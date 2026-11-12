@@ -1,0 +1,5829 @@
+{
+  "observed_at": "2026-11-10T15:07:54.094987+00:00",
+  "repository": "cisterciansis/arbos",
+  "runs": [
+    {
+      "label": "p3",
+      "run_id": 42826558559,
+      "head_sha": "d40572b8fb43886fa784f6ac7579217fd23bb965",
+      "head_branch": "improve/structure",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42826558559",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T13:39:43Z",
+      "run_started_at": "2026-11-10T13:39:43Z",
+      "updated_at": "2026-11-10T14:22:56Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129865299431,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:46Z",
+          "completed_at": "2026-11-10T13:40:34Z",
+          "wall_seconds": 48.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 35.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "413c442a98023d9c39edb8d5c6d3671278af3843665dbf6449b25dc92f8fb7fd",
+          "log_bytes": 48212,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 4.651
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 2.601
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129865299481,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:46Z",
+          "completed_at": "2026-11-10T14:22:39Z",
+          "wall_seconds": 2573.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 99.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 54.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 580.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1720.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 49.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 55.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "3fccbbe6509770afffa5fca735ec33f56d3988cd7c96b54bf67394fa10371e9d",
+          "log_bytes": 560727,
+          "rust_tests": {
+            "summary_count": 25,
+            "nonzero_summary_count": 16,
+            "zero_summary_count": 9,
+            "passed": 2423,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 585,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 346.82
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 141,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.69
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 2,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.35
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 931,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 23.62
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 601,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 34.51
+              },
+              {
+                "result": "ok",
+                "passed": 54,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.05
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.48
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.22
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129865299527,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:46Z",
+          "completed_at": "2026-11-10T13:40:11Z",
+          "wall_seconds": 25.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 5,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 6,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 15,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 17,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "8b6bb1ccb26d67f167fba755a0592a6f3884c5c493e53e3622eaaf958f889f30",
+          "log_bytes": 23980,
+          "harness_tests": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 362.497303
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129889271907,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:22:43Z",
+          "completed_at": "2026-11-10T14:22:56Z",
+          "wall_seconds": 13.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "fee97dcffb373113beac1044308280e1d201c6860842b8bd5791ee3f0347ab64",
+          "log_bytes": 19089
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p6",
+      "run_id": 42828799835,
+      "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+      "head_branch": "improve/performance",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42828799835",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T13:54:13Z",
+      "run_started_at": "2026-11-10T13:54:13Z",
+      "updated_at": "2026-11-10T14:26:03Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129873049527,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:54:17Z",
+          "completed_at": "2026-11-10T14:25:35Z",
+          "wall_seconds": 1878.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 39.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 392.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1340.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 34.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 47.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "523a46baa8fadb803867f01bbf6b4cca537c0340ce488d6feba06060185a2be7",
+          "log_bytes": 554570,
+          "rust_tests": {
+            "summary_count": 24,
+            "nonzero_summary_count": 15,
+            "zero_summary_count": 9,
+            "passed": 2374,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 585,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 353.71
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 142,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.42
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.24
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 901,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 11.13
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 593,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 26.45
+              },
+              {
+                "result": "ok",
+                "passed": 44,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.03
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.47
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.16
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.02
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129873049818,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:54:17Z",
+          "completed_at": "2026-11-10T13:54:58Z",
+          "wall_seconds": 41.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 29.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "5acc3b74574b4e2f2ba346a1a601c9ad60da7e0eef31894fb3a70c7623a15230",
+          "log_bytes": 48113,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 3.946
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 2.135
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129873049844,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:54:17Z",
+          "completed_at": "2026-11-10T13:54:43Z",
+          "wall_seconds": 26.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 5,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 6,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 15,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 17,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            }
+          ],
+          "log_sha256": "42fc7c973cd940461c279c826dabc830e0ecacf6f289474377027aeef3a70599",
+          "log_bytes": 23868,
+          "harness_tests": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 488.975563
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129891037970,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:51Z",
+          "completed_at": "2026-11-10T14:26:03Z",
+          "wall_seconds": 12.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "71f0ce44a7fc9782caecc88283f898737da86dac5b65592e656bd04c2323de1e",
+          "log_bytes": 18971
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p8",
+      "run_id": 42826558764,
+      "head_sha": "b15e3f9ba8080539a9f882cc806478f3ba6a8f33",
+      "head_branch": "improve/laws",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42826558764",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T13:39:43Z",
+      "run_started_at": "2026-11-10T13:39:43Z",
+      "updated_at": "2026-11-10T14:21:04Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129865300324,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:46Z",
+          "completed_at": "2026-11-10T13:40:25Z",
+          "wall_seconds": 39.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 27.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            }
+          ],
+          "log_sha256": "6e9cdc389962d5c94f11d651d0f5cec4edf68ee06e0c9582f66a17342a5a1f03",
+          "log_bytes": 48061,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 3.683
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 1.991
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129865300426,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:46Z",
+          "completed_at": "2026-11-10T14:20:47Z",
+          "wall_seconds": 2461.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 62.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 574.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1697.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 47.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 53.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "eed2825fa6ca9b742cd51828f085f96f40d2961193ef6eba19cde35c103e5d16",
+          "log_bytes": 554672,
+          "rust_tests": {
+            "summary_count": 24,
+            "nonzero_summary_count": 15,
+            "zero_summary_count": 9,
+            "passed": 2376,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 585,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 347.03
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 144,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.7
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.32
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 901,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 21.49
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 593,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 33.19
+              },
+              {
+                "result": "ok",
+                "passed": 44,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.03
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.48
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.25
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129865300492,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:47Z",
+          "completed_at": "2026-11-10T13:40:16Z",
+          "wall_seconds": 29.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 6,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 15,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 17,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "b1604103a4fed0a0ed21b967ea16771edd52919608ab9d496f00ee040442bba6",
+          "log_bytes": 24018,
+          "harness_tests": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 549.647644
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129888161533,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:20:50Z",
+          "completed_at": "2026-11-10T14:21:03Z",
+          "wall_seconds": 13.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "deddaa5b3eb5d6efc78ca3ad0d424e9e52595be771e226e9d987be998275bb1b",
+          "log_bytes": 19290
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "final",
+      "run_id": 42833942969,
+      "head_sha": "419d3944cf77a31086b44ee36534864bc5662758",
+      "head_branch": "improve/finish-validation-final",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833942969",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T14:25:31Z",
+      "run_started_at": "2026-11-10T14:25:31Z",
+      "updated_at": "2026-11-10T15:00:42Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129891005333,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:35Z",
+          "completed_at": "2026-11-10T15:00:41Z",
+          "wall_seconds": 2106.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 5,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 6,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 7,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 16.0
+            },
+            {
+              "number": 10,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 45.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 449.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1461.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 38.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 81.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "f2ca457e96cff7cde62dc3fa58af32e60cf97c7a9684e1c741979ed5cc785337",
+          "log_bytes": 582380,
+          "rust_tests": {
+            "summary_count": 25,
+            "nonzero_summary_count": 16,
+            "zero_summary_count": 9,
+            "passed": 2586,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 662,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 358.52
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 145,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.53
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.08
+              },
+              {
+                "result": "ok",
+                "passed": 2,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.28
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 941,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 17.2
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 673,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 45.41
+              },
+              {
+                "result": "ok",
+                "passed": 54,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.04
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.48
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.21
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129891005722,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:38Z",
+          "completed_at": "2026-11-10T14:25:50Z",
+          "wall_seconds": 12.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "c542e09b53b8316e228b834f609d7552036cdbac6cf750182e130fa842b53d37",
+          "log_bytes": 19188
+        },
+        {
+          "job_id": 129891005755,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:35Z",
+          "completed_at": "2026-11-10T14:26:22Z",
+          "wall_seconds": 47.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 34.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "78336e11e2a7b54ec2a543a140a098455ac5956c19a6fd70b78baba76ce6b264",
+          "log_bytes": 48194,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 4.472
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 2.329
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129891005778,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:35Z",
+          "completed_at": "2026-11-10T14:28:05Z",
+          "wall_seconds": 150.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 6,
+              "name": "Prepare native ownership-law dependencies",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "number": 9,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 123.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 17,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 18,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 19,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "3be1c90ee164c946d1e1a1bff4af96f123a5ba2332fccc36437fa88c74c3fa36",
+          "log_bytes": 79319,
+          "harness_tests": {
+            "tests": 94,
+            "suites": 0,
+            "pass": 94,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 122301.804334
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p4",
+      "run_id": 42833942694,
+      "head_sha": "6247938b68aaef84fdfeb1768d0b7ac80e6e8b3e",
+      "head_branch": "improve/state-machines",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833942694",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T14:25:31Z",
+      "run_started_at": "2026-11-10T14:25:31Z",
+      "updated_at": "2026-11-10T14:37:24Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129890999500,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:28:14Z",
+          "wall_seconds": 160.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 6,
+              "name": "Prepare native ownership-law dependencies",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 9.0
+            },
+            {
+              "number": 9,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "number": 10,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 125.0
+            },
+            {
+              "number": 18,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 19,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 20,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 21,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "b0a532f1da1ab196c25dd996d5bf7bbfdf71d4021e9b66d6babb28ea10c87bea",
+          "log_bytes": 80023,
+          "harness_tests": {
+            "tests": 94,
+            "suites": 0,
+            "pass": 94,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 125021.9402
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129890999928,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:26:17Z",
+          "wall_seconds": 43.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 28.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "61ea6c56fc3948e430945aae32d73a7bc34a9ecc0ae5231d353af2a447e86716",
+          "log_bytes": 48132,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 3.644
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 3.282
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129891000193,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:37:07Z",
+          "wall_seconds": 693.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 60.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "skipped",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 13.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 42.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 50.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 513.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "6405502facdcb6ae9d23a4f82c1dffb21d8d882c427e96b3feb698e6d8f9c7da",
+          "log_bytes": 376236,
+          "rust_tests": {
+            "summary_count": 24,
+            "nonzero_summary_count": 15,
+            "zero_summary_count": 9,
+            "passed": 2548,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 662,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 356.0
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 141,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.44
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.25
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 941,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 11.66
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 651,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 30.7
+              },
+              {
+                "result": "ok",
+                "passed": 44,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.02
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.47
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.15
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129897914402,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:37:10Z",
+          "completed_at": "2026-11-10T14:37:23Z",
+          "wall_seconds": 13.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "95bcfcd05799d431a28a78648e8cec760e2a585a0ae7321dae1345502e63c262",
+          "log_bytes": 19242
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p5",
+      "run_id": 42833941005,
+      "head_sha": "ef3cfc72a02027d89e0236420e4282d573fe9f7c",
+      "head_branch": "improve/observability",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833941005",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T14:25:30Z",
+      "run_started_at": "2026-11-10T14:25:30Z",
+      "updated_at": "2026-11-10T15:06:31Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129890993052,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T15:06:15Z",
+          "wall_seconds": 2441.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 13.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 57.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 563.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1691.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 48.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 54.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "ddc4872f813694ee1c2d6b8ebc4fe78df516c38408a1240dd01e3cdad7922e11",
+          "log_bytes": 554557,
+          "rust_tests": {
+            "summary_count": 24,
+            "nonzero_summary_count": 15,
+            "zero_summary_count": 9,
+            "passed": 2373,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 585,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 346.72
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 141,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.72
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.33
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 901,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 21.31
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 593,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 33.84
+              },
+              {
+                "result": "ok",
+                "passed": 44,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.04
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.49
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.26
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129890993657,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:26:01Z",
+          "wall_seconds": 27.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 6,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 15,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 17,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "8de03e28093909f8ae8e87578118a903258ca9f371fe7c4dcc2dbb5ea5dbc5cf",
+          "log_bytes": 24005,
+          "harness_tests": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 489.772587
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129890993772,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:26:17Z",
+          "wall_seconds": 43.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 30.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "f6d5e43bb4381c01294fb9ee584a49e180dc0273555751173f169b24466e0cb7",
+          "log_bytes": 45696,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 3.901
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            }
+          ],
+          "python_contract_total": 19,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129915410365,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T15:06:18Z",
+          "completed_at": "2026-11-10T15:06:31Z",
+          "wall_seconds": 13.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "f790e28fbe88b9c68692c75d047a6a63c166d6d141169e3aa85057fd4b7849ca",
+          "log_bytes": 19238
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p7",
+      "run_id": 42833940432,
+      "head_sha": "a35e9ccfd54bbdc40ee8a3ac50da80dc5083e768",
+      "head_branch": "improve/database-scale",
+      "workflow": "CI",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833940432",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T14:25:30Z",
+      "run_started_at": "2026-11-10T14:25:30Z",
+      "updated_at": "2026-11-10T15:06:54Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129890992136,
+          "name": "Layout",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:33Z",
+          "completed_at": "2026-11-10T14:26:12Z",
+          "wall_seconds": 39.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Test isolation contracts",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 4,
+              "name": "The tree is the monorepo, and the old pipeline is gone",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 5,
+              "name": "Workflow and shell lint",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 28.0
+            },
+            {
+              "number": 10,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 11,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "5ad12cd71238895984d88adb4870cc251e15302cfbc9e3faa94355f31a195f5a",
+          "log_bytes": 48242,
+          "python_contract_summaries": [
+            {
+              "tests": 14,
+              "reported_seconds": 3.279
+            },
+            {
+              "tests": 5,
+              "reported_seconds": 0.001
+            },
+            {
+              "tests": 12,
+              "reported_seconds": 1.957
+            }
+          ],
+          "python_contract_total": 31,
+          "isolation_contract_step_success": true
+        },
+        {
+          "job_id": 129890992655,
+          "name": "harness (arbos-pi-ext typecheck + build + test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:25:58Z",
+          "wall_seconds": 24.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 3,
+              "name": "Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Run pnpm install --frozen-lockfile",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 6,
+              "name": "Run pnpm -r typecheck",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 7,
+              "name": "Run pnpm -r build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 8,
+              "name": "Run pnpm -r test",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 14,
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 15,
+              "name": "Post Run pnpm/action-setup@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 16,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 17,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "94154f39dc34613614a89f07c122972306ba06046499bac0e834406c8aa2ab87",
+          "log_bytes": 24012,
+          "harness_tests": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "duration_ms": 359.789697
+          },
+          "nonzero_harness_count_observed": true,
+          "typecheck_step_success": true
+        },
+        {
+          "job_id": 129890992742,
+          "name": "rust (fmt, clippy, test)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T15:06:34Z",
+          "wall_seconds": 2460.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Make room on the short-disk fleet",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 4,
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 5,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 6,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 7,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Linux libraries for arbos-mac (GPUI)",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 67.0
+            },
+            {
+              "number": 9,
+              "name": "clang 21 for webrtc-sys",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 57.0
+            },
+            {
+              "number": 10,
+              "name": "Run cargo fmt --all --check",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 11,
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 552.0
+            },
+            {
+              "number": 12,
+              "name": "Full workspace tests with loopback-only networking",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1674.0
+            },
+            {
+              "number": 13,
+              "name": "Generated Swift relay types are fresh",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 47.0
+            },
+            {
+              "number": 14,
+              "name": "arbos-client dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 15,
+              "name": "arbos-matrix dependents",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 29,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 48.0
+            },
+            {
+              "number": 30,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 31,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            }
+          ],
+          "log_sha256": "3a84995643652954872ec87e2a5c57de9dbac9e138933331a12d0c0e57192f4e",
+          "log_bytes": 556216,
+          "rust_tests": {
+            "summary_count": 24,
+            "nonzero_summary_count": 15,
+            "zero_summary_count": 9,
+            "passed": 2387,
+            "failed": 0,
+            "ignored": 3,
+            "measured": 0,
+            "filtered_out": 0,
+            "unmatched_result_lines": 0,
+            "summaries": [
+              {
+                "result": "ok",
+                "passed": 17,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 585,
+                "failed": 0,
+                "ignored": 2,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 347.03
+              },
+              {
+                "result": "ok",
+                "passed": 31,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 141,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.68
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 21,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.34
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 901,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 22.97
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 607,
+                "failed": 0,
+                "ignored": 1,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 35.36
+              },
+              {
+                "result": "ok",
+                "passed": 44,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 1.03
+              },
+              {
+                "result": "ok",
+                "passed": 10,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 5,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.48
+              },
+              {
+                "result": "ok",
+                "passed": 4,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.03
+              },
+              {
+                "result": "ok",
+                "passed": 3,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.01
+              },
+              {
+                "result": "ok",
+                "passed": 12,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.21
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              },
+              {
+                "result": "ok",
+                "passed": 0,
+                "failed": 0,
+                "ignored": 0,
+                "measured": 0,
+                "filtered_out": 0,
+                "reported_seconds": 0.0
+              }
+            ]
+          },
+          "runtime_fence": {
+            "workflow_invocation_observed": true,
+            "self_smoke_observations": [
+              {
+                "uid": 1001,
+                "gid": 1001,
+                "groups": [],
+                "no_new_privs": 1,
+                "capability_sets_zero": true,
+                "interfaces": [
+                  "lo"
+                ],
+                "loopback_fixture": "ok",
+                "nonloopback_errno": 101
+              }
+            ],
+            "all_summaries_after_runtime_smoke": true,
+            "runner_source_sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a",
+            "smoke_source_sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2",
+            "verified": true
+          }
+        },
+        {
+          "job_id": 129915601442,
+          "name": "image (dockerfile lint)",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T15:06:38Z",
+          "completed_at": "2026-11-10T15:06:53Z",
+          "wall_seconds": 15.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Build hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "number": 3,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "number": 4,
+              "name": "Run hadolint/hadolint-action@v3.1.0",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "47b5d418349036b0cabd679e29885baeeab47e7900c80782744ad3c8541c2fad",
+          "log_bytes": 19130
+        }
+      ],
+      "job_count": 4,
+      "job_status_counts": {
+        "success": 4,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "a4-swift",
+      "run_id": 42826560300,
+      "head_sha": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+      "head_branch": "improve/finish-validation",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42826560300",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-10T13:39:44Z",
+      "run_started_at": "2026-11-10T13:39:44Z",
+      "updated_at": "2026-11-10T13:40:06Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129865305539,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:47Z",
+          "completed_at": "2026-11-10T13:40:01Z",
+          "wall_seconds": 14.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 10.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "d63a60066555d2ff4d8d31ce6bf48206b72375700666d46f4025b0a25d368880",
+          "log_bytes": 300650,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129865447906,
+          "name": "build-xcframework + fastlane test",
+          "status": "in_progress",
+          "conclusion": null,
+          "started_at": "2026-11-10T13:40:05Z",
+          "completed_at": null,
+          "wall_seconds": null,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 3,
+              "name": "Swift package cache",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Select Xcode",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "number": 5,
+              "name": "Rust toolchain",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 6,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 7,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Build ArbosFFI xcframework",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1712.0
+            },
+            {
+              "number": 10,
+              "name": "Pick an available simulator",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 49.0
+            },
+            {
+              "number": 11,
+              "name": "fastlane test",
+              "status": "in_progress",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 12,
+              "name": "Keep the xcodebuild logs",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 22,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 23,
+              "name": "Post Swift package cache",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 24,
+              "name": "Post Run actions/checkout@v4",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            }
+          ],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "logs_unavailable_no_assertion_inference",
+          "infrastructure_annotations": []
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 1
+      }
+    },
+    {
+      "label": "p8-swift",
+      "run_id": 42826558733,
+      "head_sha": "b15e3f9ba8080539a9f882cc806478f3ba6a8f33",
+      "head_branch": "improve/laws",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42826558733",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-10T13:39:43Z",
+      "run_started_at": "2026-11-10T13:39:43Z",
+      "updated_at": "2026-11-10T13:40:07Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129865301160,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:39:47Z",
+          "completed_at": "2026-11-10T13:40:03Z",
+          "wall_seconds": 16.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "835f6d5805fa68f3a64ab81f4ecd34037b8170de8cf35e68c7e7af97b74cceb5",
+          "log_bytes": 300545,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129865463984,
+          "name": "build-xcframework + fastlane test",
+          "status": "in_progress",
+          "conclusion": null,
+          "started_at": "2026-11-10T13:40:07Z",
+          "completed_at": null,
+          "wall_seconds": null,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 3,
+              "name": "Swift package cache",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Select Xcode",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 5,
+              "name": "Rust toolchain",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "number": 6,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 7,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Build ArbosFFI xcframework",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1805.0
+            },
+            {
+              "number": 10,
+              "name": "Pick an available simulator",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 10.0
+            },
+            {
+              "number": 11,
+              "name": "fastlane test",
+              "status": "in_progress",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 12,
+              "name": "Keep the xcodebuild logs",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 22,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 23,
+              "name": "Post Swift package cache",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 24,
+              "name": "Post Run actions/checkout@v4",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            }
+          ],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "logs_unavailable_no_assertion_inference",
+          "infrastructure_annotations": []
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 1
+      }
+    },
+    {
+      "label": "final-swift",
+      "run_id": 42833942995,
+      "head_sha": "419d3944cf77a31086b44ee36534864bc5662758",
+      "head_branch": "improve/finish-validation-final",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833942995",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-10T14:25:31Z",
+      "run_started_at": "2026-11-10T14:25:31Z",
+      "updated_at": "2026-11-10T14:41:39Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129891000547,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:25:51Z",
+          "wall_seconds": 17.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "ff029e4d8813323f67a947c906d8c61a84890d0db258fb245e2d09b08b6904ed",
+          "log_bytes": 300824,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129891197220,
+          "name": "build-xcframework + fastlane test",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-10T14:25:52Z",
+          "completed_at": "2026-11-10T14:41:38Z",
+          "wall_seconds": 946.0,
+          "steps": [],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "runner_not_acquired_no_assertions",
+          "infrastructure_annotations": [
+            {
+              "level": "failure",
+              "category": "runner_not_acquired",
+              "message": "The job was not acquired by Runner of type hosted even after multiple attempts"
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            }
+          ]
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 1,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p4-swift",
+      "run_id": 42833942682,
+      "head_sha": "6247938b68aaef84fdfeb1768d0b7ac80e6e8b3e",
+      "head_branch": "improve/state-machines",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833942682",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-10T14:25:31Z",
+      "run_started_at": "2026-11-10T14:25:31Z",
+      "updated_at": "2026-11-10T14:50:56Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129891643001,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:26:39Z",
+          "completed_at": "2026-11-10T14:26:57Z",
+          "wall_seconds": 18.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 14.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "12cb61fdbcb9199e36f41937aa09943abd6b550de7c6acd548246b99357eacf2",
+          "log_bytes": 300752,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129891849588,
+          "name": "build-xcframework + fastlane test",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-10T14:26:57Z",
+          "completed_at": "2026-11-10T14:50:55Z",
+          "wall_seconds": 1438.0,
+          "steps": [],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "runner_not_acquired_no_assertions",
+          "infrastructure_annotations": [
+            {
+              "level": "failure",
+              "category": "runner_not_acquired",
+              "message": "The job was not acquired by Runner of type hosted even after multiple attempts"
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            }
+          ]
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 1,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p7-swift",
+      "run_id": 42833940490,
+      "head_sha": "a35e9ccfd54bbdc40ee8a3ac50da80dc5083e768",
+      "head_branch": "improve/database-scale",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833940490",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-10T14:25:30Z",
+      "run_started_at": "2026-11-10T14:25:30Z",
+      "updated_at": "2026-11-10T14:46:39Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129890991276,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:25:53Z",
+          "wall_seconds": 19.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 13.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "f87c9faf261d813f3296f9b6d0e114d85a41466eab169fa3fd7ad8e6b6d713f3",
+          "log_bytes": 300750,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129891208634,
+          "name": "build-xcframework + fastlane test",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-10T14:25:53Z",
+          "completed_at": "2026-11-10T14:46:39Z",
+          "wall_seconds": 1246.0,
+          "steps": [],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "runner_not_acquired_no_assertions",
+          "infrastructure_annotations": [
+            {
+              "level": "failure",
+              "category": "runner_not_acquired",
+              "message": "The job was not acquired by Runner of type hosted even after multiple attempts"
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            }
+          ]
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 1,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p6-swift",
+      "run_id": 42828800182,
+      "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+      "head_branch": "improve/performance",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42828800182",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-10T13:54:13Z",
+      "run_started_at": "2026-11-10T13:54:13Z",
+      "updated_at": "2026-11-10T13:55:05Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129873231552,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T13:54:37Z",
+          "completed_at": "2026-11-10T13:54:53Z",
+          "wall_seconds": 16.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "9b39b625be3719dabb75143aa417101f81112564aedd900171416b0356bdc71f",
+          "log_bytes": 300599,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129873404857,
+          "name": "build-xcframework + fastlane test",
+          "status": "in_progress",
+          "conclusion": null,
+          "started_at": "2026-11-10T13:55:04Z",
+          "completed_at": null,
+          "wall_seconds": null,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 3,
+              "name": "Swift package cache",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 4,
+              "name": "Select Xcode",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 4.0
+            },
+            {
+              "number": 5,
+              "name": "Rust toolchain",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "number": 6,
+              "name": "Cache key for the dependency build",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 7,
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 8,
+              "name": "Fall back to the newest cache for this compiler",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Build ArbosFFI xcframework",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1915.0
+            },
+            {
+              "number": 10,
+              "name": "Pick an available simulator",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 55.0
+            },
+            {
+              "number": 11,
+              "name": "fastlane test",
+              "status": "in_progress",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 12,
+              "name": "Keep the xcodebuild logs",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 22,
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 23,
+              "name": "Post Swift package cache",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            },
+            {
+              "number": 24,
+              "name": "Post Run actions/checkout@v4",
+              "status": "pending",
+              "conclusion": null,
+              "seconds": null
+            }
+          ],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "logs_unavailable_no_assertion_inference",
+          "infrastructure_annotations": []
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "null": 1
+      }
+    },
+    {
+      "label": "p3-swift",
+      "run_id": 42826558755,
+      "head_sha": "d40572b8fb43886fa784f6ac7579217fd23bb965",
+      "head_branch": "improve/structure",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42826558755",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-10T13:39:43Z",
+      "run_started_at": "2026-11-10T14:06:29Z",
+      "updated_at": "2026-11-10T14:21:53Z",
+      "run_attempt": 2,
+      "jobs": [
+        {
+          "job_id": 129879867756,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:06:34Z",
+          "completed_at": "2026-11-10T14:06:50Z",
+          "wall_seconds": 16.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 12.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "5e09beac73c5bf3b794c0942f6bc1a462e92d1b86e3f394962172d8f84983f5e",
+          "log_bytes": 300586,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129880049447,
+          "name": "build-xcframework + fastlane test",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-10T14:06:50Z",
+          "completed_at": "2026-11-10T14:21:52Z",
+          "wall_seconds": 902.0,
+          "steps": [],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "runner_not_acquired_no_assertions",
+          "infrastructure_annotations": [
+            {
+              "level": "failure",
+              "category": "runner_not_acquired",
+              "message": "The job was not acquired by Runner of type hosted even after multiple attempts"
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            },
+            {
+              "level": "notice",
+              "category": "macos_arm64_capacity",
+              "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+            }
+          ]
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 1,
+        "skipped": 0,
+        "null": 0
+      }
+    },
+    {
+      "label": "p5-swift",
+      "run_id": 42833940754,
+      "head_sha": "ef3cfc72a02027d89e0236420e4282d573fe9f7c",
+      "head_branch": "improve/observability",
+      "workflow": "Swift core check",
+      "url": "https://github.com/cisterciansis/arbos/actions/runs/42833940754",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-10T14:25:30Z",
+      "run_started_at": "2026-11-10T14:25:30Z",
+      "updated_at": "2026-11-10T14:25:48Z",
+      "run_attempt": 1,
+      "jobs": [
+        {
+          "job_id": 129890994365,
+          "name": "Swift core check applies?",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-10T14:25:34Z",
+          "completed_at": "2026-11-10T14:25:48Z",
+          "wall_seconds": 14.0,
+          "steps": [
+            {
+              "number": 1,
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "number": 2,
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 10.0
+            },
+            {
+              "number": 3,
+              "name": "The screen's own invariants",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 4,
+              "name": "Does the gate apply to this commit?",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 8,
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "number": 9,
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ],
+          "log_sha256": "d0240a3aa28be825acbfb1541ceb973d932cef19758f0645199214173b34dc56",
+          "log_bytes": 300746,
+          "assertion_scope": "eligibility_job_not_applicable",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "infrastructure_annotations": []
+        },
+        {
+          "job_id": 129891162085,
+          "name": "build-xcframework + fastlane test",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-10T14:25:48Z",
+          "completed_at": "2026-11-10T14:25:48Z",
+          "wall_seconds": 0.0,
+          "steps": [],
+          "log_sha256": null,
+          "log_bytes": null,
+          "assertion_scope": "actual_test_job",
+          "swift_assertions": null,
+          "swift_console_summary_observations": [],
+          "swift_execution_evidence": "skipped_not_applicable_no_assertions",
+          "infrastructure_annotations": []
+        }
+      ],
+      "job_count": 2,
+      "job_status_counts": {
+        "success": 1,
+        "failure": 0,
+        "cancelled": 0,
+        "skipped": 1,
+        "null": 0
+      }
+    }
+  ],
+  "limits": "Rust counts sum emitted full-workspace Rust summary lines including zero-test and ignored summaries. Node counts come from final TAP totals. Job/step wall times are API timestamps, not user latency or a performance-gain estimate. Full raw logs/API responses remain private and are excluded from portable evidence."
+}

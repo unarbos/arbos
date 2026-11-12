@@ -1,0 +1,340 @@
+[
+  {
+    "gate": "harness-typecheck",
+    "cwd": "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext",
+    "command": [
+      "node",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/node_modules/typescript/bin/tsc",
+      "--noEmit"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 2.647893041954376,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/harness-typecheck.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "harness-build",
+    "cwd": "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext",
+    "command": [
+      "node",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/node_modules/typescript/bin/tsc",
+      "--noEmit"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 2.220721875084564,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/harness-build.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "harness-tests",
+    "cwd": "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext",
+    "command": [
+      "node",
+      "--test",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/approval.test.ts",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/index.test.ts",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/stop-job-render.test.ts"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.8723037499003112,
+    "expected_count": 37,
+    "observed_count": 37,
+    "log": "logs/harness-tests.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "image-audit",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      "image/tests/test_tool_audit.py"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 2.15161395794712,
+    "expected_count": 15,
+    "observed_count": 15,
+    "log": "logs/image-audit.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "image-packaging",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      "image/tests/test_runtime_packaging.py"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 2.974075709003955,
+    "expected_count": 9,
+    "observed_count": 9,
+    "log": "logs/image-packaging.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "title-compile",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "rustc",
+      "--edition=2021",
+      "--test",
+      "crates/arbos-mac/src/chat_title.rs",
+      "-o",
+      "<repository>/.improve/evidence/combined/title-tests"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.5735097080469131,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/title-compile.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "title-tests",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "<repository>/.improve/evidence/combined/title-tests"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.1896215840242803,
+    "expected_count": 8,
+    "observed_count": 8,
+    "log": "logs/title-tests.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "native-fmt",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "<repository>/.improve/evidence/combined/tree/.improve/laws/native/Cargo.toml",
+      "--check"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.21202904195524752,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/native-fmt.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "native-check",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "cargo",
+      "check",
+      "--manifest-path",
+      "<repository>/.improve/evidence/combined/tree/.improve/laws/native/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--jobs",
+      "2"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 1.561149041983299,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/native-check.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "native-clippy",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "<repository>/.improve/evidence/combined/tree/.improve/laws/native/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--jobs",
+      "2",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 1.777903874986805,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/native-clippy.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "native-tests",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "<repository>/.improve/evidence/combined/tree/.improve/laws/native/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--lib",
+      "--jobs",
+      "2"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 1.6372690420830622,
+    "expected_count": 13,
+    "observed_count": 13,
+    "log": "logs/native-tests.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "native-build",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "<repository>/.improve/evidence/combined/tree/.improve/laws/native/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--release",
+      "--jobs",
+      "2"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 3.3356917910277843,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/native-build.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "native-protocol",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      ".improve/laws/native/test_protocol.py"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.23137929197400808,
+    "expected_count": 24,
+    "observed_count": 24,
+    "log": "logs/native-protocol.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "laws-typecheck",
+    "cwd": "<repository>/.improve/evidence/combined/tree/.improve/laws",
+    "command": [
+      "node",
+      "<repository>/.improve/evidence/combined/tree/harness/arbos-pi-ext/node_modules/typescript/bin/tsc",
+      "--noEmit"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.6589962920406833,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/laws-typecheck.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "laws-tests",
+    "cwd": "<repository>/.improve/evidence/combined/tree/.improve/laws",
+    "command": [
+      "node",
+      "--test",
+      "--test-concurrency=1",
+      "bridge.test.ts",
+      "laws.test.ts"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 1.5708880419842899,
+    "expected_count": 18,
+    "observed_count": 18,
+    "log": "logs/laws-tests.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "laws-record",
+    "cwd": "<repository>/.improve/evidence/combined/tree/.improve/laws",
+    "command": [
+      "node",
+      "check.ts"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.9865795410005376,
+    "expected_count": null,
+    "observed_count": null,
+    "log": "logs/laws-record.log",
+    "passed": true,
+    "skipped_or_ignored": null
+  },
+  {
+    "gate": "sql-suite",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      ".improve/load-test",
+      "-p",
+      "test_suite.py",
+      "-v"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 8.926929875044152,
+    "expected_count": 8,
+    "observed_count": 8,
+    "log": "logs/sql-suite.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "sql-coverage",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      ".improve/load-test/coverage.py",
+      "--check"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.18413495901040733,
+    "expected_count": 6,
+    "observed_count": 6,
+    "log": "logs/sql-coverage.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  },
+  {
+    "gate": "sql-job-index",
+    "cwd": "<repository>/.improve/evidence/combined/tree",
+    "command": [
+      "python3",
+      ".improve/load-test/job_index.py",
+      "--check"
+    ],
+    "exit_code": 0,
+    "duration_seconds": 0.10860799998044968,
+    "expected_count": 6,
+    "observed_count": 6,
+    "log": "logs/sql-job-index.log",
+    "passed": true,
+    "skipped_or_ignored": 0
+  }
+]

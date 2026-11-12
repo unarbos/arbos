@@ -1,0 +1,9 @@
+{
+  "path": "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift",
+  "phase4_sha256": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+  "phase6_sha256": "b4bf3667a8a7f52b12448204af2541c57ae35d7ab4259a36533eea6c3e6aa843",
+  "automatic_output_sha256": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+  "output_sha256": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+  "mode": "100644",
+  "scope": "Require exact normal P6 diff application from standalone76847ac8 (ProjectListId comment is already correctly placed) to P4; automatic output must directly equal reviewed SDK-compiled79a. No normalizer or replacement fallback."
+}

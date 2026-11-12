@@ -1,0 +1,36 @@
+{
+  "path": ".github/workflows/ci.yml",
+  "mode": "100644",
+  "phase3_sha256": "d7782e97fd50dffc35e051308eef4dab6f64a9b5422d161293128b114d61e943",
+  "phase4_sha256": "22b57d56ca6e3231b4d5f79264d2b1d2217cec2744f5902f80e01fd1ed678f6e",
+  "phase6_sha256": "d7782e97fd50dffc35e051308eef4dab6f64a9b5422d161293128b114d61e943",
+  "phase8_sha256": "d7782e97fd50dffc35e051308eef4dab6f64a9b5422d161293128b114d61e943",
+  "phase9_sha256": "c456e0c370ca269b29d72282a9a9ef4d1ac3ad06106ac1c5c6bbe732b326f0c4",
+  "output_sha256": "8a2faa25352f0d9ae7a8df37644ebc03d0eaa9eb5976a7b401cda62cb95a689a",
+  "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+  "review_diff_sha256": "05c5e572de9b31646bae29ae5eada84e12dbc963d725f74370bfa7336e231f50",
+  "common_fences": {
+    "scripts/ci/run-tests-no-egress.sh": {
+      "mode": "100755",
+      "sha256": "b9f38c60fdb585ee7ef858b3b653236c3cfa1b2cf5967d6a9ff0f04d0476db4a"
+    },
+    "scripts/ci/netns-smoke.py": {
+      "mode": "100644",
+      "sha256": "94b5944760e374271f563e167da9e8adb22bb1c3266d7918de6226826953bdd2"
+    },
+    "scripts/ci/test_no_egress_runner.py": {
+      "mode": "100644",
+      "sha256": "acb7ac55eb127b9cca0d91fdb646ddd90fdbbf2d537c94f7ffa73183acc985db"
+    },
+    "scripts/ci/test_netns_smoke.py": {
+      "mode": "100644",
+      "sha256": "c349580c255ce5f20ff56ff84a371f97417736c7e5dda76059d90735bc669554"
+    }
+  },
+  "patch": "p9-ci.patch",
+  "patch_sha256": "818af79e19c8110e5baac2fe7f855fa2795fef2ebba2beae1b59d5d4f3a8eaf7",
+  "patch_bytes": 1616,
+  "scope": "Carry exact no-egress runner/smoke/contracts + appropriate isolation Layout/shellcheck/testline/improvepush safety to all standalone3\u20138. Phase5 Layout has only14runner+5smoke tests and no Swift changes; all other standalone inputs include12XCTest contracts. P4 additionally retains actual native leaf-prefetch. Phase9 delta contains only three free CI fixes, applied to P4safe+prefetch; no test removal or unknown CI fallback.",
+  "phase5_sha256": "ca9d8bb9056d28bfa01ef4403ba505823f2ff62279488ec8d1c04e21923d6402",
+  "phase7_sha256": "d7782e97fd50dffc35e051308eef4dab6f64a9b5422d161293128b114d61e943"
+}

@@ -1,0 +1,58 @@
+[
+  {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/ci/test_no_egress_runner.py",
+      "-v"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 14.175014166045003,
+    "log": "installed-contracts.log",
+    "test_count": 14
+  },
+  {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/ci/test_netns_smoke.py",
+      "-v"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 0.08502958295866847,
+    "log": "installed-smoke-tests.log",
+    "test_count": 5
+  },
+  {
+    "command": [
+      "actionlint",
+      "-shellcheck=",
+      "-no-color",
+      ".github/workflows/ci.yml"
+    ],
+    "exit_code": 0,
+    "seconds": 0.01478195795789361,
+    "log": "installed-actionlint.log",
+    "shellcheck": "disabled locally because missing; CI shellcheck glob includes scripts/ci/*.sh",
+    "test_count": null
+  },
+  {
+    "gate": "swift-isolation-before",
+    "test_groups": 12,
+    "failed_subcase_assertions": 13,
+    "exit_code": 1,
+    "seconds": 2.1463961249683052
+  },
+  {
+    "gate": "swift-isolation-after",
+    "test_groups": 12,
+    "failed": 0,
+    "skipped": 0,
+    "exit_code": 0,
+    "seconds": 2.6
+  },
+  {
+    "gate": "ruby-syntax",
+    "exit_code": 0
+  }
+]

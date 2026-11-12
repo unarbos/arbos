@@ -1,0 +1,74 @@
+{
+  "status": "FULL RUN FAILED: sole unit assertion; full UI target passed",
+  "canonical_base": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "build": {
+    "exit_code": 0,
+    "wall_seconds": 41.23463025002275,
+    "variant_expected_sources_unchanged": true,
+    "FFI_bytes_unchanged": true,
+    "scope": "incremental actual Xcode all-target build-for-testing; reviewed eight-file corrective composition; all2689 C19 inputs present; no app/test launch"
+  },
+  "test": {
+    "exit_code": 65,
+    "outer_7200s_ceiling_exceeded": false,
+    "wall_seconds": 1571.3392324170563,
+    "corrected_expected_sources_unchanged": true,
+    "exact_C19_FFI_unchanged": true,
+    "plan_sha256_unchanged": true,
+    "all_source_modes_unchanged": true,
+    "scope": "full unfiltered actual XCTest on SAME owned iPhone17Pro/iOS26.2; reviewed eight-file correction over complete C19; no credentials/provisioning/signing/provider actions; verified relay endpoint127.0.0.1:1",
+    "runtime_network_limit": "Parent process deny-network is not a whole-simulator no-egress claim; all-host/UI-app verified relay plan and fresh owned data boundary remain required."
+  },
+  "real_case_counts": {
+    "ArbosTests": {
+      "Passed": 555,
+      "Expected Failure": 1,
+      "Failed": 1,
+      "Skipped": 0
+    },
+    "ArbosUITests": {
+      "Passed": 55,
+      "Expected Failure": 0,
+      "Failed": 0,
+      "Skipped": 13
+    }
+  },
+  "console_case_counts_expected_included_as_passed": {
+    "ArbosTests": {
+      "passed": 556,
+      "failed": 1,
+      "skipped": 0
+    },
+    "ArbosUITests": {
+      "passed": 55,
+      "failed": 0,
+      "skipped": 13
+    }
+  },
+  "xcresult": {
+    "result": "Failed",
+    "totalTestCount": 625,
+    "passedTests": 610,
+    "failedTests": 1,
+    "skippedTests": 13,
+    "expectedFailures": 1
+  },
+  "sole_failure": {
+    "case": "ComposerDraftLifetimeTests.testAClosedChatFreesItsDraft",
+    "file": "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift",
+    "line": 308,
+    "assertion": "XCTAssertEqual failed: 0 is not equal to 1 - the closed chat draft is still alive",
+    "diagnostic_limit": "Uses a global live-instance count; this failure alone does not prove retention of the draft created by this case."
+  },
+  "full_unfiltered_CLI": true,
+  "test_settings_and_UI_sources_unchanged": true,
+  "valid_after_only_UI_metrics": true,
+  "no_performance_improvement_claim": true,
+  "source_expected_count": 2689,
+  "all_source_hashes_and_modes_verified_after_run": true,
+  "plan_sha256": "a063afcc584373b8eae77b613e53b31b205d3606d8b52d4934cb2bb4c01bd1d3",
+  "FFI_static_library_sha256": "586da39d02f3bf42f30cd5fc4f6e9e7af403b5896786a0fac1150faa4f65cef6",
+  "raw_log_sha256": "39af787c3c8c09589395ad4fd484d5fa4503d86bb0854be8006919ebd700fd0f",
+  "raw_log_bytes": 818523,
+  "next_gate": "Reviewed DEBUG observer/test-only successor still requires its own build/fullunit+five-Avatar verification. Do not relabel this predecessor as a same-source final unfiltered pass."
+}

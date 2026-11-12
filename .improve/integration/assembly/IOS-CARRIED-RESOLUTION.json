@@ -1,0 +1,57 @@
+{
+  "apps/ios/Arbos/Arbos/Store/AppModel.swift": {
+    "phase3_sha256": "f221b41a48363a7f5248bd484350fbf2f57b87fe41461577bcaaaa41cc7244f1",
+    "phase4_sha256": "cc2932a3f6cbf10b1408eb3c6cf3c6640e4620bb358262f793ee256b2590098e",
+    "review_diff_sha256": "7d6512196932df3bf842a378d560619600f2eabcb61c65bf36e04ba0f5b467a3",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  "apps/ios/Arbos/Arbos/UI/ChatView.swift": {
+    "phase3_sha256": "2c30e3e7d6cce52eee092af50926b080d997ce817805d16311ee27e4d21a3744",
+    "phase4_sha256": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+    "review_diff_sha256": "5f1c0a704af9fbbec08ef43f5dcaef95c12dc2f190bd16bddd332ba2f1f8933b",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  "apps/ios/Arbos/Arbos/UI/Transcript.swift": {
+    "phase3_sha256": "5f80688e067eb288761319c5bb18e54258ebf32529af4d9a5b11f0dda9b74210",
+    "phase4_sha256": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+    "review_diff_sha256": "84cca30321503f1fc5a4e1f6ba3861ad38bdec5387887901acadb155c9bd328d",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  "apps/ios/Arbos/Arbos/UI/LibraryList.swift": {
+    "phase3_sha256": "7d812ce5fa12c9f06297a1ea0a240ecbf4a6047bceec1f3d4d49f72f1fdc1ec1",
+    "phase4_sha256": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe",
+    "review_diff_sha256": "f9a7b24957e9110f0cd76153fc4889a7de3f9448f9ea8fb7f3cd4c3058bccc9a",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  ".improve/finish-checks/source-consumers/check.py": {
+    "phase3_sha256": "0cc470e167726074cecd252480cacaee3366d2ce67cc9fcab5432b16853ff38f",
+    "phase4_sha256": "5d5a4f7011b24a06f148245831b2bb589d0431d09df9b8f43eb28fa229c91dcb",
+    "review_diff_sha256": "628ba226eadc8c841237032d27d2fa3ea4b6211bc4ee0e5216e2fb0c069618be",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  ".improve/finish-checks/source-consumers/README.md": {
+    "phase3_sha256": "249c1abef82ae86cc0c083aacb7bf919a26c82a82b5a41a61a54e3452acbe008",
+    "phase4_sha256": "c06ff9cb36db41db7d50ef15e6224495521c2b96dd05ee62fe8241c8080df461",
+    "review_diff_sha256": "244911ef5cfde916ac4ff4c9c4dd8232fe922d42cd7c861280a86b81d01043ed",
+    "phase3_ref": "658266a56e21eff1f740b6040d802033b4620873",
+    "phase4_ref": "03a12e30e7d956070cfcacfd0e30cd35fca16598",
+    "mode": "100644",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1"
+  },
+  "scope": "Six exact iOS/proof P4supersets of P3: AppModel/ChatView/Transcript plus LibraryList and intentional source-consumer check/README extensions. Preserve P3 preview/TZ/DEBUGweakobserver/test integrity and P4 captured-account/media/row-identity/DraftDM behavior. Other differing overlaps refuse; common ComposerMetrics/Calendar tests and common proof assets carry only when exact blob+mode match."
+}

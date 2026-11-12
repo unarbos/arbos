@@ -1,0 +1,35 @@
+{
+  "tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "source_manifest_sha256": "49ea39dee1f4be6f5aa5c05d4787920ca455c58ea56c07a9901e218dc5e0e356",
+  "source_files": 2689,
+  "source_bytes": 68602520,
+  "root_Cargo_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+  "target": "aarch64-apple-ios-sim",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13)",
+  "Xcode": "26.2 (17C52)",
+  "SDK": "iPhoneSimulator26.2",
+  "UniFFI": "0.32.2",
+  "bindgen_binary_sha256": "d6770699905acd0c1a1efe1a830d8091652baad86d5cc4176ce72a8ed1906198",
+  "library_sha256": "586da39d02f3bf42f30cd5fc4f6e9e7af403b5896786a0fac1150faa4f65cef6",
+  "library_bytes": 178136880,
+  "framework_role": "Private ArbosFFIRust.xcframework, one ios/arm64/simulator static slice; binaries not committed",
+  "generated": {
+    "arbos_ffi.swift": {
+      "sha256": "2917247857355c182bcb128e3a1c8a7801a20bbbf7bb40c0b316884847c91f68",
+      "bytes": 227522,
+      "baseline_identical": true
+    },
+    "arbos_ffiFFI.h": {
+      "sha256": "c25f12d11611f6160e59feba3ac33fc726222e8558cba620473e2ead146abc7e",
+      "bytes": 79184,
+      "baseline_identical": true
+    },
+    "arbos_ffiFFI.modulemap": {
+      "sha256": "cc6b494f28e241f7ae51782a867d66b7bb4bba1d0e4bd402f11cf59981ad2ec5",
+      "bytes": 134,
+      "baseline_identical": true
+    }
+  },
+  "source_unchanged": true,
+  "no_tool_install": true
+}

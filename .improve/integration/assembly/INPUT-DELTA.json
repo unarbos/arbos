@@ -1,0 +1,21 @@
+{
+  "source_recipe_v2_script": "80f96bc0928bb14fd95820a739e1f69a2ca412b1a7bd2b875ace88bddf3eb987",
+  "script_unchanged": true,
+  "semantic_input_changes": {
+    "IOS-CARRIED-RESOLUTION.json": {
+      "before_sha256": "a048bccf242876651919bc92de87ecf6a06208f0801ced6cf7deb2d57dbe4bb7",
+      "after_sha256": "0bdf88b7392441d2d8207afeb2a9e5b17427235e0a4bde2fd2054190ab915a48"
+    },
+    "P6-IOS-UPLOADS-RESOLUTION.json": {
+      "before_sha256": "9817c45756daee7e51e9643a31bb38b33325f7e6434c10084d5b0d699454bb90",
+      "after_sha256": "f2670851bba128ae90c8b2b7851aa8fc875d6b7ba6be9807a763ee14730ffb63"
+    }
+  },
+  "pins_changed_only": [
+    "phase3",
+    "phase4",
+    "readiness"
+  ],
+  "explicit_carried_guard_count": 12,
+  "scope": "Fresh v3 input package; no v2 execution receipts copied or relabeled; no full assembly executed."
+}
