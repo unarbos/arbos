@@ -102,4 +102,42 @@ final class TimeDividerTests: XCTestCase {
         ]
         XCTAssertEqual(dateLines(messages), ["m1"])
     }
+
+    /// #2047 asked for "Today" only above the first message of the day. Jacob's later rule
+    /// ([feedback time-dividers-2026-11-05] / #2794) keeps an hour-gap stamp mid-day too, and
+    /// its words still say "Today …". So a second same-day stamp after an hour of silence is
+    /// intentional — not a placement bug.
+    func testASameDayHourGapStillDrawsTodayAboveTheLaterMessage() {
+        let hour = timeDividerGapMs()
+        let first = midday
+        let later = midday + hour
+        let messages = [
+            person("m1", "earlier today", at: first),
+            person("m2", "after an hour", at: later),
+        ]
+        XCTAssertEqual(dateLines(messages), ["m1", "m2"])
+        let stamp = Transcript.dateLabel(later)
+        XCTAssertTrue(stamp.hasPrefix("Today ") || stamp.contains(":"),
+                      "the hour-gap stamp still names the later message's clock: \(stamp)")
+    }
+
+    /// Jacob's TestFlight shot ([feedback AGgL7fykRs0BE9uiHscNCvk]): "Today" sat on
+    /// the bubble above it. The shared `systemGap` is equal above and below the stamp,
+    /// but a bubble's own vertical pad opens the space below before its text — so the
+    /// stamp needs its own top pad, and that pad is what this pins on the view.
+    /// Landed on main via #2982; kept here so this branch stays compatible after the merge.
+    func testTheDateStampKeepsAirAboveTheBubbleAboveIt() throws {
+        XCTAssertEqual(Transcript.stampTopPad, 16,
+                       "enough air that \"Today …\" clears the bubble above it")
+        XCTAssertGreaterThan(Transcript.stampTopPad, 0)
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Arbos/UI/Transcript.swift")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        let src = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(src.contains(".padding(.top, Transcript.stampTopPad)"),
+                      "the centred system stamp draws the pad above its glyphs")
+    }
 }

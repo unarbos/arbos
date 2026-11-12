@@ -1,0 +1,58 @@
+{
+  "schema": "\nCREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n\n-- Room cursor + snapshot committed together (crdt-sync \u00a72.3).\nCREATE TABLE IF NOT EXISTS room_docs (\n  room TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0, snapshot BLOB, acked_vv BLOB, updated_at INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS chats (\n  id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New chat', is_pinned INTEGER NOT NULL DEFAULT 0,\n  created_at INTEGER NOT NULL, last_message_at INTEGER,\n  compaction_summary TEXT, compacted_through TEXT, compaction_version INTEGER NOT NULL DEFAULT 0,\n  pi_session_path TEXT\n);\n\nCREATE TABLE IF NOT EXISTS sessions (\n  id TEXT PRIMARY KEY, subagent_id TEXT, path TEXT, cwd TEXT, model TEXT, thinking_level TEXT,\n  last_cursor TEXT, compactions INTEGER NOT NULL DEFAULT 0, context_pct INTEGER NOT NULL DEFAULT 0,\n  harness TEXT NOT NULL, role TEXT NOT NULL, harness_version TEXT, created_at INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS subagents (\n  id TEXT PRIMARY KEY, name TEXT NOT NULL, purpose TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',\n  tags TEXT NOT NULL DEFAULT '[]', last_seen_at INTEGER, status TEXT NOT NULL DEFAULT 'idle',\n  turns INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_turn_at INTEGER, retired_reason TEXT,\n  harness TEXT NOT NULL, handles TEXT NOT NULL DEFAULT '[]', chat_id TEXT\n);\n\n-- T3: one row per message / tool call / tool output / compaction / memory event.\nCREATE TABLE IF NOT EXISTS t3 (\n  id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, subagent_id TEXT, session_id TEXT, kind TEXT NOT NULL,\n  role TEXT, at INTEGER NOT NULL, text TEXT NOT NULL, source TEXT, size INTEGER NOT NULL\n);\nCREATE INDEX IF NOT EXISTS t3_thread_at ON t3(thread_id, at);\nCREATE INDEX IF NOT EXISTS t3_at ON t3(at);\nCREATE VIRTUAL TABLE IF NOT EXISTS t3_fts USING fts5(text, id UNINDEXED, thread_id UNINDEXED, kind UNINDEXED, tokenize = 'porter unicode61');\n\nCREATE TABLE IF NOT EXISTS memory (\n  id TEXT PRIMARY KEY, tier TEXT NOT NULL, thread_id TEXT, kind TEXT NOT NULL, scope TEXT NOT NULL,\n  text TEXT NOT NULL, source TEXT, valid_at INTEGER, invalid_at INTEGER, created_at INTEGER NOT NULL, expired_at INTEGER,\n  supersedes TEXT NOT NULL DEFAULT '[]', confidence REAL NOT NULL DEFAULT 0.5, importance INTEGER NOT NULL DEFAULT 5,\n  last_accessed_at INTEGER, access_count INTEGER NOT NULL DEFAULT 0\n);\nCREATE INDEX IF NOT EXISTS memory_tier_live ON memory(tier, expired_at);\nCREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, id UNINDEXED, tier UNINDEXED, tokenize = 'porter unicode61');\n\nCREATE TABLE IF NOT EXISTS memory_decision_log (\n  id TEXT PRIMARY KEY, side TEXT NOT NULL, event_id TEXT, gate TEXT, action TEXT, target_ids TEXT,\n  reason TEXT, confidence REAL, model TEXT, latency_ms INTEGER, usage TEXT, created_at INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS handles (\n  id TEXT PRIMARY KEY, chat_id TEXT, session_id TEXT, kind TEXT NOT NULL, chars INTEGER NOT NULL, lines INTEGER NOT NULL,\n  path TEXT NOT NULL, note TEXT NOT NULL, blob_key TEXT, created_at INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS scratch (\n  chat_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (chat_id, name)\n);\n\nCREATE TABLE IF NOT EXISTS turn_metrics (\n  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, route TEXT, ttft_ms INTEGER, route_ms INTEGER,\n  total_ms INTEGER, tool_calls INTEGER NOT NULL DEFAULT 0, escalated INTEGER NOT NULL DEFAULT 0, usage TEXT, created_at INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS asks (\n  id TEXT PRIMARY KEY, chat_id TEXT, session_id TEXT, question TEXT NOT NULL, answered INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL\n);\n\n-- Approval cards (feature approve): the doc part is the source of truth for clients; this row\n-- survives a restart so a late decision still dispatches.\nCREATE TABLE IF NOT EXISTS approvals (\n  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, title TEXT NOT NULL, risk TEXT NOT NULL,\n  payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,\n  decided_at INTEGER, decided_by TEXT, reason TEXT\n);\n\n-- Approved drafts with no connector to deliver them (feature approve, until connectors land).\nCREATE TABLE IF NOT EXISTS outbox (\n  id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT,\n  body TEXT NOT NULL, created_at INTEGER NOT NULL\n);\n\n-- Background jobs the main agent starts with `start_job` (duplex design \u00a72.3): one row per job, from\n-- the ask to its delivery. `subagent_id` names the harness session that runs it.\nCREATE TABLE IF NOT EXISTS jobs (\n  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, ask_message_id TEXT NOT NULL, subagent_id TEXT,\n  title TEXT NOT NULL, kind TEXT NOT NULL, brief TEXT NOT NULL, touches TEXT NOT NULL DEFAULT '[]',\n  state TEXT NOT NULL, last_step TEXT NOT NULL DEFAULT '', last_step_at INTEGER,\n  created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,\n  delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0, steers TEXT NOT NULL DEFAULT '[]'\n);\n\n-- Every worker a job has ever been given, not only the one it is on now (bug AO). `jobs.subagent_id`\n-- is overwritten by each fresh worker, and the processes the replaced worker left behind are\n-- reachable only under *its* id \u2014 so a cancel that reads the column alone asks the kernel about the\n-- wrong session. This is the job's whole history of workers, which is what a cancel sweeps.\nCREATE TABLE IF NOT EXISTS job_workers (\n  job_id TEXT NOT NULL, subagent_id TEXT NOT NULL, at INTEGER NOT NULL,\n  PRIMARY KEY (job_id, subagent_id)\n);\nCREATE INDEX IF NOT EXISTS job_workers_job ON job_workers(job_id, at);\n",
+  "query": "SELECT id, chat_id, ask_message_id, subagent_id, title, kind, brief, touches, state, last_step, last_step_at, created_at, started_at, ended_at, error, delivered_key, restarts, steers FROM jobs WHERE subagent_id = ?1 ORDER BY created_at DESC LIMIT 1",
+  "source_sha256": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "215d752611f892c3e41554b2c9636a8e86fdcac26fec12cea58e1b6c3b76b007",
+    "crates/arbos-relay/src/db_push.rs": "1bbd3bad616e5b491e4c681e2bc4d3353a2e95e87419d61bb5e5191ea29d8126",
+    "crates/arbos-agentd/src/store.rs": "706067a60cbebd3a1571a4e2c718f98f9bae8791771c24c3cdb1a0ff067b73c2"
+  },
+  "before_checks": {
+    "fresh_and_existing_replay": "PASS",
+    "latest": [
+      [
+        "latest",
+        "chat",
+        "ask",
+        "worker",
+        "Latest",
+        "task",
+        "Synthetic regression",
+        "[]",
+        "done",
+        "",
+        null,
+        10,
+        null,
+        null,
+        null,
+        null,
+        0,
+        "[]"
+      ]
+    ],
+    "equal_timestamp": [
+      [
+        "tie-first",
+        "chat",
+        "ask",
+        "tied",
+        "First insertion",
+        "task",
+        "Synthetic regression",
+        "[]",
+        "done",
+        "",
+        null,
+        20,
+        null,
+        null,
+        null,
+        null,
+        0,
+        "[]"
+      ]
+    ],
+    "missing_and_null": "empty"
+  }
+}

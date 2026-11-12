@@ -1,0 +1,403 @@
+{
+  "source_unchanged": true,
+  "source_after": {
+    "crates/arbos-mac/src/sync/relay.rs": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+    "crates/arbos-mac/src/model.rs": "06160d8be8296301723fc258db0d3f6400f250dc50e13dc30d21b4cc7cf141d7",
+    "crates/arbos-mac/src/sync/user_error.rs": "bd72e3774026d5d43c76b68b268f45ad229f1a73b9399946b4cd1053fe026784",
+    "crates/arbos-mac/src/sync/chat_send_queue.rs": "08d01228f9db9d6643d7b699eda514572df6e5c65f56c0e779be4f49d615ad3f",
+    "crates/arbos-core/src/api.rs": "89d3f29fd815044032bfbed19a0fe538efa959dd52b25c7113964227c9e553bc",
+    "crates/arbos-core/src/doc.rs": "27957486cb516b12f353b491719065ee0204dc160afe1b1c1325a77dc912f415"
+  },
+  "seconds": 16.64905100001488,
+  "controls": 11,
+  "redirect_cases": 3,
+  "serial_bound_cases": 3,
+  "allocation_cases": 1,
+  "source": {
+    "relay_sha256": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+    "source_files": {
+      "crates/arbos-mac/src/sync/relay.rs": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+      "crates/arbos-mac/src/model.rs": "06160d8be8296301723fc258db0d3f6400f250dc50e13dc30d21b4cc7cf141d7",
+      "crates/arbos-mac/src/sync/user_error.rs": "bd72e3774026d5d43c76b68b268f45ad229f1a73b9399946b4cd1053fe026784",
+      "crates/arbos-mac/src/sync/chat_send_queue.rs": "08d01228f9db9d6643d7b699eda514572df6e5c65f56c0e779be4f49d615ad3f",
+      "crates/arbos-core/src/api.rs": "89d3f29fd815044032bfbed19a0fe538efa959dd52b25c7113964227c9e553bc",
+      "crates/arbos-core/src/doc.rs": "27957486cb516b12f353b491719065ee0204dc160afe1b1c1325a77dc912f415"
+    },
+    "actual_upload_tranche_sha256": "64c7c68bcb8e0e387f9e0fac1cda3e23013f74a3e7c23454153a30c4664b9cdb",
+    "actual_functions": {
+      "pub(crate) struct RelayError {": "6988ba27fa4fa25f629112727efc42cc8cfd53382fc6dbb89b44ac4561ec4864",
+      "impl RelayError {": "f5ef40ac03dc78ccb672beb3af623fc09e691999bb09f482b6d6abc411e3dcc3",
+      "impl std::fmt::Display for RelayError {": "4ca54ba8c775b78dbe8200beba94904dc5dd98ca9f5609d2d7b9db64868f94a5",
+      "impl std::error::Error for RelayError {}": "cfd61db95ee055f376b96e4de04f42667c03464e9722e3942814b0e6e121492b",
+      "pub(crate) fn mime_for(": "0030eb51a3b65eb2da54921482d0fc292db96623066deab7942dbee3def347aa",
+      "fn blob_request_url(": "e90fd55ce40be95dcf5abf91f7458513dfac3ff4f6aaa000e94a4c5dd384fe10",
+      "async fn fetch_blob_bytes(": "e4b71a08b31594d32760fa748a30414bd29c09c9077a1b1dea5aa1c23863cc9d",
+      "fn safe_name(": "d0e35e731ac6aac5421e0bb4cf5d53f98b3debd8ceefe352eaeb58aad867c008",
+      "fn attachment_kind_str(": "7c024aada69ea2a2f697a7fc086f9f0928d0bcd924667433885ffa6c968703bf",
+      "fn user_attachment_from_part(": "d278820d1f78a9831b702bf01b4ae171de602511502b9c445d48d8d8fba957da",
+      "async fn upload_outgoing(": "d4de49f19361752c0704f5336ad620f7c7facbba06c57c1ab68325271c1a6b7e",
+      "fn forwarded_chart_parts(": "c44ab19d052b685383e6fd365ee0223289cb84655aa23d6893a9c984e132e43a",
+      "async fn upload_voice_memo(": "c6529b3b9c58f1d45eb478ca00c45bcd0a83c492bb8fa05738c6d3960393e57e"
+    },
+    "actual_rs_sha256": "1766dc831ec6e985361f2fddc7b53ef6046723aa6525f5238c33092330318380",
+    "fixture_rs_sha256": "f74b15f6f81469ca60ad698e419de1d24ff3f09377cdecf48b03b039586f1e35",
+    "driver_sha256": "61fbc97c1ead1e8a339892468215f44b97e01f73110a513b522fbe49bba5669b",
+    "scope": "Actual selected production functions and send upload tranche; actual classifier+ChatSendQueue with local account/DTO collaborators, no GPUI/SDK/CRDT runtime."
+  },
+  "results": [
+    {
+      "arguments": [
+        "controls"
+      ],
+      "result": {
+        "cases": [
+          "path-length-bytes-mime-and-picker-metadata",
+          "path-replacement-retains-open-original-file-and-length",
+          "read-failure-order-and-ref-none-continues",
+          "put-401-one-attempt-no-refresh",
+          "download-helper-mime-bytes-refresh-preserved",
+          "copy-owner-refresh-bytes-and-length",
+          "copy-refuses-retired-owner-before-retry-or-put",
+          "failed-puts-visible-in-input-order",
+          "voice-and-forwarded-chart-linked-display-order",
+          "actual-chat-send-queue-fifo",
+          "actual-send-queue-clear-aborts-and-drops-later-send"
+        ],
+        "count": 11,
+        "scope": "actual selected production upload/fetch/tranche/classifier/ChatSendQueue; synthetic local collaborators and loopback HTTP"
+      }
+    },
+    {
+      "arguments": [
+        "redirect",
+        "path"
+      ],
+      "result": {
+        "errors": [],
+        "kind": "path",
+        "requests": [
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 16,
+            "chunked": false,
+            "hash": 1935230249228179095,
+            "length": 16,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9s4ybhchavt0z5skk9d-redirect.png"
+          },
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 16,
+            "chunked": false,
+            "hash": 1935230249228179095,
+            "length": 16,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9s4ybhchavt0z5skk9d-redirected.png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "redirect",
+        "copy"
+      ],
+      "result": {
+        "errors": [],
+        "kind": "copy",
+        "requests": [
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 0,
+            "chunked": false,
+            "hash": 14695981039346656037,
+            "length": null,
+            "method": "GET",
+            "mime": "",
+            "path": "/blob/origin/image"
+          },
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 8192,
+            "chunked": false,
+            "hash": 7819384445464593189,
+            "length": 8192,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9sjrt5rdyd02p26qkmj-redirect.png"
+          },
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 8192,
+            "chunked": false,
+            "hash": 7819384445464593189,
+            "length": 8192,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9sjrt5rdyd02p26qkmj-redirected.png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "redirect",
+        "sticker"
+      ],
+      "result": {
+        "errors": [],
+        "kind": "sticker",
+        "requests": [
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 16,
+            "chunked": false,
+            "hash": 1935230249228179095,
+            "length": 16,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9t0c7n35w7amr988wxc-redirect.png"
+          },
+          {
+            "auth": "Bearer synthetic-A",
+            "bytes": 16,
+            "chunked": false,
+            "hash": 1935230249228179095,
+            "length": 16,
+            "method": "PUT",
+            "mime": "image/png",
+            "path": "/blob/target/att-01m72ft9t0c7n35w7amr988wxc-redirected.png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "bounds-check",
+        "4",
+        "65536",
+        "path"
+      ],
+      "result": {
+        "allocation_requested_bytes": 1294278,
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 62041,
+        "heap_peak_bytes": 567373,
+        "heap_peak_delta_bytes": 505332,
+        "kind": "path",
+        "milliseconds": 62.830999999999996,
+        "mode": "bounds-check",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "payload_sized_allocation_events": 8,
+        "peak_get": 0,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 16934947671703429925,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 3261597983981380389,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 7687185194056557349,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 5325782768071680805,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "bounds-check",
+        "4",
+        "65536",
+        "copy"
+      ],
+      "result": {
+        "allocation_requested_bytes": 2481502,
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61441,
+        "heap_peak_bytes": 568189,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.98120800000001,
+        "mode": "bounds-check",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "payload_sized_allocation_events": 12,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "bounds-check",
+        "4",
+        "65536",
+        "shared-sticker"
+      ],
+      "result": {
+        "allocation_requested_bytes": 1292826,
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 323939,
+        "heap_peak_bytes": 829951,
+        "heap_peak_delta_bytes": 506012,
+        "kind": "shared-sticker",
+        "milliseconds": 63.107499999999995,
+        "mode": "bounds-check",
+        "names": [
+          "image-0.png",
+          "image-1.png",
+          "image-2.png",
+          "image-3.png"
+        ],
+        "payload_sized_allocation_events": 8,
+        "peak_get": 0,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 16934947671703429925,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 3261597983981380389,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 7687185194056557349,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 5325782768071680805,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "arguments": [
+        "allocation-check",
+        "1",
+        "4194304",
+        "copy"
+      ],
+      "result": {
+        "allocation_requested_bytes": 11536951,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61357,
+        "heap_peak_bytes": 8952038,
+        "heap_peak_delta_bytes": 8890681,
+        "kind": "copy",
+        "milliseconds": 46.779875,
+        "mode": "allocation-check",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    }
+  ],
+  "scope": "Selected actual upload/fetch/send tranche plus actual classifier/ChatSendQueue; generated files and loopback-only HTTP; no SDK/media/CRDT or whole-app performance inference."
+}

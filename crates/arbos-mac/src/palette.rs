@@ -223,7 +223,8 @@ pub struct AgentRow {
 }
 
 /// Which of the Mac's pages a shared index item is; `None` for the items the
-/// Mac does not list (the iPhone's Privacy, Text Size, Credits, Connected apps).
+/// Mac does not list (the iPhone's Privacy, Text Size, Credits; Connected apps
+/// is hidden on both until the feature ships).
 pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
     Some(match item {
         SettingsItem::Appearance | SettingsItem::AppearanceOpacity => {
@@ -1188,5 +1189,23 @@ mod tests {
         assert!(find("pause").is_empty());
         // No query, no Settings rows (Recent stays chats and servers).
         assert!(settings_entries("", &agents()).is_empty());
+    }
+
+    /// Connected apps stays off the Settings list until the feature ships
+    /// ([feedback connected-apps-hidden-until-implemented-2026-11-10]). The
+    /// iPhone twin is `ConnectedAppsHiddenUITests`.
+    #[test]
+    fn connected_apps_stays_off_the_settings_list_until_implemented() {
+        assert!(
+            !SettingsPage::LISTED.contains(&SettingsPage::Connectors),
+            "Connected apps must not appear in Mac Settings until implemented"
+        );
+        assert!(setting_target(SettingsItem::ConnectedApps).is_none());
+        assert!(
+            settings_search::index(Platform::Mac).all(|e| e.item != SettingsItem::ConnectedApps)
+        );
+        assert!(
+            settings_entries(&crate::search::normalize_query("connected apps"), &[]).is_empty()
+        );
     }
 }
