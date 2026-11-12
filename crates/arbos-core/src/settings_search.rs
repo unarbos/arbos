@@ -18,14 +18,15 @@
 //!
 //! Not indexed on purpose (Jacob, 14:18 CR): Sign out and Pause all secrets
 //! (a search result must never act), the pages a platform hides (the Mac's
-//! Credits / Connected apps until they return), and a server's or group's own
-//! Settings tab (its chat row already finds it).
+//! Credits until they return; Connected apps on both platforms until the
+//! feature ships), and a server's or group's own Settings tab (its chat row
+//! already finds it).
 
 use crate::search::{match_text, MatchKind};
 
 /// Which app is asking: the index differs a little per platform (the Mac has
-/// Updates and On this Mac, the iPhone has Privacy, Text Size, Credits and
-/// Connected apps).
+/// Updates and On this Mac, the iPhone has Privacy, Text Size and Credits).
+/// Connected apps is indexed on neither until the feature ships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
     Mac,
@@ -56,6 +57,8 @@ pub enum SettingsItem {
     Privacy,
     TextSize,
     Credits,
+    /// Kept for FFI / a future Settings row; not indexed on any platform until
+    /// the feature ships ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
     ConnectedApps,
     /// My Profile tab (name, handle, picture).
     Profile,
@@ -297,20 +300,10 @@ pub const INDEX: &[SettingsEntry] = &[
         ["credits", "balance", "spend", "top-up", "cost", "billing"],
         IPHONE
     ),
-    entry!(
-        ConnectedApps,
-        "Connected apps",
-        "Settings",
-        [
-            "connected apps",
-            "google",
-            "slack",
-            "github",
-            "oauth",
-            "connectors"
-        ],
-        IPHONE
-    ),
+    // Connected apps (`SettingsItem::ConnectedApps`) stays out of the index on
+    // both platforms until the feature ships — Settings lists no row for it,
+    // so search must not open a page the list does not show
+    // ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
     entry!(
         Profile,
         "Profile",
@@ -563,6 +556,11 @@ mod tests {
         assert!(search("updates", Platform::Iphone)
             .iter()
             .any(|h| h.entry.item == SettingsItem::About));
+        // Connected apps is listed on neither app until the feature ships.
+        assert!(index(Platform::Mac).all(|e| e.item != SettingsItem::ConnectedApps));
+        assert!(index(Platform::Iphone).all(|e| e.item != SettingsItem::ConnectedApps));
+        assert!(search("connected apps", Platform::Iphone).is_empty());
+        assert!(search("connectors", Platform::Mac).is_empty());
     }
 
     #[test]
