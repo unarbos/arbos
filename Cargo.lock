@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-boxd"
-version = "0.6.410"
+version = "0.6.411"
 dependencies = [
  "anyhow",
  "async-trait",
