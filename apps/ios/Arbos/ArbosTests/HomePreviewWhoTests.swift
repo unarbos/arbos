@@ -52,4 +52,18 @@ final class HomePreviewWhoTests: XCTestCase {
         model.channelRows["dm1"] = []
         XCTAssertEqual(HomeView.peoplePreview(dm, in: model), "Say hi")
     }
+
+    /// The rollback (`matrix_people_native` off): the chats this device read from the
+    /// homeserver are dialled as Loro rooms as soon as the relay says so. They used to wait
+    /// for the launch loop's next turn, 15 s of spinner on the chat that was opened.
+    func testAChatHandedBackIsDialledWithoutWaitingForTheLoop() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Arbos/Store/ServerStore.swift")
+        guard let store = try? String(contentsOf: url, encoding: .utf8) else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        let handedBack = try XCTUnwrap(store.range(of: "if !peopleNative, !nativeRooms.isEmpty {"))
+        let next = store[handedBack.upperBound...].prefix(120)
+        XCTAssertTrue(next.contains("applyNativeRooms([:])") && next.contains("await refreshPeople()"), String(next))
+    }
 }
