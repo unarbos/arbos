@@ -983,15 +983,21 @@ struct HomeView: View {
     ///
     /// Skips group deletion audits (hidden in the chat; Activity only) and rows hidden
     /// for me (someone I blocked), so a row matches what opening the chat shows.
+    ///
+    /// A file with no words is the newest message all the same, and previews by the word
+    /// its notification has (`arbos_matrix::preview`): the row used to keep the text before it.
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
+        func isFile(_ m: Message) -> Bool {
+            m.parts.contains { if case .attachment = $0 { return true } else { return false } }
+        }
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty
+            !$0.voice && (!$0.plainText.isEmpty || isFile($0))
                 && !model.hidesMessage($0, chatId: c.id)
                 && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? (isFile(m) ? "Attachment" : "")
         let who = previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
                              sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
