@@ -4613,6 +4613,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -5137,6 +5138,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -6035,6 +6037,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -6446,6 +6449,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -8503,6 +8507,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -8654,6 +8659,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -9180,7 +9186,20 @@ impl AppState {
             return;
         };
         self.select_project(project_id, cx);
-        self.select_tab(chat_id, cx);
+        self.select_tab(chat_id.clone(), cx);
+        // A "message from another project" banner announced an agent-to-agent exchange,
+        // which the transcript leaves out by default (Jacob, 2026-11-04). The click is
+        // what opens it: ask for its newest row through the same reveal path a search hit
+        // uses, which both draws the exchange and scrolls to it.
+        let newest_cross = self
+            .messages_of(&chat_id)
+            .iter()
+            .rev()
+            .find(|m| m.is_agent_cross_message())
+            .map(|m| m.id.clone());
+        if let Some(id) = newest_cross {
+            self.reveal_reply(chat_id, id, cx);
+        }
         cx.activate(true);
     }
 

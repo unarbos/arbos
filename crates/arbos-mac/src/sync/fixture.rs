@@ -5923,11 +5923,12 @@ impl Seeder<'_> {
     }
 
     /// Agent-to-agent messaging, receiving side: another agent's words in this chat.
-    fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) {
+    fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) -> Id {
         self.t += 30_000;
+        let id = new_id();
         self.doc.core.transact(|d| {
             d.append_project_message(
-                &new_id(),
+                &id,
                 text,
                 DEVICE,
                 &format!("project:{from_id}"),
@@ -5944,6 +5945,7 @@ impl Seeder<'_> {
                 false,
             );
         });
+        id
     }
 
     /// An answer to the user message two rows back: `replyTo` set (the quote header) when
@@ -5969,11 +5971,19 @@ impl Seeder<'_> {
         id
     }
 
-    /// The reply that went back to that agent ("Replied to ◉ X").
-    fn assistant_replying_to_agent(&mut self, to_name: &str, text: &str) -> Id {
+    /// The reply that went back to that agent: the quote header over the words it answers
+    /// (`replyTo`, as agentd sets it) and the "Replied to ◉ X" line under the bubble.
+    fn assistant_replying_to_agent(&mut self, to_name: &str, asked: &str, text: &str) -> Id {
         let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
         self.doc.core.transact(|d| {
-            d.set_message_fields(&id, &[("agentReplyTo", json!(to_name))]);
+            d.set_message_fields(
+                &id,
+                &[
+                    ("agentReplyTo", json!(to_name)),
+                    ("inReplyTo", json!(asked)),
+                    ("replyTo", json!(asked)),
+                ],
+            );
         });
         id
     }
@@ -6747,13 +6757,14 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // bubble labelled "Arbos"), Comms's reply, "Replied to ◉ Arbos".
         if agent_message_fixture() {
             s.t = base.saturating_sub(10 * 60_000);
-            s.agent_message_received(
+            let asked = s.agent_message_received(
                 PROJECT_ARBOS,
                 "Arbos",
                 "Hello, Comms — Jacob asked me to pass along a hello.",
             );
             s.assistant_replying_to_agent(
                 "Arbos",
+                &asked,
                 "Hello back, Jacob — and hi Arbos! Ready whenever you want the weekly update sent.",
             );
         }
@@ -7118,6 +7129,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         job: None,
         hidden: false,
         agent_reply_to: None,
+        agent_message: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
