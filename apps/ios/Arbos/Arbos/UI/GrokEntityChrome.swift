@@ -21,7 +21,7 @@ struct EditPillButton: View {
                 .foregroundStyle(theme.text)
                 .padding(.horizontal, 14)
                 .frame(height: 28)
-                .background(Capsule().fill(theme.field))
+                .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("profile-edit")

@@ -2703,7 +2703,7 @@ async fn hydrate_project(
         project.model = "anthropic/claude-haiku-5.5".into();
     }
     if project.avatar_color_index.is_none() {
-        project.avatar_color_index = Some(crate::ui::avatars::color_index(&id));
+        project.avatar_color_index = Some(arbos_core::avatar::color_index(&id));
     }
     let chats: Vec<Chat> = detail.chats.iter().map(chat_from_dto).collect();
     (Some(project), chats)

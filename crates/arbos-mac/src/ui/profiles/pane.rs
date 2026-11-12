@@ -94,6 +94,17 @@ pub enum Section {
     Custom(AnyElement),
 }
 
+/// The read-only hero name.
+pub fn name(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
+    div()
+        .text_size(px(22.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(theme.text)
+        .truncate()
+        .child(text.into())
+        .into_any_element()
+}
+
 /// The page's frame title, for the pushed bar.
 fn title_of(page: &ProfilePage, state: &AppState) -> String {
     match page {
