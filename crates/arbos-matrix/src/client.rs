@@ -1082,10 +1082,12 @@ impl MatrixClient {
     /// from there.
     async fn mend(&self, room: &Room) {
         let id = room.room_id();
-        let open = {
+        let (open, at_start) = {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
-            tl.get(id)
-                .is_some_and(|t| t.loaded && t.rows.iter().any(|r| !r.pending))
+            tl.get(id).map_or((false, false), |t| {
+                let rows = t.at_start || t.rows.iter().any(|r| !r.pending);
+                (t.loaded && rows, t.at_start)
+            })
         };
         if !open {
             return;
@@ -1096,7 +1098,11 @@ impl MatrixClient {
         let Ok(mut whole) = cache.events().await else {
             return;
         };
-        if self.before(id, &whole).is_empty() {
+        // A timeline that goes back to the room's beginning has no row before a break when
+        // it had none at all (the room was opened empty), and would go on saying there is
+        // nothing earlier. The store is asked instead: it answers with no request when it
+        // still reaches the beginning.
+        if !at_start && self.before(id, &whole).is_empty() {
             return;
         }
         for _ in 0..PAGE_ROUNDS {
@@ -1143,13 +1149,19 @@ impl MatrixClient {
         let (cache, _) = room.event_cache().await.map_err(stored)?;
         let mut events = cache.events().await.map_err(stored)?;
         let mut at_start = false;
-        if events.len() < usize::from(HISTORY_PAGE) {
+        // Not one request for it: the store holds a room in pieces (one ends wherever a sync
+        // left something out), and the homeserver's page comes back empty when it is all
+        // events the store already holds, with the older piece still to read.
+        for _ in 0..PAGE_ROUNDS {
+            if at_start || events.len() >= usize::from(HISTORY_PAGE) {
+                break;
+            }
             match cache.pagination().run_backwards_once(HISTORY_PAGE).await {
                 Ok(older) => {
                     at_start = older.reached_start;
                     events.extend(older.events);
                 }
-                Err(_) if !events.is_empty() => {}
+                Err(_) if !events.is_empty() => break,
                 Err(e) => return Err(stored(e)),
             }
         }
@@ -1160,7 +1172,10 @@ impl MatrixClient {
             t.loaded = true;
             t.at_start = at_start;
         }
-        Ok(self.push_rows(room.room_id(), rows, false))
+        self.push_rows(room.room_id(), rows, false);
+        // A sync that arrived while this was reading found the room not open yet.
+        self.mend(&room).await;
+        Ok(self.push_rows(room.room_id(), Vec::new(), false))
     }
 
     /// One more page of older history; `Ok(None)` at the beginning of the room.

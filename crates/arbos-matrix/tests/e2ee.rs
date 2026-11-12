@@ -2333,3 +2333,171 @@ async fn a_notification_reads_an_encrypted_message_from_the_devices_store() {
     alice1.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What an open room shows is what the homeserver has: after the device has heard from it,
+/// the rows are its newest messages with none left out between them, however the messages
+/// arrived (one or many while the device was away, while the room was being opened, or more
+/// than a page of them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_room_has_every_message_the_homeserver_has() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-whole-{tag}"));
+    let a = hs.register(&format!("wa{tag}")).await;
+    let b = Session {
+        people_native: true,
+        ..hs.register(&format!("wb{tag}")).await
+    };
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P3WHOLE" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P3WHOLE", "kind": "dm", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                    ] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sent = std::sync::atomic::AtomicUsize::new(0);
+    let say = |count: usize| {
+        let (hs, a, room, sent) = (&hs, &a, &room, &sent);
+        async move {
+            for _ in 0..count {
+                let n = sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                hs.call(
+                    "PUT",
+                    &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/w{n}"),
+                    Some(&a.access_token),
+                    json!({ "msgtype": "m.text", "body": format!("said {n}") }),
+                )
+                .await;
+                // Under the homeserver's ten messages a second.
+                tokio::time::sleep(Duration::from_millis(110)).await;
+            }
+        }
+    };
+    // The room's messages as the homeserver has them, oldest first.
+    let said = || {
+        let (hs, a, room) = (&hs, &a, &room);
+        async move {
+            let page = hs
+                .call(
+                    "GET",
+                    &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=200"),
+                    Some(&a.access_token),
+                    Value::Null,
+                )
+                .await;
+            let mut all: Vec<String> = page["chunk"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["type"] == "m.room.message")
+                .map(|e| e["content"]["body"].as_str().unwrap().to_owned())
+                .collect();
+            all.reverse();
+            all
+        }
+    };
+    // Whether the device shows the homeserver's newest messages, a page of them when there
+    // is one, in its order and with none left out; else what it shows.
+    let shown = |c: &Arc<MatrixClient>| {
+        let (c, room) = (c.clone(), &room);
+        async move {
+            let all = said().await;
+            let mut read = Vec::new();
+            for _ in 0..20 {
+                read = texts(&c, room).await;
+                if read.len() >= all.len().min(50) && all.ends_with(&read) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(format!("of {}, shown: {read:?}", all.len()))
+        }
+    };
+    let listed = |c: &Arc<MatrixClient>| {
+        let c = c.clone();
+        async move {
+            let all = said().await;
+            eventually(|| async {
+                (c.snapshot().await.people.first()?.last_text == *all.last()?).then_some(())
+            })
+            .await
+        }
+    };
+    // The device stopped, `count` messages said while it is away, and the device again.
+    let away = |c: Arc<MatrixClient>, count: usize| {
+        let (b, dir, say) = (&b, &dir, &say);
+        async move {
+            c.stop();
+            say(count).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            start_as(b, dir, false).await
+        }
+    };
+    let mut wrong = Vec::new();
+
+    // The room's first two messages, to a device that opened it while it was empty (there
+    // is nothing earlier, and it knows) and opens it again before the homeserver has answered.
+    let mut bob = start(&b, &dir).await;
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b.access_token),
+        json!({}),
+    )
+    .await;
+    eventually(|| async { bob.open_room(&room).await.ok() }).await;
+    eventually(|| async { bob.load_older(&room).await.ok()?.is_none().then_some(()) }).await;
+    bob = away(bob, 2).await;
+    let _ = bob.open_room(&room).await;
+    listed(&bob).await;
+    wrong.push(("the first messages".to_owned(), shown(&bob).await));
+    // Nothing, one message, several (a sync hands over the newest only) and more than a page
+    // while the device is away: opened once the homeserver has answered, and opened at once,
+    // before it has.
+    for count in [0, 1, 2, 6, 60] {
+        bob = away(bob, count).await;
+        listed(&bob).await;
+        wrong.push((
+            format!("{count} while away, opened after the sync"),
+            shown(&bob).await,
+        ));
+        bob = away(bob, count).await;
+        let _ = bob.open_room(&room).await;
+        listed(&bob).await;
+        wrong.push((
+            format!("{count} while away, opened at once"),
+            shown(&bob).await,
+        ));
+    }
+    // Stopped before its first sync was through.
+    bob = away(bob, 2).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    bob = away(bob, 0).await;
+    listed(&bob).await;
+    wrong.push(("restarted mid-sync".to_owned(), shown(&bob).await));
+    // A burst while it is open.
+    say(5).await;
+    listed(&bob).await;
+    wrong.push(("five while open".to_owned(), shown(&bob).await));
+
+    wrong.retain(|(_, r)| r.is_err());
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    bob.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
