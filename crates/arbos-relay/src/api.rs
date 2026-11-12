@@ -1569,7 +1569,7 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
         .into_response())
 }
 
-/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|null}`:
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|boxd|null}`:
 /// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
 /// current sandbox to re-create); a key that is absent is left as it is, `null` clears it. The
 /// retired provider is refused here, so no box can be sent back to it by hand.

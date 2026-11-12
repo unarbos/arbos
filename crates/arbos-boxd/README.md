@@ -1,8 +1,10 @@
 # arbos-boxd
 
 The root daemon on a compute host that runs each user's box as an OCI bundle directly under
-`runsc` (docs/box-scaling.md §3 and §4.1). This is Phase 1: nothing calls it yet. The R2 cold
-tier, the relay's `Provider::Boxd`, the idle supervisor and multi-node are later phases.
+`runsc` (docs/box-scaling.md §3 and §4.1). The relay calls it for boxes on its
+`boxd` provider, which is off unless the relay has `ARBOS_BOXD_URL` and `ARBOS_BOXD_TOKEN_FILE`
+(a copy of the token below that the relay's user can read, mode 0600). The R2 cold tier and
+multi-node are later phases.
 
 ## What the host needs
 

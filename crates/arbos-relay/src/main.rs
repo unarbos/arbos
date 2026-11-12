@@ -15,6 +15,7 @@ mod avatar_image;
 mod blobs;
 #[cfg(test)]
 mod box_row_tests;
+mod boxd;
 mod boxes;
 mod browser;
 mod calls;
@@ -259,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
         default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
+        boxd: boxd::Boxd::from_env()?,
         fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
@@ -402,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
+    boxd::spawn_idle_sleeper(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;

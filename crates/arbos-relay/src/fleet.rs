@@ -822,7 +822,7 @@ pub fn pick_eviction(cands: &[Candidate]) -> Option<String> {
 }
 
 /// A keepalive said a turn is running this recently → the sandbox is busy.
-const TURN_FRESH_MS: i64 = 3 * 60_000;
+pub(crate) const TURN_FRESH_MS: i64 = 3 * 60_000;
 
 async fn candidates(state: &AppState) -> Vec<Candidate> {
     let boxes = state.db.list_boxes().unwrap_or_default();

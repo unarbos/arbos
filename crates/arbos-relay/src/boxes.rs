@@ -31,11 +31,14 @@ pub enum Provider {
     Docker,
     /// A gVisor (`runsc`) container on the relay host with a per-user `/work` image (D89).
     Gvisor,
+    /// An OCI bundle under the host's `arbos-boxd` daemon (docs/box-scaling.md, `boxd.rs`). Works
+    /// only with `ARBOS_BOXD_URL` set; no box is on it unless an operator names it.
+    Boxd,
 }
 
 impl Provider {
     /// Every provider a box may be created on, for the messages that list the choices.
-    pub const NAMES: &'static str = "process|docker|gvisor";
+    pub const NAMES: &'static str = "process|docker|gvisor|boxd";
     /// `None` for anything this relay cannot run, including [`RETIRED_PROVIDER`]. A caller holding
     /// a stored row uses [`provider_of`] instead, so the retirement shows up in the message.
     pub fn parse(s: &str) -> Option<Self> {
@@ -43,6 +46,7 @@ impl Provider {
             "process" => Some(Provider::Process),
             "docker" => Some(Provider::Docker),
             "gvisor" => Some(Provider::Gvisor),
+            "boxd" => Some(Provider::Boxd),
             _ => None,
         }
     }
@@ -51,6 +55,7 @@ impl Provider {
             Provider::Process => "process",
             Provider::Docker => "docker",
             Provider::Gvisor => "gvisor",
+            Provider::Boxd => "boxd",
         }
     }
 }
@@ -217,6 +222,7 @@ async fn create_box_row(
         Provider::Process => format!("local-{user_id}"),
         Provider::Docker => format!("arbos-box-{}", user_id.to_ascii_lowercase()),
         Provider::Gvisor => crate::fleet::container_name(user_id),
+        Provider::Boxd => format!("arbos-box-{user_id}"),
     };
     state.db.begin_box_create(
         user_id,
@@ -315,6 +321,23 @@ async fn create_on_provider(
             state.db.record_timing(
                 &timing_key(user_id),
                 "gvisor_create_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
+        Provider::Boxd => {
+            sb.snapshot = Some(snapshot_name.to_owned());
+            if let Err(e) = crate::boxd::create_box(state, user_id, sb, box_token, mcp_token).await
+            {
+                // As for gVisor: a box that was not made leaves no row to be woken later.
+                if replacing.is_none() {
+                    let _ = state.db.delete_box_row(user_id);
+                }
+                return Err(e);
+            }
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_create_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
@@ -588,6 +611,16 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                 None,
             )?;
         }
+        Provider::Boxd => {
+            let t0 = Instant::now();
+            crate::boxd::start_box(state, user_id, &mut sb).await?;
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_start_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
@@ -628,6 +661,13 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
             let name = sb.sandbox_id.clone().unwrap_or_default();
             // One agentd stops every workspace's children; give it the full grace.
             crate::fleet::stop_box(&name, 30).await?;
+        }
+        Provider::Boxd => {
+            // The daemon has no forced stop yet: a box agentd calls busy keeps running, `force`
+            // or not, and the caller is told so.
+            if !crate::boxd::of(state)?.sleep(&state.http, user_id).await? {
+                return Err(anyhow!(crate::boxd::BUSY));
+            }
         }
     }
     sb.last_stopped_at = Some(now_ms());
@@ -1369,6 +1409,13 @@ pub async fn spawn_always_on(state: AppState) {
                 }
                 // Waitlisted (D89): no box until the admission tick frees a slot.
                 if state.db.is_waitlisted(&user_id).unwrap_or(false) {
+                    continue;
+                }
+                // A `boxd` box sleeps when idle and wakes when something needs it
+                // (`boxd::spawn_idle_sleeper`); keeping it up is not this sweep's to do.
+                if state.cfg.boxd.is_some()
+                    && matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str())
+                {
                     continue;
                 }
                 tracing::info!(%user_id, "always-on: waking");
