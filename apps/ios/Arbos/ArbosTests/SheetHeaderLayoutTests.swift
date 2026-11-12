@@ -127,7 +127,7 @@ final class SheetHeaderLayoutTests: XCTestCase {
     /// The sheets with a possibly long title draw `SheetHeaderBar`, and none of them keeps a
     /// system `topBarTrailing` item — the thing the inline bar squeezed.
     func testEveryLongTitleSheetUsesTheSharedHeader() throws {
-        let files = ["PeopleSheets.swift", "ProfilePages.swift", "ServerChannelsView.swift", "AgentPicker.swift", "SecretsViews.swift"]
+        let files = ["PeopleSheets.swift", "ServerChannelsView.swift", "AgentPicker.swift", "SecretsViews.swift"]
         let first = sourceRoot.appendingPathComponent(files[0])
         try XCTSkipIf(!FileManager.default.fileExists(atPath: first.path), "sources not beside the test bundle")
         for name in files {

@@ -56,12 +56,6 @@ final class HomeNavPushUITests: XCTestCase {
                        "a sheet cancel would mean this rose as a bottom sheet", file: file, line: line)
     }
 
-    /// Settings / New Message chrome often marks rows and glass discs non-hittable
-    /// (`hit point {-1,-1}`); coordinate-tap still reaches them (same as AgentAccessLinkUITests).
-    private func tap(_ item: XCUIElement) {
-        item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-    }
-
     // MARK: Settings
 
     /// [feedback iphone-settings-nav-push-2026-11-10]
