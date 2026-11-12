@@ -325,9 +325,21 @@ impl Boxd {
         mkdir_private(&format!("{root}/images"))?;
         std::fs::write(format!("{root}/resolv.conf"), RESOLV_CONF)?;
         std::fs::write(format!("{root}/hosts"), HOSTS)?;
-        if !self.holds(&["ip", "link", "show", BRIDGE]).await? {
-            let [a, b] = self.cfg.subnet;
-            let gateway = format!("{a}.{b}.0.1/16");
+        let [a, b] = self.cfg.subnet;
+        let gateway = format!("{a}.{b}.0.1/16");
+        if self.holds(&["ip", "link", "show", BRIDGE]).await? {
+            // The bridge and the veth names are one per network namespace: a second daemon
+            // here would start, and its boxes would have no gateway.
+            let held = self
+                .run(&["ip", "-o", "-4", "addr", "show", "dev", BRIDGE])
+                .await?;
+            if !held.split_whitespace().any(|w| w == gateway) {
+                bail!(
+                    "the bridge {BRIDGE} is already there without {gateway}: another daemon \
+                     on this host has it, and a second one needs its own network namespace"
+                );
+            }
+        } else {
             self.run(&["ip", "link", "add", BRIDGE, "type", "bridge"])
                 .await?;
             self.run(&["ip", "addr", "add", &gateway, "dev", BRIDGE])
@@ -899,6 +911,12 @@ impl Boxd {
             self.forget_cold(&p, part)?;
         }
         let has_ckpt = Path::new(&p.ckpt).is_dir();
+        if !Path::new(&p.img).is_file() {
+            return Err(refuse(
+                StatusCode::CONFLICT,
+                "the box has no disk on this host; ensure it first",
+            ));
+        }
         // A sandbox that exited by itself still holds its id.
         let _ = self.runsc(&["delete", "--force", &p.id], None).await;
         self.mount(&p).await?;
@@ -1390,6 +1408,41 @@ pub mod tests {
             status(b.wake(&user("u_nobody")).await),
             StatusCode::NOT_FOUND
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bundle whose disk is gone, with no record of one in the store, is refused in words
+    /// before anything is attached.
+    #[tokio::test]
+    async fn wake_refuses_a_box_with_no_disk() {
+        let (b, fake, root) = boxd("no-disk").await;
+        let u = user("u_nodisk");
+        b.ensure(&u, "1.0", &env("t")).await.unwrap();
+        std::fs::remove_file(format!("{root}/boxes/u_nodisk/work.img")).unwrap();
+        let e = b.wake(&u).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.msg.contains("no disk on this host"), "{}", e.msg);
+        assert_eq!((fake.ran("losetup --find"), fake.ran("--detach")), (0, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second daemon on a host, told another subnet, finds the first one's bridge and does
+    /// not start on it.
+    #[tokio::test]
+    async fn a_bridge_that_is_another_daemons_stops_the_start() {
+        let (b, fake, root) = boxd("bridge").await;
+        let cfg = Cfg {
+            root: root.clone(),
+            run: format!("{root}/run"),
+            platform: "systrap".into(),
+            subnet: parse_subnet("10.208.0.0/16").unwrap(),
+            store: None,
+        };
+        let e = Boxd::new(cfg, fake.clone()).init().await.unwrap_err();
+        assert!(e.to_string().contains("without 10.208.0.1/16"), "{e}");
+        assert_eq!(fake.ran("ip link add"), 0);
+        // The first one starts again on its own.
+        b.init().await.unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 

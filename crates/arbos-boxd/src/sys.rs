@@ -168,6 +168,11 @@ pub mod fake {
                     loops.insert(last, stdout.trim().to_owned());
                 }
                 "losetup" if has("-d") => self.loops.lock().unwrap().retain(|_, d| *d != last),
+                // The bridge is there, as node-0's daemon left it.
+                "ip" if has("addr") && has("show") => {
+                    stdout =
+                        "5: arbos-boxd0    inet 10.207.0.1/16 scope global arbos-boxd0\n".into();
+                }
                 "mountpoint" => ok = self.mounted.lock().unwrap().contains(&last),
                 "mount" => drop(self.mounted.lock().unwrap().insert(last)),
                 "umount" => drop(self.mounted.lock().unwrap().remove(&last)),
