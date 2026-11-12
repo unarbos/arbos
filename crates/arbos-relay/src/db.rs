@@ -26,6 +26,8 @@ pub struct BoxAgentd {
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
+const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -86,6 +88,7 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+CREATE INDEX IF NOT EXISTS rows_room_activity ON rows(room, created_at);
 -- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
 -- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
 -- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
@@ -1774,16 +1777,22 @@ impl Db {
 
     // ---- rooms --------------------------------------------------------------------------------
 
+    fn room_position_from(c: &Connection, room: &str) -> rusqlite::Result<(i64, i64)> {
+        c.query_row(ROOM_POSITION_SQL, params![room], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .map(|position| position.unwrap_or((0, 0)))
+    }
+
+    /// Stored room head and checkpoint floor; unknown rooms start at `(0, 0)`.
+    pub fn room_position(&self, room: &str) -> Result<(i64, i64)> {
+        self.with(|c| Self::room_position_from(c, room))
+    }
+
     pub fn room_state(&self, room: &str) -> Result<RoomState> {
         self.with(|c| {
-            let (head, floor): (i64, i64) = c
-                .query_row(
-                    "SELECT head, floor FROM room_seq WHERE room = ?1",
-                    params![room],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?
-                .unwrap_or((0, 0));
+            let (head, floor) = Self::room_position_from(c, room)?;
             let cp: Option<(i64, i64, Vec<u8>)> = c
                 .query_row(
                     "SELECT seq, size, frontier FROM checkpoints WHERE room = ?1",
@@ -3784,6 +3793,51 @@ impl Db {
             let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod room_position_tests {
+    use super::*;
+
+    #[test]
+    fn position_and_statistics_track_appends_and_checkpoints() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)));
+        let check = |position, counts, checkpoint_seq| {
+            let state = db.room_state("project/chat").unwrap();
+            assert_eq!((state.head, state.floor), position);
+            assert_eq!(db.room_position("project/chat").unwrap(), position);
+            assert_eq!((state.row_count, state.row_bytes), counts);
+            assert_eq!(state.checkpoint_seq, checkpoint_seq);
+        };
+        check((0, 0), (0, 0), 0);
+        db.append_row("project/chat", "device", "batch1", b"abc")
+            .unwrap();
+        db.append_row("project/chat", "device", "batch2", b"12345")
+            .unwrap();
+        check((2, 0), (2, 8), 0);
+        assert!(db
+            .put_checkpoint("project/chat", 1, b"frontier", b"snapshot")
+            .unwrap());
+        check((2, 1), (1, 5), 1);
+        let checkpoint = db.room_state("project/chat").unwrap();
+        assert_eq!(checkpoint.checkpoint_size, 8);
+        assert_eq!(checkpoint.checkpoint_frontier, b"frontier");
+        db.append_row("project/chat", "device", "batch3", b"x")
+            .unwrap();
+        check((3, 1), (2, 6), 1);
+    }
+
+    #[test]
+    fn a_position_query_error_is_not_a_missing_room() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)));
+        db.with(|c| c.execute_batch("DROP TABLE room_seq")).unwrap();
+        assert!(db.room_state("project/chat").is_err());
+        assert!(db.room_position("project/chat").is_err());
     }
 }
 

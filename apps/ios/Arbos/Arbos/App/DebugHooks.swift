@@ -156,7 +156,9 @@ enum DebugHooks {
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
-    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture;
+    /// `agent-links` opens Agent access link, `agent-links-copy` lands with the copy sheet up and
+    /// `agent-links-copied` with its Copy already pressed.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
@@ -193,6 +195,9 @@ enum DebugHooks {
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `ARBOS_TIME_REVEAL=1`: the open chat holds the iMessage time peek fully drawn out, for
+    /// screenshot rigs (`simctl` cannot drag the transcript).
+    static var timeReveal: Bool { value("ARBOS_TIME_REVEAL") == "1" }
     /// `system | light | dark`: the theme for one launch, over the saved choice and the
     /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }

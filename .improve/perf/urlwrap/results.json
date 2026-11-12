@@ -1,0 +1,4661 @@
+{
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+  "source": "crates/arbos-mac/src/ui/urlwrap.rs",
+  "baseline_ref": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "results": {
+    "before": {
+      "source_sha256": "270528323de247de120709b6c7521764cc3c5abb00b3cc1f87a0a55bcc42259f",
+      "compile_seconds": 0.582,
+      "checks": {
+        "goldens_passed": 10,
+        "round_trips_passed": 125,
+        "failed": 0
+      },
+      "samples": [
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 230.383
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 34363.32
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 2009091.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 219.283
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 42934.18
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 3113691.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 223.283
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 18010.82
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 175008.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 230.717
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 34523.34
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 1998516.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 212.808
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 42370.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 3097575.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 219.75
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 18644.16
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 177275.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 236.892
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 35087.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 1987141.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 213.133
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 42949.18
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 3099950.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 226.05
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 17542.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 175600.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 230.142
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 35065.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 1998416.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 217.108
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 43039.18
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 3138325.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 227.925
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 17924.16
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 174091.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 225.992
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 36224.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 2026891.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 217.85
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 43845.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 3109808.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 231.45
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 18232.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 179741.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 236.517
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 35175.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 2109875.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 225.333
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 43014.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 3122125.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 227.7
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 17923.32
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 184233.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 225.475
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 35060.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 2008425.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 226.817
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 43174.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 3107683.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 222.342
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 17873.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 181708.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 235.767
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 35169.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 2011616.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 215.092
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 42375.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 3108083.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 223.142
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 17955.82
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 181425.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 232.817
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 34886.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 2004850.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 218.633
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 42306.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 3087675.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 228.583
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 17920.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 178958.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 232.258
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 34630.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 2004166.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 225.6
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 43357.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 3108275.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 224.3
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 17530.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 171533.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 241.875
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 35991.68
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 1996366.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 215.317
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 45325.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 3119600.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 225.475
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 17900.82
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 175933.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 245.158
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 36425.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 2023808.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 230.883
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 44295.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 3109900.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 229.942
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 17972.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 174491.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 230.733
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 35557.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 2027283.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 274.242
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 43465.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 3123508.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 230.133
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 18472.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 180675.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 232.767
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 35500.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 2011491.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 222.183
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 42577.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 3113641.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 228.358
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 17771.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 172825.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 226.283
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 35148.32
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 2002400.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 218.667
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 43135.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 3096300.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 229.042
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 17602.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 176625.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 246.75
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 36692.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 1986250.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 217.633
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 42662.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 3103183.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 226.467
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 17648.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 180625.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 228.883
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 34621.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 1990433.2
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 221.358
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 43220.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 3068708.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 225.042
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 17867.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 170350.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 233.592
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 34481.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 2011091.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 218.517
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 43739.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 3106666.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 224.408
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 19607.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 177825.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 225.317
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 34597.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 2026100.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 212.3
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 43016.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 3091775.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 224.683
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 17880.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 174783.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 252.892
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 36297.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 2003675.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 219.933
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 42816.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 3107208.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 230.542
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 17787.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 179483.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 228.233
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 35609.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 1999966.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 215.742
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 42325.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 3090483.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 221.75
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 17236.66
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 171291.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 240.6
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 37045.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 1995591.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 224.258
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 42940.82
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 3119241.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 228.308
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 17931.66
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 178116.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 227.15
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 35088.34
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 1993458.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 223.417
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 42688.34
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 3105925.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 222.442
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 17429.18
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 172075.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 233.917
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 34426.68
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 2023741.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 226.908
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 42790.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 3105558.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 236.033
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 17992.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 177408.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 249.95
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 36335.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 2004191.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 216.117
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 46115.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 3099191.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 232.675
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 18447.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 182166.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 231.8
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 34989.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 2004191.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 221.083
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 42984.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 3092491.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 228.942
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 17613.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 179400.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 244.183
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 35196.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 2023183.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 220.158
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 42782.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 3141233.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 221.167
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 17137.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 170633.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 253.175
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 36150.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 2008591.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 218.383
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 42460.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 3127350.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 229.758
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 17595.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 174850.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 225.825
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 34216.68
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 2000950.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 216.617
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 42351.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 3108233.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 228.808
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 17541.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 174258.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 228.575
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 35945.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 2077950.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 220.142
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 51594.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 3654800.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 281.042
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 18633.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 186241.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 255.725
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 38142.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 2144008.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 233.425
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 43961.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 3196883.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 284.183
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 18516.66
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 195550.0
+        }
+      ],
+      "summary": [
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "samples": 31,
+          "median_ns": 232.767,
+          "min_ns": 225.317,
+          "p95_ns": 252.892
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "samples": 31,
+          "median_ns": 35169.16,
+          "min_ns": 34216.68,
+          "p95_ns": 36692.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "samples": 31,
+          "median_ns": 2004850.0,
+          "min_ns": 1986250.0,
+          "p95_ns": 2077950.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "samples": 31,
+          "median_ns": 219.283,
+          "min_ns": 212.3,
+          "p95_ns": 230.883
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "samples": 31,
+          "median_ns": 42984.16,
+          "min_ns": 42306.66,
+          "p95_ns": 45325.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "samples": 31,
+          "median_ns": 3108083.4,
+          "min_ns": 3068708.2,
+          "p95_ns": 3141233.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "samples": 31,
+          "median_ns": 227.925,
+          "min_ns": 219.75,
+          "p95_ns": 236.033
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "samples": 31,
+          "median_ns": 17900.82,
+          "min_ns": 17137.5,
+          "p95_ns": 18633.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "samples": 31,
+          "median_ns": 177275.0,
+          "min_ns": 170350.0,
+          "p95_ns": 184233.4
+        }
+      ]
+    },
+    "after": {
+      "source_sha256": "4fbf136cd3e47c4fe946b59fe0378c2a106b35722c8e9f1dfbc488bea64b2f16",
+      "compile_seconds": 0.211,
+      "checks": {
+        "goldens_passed": 10,
+        "round_trips_passed": 125,
+        "failed": 0
+      },
+      "samples": [
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 163.392
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 14400.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 144816.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 169.067
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 14341.68
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 145350.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 0,
+          "iterations": 5000,
+          "ns_per_call": 177.75
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 0,
+          "iterations": 50,
+          "ns_per_call": 14246.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 0,
+          "iterations": 5,
+          "ns_per_call": 135133.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 161.617
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 13145.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 133550.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 154.483
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 13202.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 131991.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 1,
+          "iterations": 5000,
+          "ns_per_call": 151.725
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 1,
+          "iterations": 50,
+          "ns_per_call": 13559.18
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 1,
+          "iterations": 5,
+          "ns_per_call": 141950.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 157.358
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 12899.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 129700.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 150.975
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 12587.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 129791.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 2,
+          "iterations": 5000,
+          "ns_per_call": 150.575
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 2,
+          "iterations": 50,
+          "ns_per_call": 13436.66
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 2,
+          "iterations": 5,
+          "ns_per_call": 141141.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 164.292
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 13750.82
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 134608.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 161.758
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 13106.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 132083.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 3,
+          "iterations": 5000,
+          "ns_per_call": 156.783
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 3,
+          "iterations": 50,
+          "ns_per_call": 13452.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 3,
+          "iterations": 5,
+          "ns_per_call": 135558.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 160.483
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 13066.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 131883.2
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 151.15
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 13051.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 131633.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 4,
+          "iterations": 5000,
+          "ns_per_call": 160.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 4,
+          "iterations": 50,
+          "ns_per_call": 13738.32
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 4,
+          "iterations": 5,
+          "ns_per_call": 136833.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 164.617
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 13071.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 132283.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 152.8
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 12747.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 137458.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 5,
+          "iterations": 5000,
+          "ns_per_call": 159.458
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 5,
+          "iterations": 50,
+          "ns_per_call": 13919.16
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 5,
+          "iterations": 5,
+          "ns_per_call": 155991.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 162.567
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 12950.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 138850.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 163.475
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 13345.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 132175.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 6,
+          "iterations": 5000,
+          "ns_per_call": 163.45
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 6,
+          "iterations": 50,
+          "ns_per_call": 13820.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 6,
+          "iterations": 5,
+          "ns_per_call": 138758.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 157.933
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 13503.32
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 134983.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 154.592
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 12808.32
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 152241.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 7,
+          "iterations": 5000,
+          "ns_per_call": 180.692
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 7,
+          "iterations": 50,
+          "ns_per_call": 15360.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 7,
+          "iterations": 5,
+          "ns_per_call": 154691.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 160.792
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 13710.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 134933.2
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 154.292
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 13220.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 132925.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 8,
+          "iterations": 5000,
+          "ns_per_call": 157.55
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 8,
+          "iterations": 50,
+          "ns_per_call": 13918.32
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 8,
+          "iterations": 5,
+          "ns_per_call": 142491.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 163.933
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 13560.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 132425.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 158.017
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 13102.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 131116.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 9,
+          "iterations": 5000,
+          "ns_per_call": 152.767
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 9,
+          "iterations": 50,
+          "ns_per_call": 13866.66
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 9,
+          "iterations": 5,
+          "ns_per_call": 136050.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 161.342
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 13270.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 134233.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 162.008
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 13627.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 127183.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 10,
+          "iterations": 5000,
+          "ns_per_call": 156.642
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 10,
+          "iterations": 50,
+          "ns_per_call": 13583.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 10,
+          "iterations": 5,
+          "ns_per_call": 138883.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 161.533
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 13220.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 135358.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 154.975
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 12971.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 128533.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 11,
+          "iterations": 5000,
+          "ns_per_call": 155.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 11,
+          "iterations": 50,
+          "ns_per_call": 13839.16
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 11,
+          "iterations": 5,
+          "ns_per_call": 133891.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 157.075
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 13557.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 132133.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 156.058
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 12836.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 132183.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 12,
+          "iterations": 5000,
+          "ns_per_call": 154.983
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 12,
+          "iterations": 50,
+          "ns_per_call": 13410.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 12,
+          "iterations": 5,
+          "ns_per_call": 143783.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 161.217
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 13469.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 133591.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 157.633
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 13130.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 133641.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 13,
+          "iterations": 5000,
+          "ns_per_call": 158.75
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 13,
+          "iterations": 50,
+          "ns_per_call": 14000.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 13,
+          "iterations": 5,
+          "ns_per_call": 145275.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 167.542
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 13799.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 139741.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 164.45
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 13860.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 139175.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 14,
+          "iterations": 5000,
+          "ns_per_call": 167.508
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 14,
+          "iterations": 50,
+          "ns_per_call": 14656.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 14,
+          "iterations": 5,
+          "ns_per_call": 139275.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 176.7
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 14122.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 143291.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 164.267
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 14005.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 142291.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 15,
+          "iterations": 5000,
+          "ns_per_call": 163.725
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 15,
+          "iterations": 50,
+          "ns_per_call": 14877.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 15,
+          "iterations": 5,
+          "ns_per_call": 143666.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 155.867
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 13085.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 132700.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 150.833
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 12746.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 127733.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 16,
+          "iterations": 5000,
+          "ns_per_call": 152.292
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 16,
+          "iterations": 50,
+          "ns_per_call": 13762.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 16,
+          "iterations": 5,
+          "ns_per_call": 138266.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 159.875
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 13044.18
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 141333.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 159.533
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 13559.16
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 130100.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 17,
+          "iterations": 5000,
+          "ns_per_call": 154.433
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 17,
+          "iterations": 50,
+          "ns_per_call": 13483.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 17,
+          "iterations": 5,
+          "ns_per_call": 137641.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 158.0
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 13625.84
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 143391.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 167.967
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 14160.82
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 137683.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 18,
+          "iterations": 5000,
+          "ns_per_call": 162.65
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 18,
+          "iterations": 50,
+          "ns_per_call": 14633.34
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 18,
+          "iterations": 5,
+          "ns_per_call": 144450.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 158.125
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 13125.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 132825.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 151.733
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 12931.68
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 127358.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 19,
+          "iterations": 5000,
+          "ns_per_call": 155.025
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 19,
+          "iterations": 50,
+          "ns_per_call": 13590.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 19,
+          "iterations": 5,
+          "ns_per_call": 141250.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 158.675
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 13000.82
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 141883.2
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 151.008
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 12659.18
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 130741.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 20,
+          "iterations": 5000,
+          "ns_per_call": 155.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 20,
+          "iterations": 50,
+          "ns_per_call": 14272.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 20,
+          "iterations": 5,
+          "ns_per_call": 139108.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 159.5
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 13304.18
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 146366.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 174.417
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 14390.82
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 145516.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 21,
+          "iterations": 5000,
+          "ns_per_call": 173.267
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 21,
+          "iterations": 50,
+          "ns_per_call": 15385.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 21,
+          "iterations": 5,
+          "ns_per_call": 147033.4
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 154.425
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 13948.32
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 131000.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 152.008
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 12953.34
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 128550.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 22,
+          "iterations": 5000,
+          "ns_per_call": 154.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 22,
+          "iterations": 50,
+          "ns_per_call": 13939.16
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 22,
+          "iterations": 5,
+          "ns_per_call": 142325.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 165.042
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 13364.18
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 138066.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 153.633
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 13105.84
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 128025.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 23,
+          "iterations": 5000,
+          "ns_per_call": 151.408
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 23,
+          "iterations": 50,
+          "ns_per_call": 13396.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 23,
+          "iterations": 5,
+          "ns_per_call": 150791.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 163.225
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 13368.34
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 131008.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 167.317
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 13615.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 126016.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 24,
+          "iterations": 5000,
+          "ns_per_call": 153.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 24,
+          "iterations": 50,
+          "ns_per_call": 13745.84
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 24,
+          "iterations": 5,
+          "ns_per_call": 140091.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 157.517
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 12982.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 142950.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 169.567
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 14026.66
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 139591.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 25,
+          "iterations": 5000,
+          "ns_per_call": 163.842
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 25,
+          "iterations": 50,
+          "ns_per_call": 14152.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 25,
+          "iterations": 5,
+          "ns_per_call": 143516.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 161.775
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 13044.16
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 131808.4
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 151.292
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 13012.5
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 129358.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 26,
+          "iterations": 5000,
+          "ns_per_call": 156.908
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 26,
+          "iterations": 50,
+          "ns_per_call": 13277.5
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 26,
+          "iterations": 5,
+          "ns_per_call": 141141.8
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 158.967
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 13781.66
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 133033.2
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 155.575
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 13025.82
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 130441.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 27,
+          "iterations": 5000,
+          "ns_per_call": 157.4
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 27,
+          "iterations": 50,
+          "ns_per_call": 14101.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 27,
+          "iterations": 5,
+          "ns_per_call": 138825.0
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 169.45
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 14267.5
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 142291.8
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 162.8
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 13900.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 151333.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 28,
+          "iterations": 5000,
+          "ns_per_call": 211.967
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 28,
+          "iterations": 50,
+          "ns_per_call": 14190.82
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 28,
+          "iterations": 5,
+          "ns_per_call": 149108.2
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 180.075
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 15074.18
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 144800.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 167.308
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 14980.0
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 166941.8
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 29,
+          "iterations": 5000,
+          "ns_per_call": 184.525
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 29,
+          "iterations": 50,
+          "ns_per_call": 17664.18
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 29,
+          "iterations": 5,
+          "ns_per_call": 150741.6
+        },
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 177.275
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 14710.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 132591.6
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 153.375
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 13335.82
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 133716.6
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "sample": 30,
+          "iterations": 5000,
+          "ns_per_call": 156.675
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "sample": 30,
+          "iterations": 50,
+          "ns_per_call": 14206.68
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "sample": 30,
+          "iterations": 5,
+          "ns_per_call": 162916.6
+        }
+      ],
+      "summary": [
+        {
+          "scheme": "https",
+          "links": 1,
+          "input_bytes": 36,
+          "samples": 31,
+          "median_ns": 161.342,
+          "min_ns": 154.425,
+          "p95_ns": 176.7
+        },
+        {
+          "scheme": "https",
+          "links": 100,
+          "input_bytes": 3690,
+          "samples": 31,
+          "median_ns": 13368.34,
+          "min_ns": 12899.16,
+          "p95_ns": 14400.0
+        },
+        {
+          "scheme": "https",
+          "links": 1000,
+          "input_bytes": 37890,
+          "samples": 31,
+          "median_ns": 134608.4,
+          "min_ns": 129700.0,
+          "p95_ns": 144800.0
+        },
+        {
+          "scheme": "http",
+          "links": 1,
+          "input_bytes": 35,
+          "samples": 31,
+          "median_ns": 156.058,
+          "min_ns": 150.833,
+          "p95_ns": 169.067
+        },
+        {
+          "scheme": "http",
+          "links": 100,
+          "input_bytes": 3590,
+          "samples": 31,
+          "median_ns": 13130.84,
+          "min_ns": 12587.5,
+          "p95_ns": 14341.68
+        },
+        {
+          "scheme": "http",
+          "links": 1000,
+          "input_bytes": 36890,
+          "samples": 31,
+          "median_ns": 132083.2,
+          "min_ns": 126016.6,
+          "p95_ns": 151333.2
+        },
+        {
+          "scheme": "mixed",
+          "links": 1,
+          "input_bytes": 36,
+          "samples": 31,
+          "median_ns": 156.908,
+          "min_ns": 150.575,
+          "p95_ns": 180.692
+        },
+        {
+          "scheme": "mixed",
+          "links": 100,
+          "input_bytes": 3640,
+          "samples": 31,
+          "median_ns": 13918.32,
+          "min_ns": 13277.5,
+          "p95_ns": 15360.0
+        },
+        {
+          "scheme": "mixed",
+          "links": 1000,
+          "input_bytes": 37390,
+          "samples": 31,
+          "median_ns": 141250.0,
+          "min_ns": 133891.6,
+          "p95_ns": 154691.8
+        }
+      ]
+    }
+  },
+  "limits": "Isolated optimized URL-formatting microbenchmark; not app open/send latency or GPUI visual verification.",
+  "method": "31 paired samples; before/after order alternates each round; 8 warmups per workload; 5000/links calls per sample."
+}

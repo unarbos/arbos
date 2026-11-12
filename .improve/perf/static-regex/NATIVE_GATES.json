@@ -1,0 +1,30 @@
+{
+  "scope": "full actual agentd all-target Clippy for frozen Phase6 snapshot with parser changes",
+  "command": [
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-agentd",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "seconds": 66.53847812500317,
+  "exit_code": 0,
+  "network": "deny network*",
+  "private_HOME": true,
+  "workspace_packages_cleaned": 12,
+  "source_sha256": {
+    "crates/arbos-agentd/src/web.rs": "9a5f62fa25c5c68295b2ec6f2576ce09efc3f1c24e74ca0f4a76797f819b35d7",
+    "crates/arbos-agentd/src/tree.rs": "4a67551dfc6b0959b77a4c429a1770bb422270dbeae530e7698af97d1db6757c",
+    "crates/arbos-agentd/src/llm.rs": "442ebe8b66318db8a0db5c0a9c6f51f77d5fb2664b4e6e82b27680274f772fa6",
+    "crates/arbos-core/src/approval.rs": "e96b5fea2e78d3b78b59717f8a980b3c772ddc3b9ded4afa7b4d2e3afad770b6",
+    "crates/arbos-core/src/redact.rs": "aeebd4d52c2cec5fc7cd32f23e5cf51a371e011caf735b8462282aa98f48b568"
+  },
+  "source_unchanged": true,
+  "log_sha256": "f3749c5de9bbfdeddf9a3c08ab65cf480b23517d0fc5caafcd44b3735feffdbf",
+  "limits": "runtime/native selected tests and final combined workspace CI are separate gates"
+}

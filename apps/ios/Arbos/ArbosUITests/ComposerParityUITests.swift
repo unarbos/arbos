@@ -5,9 +5,10 @@ import XCTest
 /// (Jacob, 2026-11-09). The pure rules are in `ComposerParityTests`; these are the claims that
 /// only the laid-out box can answer, including the one Jacob has now asked for twice.
 ///
-/// `testTheBoxLightsUnderAHoldingFinger` is the regression guard for the touch-and-hold
-/// highlight ([feedback attachment-in-composer-2026-11-09] is the staged picture; the
-/// highlight is Jacob, 2026-11-09 11:55). It went missing once already in a way worth
+/// `testTheBoxVisiblyLightsUnderAHoldingFinger` is the regression guard for the touch-and-hold
+/// highlight ([feedback composer-hold-highlight-2026-11-09], Jacob 2026-11-09 11:55;
+/// [feedback attachment-in-composer-2026-11-09] is the staged picture). It went missing once
+/// already in a way worth
 /// knowing about: `ControlSurface` has always taken a `pressed` flag and `Theme.controlPill`
 /// has always plumbed it, but nothing ever passed `true`. A test that only checked the flag
 /// existed would have passed throughout. This one holds a finger on the real field and looks
@@ -112,7 +113,7 @@ final class ComposerParityUITests: XCTestCase {
                              "the controls stay on the bottom row of the grown card")
 
         let remove = app.descendants(matching: .any)["composer-remove-attachment"].firstMatch
-        XCTAssertTrue(remove.exists, "the ✕ badge is on the thumbnail's corner")
+        XCTAssertTrue(remove.waitForExistence(timeout: appear), "the ✕ badge is on the thumbnail's corner")
         XCTAssertGreaterThan(remove.frame.midX, thumb.frame.midX, "top-right of the picture")
         XCTAssertLessThan(remove.frame.midY, thumb.frame.midY, "top-right of the picture")
 
@@ -157,8 +158,14 @@ final class ComposerParityUITests: XCTestCase {
         let box = field(app)
         XCTAssertTrue(box.waitForExistence(timeout: appear), "the composer is on screen")
 
-        let lit = app.descendants(matching: .any)["input-hold-highlight"].firstMatch
-        XCTAssertFalse(lit.exists, "nothing is lit before a finger is anywhere near it")
+        // The sentinel stays in the tree for the field's life (`off` / `lit`); the wash is
+        // what paints. Querying a mount-only identifier raced the post-lift fade on CI.
+        let probes = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == %@", "input-hold-highlight"))
+        let probe = probes.firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: appear), "the hold overlay is published")
+        XCTAssertFalse(probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch.exists,
+                       "nothing is lit before a finger is anywhere near it")
 
         // Focus first, and only then measure. A press on an unfocused field raises the
         // keyboard, which lifts the composer by the keyboard's height — the two samples would
@@ -168,16 +175,24 @@ final class ComposerParityUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1)
         let pill = box.frame
         let resting = brightness(app, of: pill)
-        // Held well past the arming delay, and the press is what raises the system's own
-        // Paste / AutoFill menu too — the highlight must not take that touch away. The light
-        // outlasts the lift on purpose, which is what makes it measurable from a still at all.
-        box.press(forDuration: 1.2)
+
+        // All XCUI work stays on the test thread. Held well past the arming delay; the press
+        // also raises Paste / AutoFill — the highlight must not take that touch away. The
+        // sentinel stays `lit` through `HoldHighlight.tail` after lift, so the wait and the
+        // brightness sample run after press returns without a background queue.
+        let finger = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        finger.press(forDuration: 1.2)
+        let lit = probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch
         XCTAssertTrue(lit.waitForExistence(timeout: 5),
                       "touch-and-hold lights the box the way Grok's does")
 
         let held = brightness(app, of: pill)
         let delta = abs(held - resting)
-        XCTAssertGreaterThan(delta, 12,
+        // Threshold 8 (was 12): #2998 dropped `PillSurface.translucentAlpha` to 0.12, so a
+        // good still reads ~10.26 mean delta on CI instead of the older denser-pill figure.
+        // Still well above the invisible ~2.7 cut Jacob rejected — held must remain visibly
+        // different from idle; this only recalibrates for the intentionally lighter fill.
+        XCTAssertGreaterThan(delta, 8,
                              "the light is too faint to see: the pill read \(resting) at rest "
                              + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
