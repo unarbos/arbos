@@ -16,11 +16,11 @@
 //! [`arbos_core::search`] (exact > prefix > word-start, display name before
 //! handle, diacritics folded) — the same rule every picker in both apps uses
 //! ([feedback shared-search-matcher-mac-2026-10-26]). Message bodies are not
-//! entities and keep the substring search here.
+//! entities and keep the substring search here — but they fold through the
+//! same [`arbos_core::search::push_folded`] the query folds through, so the
+//! app-wide palette finds the body the in-chat search finds.
 
-pub use arbos_core::search::{fold, match_entity, normalize_query, Match};
-use unicode_normalization::char::is_combining_mark;
-use unicode_normalization::UnicodeNormalization;
+pub use arbos_core::search::{fold, match_entity, normalize_query, push_folded, Match};
 
 use crate::model::{Id, Project, ServerInfo};
 
@@ -195,20 +195,17 @@ pub fn snippet(text: &str, q: &str) -> Option<String> {
     if q.is_empty() {
         return None;
     }
-    // Fold char by char, remembering which original char each folded char
-    // came from, so a hit in the folded text maps back to the original.
+    // Fold char by char through the shared table (`push_folded`, the one
+    // `normalize_query` folded `q` with), remembering which original char each
+    // folded char came from, so a hit in the folded text maps back to the
+    // original — a fold can grow (`ß` → `ss`) or vanish (a combining mark).
     let chars: Vec<char> = text.chars().collect();
-    let mut folded = String::new();
-    let mut origin: Vec<usize> = Vec::new();
+    let mut folded = String::with_capacity(text.len());
+    let mut origin: Vec<usize> = Vec::with_capacity(chars.len());
     for (i, c) in chars.iter().enumerate() {
-        for f in std::iter::once(*c)
-            .flat_map(char::to_lowercase)
-            .nfd()
-            .filter(|c| !is_combining_mark(*c))
-        {
-            folded.push(f);
-            origin.push(i);
-        }
+        let before = folded.len();
+        push_folded(*c, &mut folded);
+        origin.extend(std::iter::repeat_n(i, folded[before..].chars().count()));
     }
     let start_byte = folded.find(q)?;
     let start_fc = folded[..start_byte].chars().count();
@@ -605,6 +602,49 @@ mod tests {
                 &normalize_query("ffin")
             ),
             None
+        );
+    }
+
+    /// A snippet folds the body the way `normalize_query` folds the query:
+    /// through `arbos_core::search::fold`, hand-mapped letters included.
+    /// Measured 2026-11-05: the app-wide palette could not find "Strasse" in
+    /// "Treffen in der Straße" because this folding skipped `ß` → `ss` while
+    /// the query had it, so the index matched and the snippet did not.
+    #[test]
+    fn snippets_fold_the_hand_mapped_letters() {
+        for (typed, body) in [
+            ("Strasse", "Treffen in der Straße"),
+            ("Oyvind", "ping Øyvind about it"),
+            ("aero", "the Ærø ferry leaves at six"),
+            ("oeuvre", "her œuvre is online now"),
+            ("lukasz", "Łukasz replied this morning"),
+            ("duro", "Đuro signed the lease"),
+            ("isik", "ışık means light"),
+            ("ss", "ẞ is the capital one"),
+        ] {
+            let q = normalize_query(typed);
+            assert!(
+                snippet(body, &q).is_some(),
+                "typed {typed:?} (folded {q:?}) in {body:?}"
+            );
+        }
+    }
+
+    /// `ß` → `ss` makes the folded text longer than the original, so every
+    /// offset the snippet window uses has to come back through the origin map.
+    /// A window computed on folded offsets would start one char late here.
+    #[test]
+    fn a_fold_that_grows_keeps_the_window_on_the_match() {
+        let q = normalize_query("Strasse");
+        assert_eq!(
+            snippet("Wir treffen uns in der Straße vor dem Haus", &q).as_deref(),
+            Some("…reffen uns in der Straße vor dem Haus")
+        );
+        // `Æ` → `ae` grows before the match too: a window on folded offsets
+        // would start one char later, on "s Treffen".
+        assert_eq!(
+            snippet("Ærø bestätigt das Treffen in der Straße heute", &q).as_deref(),
+            Some("…as Treffen in der Straße heute")
         );
     }
 
