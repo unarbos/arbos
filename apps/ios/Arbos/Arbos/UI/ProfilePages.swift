@@ -1163,8 +1163,6 @@ struct GroupProfileView: View {
     /// Ban confirm (remove and block rejoin), same shape as server member ban.
     @State private var pendingBanId: String?
     @State private var pendingBanName: String?
-    /// Human member (not you) whose row was tapped: offer View profile / Send private message.
-    @State private var memberActions: ProfilePerson?
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
@@ -1437,6 +1435,10 @@ struct GroupProfileView: View {
             }
             .task {
                 if let projectId { projectMembers = await model.projectMembers(projectId) }
+                // A tapped row pushes that member's page, whose hero reads the same
+                // cache key at the same 384 px size: warm the list so the picture is
+                // already decoded when the page slides in.
+                AvatarImageCache.shared.warm(urls: rows.map(\.person.avatarUrl))
                 if projectId == nil, people?.kind == "group" {
                     groupInvites = await model.groupInvites(chatId)
                 }
@@ -1798,14 +1800,14 @@ struct GroupProfileView: View {
             case (false, let manage): return manage
             }
         }()
+        // Jacob 2026-11-04: one tap goes straight to the member's page — no menu in
+        // between. Send private message stays on the page's Message pill and in the
+        // long-press menu below.
         return Button {
             if let a = r.agent {
                 model.showProfile(.agent(projectId: a.id), in: profileHost)
-            } else if isMe {
-                model.showProfile(.user(r.person), in: profileHost)
             } else {
-                // Offer Send private message alongside View profile (#1455).
-                memberActions = r.person
+                model.showProfile(.user(r.person), in: profileHost)
             }
         } label: {
             PaneRow(
@@ -1816,6 +1818,10 @@ struct GroupProfileView: View {
             )
         }
         .buttonStyle(.borderless)
+        // The shot rig taps the row by name, and the chat behind this page carries the same
+        // sender names in its transcript; an identifier is what makes the tap land here (the
+        // Mac's `profile-member-<handle>` debug selector).
+        .accessibilityIdentifier("profile-member-\(r.agent?.id ?? r.person.handle)")
         // Long-press: View profile, Send private message, Mute (with duration) /
         // Unmute, owner admin rights, Remove, Ban.
         .contextMenu {
@@ -1890,25 +1896,6 @@ struct GroupProfileView: View {
                     } label: { Label("Remove from group", systemImage: "xmark") }
                 }
             }
-        }
-        // A tapped member's actions (Send private message, View profile): a menu on its own
-        // row, anchored to the control, so it stays a dialog.
-        .confirmationDialog(r.person.displayName, isPresented: Binding( // confirm: anchored
-            get: { memberActions?.id == r.person.id },
-            set: { if !$0 { memberActions = nil } }
-        ), titleVisibility: .visible) {
-            Button("Send private message") {
-                let handle = r.person.handle
-                memberActions = nil
-                Task {
-                    if await model.openDM(handle: handle) != nil { dismiss() }
-                }
-            }
-            Button("View profile") {
-                model.showProfile(.user(r.person), in: profileHost)
-                memberActions = nil
-            }
-            Button("Cancel", role: .cancel) { memberActions = nil }
         }
     }
 
