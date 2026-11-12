@@ -1518,7 +1518,13 @@ mod tests {
             200,
             json!({ "state": "warm", "restored": false, "box_url": "http://10.208.0.2:7788" }),
         );
-        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("not in this node"));
         let paths = fake.paths();
         assert_eq!(
