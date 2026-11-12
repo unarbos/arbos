@@ -237,7 +237,7 @@ extension AppModel {
         } catch {
             return "That phrase doesn't belong to this account."
         }
-        do { try WalletVault.save(phrase, user: me.id) } catch { return error.localizedDescription }
+        do { try WalletVault.save(phrase, user: me.id) } catch { return "Couldn't save your recovery phrase. Something went wrong." }
         walletPrompt = nil
         // The keys are here now: read the people chats whose rows were locked again.
         for chat in nativeRooms.keys { openChannel(chat) }
