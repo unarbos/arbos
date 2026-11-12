@@ -3,7 +3,8 @@
 // short grouped cards of icon-tile rows that push to subpages. Everything that
 // was on the old flat form is still here, regrouped:
 //
-//   Account              Credits · Connected apps · On this iPhone
+//   Account              Credits · Secrets · Devices · On this iPhone
+//                        (Connected apps hidden until implemented — same as Mac)
 //   Agents & Computer    Machine
 //   Notifications        Notifications (system permission + relay push)
 //   Appearance           Theme · Surface (Glass / Matte)
@@ -120,8 +121,11 @@ struct SettingsView: View {
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
     /// the structure test checks the shared index finds each of them.
+    /// Connected apps stays off this list (and out of search) until the feature
+    /// ships — same rule as the Mac me-pane Settings tab
+    /// ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
     static let listedPages: [GlobalSearch.SettingsPageRoute] = [
-        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+        .credits, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
     ]
 
     init(landing: String? = DebugHooks.settingsPage) {
@@ -269,10 +273,9 @@ struct SettingsView: View {
             }),
         ]
         if model.credentials != nil {
-            account.append(AnyView(NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
-                SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
-            }))
-            // D83: a secret is "an app you connected by key"; it sits right after.
+            // Connected apps stays off the list until the feature ships (Mac already
+            // hides it; the Connectors page remains reachable from the rig only).
+            // D83: a secret is "an app you connected by key".
             account.append(AnyView(NavigationLink { SecretsPage() } label: {
                 SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
@@ -438,11 +441,6 @@ struct SettingsView: View {
     private var creditsSummary: String? {
         guard let c = model.credits else { return nil }
         return String(format: "$%.0f left", c.balanceUsd)
-    }
-
-    private var connectorsSummary: String? {
-        let n = model.connectors.items.filter { $0.status == .connected }.count
-        return n == 0 ? nil : "\(n) connected"
     }
 
     private var machineSummary: String {

@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.410"
+version = "0.6.411"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
