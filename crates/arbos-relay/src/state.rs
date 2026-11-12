@@ -39,10 +39,13 @@ pub struct Config {
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,
-    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`process|docker|gvisor`);
+    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`process|docker|gvisor|boxd`);
     /// unset = a local process. D89 sets `gvisor` on the relay host, which is where every new box
     /// goes now that Daytona is retired.
     pub default_provider: Option<String>,
+    /// `ARBOS_BOXD_URL` and `ARBOS_BOXD_TOKEN_FILE`: the host's `arbos-boxd` daemon
+    /// (docs/box-scaling.md §4.1). Unset = the `boxd` provider is off.
+    pub boxd: Option<crate::boxd::Boxd>,
     /// Host fleet knobs (D89).
     pub fleet: crate::fleet::FleetCfg,
     /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
@@ -763,6 +766,7 @@ pub(crate) mod test_support {
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
             default_provider: None,
+            boxd: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
             channels_mock: true,

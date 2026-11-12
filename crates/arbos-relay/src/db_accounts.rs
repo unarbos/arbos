@@ -82,6 +82,13 @@ pub fn migrate_accounts(c: &Connection) {
         // user's NEXT box is created when it differs from ARBOS_DEFAULT_PROVIDER — scratch Daytona
         // boxes for carry tests on a gVisor-default host (ARB-339). NULL = the relay default.
         "ALTER TABLE users ADD COLUMN box_provider TEXT",
+        // A `boxd` box (docs/box-scaling.md §4.2): the host it is on, where the daemon last left
+        // it (warm | waking | asleep_clean | asleep_ckpt | cold | error), and the storage split
+        // of its last sleep as JSON. NULL on every other row; a relay from before these columns
+        // names its columns in every statement and never sees them.
+        "ALTER TABLE boxes ADD COLUMN node_id TEXT",
+        "ALTER TABLE boxes ADD COLUMN lifecycle_state TEXT",
+        "ALTER TABLE boxes ADD COLUMN storage_json TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -1330,6 +1337,40 @@ impl Db {
             )
             .optional()
             .map(|o| o.unwrap_or(0) != 0)
+        })
+    }
+
+    // ---- boxd: where the daemon last left a box (docs/box-scaling.md §4.2) --------------------
+
+    /// `storage_json` of `None` keeps the split of the sleep before: a box that was not running
+    /// had no agentd to measure one.
+    pub fn set_box_lifecycle(
+        &self,
+        user_id: &str,
+        node_id: &str,
+        lifecycle_state: &str,
+        storage_json: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET node_id = ?2, lifecycle_state = ?3, storage_json = COALESCE(?4, storage_json)
+                 WHERE user_id = ?1",
+                params![user_id, node_id, lifecycle_state, storage_json],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(node_id, lifecycle_state, storage_json)`, or `None` for a box no daemon has reported on.
+    pub fn box_lifecycle(&self, user_id: &str) -> Result<Option<(String, String, Option<String>)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT node_id, lifecycle_state, storage_json FROM boxes
+                 WHERE user_id = ?1 AND node_id IS NOT NULL AND lifecycle_state IS NOT NULL",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
         })
     }
 

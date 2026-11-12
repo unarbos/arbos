@@ -795,6 +795,7 @@ mod tests {
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
             default_provider: None,
+            boxd: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
             channels_mock: true,

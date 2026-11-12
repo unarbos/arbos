@@ -9,8 +9,8 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -117,11 +117,23 @@ async fn wake(State(app): State<App>, Path(user): Path<String>) -> Response {
     finish(async move { app.boxd.wake(&user).await }).await
 }
 
-async fn sleep(State(app): State<App>, Path(user): Path<String>) -> Response {
-    let Some(user) = UserId::parse(&user) else {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SleepReq {
+    /// Stop the box without asking agentd, and keep no checkpoint.
+    #[serde(default)]
+    force: bool,
+}
+
+async fn sleep(
+    State(app): State<App>,
+    Path(user): Path<String>,
+    query: Result<Query<SleepReq>, QueryRejection>,
+) -> Response {
+    let (Some(user), Ok(Query(req))) = (UserId::parse(&user), query) else {
         return invalid();
     };
-    finish(async move { app.boxd.sleep(&user).await }).await
+    finish(async move { app.boxd.sleep(&user, req.force).await }).await
 }
 
 async fn grow(State(app): State<App>, Path(user): Path<String>) -> Response {
@@ -239,6 +251,18 @@ mod tests {
         assert_eq!(post("/v1/boxes/u_a/ensure", good).await, 200);
         assert_eq!(post("/v1/boxes/u_a/wake", json!({})).await, 200);
         assert_eq!(post("/v1/boxes/u_b/sleep", json!({})).await, 404);
+        // `force` is true, false or absent; anything else in the query stops nothing.
+        for query in [
+            "force=yes",
+            "force=1",
+            "force",
+            "force=true&x=1",
+            "now=true",
+        ] {
+            let path = format!("/v1/boxes/u_a/sleep?{query}");
+            assert_eq!(post(&path, json!({})).await, 400, "{query}");
+        }
+        assert_eq!(post("/v1/boxes/u_a/sleep?force=true", json!({})).await, 200);
         let _ = std::fs::remove_dir_all(&root);
     }
 

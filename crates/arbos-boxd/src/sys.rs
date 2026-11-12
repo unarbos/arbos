@@ -115,6 +115,8 @@ pub mod fake {
         pub log: Mutex<Vec<String>>,
         /// What agentd answers to prepare-sleep.
         pub agentd: Mutex<(u16, String)>,
+        /// `runsc delete` removes nothing while this is set.
+        pub stuck: std::sync::atomic::AtomicBool,
         loops: Mutex<HashMap<String, String>>,
         mounted: Mutex<HashSet<String>>,
         running: Mutex<HashSet<String>>,
@@ -125,6 +127,7 @@ pub mod fake {
             Self {
                 log: Mutex::default(),
                 agentd: Mutex::new((200, r#"{"ok":true,"active_user_pids":0}"#.into())),
+                stuck: Default::default(),
                 loops: Mutex::default(),
                 mounted: Mutex::default(),
                 running: Mutex::default(),
@@ -179,7 +182,9 @@ pub mod fake {
                         let image = argv.iter().find_map(|a| a.strip_prefix("--image-path="));
                         std::fs::create_dir_all(image.unwrap())?;
                         running.remove(&last);
-                    } else if has("delete") {
+                    } else if has("delete")
+                        && !self.stuck.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         running.remove(&last);
                     }
                 }

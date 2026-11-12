@@ -271,6 +271,10 @@ pub struct Capacity {
     pub min_free_disk_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
+    /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
+    /// box needs only disk. Absent when the provider is off, and nothing above counts its boxes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boxd: Option<crate::boxd::Capacity>,
 }
 
 /// `max_boxes` from the DB override (`PUT /admin/fleet`) or the env default.
@@ -304,6 +308,7 @@ pub async fn capacity(state: &AppState) -> Capacity {
             disk_free_gb,
             state.cfg.fleet.min_free_disk_gb,
         ),
+        boxd: crate::boxd::capacity(state).await,
     }
 }
 
@@ -822,14 +827,17 @@ pub fn pick_eviction(cands: &[Candidate]) -> Option<String> {
 }
 
 /// A keepalive said a turn is running this recently → the sandbox is busy.
-const TURN_FRESH_MS: i64 = 3 * 60_000;
+pub(crate) const TURN_FRESH_MS: i64 = 3 * 60_000;
 
-async fn candidates(state: &AppState) -> Vec<Candidate> {
+pub(crate) async fn candidates(state: &AppState, provider: Provider) -> Vec<Candidate> {
     let boxes = state.db.list_boxes().unwrap_or_default();
     let turns = state.turn_running.lock().await.clone();
     let pushes = state.last_client_push.lock().await.clone();
     let mut out = Vec::new();
-    for b in boxes.into_iter().filter(|b| b.provider == "gvisor") {
+    for b in boxes
+        .into_iter()
+        .filter(|b| b.provider == provider.as_str())
+    {
         let (st, _) = state.box_state(&b.user_id).await;
         let last_active_ms = [
             b.last_seen_at.unwrap_or(0),
@@ -938,7 +946,7 @@ pub async fn spawn_fleet_tasks(state: AppState) {
                 if evicted >= 5 {
                     break;
                 }
-                let Some(victim) = pick_eviction(&candidates(&st).await) else {
+                let Some(victim) = pick_eviction(&candidates(&st, Provider::Gvisor).await) else {
                     tracing::warn!(trigger, "host pressure but no evictable sandbox");
                     break;
                 };
