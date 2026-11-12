@@ -4720,11 +4720,11 @@ final class AppModel: ObservableObject {
         typing[chatId] = chat.isEmpty ? nil : chat
     }
 
-    /// Composer keystroke in a people chat (DM or group): at most one presence
-    /// typing ping per 3 s so peers see who is typing ([feedback
-    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    /// Composer keystroke: at most one presence typing ping per 3 s. In a people
+    /// chat (DM or group) peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6]); in an agent's chat the relay wakes a
+    /// sleeping machine on it (docs/box-scaling.md §4.2). Mac `AppState::typed_in`.
     func typedIn(chatId: Id) {
-        guard peopleChat(chatId) != nil else { return }
         let now = nowMs()
         let last = typingSentAt[chatId] ?? 0
         guard now - last > 3_000 else { return }

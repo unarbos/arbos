@@ -10296,13 +10296,12 @@ impl AppState {
         self.awaiting_dm.clone()
     }
 
-    /// Composer keystroke in a people chat: at most one presence ping per 3 s.
+    /// Composer keystroke: at most one presence ping per 3 s. In a people chat it is what the
+    /// others see as typing; in an agent's chat it is what wakes a sleeping machine a moment
+    /// before the message (docs/box-scaling.md §4.2), and nobody is shown it.
     pub fn typed_in(&mut self, chat_id: &Id) {
         self.last_input_at = now_ms();
-        let Some(space) = self.project_of_chat(chat_id) else {
-            return;
-        };
-        if !space.is_people() {
+        if self.project_of_chat(chat_id).is_none() {
             return;
         }
         let now = now_ms();

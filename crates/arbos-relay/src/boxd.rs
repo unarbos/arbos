@@ -1118,6 +1118,27 @@ pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
     }
 }
 
+/// A person is typing in a chat of this project (the `typing` flag on `PRESENCE`, §4.2): a `boxd`
+/// box asleep behind it is woken now, the second or three before the message is sent. A box its
+/// user stopped stays down until they send or start it, as it does for everything but those.
+pub async fn wake_for_typing(state: &AppState, project_id: &str) {
+    if state.cfg.boxd.is_none() {
+        return;
+    }
+    let Some(user_id) = state.user_of(project_id) else {
+        return;
+    };
+    let on_boxd = matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == boxes::Provider::Boxd.as_str());
+    // Fail closed: a hold that cannot be read is a hold.
+    if !on_boxd
+        || state.box_state(&user_id).await.0 != BoxState::Asleep
+        || state.db.box_held(&user_id).unwrap_or(true)
+    {
+        return;
+    }
+    boxes::ensure_awake(state, &user_id, "typing").await;
+}
+
 // ---- the cold tier (§3.3) and the prefetch (§4.2) --------------------------------------------
 
 /// A client has a chat of this project on screen (`focused_chat` on `PRESENCE`): if the box
@@ -2600,6 +2621,48 @@ mod tests {
         row.user_id = "u_gvisor".into();
         state.db.upsert_box(&row).unwrap();
         assert_eq!(state.db.box_lifecycle("u_gvisor").unwrap(), None);
+    }
+
+    /// Typing in an agent's chat wakes its sleeping box, and only that: not a box that is up,
+    /// one its user stopped, one of another provider, or anything with the provider off.
+    #[tokio::test]
+    async fn typing_wakes_a_sleeping_box_and_leaves_a_stopped_one_down() {
+        let (mut state, fake, user) = relay().await;
+        let project = crate::people::tests_support::project_of(&state, &user, "Typing");
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        wake_for_typing(&state, &project).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        assert!(state.db.due_wake_jobs().unwrap().is_empty());
+
+        // The user's own Stop holds it down: typing is not sending.
+        boxes::stop_box(&state, &user, true).await.unwrap();
+        state.db.set_box_held(&user, true).unwrap();
+        wake_for_typing(&state, &project).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+
+        state.db.set_box_held(&user, false).unwrap();
+        wake_for_typing(&state, "no-such-project").await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+        let before = fake.paths().len();
+        wake_for_typing(&state, &project).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Waking);
+        let jobs = state.db.due_wake_jobs().unwrap();
+        assert_eq!((jobs.len(), jobs[0].1.as_str()), (1, "typing"));
+        // The wake itself is the wake job's, as for a message.
+        assert_eq!(fake.paths().len(), before);
+        boxes::run_wake_jobs(&state).await;
+        assert_eq!(
+            fake.paths().last().unwrap(),
+            &format!("/v1/boxes/{user}/wake")
+        );
+
+        boxes::stop_box(&state, &user, false).await.unwrap();
+        Arc::get_mut(&mut state.cfg).expect("one holder").boxd = None;
+        wake_for_typing(&state, &project).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
     }
 
     // ---- more than one node (Phase 4) --------------------------------------------------------

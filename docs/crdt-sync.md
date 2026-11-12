@@ -298,6 +298,8 @@ Relay broadcasts `STATUS { box, since, detail? }` on box lifecycle changes to ro
 
 Clients send `PRESENCE` periodically (iOS ~15 s) with `device`, `at`, optional user identity, `in_call`, and **`focused_chat`**: the chat id currently on screen while the app is active. The relay suppresses push notifications for that chat while focus is fresh, and may update `last_seen_at`.
 
+A composer keystroke adds **`typing: true`** to a presence frame, at most once every 3 s. In a people chat the other members show it as a typing row for 6 s. In a project chat nobody is shown it; the relay wakes the project's box if it is a `boxd` box asleep and its user has not stopped it, so the box is up a moment before the message arrives.
+
 ### 7.6 Row size cap
 
 `ROW_MAX = 1024 * 1024 - 4096` (~1 MiB minus header budget). Larger PUSH → `ERROR too_large`.

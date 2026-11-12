@@ -1687,9 +1687,11 @@ struct ChatSession: View {
             // Keep the draft while the view is still up so a process kill mid-type
             // is not required — leaving the thread saves on disappear too.
             model.setComposerDraft(d, for: chatId)
-            // People chats (DM + group): tell the room we are typing so peers
-            // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
-            if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Tell the room we are typing. In a people chat (DM + group) peers see names
+            // on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]); in an
+            // agent's chat it wakes a sleeping machine a moment before the message
+            // (docs/box-scaling.md §4.2) and nobody is shown it.
+            if !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 model.typedIn(chatId: chatId)
             }
             let everyone = AppModel.addressesEveryone(d)
