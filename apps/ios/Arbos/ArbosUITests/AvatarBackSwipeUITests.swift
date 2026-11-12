@@ -118,9 +118,9 @@ final class AvatarBackSwipeUITests: XCTestCase {
     }
 
     private func assertHome(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(app.buttons["Agents"].waitForExistence(timeout: settle),
-                      "Home's list filter is on screen", file: file, line: line)
-        XCTAssertTrue(app.buttons["People"].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["home-account"].waitForExistence(timeout: settle),
+                      "Home's account circle is on screen", file: file, line: line)
+        XCTAssertFalse(app.buttons["Agents"].exists, "the list filter is gone", file: file, line: line)
     }
 
     // MARK: The bug

@@ -8,10 +8,11 @@
 //! be in the side bar" — before, a plain window kept it floating in the chat
 //! header), then every chat's picture (agents, people, groups, servers)
 //! at 36 pt on Grok's 58 pt pitch, and my own picture alone at the bottom on
-//! the footer's line. The rail follows the All · Agents · People · Servers
-//! segment, which persists with the collapsed state; a server's picture opens
-//! its newest channel; pictures carry the rows' badges (typing green wins over
-//! the unread blue on the one corner spot) and show the name on hover.
+//! the footer's line. The rail shows the same linear list as the expanded
+//! sidebar (no All · Agents · People · Servers filter); a server's picture
+//! opens its newest channel; pictures carry the rows' badges (typing green
+//! wins over the unread blue on the one corner spot) and show the name on
+//! hover.
 //!
 //! Measured on Jacob's `jacob-ref-grok-collapsed-rail-2.png` (3440 × 2158 px =
 //! a 1720 × 1079 pt window at 2 px/pt; project store
@@ -241,19 +242,14 @@ pub(crate) fn progress(visible: f32, full: f32) -> f32 {
 }
 
 /// Top of the list frame the morph's travelling pictures are clipped to and
-/// edge-faded in at progress `t`: the expanded list's frame (under the filter
-/// segment) at 0, the rail list's (under Search) at 1, on the pictures' own
-/// linear path. Both lists fade their rows over `LIST_FADE_BAND` at the
-/// frame's top and bottom, so the pictures keep that fade the whole way and
-/// the rail at rest adds none ([feedback mac-sidebar-slide-jank-2026-10-29]:
-/// it used to appear the frame the fold ended, and vanish the frame an unfold
-/// began).
+/// edge-faded in at progress `t`: the expanded list's frame (under the strip)
+/// at 0, the rail list's (under Search) at 1, on the pictures' own linear
+/// path. Both lists fade their rows over `LIST_FADE_BAND` at the frame's top
+/// and bottom, so the pictures keep that fade the whole way and the rail at
+/// rest adds none ([feedback mac-sidebar-slide-jank-2026-10-29]: it used to
+/// appear the frame the fold ended, and vanish the frame an unfold began).
 pub(crate) fn morph_list_top(t: f32) -> f32 {
-    let expanded = crate::ui::theme::HEADER_HEIGHT
-        + sidebar::FILTER_TOP
-        + sidebar::FILTER_HEIGHT
-        + sidebar::FILTER_BOTTOM
-        - LIST_FADE_BAND;
+    let expanded = crate::ui::theme::HEADER_HEIGHT - LIST_FADE_BAND;
     let rail = metrics::LIST_TOP - LIST_FADE_BAND;
     expanded + (rail - expanded) * t.clamp(0.0, 1.0)
 }
@@ -991,16 +987,13 @@ mod tests {
     /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]): "it
     /// folds in and the second it is folded in it just overlays the blur".
     /// The travelling pictures are faded in a list frame that starts as the
-    /// expanded list's (its fade band ending at the filter segment's foot) and
-    /// lands on the rail list's (ending at the first tile's slot), moving
-    /// with the pictures — so the fade is on them from the first frame of a
-    /// fold to the last of an unfold, never added or dropped at either end.
+    /// expanded list's (its fade band ending under the strip) and lands on
+    /// the rail list's (ending at the first tile's slot), moving with the
+    /// pictures — so the fade is on them from the first frame of a fold to
+    /// the last of an unfold, never added or dropped at either end.
     #[test]
     fn the_morph_fades_its_pictures_in_a_frame_that_moves_with_them() {
-        let expanded_band_foot = crate::ui::theme::HEADER_HEIGHT
-            + sidebar::FILTER_TOP
-            + sidebar::FILTER_HEIGHT
-            + sidebar::FILTER_BOTTOM;
+        let expanded_band_foot = crate::ui::theme::HEADER_HEIGHT;
         assert_eq!(morph_list_top(0.0) + LIST_FADE_BAND, expanded_band_foot);
         assert_eq!(morph_list_top(1.0) + LIST_FADE_BAND, LIST_TOP);
         // On the pictures' linear path (`lerp_bounds`), clamped at both ends.

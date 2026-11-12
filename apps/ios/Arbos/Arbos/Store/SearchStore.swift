@@ -256,16 +256,16 @@ extension AppModel {
         }
     }
 
-    /// A Settings row tapped in search: Settings lands on the page (the
+    /// A Settings row tapped in search: my own pane pushes in landed on that page (the
     /// `ARBOS_SETTINGS_PAGE` word `SettingsView(landing:)` understands), the
     /// feedback sheet opens, or the agent's chat opens with its pane on the
     /// setting's picker.
     func open(settingsRoute route: GlobalSearch.SettingsRoute) {
         switch route {
         case .page(let page):
-            pendingSettingsLanding = page.rawValue
+            showOwnProfile(landing: page.rawValue)
         case .profile:
-            pendingSettingsLanding = "profile"
+            showOwnProfile(landing: "profile")
         case .feedback:
             FeedbackCenter.shared.open(screen: "search")
         case .agent(let projectId, let setting):

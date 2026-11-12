@@ -549,6 +549,18 @@ impl Agent {
             "message_id": mid, "chat_id": chat_id, "chars": text.chars().count(),
         }));
         tracing::info!(%from_id, %mid, chat = %chat_id, "agent message received");
+        // Tell the sender's hand-off notice where this row landed, so a tap can open it
+        // before the reply is ready.
+        let _ = self
+            .http_client()
+            .post(format!(
+                "{}/projects/{}/agent-messages/{}/landed",
+                self.cfg.relay_url, self.cfg.project_id, mid
+            ))
+            .bearer_auth(&self.cfg.box_token)
+            .json(&json!({ "chatId": chat_id, "messageId": msg_id }))
+            .send()
+            .await;
         let outcome = self.handle_command(&chat_id, cmd).await;
         let reply = {
             let h = host.lock().await;
@@ -592,7 +604,12 @@ impl Agent {
                 self.cfg.relay_url, self.cfg.project_id, mid
             ))
             .bearer_auth(&self.cfg.box_token)
-            .json(&json!({ "text": reply_text, "status": status }))
+            .json(&json!({
+                "text": reply_text,
+                "status": status,
+                "destinationChatId": chat_id,
+                "destinationMessageId": msg_id,
+            }))
             .send()
             .await?;
         if !r.status().is_success() {
@@ -602,6 +619,50 @@ impl Agent {
             "ts": now_ms(), "kind": "agent_message_replied", "to": from_id, "message_id": mid,
             "status": status, "chars": reply_text.chars().count(),
         }));
+        Ok(())
+    }
+
+    /// Merge destination chat/message ids onto the sender's hand-off `agentMessage` payload
+    /// so clients can open the landed row. No-op when the row or field is gone (old notices).
+    pub(crate) fn set_handoff_destination(
+        doc: &arbos_core::doc::ChatDoc,
+        row_id: &str,
+        dest_chat: &str,
+        dest_msg: &str,
+    ) {
+        if dest_chat.is_empty() || dest_msg.is_empty() {
+            return;
+        }
+        let Some(mut am) = doc
+            .message(row_id)
+            .and_then(|m| m.rest.get("agentMessage").cloned())
+        else {
+            return;
+        };
+        am["chatId"] = json!(dest_chat);
+        am["messageId"] = json!(dest_msg);
+        doc.set_message_fields(row_id, &[("agentMessage", am)]);
+    }
+
+    /// `agent_message_landed` push (sender box): the target wrote the inbound row; stamp its
+    /// chat/message ids onto the hand-off notice for tap-to-open.
+    pub async fn handle_agent_message_landed(self: &Arc<Self>, payload: Value) -> Result<()> {
+        let chat_id = match str_field(&payload, "chatId") {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let row_id = match str_field(&payload, "messageId") {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let dest_chat = str_field(&payload, "destinationChatId").unwrap_or_default();
+        let dest_msg = str_field(&payload, "destinationMessageId").unwrap_or_default();
+        if dest_chat.is_empty() || dest_msg.is_empty() {
+            return Ok(());
+        }
+        let host = self.room(&chat_id).await?;
+        let h = host.lock().await;
+        Self::set_handoff_destination(&h.doc, &row_id, &dest_chat, &dest_msg);
         Ok(())
     }
 
@@ -654,12 +715,15 @@ impl Agent {
                 .ok_or_else(|| anyhow!("agent_reply: no chat"))?,
         };
         let row_id = str_field(&payload, "messageId");
+        let dest_chat = str_field(&payload, "destinationChatId").unwrap_or_default();
+        let dest_msg = str_field(&payload, "destinationMessageId").unwrap_or_default();
         let host = self.room(&chat_id).await?;
         let in_reply_to = {
             let h = host.lock().await;
             if let Some(id) = &row_id {
                 h.doc
                     .set_message_fields(id, &[("handoffMessages", json!(2))]);
+                Self::set_handoff_destination(&h.doc, id, &dest_chat, &dest_msg);
                 h.doc.add_hidden_part(
                     id,
                     "agent_message_reply",
@@ -1124,6 +1188,59 @@ mod tests {
             !agent.people_already_replied(&host, "u1").await,
             "a hand-off row is not the answer to the ask"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Destination chat/message ids stamp onto the hand-off's `agentMessage` so a tap can open
+    /// the landed row; older notices without them stay valid.
+    #[tokio::test]
+    async fn handoff_destination_ids_merge_onto_agent_message() {
+        use super::{Agent, Delivery};
+        use crate::status::tests::test_agent;
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATHANDOFFDEST00001";
+        agent.sync.open_room(chat).await.unwrap();
+        let delivery = Delivery {
+            id: "d-dest".into(),
+            status: "delivered".into(),
+            to_id: "bubble".into(),
+            to_name: "Bubble".into(),
+        };
+        agent
+            .write_handoff_row(chat, "u1", "row-dest", &delivery, "Hey Bubble")
+            .await;
+        let host = agent.sync.host(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            let am = h.doc.message("row-dest").unwrap().rest["agentMessage"].clone();
+            assert_eq!(am["id"], "d-dest");
+            assert_eq!(am["toProjectId"], "bubble");
+            assert!(am.get("chatId").is_none());
+            Agent::set_handoff_destination(&h.doc, "row-dest", "bubble-home", "landed-1");
+            let am = h.doc.message("row-dest").unwrap().rest["agentMessage"].clone();
+            assert_eq!(am["chatId"], "bubble-home");
+            assert_eq!(am["messageId"], "landed-1");
+            assert_eq!(
+                am["toProjectId"], "bubble",
+                "other agentMessage fields stay"
+            );
+        }
+        // A row with no agentMessage is a no-op (old / unrelated notices).
+        {
+            let h = host.lock().await;
+            h.doc.transact(|d| {
+                let _ = d.append_system_line("sys1", "hello", &agent.cfg.device_id, None);
+            });
+            Agent::set_handoff_destination(&h.doc, "sys1", "x", "y");
+            assert!(h
+                .doc
+                .message("sys1")
+                .unwrap()
+                .rest
+                .get("agentMessage")
+                .is_none());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
