@@ -312,6 +312,14 @@ impl Supervisor {
             .context("project without id")?
             .to_owned();
         if let Some(w) = self.get(&project_id).await {
+            // A hello after a restore (`reconnect`) carries what the relay queued while the box
+            // was frozen, and the relay has taken it off its queue: this is the only delivery.
+            // A row that woke the box is among them, as the `chat_open` for its closed room.
+            // The 3 s registry poll carries none.
+            for p in pushes {
+                tracing::info!(project = %project_id, push = %p, "queued push delivered to a running workspace");
+                w.agent.dispatch_push(p.clone());
+            }
             if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
                 w.agent.people.set_project_owner(owner);
             }
@@ -1463,6 +1471,88 @@ pub(crate) mod tests {
         sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
             .await;
         assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pushes a listing carries reach the workspace once each, whichever way it meets them.
+    /// The listing that starts a workspace hands them over at the end of the start. A later
+    /// hello (the one a restored box says on SIGUSR1) finds the workspace running, and used to
+    /// drop them: the relay had already taken them off its queue, so the `chat_open` for the
+    /// row that woke an idle-slept box never arrived and that message went unanswered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_push_is_delivered_once_at_the_start_and_once_to_a_running_workspace() {
+        let root = scratch("queued-push");
+        std::fs::create_dir_all(&root).unwrap();
+        // A pi that answers every command with success: the workspace only has to start.
+        let script = root.join("fake-pi.py");
+        std::fs::write(
+            &script,
+            "import sys, json\nfor line in sys.stdin:\n    try:\n        c = json.loads(line)\n    except ValueError:\n        continue\n    sys.stdout.write(json.dumps({'type': 'response', 'id': c.get('id'), 'command': c.get('type'), 'success': True}) + '\\n')\n    sys.stdout.flush()\n",
+        )
+        .unwrap();
+        let pi = root.join("fake-pi");
+        std::fs::write(
+            &pi,
+            format!("#!/bin/sh\nexec python3 {}\n", script.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The workspace's four loopback servers sit just above a port nothing holds right now.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port().min(u16::MAX - 100);
+        let mut cfg = test_supervisor(&root.join("work")).cfg.clone();
+        cfg.port = port;
+        cfg.pi_bin = pi.display().to_string();
+        let sup = Supervisor::new(cfg);
+
+        let project = "01JQUEUEDPUSH0000000000000";
+        let listing = |pushes: serde_json::Value| {
+            serde_json::json!({ "workspaces": [{
+                "project": { "id": project, "name": "queued", "user_id": "u-test" },
+                "chats": [], "pushes": pushes,
+            }] })
+        };
+        let push =
+            |n: u32| serde_json::json!({ "id": n, "kind": "test_note", "payload": { "n": n } });
+        // An unknown kind is written to the workspace's store, one row per delivery.
+        let delivered = |sup: Arc<Supervisor>| async move {
+            let w = sup.get(project).await.expect("the workspace started");
+            let mut seen: Vec<u64> = Vec::new();
+            for _ in 0..100 {
+                seen = w
+                    .store
+                    .t3_thread("projects", None, None, 100)
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.kind == "push")
+                    .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.text).ok())
+                    .filter_map(|v| v["payload"]["n"].as_u64())
+                    .collect();
+                seen.sort_unstable();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            seen
+        };
+
+        // The listing that starts the workspace.
+        sup.apply_listing(&listing(serde_json::json!([push(1)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1]);
+        // A hello after a restore: the workspace is running.
+        sup.apply_listing(&listing(serde_json::json!([push(2)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+        // The registry poll: no pushes, and nothing is delivered again.
+        sup.apply_listing(&serde_json::json!({ "workspaces": [{
+            "project": { "id": project, "name": "queued", "user_id": "u-test" }, "chats": [],
+        }] }))
+        .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+
+        sup.shutdown().await;
         let _ = std::fs::remove_dir_all(&root);
     }
 
