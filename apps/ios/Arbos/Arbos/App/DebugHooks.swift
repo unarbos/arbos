@@ -14,8 +14,6 @@ enum DebugHooks {
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
     /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
     static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
-    /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
-    static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
@@ -46,7 +44,7 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
-    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
+    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers among the home chats.
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
     /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
     static var fixtureGroupRole: String? {

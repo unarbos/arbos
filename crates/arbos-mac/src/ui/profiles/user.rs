@@ -270,6 +270,7 @@ pub(super) fn page(
             footer,
             done: None,
             share: None,
+            overview_back: false,
         },
         shell,
         cx,

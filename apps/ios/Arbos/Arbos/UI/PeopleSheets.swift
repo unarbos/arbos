@@ -24,12 +24,12 @@ enum SheetRow {
     static var textLeading: CGFloat { cardInset + textInset }
 }
 
-/// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
-/// from the bottom, search on top, then New agent / New group, then your
-/// agents, then every other Arbos user. Typing filters agents, servers and the
-/// directory and also asks `GET /users/search` and `GET /servers/search`, so a
-/// GitHub handle not on Arbos yet can be invited and an open server can be joined
-/// without an invite link.
+/// "+" on home — Telegram's "New Message" panel in Grok's dark skin. Pushed onto
+/// Home's stack from the right ([feedback iphone-compose-nav-push-2026-11-10]),
+/// search on top, then New agent / New group, then your agents, then every other
+/// Arbos user. Typing filters agents, servers and the directory and also asks
+/// `GET /users/search` and `GET /servers/search`, so a GitHub handle not on Arbos
+/// yet can be invited and an open server can be joined without an invite link.
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -53,6 +53,9 @@ struct NewChatSheet: View {
     }()
     @State private var showGroupPicker = DebugHooks.show == "newgroup2"
     @FocusState private var focused: Bool
+
+    /// Close the whole compose push (Create's Cancel / Close), not only the Create page.
+    private var closeCompose: () -> Void { { model.dismissNewMessage() } }
 
     private var trimmed: String {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
@@ -90,9 +93,14 @@ struct NewChatSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
+        // Pushed onto Home's stack (`AppModel.Route.newMessage`): no NavigationStack of
+        // its own, so Create screens push onto the same stack and the edge swipe pops
+        // one level — the same structure Settings and chats use.
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     searchField
                         .padding(.horizontal, SheetSearchField.inset)
                         .padding(.top, 6)
@@ -100,25 +108,37 @@ struct NewChatSheet: View {
 
                     if trimmed.isEmpty {
                         card {
-                            NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .agent, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
                             }
                             .buttonStyle(.plain)
                             rowDivider
                             // Connect an agent (#2142): an agent that runs elsewhere joins as a member.
-                            NavigationLink { CreateEntityView(kind: .connect, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .connect, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "link", title: "Connect an agent", subtitle: "Claude Code, Grok or your own bot, with a key")
                             }
                             .buttonStyle(.plain)
                             rowDivider
-                            NavigationLink { CreateEntityView(kind: .group, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .group, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
                             if model.serversAvailable {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
-                                NavigationLink { CreateEntityView(kind: .server, onDone: { dismiss() }) } label: {
+                                NavigationLink {
+                                    CreateEntityView(kind: .server, onDone: closeCompose)
+                                        .backSwipeToPop()
+                                } label: {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
@@ -179,33 +199,49 @@ struct NewChatSheet: View {
             }
             .scrollIndicators(.visible)
             .scrollDismissesKeyboard(.interactively)
-            .background(theme.bg)
-            .navigationTitle("New Message")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
-                CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
-            }
-            .navigationDestination(isPresented: $showGroupPicker) {
-                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
-            }
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .task {
-                loadingDirectory = model.directory.isEmpty
-                await model.loadDirectory()
-                loadingDirectory = false
-            }
-            .onChange(of: query) { _, _ in search() }
+            topBar
         }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
+            CreateEntityView(kind: showCreate ?? .agent, onDone: closeCompose)
+                .backSwipeToPop()
+        }
+        .navigationDestination(isPresented: $showGroupPicker) {
+            NewGroupView(onDone: closeCompose, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
+                .backSwipeToPop()
+        }
+        .task {
+            loadingDirectory = model.directory.isEmpty
+            await model.loadDirectory()
+            loadingDirectory = false
+        }
+        .onChange(of: query) { _, _ in search() }
         .tint(theme.text)
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .presentationBackground(theme.bg)
-        .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        // Page id on a zero-size marker — not on this container. Putting
+        // `.accessibilityIdentifier` on the pushed root collapsed every child
+        // (including `new-message-back`) out of the XCTest tree.
+        .background {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("new-message")
+        }
+    }
+
+    /// Same glass back as Settings (`ProfileTopBar`) plus a centred title.
+    /// Title is VoiceOver-hidden so it cannot collapse `new-message-back` out of the tree.
+    private var topBar: some View {
+        ZStack(alignment: .top) {
+            ProfileTopBar(screen: .newMessage, backIdentifier: "new-message-back") { EmptyView() }
+            Text("New Message")
+                .font(.system(size: Theme.body, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .padding(.top, 16)
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     // MARK: Pieces
@@ -525,27 +561,24 @@ enum ConnectTransport: String, CaseIterable, Identifiable {
     }
 }
 
-/// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
-/// layout: title + close ×, the preview, a centred name field, the picture options, Cancel + the
-/// action pinned above the home indicator. Grok's sizes in points (measured on the 2x reference)
-/// inside the shipped bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation
-/// (touch minimum). Agents create here; a group goes on to the member picker (`NewGroupView`) as
-/// step two with the name + picture as its draft; a server keeps its one-line explainer under
-/// the field. Pushed from New Message with its own header; × and Cancel close the whole sheet.
+/// The one Create screen for a new agent, group or server — Grok Bot's Edit-page hierarchy
+/// pushed from New Message ([feedback iphone-create-entity-edit-style-2026-11-10]): glass back,
+/// white Create/Next pill, centred avatar with a pencil badge, then sectioned cards (Name,
+/// Appearance with Upload | Generate, plus Connection for connect / an explainer for server).
+/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two; Cancel
+/// / back still clears the whole compose push via `onDone`.
 ///
 /// **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-ios-2026-10-25]):
-/// the sixteen-shape grid and the ten pastel swatches are gone. Under the name field sit the
-/// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
-/// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
-/// chosen photo, the generated picture, or, when neither was picked, the sheet's own placeholder:
-/// the name's first letter on a grey disc (`NeutralAvatar`). That grey is sheet chrome, not a
-/// default avatar — the entity has no id yet, so no colour can be derived. The entity is stored
-/// with no colour at all, and the disc follows from the id the relay assigns.**
+/// the sixteen-shape grid and the ten pastel swatches are gone. Appearance offers
+/// `Upload | Generate` only (`AvatarTabPill` + `AvatarSourceBody` on an `AvatarSourceState`).
+/// The hero shows the chosen photo, the generated picture, or the name's first letter on a
+/// grey disc (`NeutralAvatar`) — sheet chrome, not a default avatar. The entity is stored with
+/// no colour; the disc follows from the id the relay assigns.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let kind: CreateKind
-    /// Closes the whole sheet (a pushed view's own dismiss only pops).
+    /// Closes the whole compose push (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = DebugHooks.newAgentName ?? ""
     @State private var option: AvatarPickerTab = CreateEntityView.initialOption
@@ -553,214 +586,166 @@ struct CreateEntityView: View {
     @State private var creating = false
     @State private var localError: UserError?
     @State private var next = false
-    /// Connect an agent (#2142): the transport picked under the explainer, then the reveal.
+    /// Connect an agent (#2142): the transport picked under Appearance, then the reveal.
     @State private var transport: ConnectTransport = .acp
     @State private var reveal: ConnectReveal?
+    /// Appearance body is expanded after a tap on the pencil / Avatar row.
+    @State private var showAppearance = true
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
     private var canGo: Bool { !clean.isEmpty && !creating && !source.generating }
 
-    /// The two options every Create sheet offers, in order — the draft picker's tabs.
+    /// The two options every Create screen offers, in order — the draft picker's tabs.
     static let options: [AvatarPickerTab] = [.upload, .generate]
     /// The disc colour a new entity is stored with: **none**. The relay has not assigned the id
     /// the colour derives from, and no default is grey any more, so there is nothing to store
     /// that would mean "draw me grey" (Jacob, 2026-11-06).
     static var storedDisc: UInt8? { nil }
-    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
+    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens on Generate.
     private static var initialOption: AvatarPickerTab {
         (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
     }
 
-    // Grok's palette, approved as is.
-    private let sheetBg = AvatarSheetPalette.sheetBg
-    private let line = AvatarSheetPalette.line
-    private let placeholder = AvatarSheetPalette.placeholder
-    private let cancelBg = AvatarSheetPalette.pillBg
-    private let createBg = AvatarSheetPalette.disabledBg
-    private let createText = AvatarSheetPalette.disabledText
-
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
-            // create, or a failed generation (`source.error`); the body below moves down.
-            if let error = source.error ?? localError {
-                ErrorNote(id: "create-entity-error", error: error,
-                          detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
-                          onTryAgain: source.error != nil ? generate : nil)
-                    .padding(.horizontal, 16.5)
-                    .padding(.top, 12)
-            } else {
-                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
-                    .padding(.horizontal, 16.5)
-                    .padding(.top, 12)
-            }
-            // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
-            // so the action is always reachable); at rest it is Grok's fixed layout.
-            ScrollView(showsIndicators: false) {
-                ZStack(alignment: .top) {
-                    preview
-                        .padding(.top, 62 - 54.5)
-                        .animation(.snappy, value: source.generatedKey)
-                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218; the
-                    // option capsules start where Grok's first icon row began (246); the chosen
-                    // option's body 16 under them. The server explainer adds 40 under the field.
-                    VStack(spacing: 0) {
-                        field.padding(.top, 183 - 54.5)
-                        if let explainer = kind.explainer {
-                            Text(explainer)
-                                .font(.system(size: 13))
-                                .foregroundStyle(placeholder)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .lineSpacing(3)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity)
-                                .padding(.horizontal, 16.5)
-                                .padding(.top, 8)
-                                .frame(height: 40, alignment: .top)
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: kind.title,
+                    doneTitle: creating ? "Creating…" : kind.action,
+                    doneEnabled: canGo,
+                    onDone: go,
+                    onBack: onDone
+                )
+                if let error = source.error ?? localError {
+                    ErrorNote(id: "create-entity-error", error: error,
+                              detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
+                              onTryAgain: source.error != nil ? generate : nil)
+                        .padding(.horizontal, PaneKit.inset)
+                        .padding(.top, 8)
+                } else {
+                    SheetErrorNote(id: "create-entity-error", onTryAgain: go)
+                        .padding(.horizontal, PaneKit.inset)
+                        .padding(.top, 8)
+                }
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        EntityEditHero(onAvatar: { showAppearance = true }) { preview }
+                            .padding(.top, 12)
+                            .animation(.snappy, value: source.generatedKey)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Name")
+                            PaneCard {
+                                EntityNameField(text: $name, placeholder: kind.placeholder, focused: $focused,
+                                                submitLabel: kind == .group ? .next : .done, onSubmit: go)
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                            if let explainer = kind.explainer {
+                                Text(explainer)
+                                    .font(theme.font(Theme.tiny))
+                                    .foregroundStyle(theme.muted)
+                                    .padding(.horizontal, PaneKit.inset)
+                            }
                         }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Appearance")
+                            PaneCard {
+                                Button { showAppearance.toggle() } label: {
+                                    PaneRow(title: "Avatar", value: option.rawValue, chevron: true)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("create-avatar-row")
+                                if showAppearance {
+                                    VStack(spacing: 12) {
+                                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
+                                            .accessibilityIdentifier("create-entity-options")
+                                        AvatarSourceBody(state: source, tab: option,
+                                                         keepsLine: "Create keeps this one.",
+                                                         uploadsLine: "Create uploads it.",
+                                                         generate: generate) { EmptyView() }
+                                    }
+                                    .padding(.horizontal, PaneKit.inset)
+                                    .padding(.bottom, 14)
+                                }
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
                         if kind == .connect {
-                            transportRow
-                                .frame(height: 40, alignment: .top)
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Connection")
+                                ProfileCard {
+                                    ForEach(ConnectTransport.allCases) { t in
+                                        Button { transport = t } label: {
+                                            PaneRow(title: t.label,
+                                                    trailing: transport == t
+                                                        ? AnyView(Image(systemName: "checkmark")
+                                                            .font(theme.font(14, weight: .semibold))
+                                                            .foregroundStyle(theme.text))
+                                                        : nil)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityIdentifier("connect-transport-\(t.rawValue)")
+                                        .accessibilityAddTraits(transport == t ? [.isSelected] : [])
+                                    }
+                                }
                                 .accessibilityIdentifier("connect-transports")
+                            }
                         }
-                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
-                            .padding(.top, 246 - 218)
-                            .accessibilityIdentifier("create-entity-options")
-                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
-                            EmptyView()
-                        }
-                        .padding(.top, 16)
+
+                        Color.clear.frame(height: 40)
                     }
                 }
-                .padding(.bottom, 24)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .scrollDismissesKeyboard(.interactively)
-            footer
         }
         .claimFailures("create-entity", ["create the server", "create the agent", "create the group", "connect the agent"])
-        .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
         .navigationDestination(isPresented: $next) {
             NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, discColor: Self.storedDisc, picture: source.draftPicture(for: option)))
+                .backSwipeToPop()
         }
         .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
             if let reveal {
                 ConnectRevealView(reveal: reveal, onDone: onDone)
+                    .backSwipeToPop()
             }
         }
-        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
         .onAppear {
             if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true }
             if let spec = DebugHooks.createPicture, let colon = spec.firstIndex(of: ":") {
                 source.prompt = String(spec[spec.index(after: colon)...])
             }
         }
+        .accessibilityIdentifier("create-entity")
     }
 
-    private var header: some View {
-        HStack {
-            Text(kind.title)
-                .font(.system(size: 14.2, weight: .semibold))
-                .foregroundStyle(Color(white: 0xF5 / 255))
-                .padding(.leading, 17.5)
-            Spacer()
-            Button(action: onDone) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color(white: 0xD2 / 255))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 5.5)
-            .accessibilityLabel("Close")
-        }
-        .frame(height: 54.5)
-        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
-    }
-
-    /// The 114 pt preview: the chosen photo, the generated picture (fetched from my own slot),
-    /// else the neutral initial of the typed name — an empty disc until something is typed.
+    /// The hero preview: chosen photo, generated picture, or the neutral initial of the name.
     @ViewBuilder
     private var preview: some View {
         if option == .upload, let image = source.uploadPreview {
             Image(uiImage: image).resizable().scaledToFill()
-                .frame(width: 114, height: 114).clipShape(Circle())
+                .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar).clipShape(Circle())
         } else if option == .generate, let key = source.generatedKey, let url = model.draftPictureURL(key: key) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
                 } else {
                     ZStack {
-                        NeutralAvatar(name: clean, size: 114)
-                        if phase.error == nil { ProgressView().tint(placeholder) }
+                        NeutralAvatar(name: clean, size: PaneKit.heroAvatar)
+                        if phase.error == nil { ProgressView().tint(theme.muted) }
                     }
                 }
             }
-            .frame(width: 114, height: 114)
+            .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             .clipShape(Circle())
         } else {
-            NeutralAvatar(name: clean, size: 114)
+            NeutralAvatar(name: clean, size: PaneKit.heroAvatar)
         }
-    }
-
-    /// Connect an agent: the three transports as capsules (the Create sheet's option style).
-    private var transportRow: some View {
-        HStack(spacing: 2) {
-            ForEach(ConnectTransport.allCases) { t in
-                Button { transport = t } label: {
-                    Text(t.label)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(transport == t ? Color(white: 0xF5 / 255) : AvatarSheetPalette.labelMuted)
-                        .padding(.horizontal, 11)
-                        .frame(height: 28)
-                        .background(Capsule().fill(transport == t ? cancelBg : .clear))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("connect-transport-\(t.rawValue)")
-            }
-        }
-        .padding(.top, 6)
-    }
-
-    private var field: some View {
-        TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
-            .font(.system(size: 15.5))
-            .foregroundStyle(Color(white: 0xF5 / 255))
-            .multilineTextAlignment(.center)
-            .autocorrectionDisabled()
-            .focused($focused)
-            .submitLabel(kind == .group ? .next : .done)
-            .onSubmit(go)
-            .padding(.horizontal, 12)
-            .frame(height: 35)
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
-            .padding(.horizontal, 16.5)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Spacer()
-            Button(action: onDone) {
-                Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(white: 0xF5 / 255))
-                    .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
-            }
-            .buttonStyle(.plain)
-            Button(action: go) {
-                Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(canGo ? theme.onPrimary : createText)
-                    .frame(width: 92, height: 44).background(Capsule().fill(canGo ? theme.primary : createBg))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canGo)
-        }
-        .padding(.trailing, 16)
-        .padding(.top, 25)
-        .padding(.bottom, 35)
-        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
     /// Generate into my own slot (`POST /me/avatar/generate`): the entity does not exist yet.
@@ -787,7 +772,6 @@ struct CreateEntityView: View {
                 if await model.createServer(name: clean, discColor: Self.storedDisc, picture: picture) {
                     onDone()
                 }
-                // A refusal is the claimed failure drawn by the note above the hero.
                 creating = false
             }
         case .connect:

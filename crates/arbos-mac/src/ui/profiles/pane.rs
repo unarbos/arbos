@@ -37,6 +37,11 @@ pub struct ProfilePane {
     /// Grok's share disc, left of the ×, when the page has something to share
     /// (an agent or a group: the invite sheet). `None` draws the × alone.
     pub share: Option<HeroClick>,
+    /// Overview drill-in (agent / group / server): show ‹ that clears
+    /// `profile_subpage` even when the profile stack is empty — Mac keeps the
+    /// side pane instead of an iOS push
+    /// ([feedback iphone-entity-profile-edit-2026-11-10]).
+    pub overview_back: bool,
 }
 
 pub struct Hero {
@@ -312,17 +317,42 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         }
     }
     let share = pane.share.filter(|_| share_disc_allowed(&pane.page));
-    pushed_frame(
-        &title,
-        Some(pinned),
-        body,
-        pane.done,
-        share,
-        Some(&shell.profile_scroll),
-        shell,
-        &theme,
-        cx,
-    )
+    if pane.overview_back {
+        let back = crate::ui::glass::control_disc(
+            "profile-back",
+            "chevron.left",
+            crate::ui::theme::CONTROL_GLYPH,
+            &theme,
+        )
+        .debug_selector(|| "profile-back".into())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.state
+                .update(cx, |s, cx| s.set_profile_subpage(None, cx));
+        }));
+        super::pane_frame(
+            super::SHEET_WIDTH,
+            Some((title.as_str(), back)),
+            Some(pinned),
+            body,
+            pane.done,
+            share,
+            Some(&shell.profile_scroll),
+            &theme,
+            cx,
+        )
+    } else {
+        pushed_frame(
+            &title,
+            Some(pinned),
+            body,
+            pane.done,
+            share,
+            Some(&shell.profile_scroll),
+            shell,
+            &theme,
+            cx,
+        )
+    }
 }
 
 /// A leading section label starts this much higher than a card would, so its
@@ -363,22 +393,24 @@ pub(crate) fn first_spacer(first: Option<&Section>) -> f32 {
 mod tests {
     use super::{child_index_of_row, layout, share_disc_allowed, Block};
 
-    /// Every kind's tab set (the same labels and order as the iPhone page of
-    /// that kind — `ArbosTests/ProfilePaneStructureTests.swift` holds the twin).
-    /// Kinds may differ in tab count (Jacob, 2026-10-22 22:32 UTC); what every
-    /// kind shares is the structure: hero, then the pill, then the options.
-    const KINDS: [(&str, &[&str]); 6] = [
+    /// Tabbed kinds still lay out hero → pill → options. Overview kinds
+    /// (agent / group / server) land with zero tabs → no pill
+    /// ([feedback iphone-entity-profile-edit-2026-11-10]). Twin:
+    /// `ArbosTests/ProfilePaneStructureTests.swift`.
+    const TABBED: [(&str, &[&str]); 3] = [
         ("person", &super::super::user::TABS),
         ("own profile", &super::super::me::TABS),
+        ("channel", &super::super::channel::TABS),
+    ];
+    const OVERVIEW: [(&str, &[&str]); 3] = [
         ("agent", &super::super::agent::TABS),
         ("group", &super::super::group::TABS),
         ("server", &super::super::server::TABS),
-        ("channel", &super::super::channel::TABS),
     ];
 
     #[test]
-    fn every_kind_lays_out_hero_then_pill_then_options() {
-        for (kind, tabs) in KINDS {
+    fn tabbed_kinds_lay_out_hero_then_pill_then_options() {
+        for (kind, tabs) in TABBED {
             assert!(tabs.len() >= 2, "{kind}: a pane has at least two tabs");
             let blocks = layout(tabs.len(), 1);
             assert_eq!(
@@ -393,17 +425,31 @@ mod tests {
                 "{kind}"
             );
         }
-        // One tab: no pill, the options follow the hero directly.
+        // One tab / overview (0 tabs): no pill, the options follow the hero directly.
         assert_eq!(layout(1, 0), vec![Block::Hero, Block::Options]);
+        assert_eq!(layout(0, 0), vec![Block::Hero, Block::Options]);
     }
 
     #[test]
-    fn kinds_keep_their_own_tab_sets() {
-        // Grok Bot's agent tabs (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24]).
+    fn overview_kinds_have_no_tab_pill() {
+        for (kind, rows) in OVERVIEW {
+            assert!(rows.len() >= 2, "{kind}: an overview has at least two rows");
+            assert_eq!(
+                layout(0, 1),
+                vec![Block::Hero, Block::Options, Block::Footer],
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn kinds_keep_their_own_label_sets() {
+        // Grok Bot overview rows on agent / group / server; tab pills on the rest.
         let agent: Vec<&str> = super::super::agent::TABS.to_vec();
-        assert_eq!(agent, ["Details", "Library", "Computer"]);
+        assert_eq!(agent, ["Coding", "Routines", "Library", "Computer"]);
         assert_eq!(agent[super::super::agent::TAB_LIBRARY], "Library");
         assert_eq!(agent[super::super::agent::TAB_COMPUTER], "Computer");
+        assert_eq!(super::super::agent::OUTSIDE_TABS, ["Library", "Connection"]);
         assert_eq!(super::super::me::TABS, ["Profile", "Settings"]);
         assert_eq!(super::super::user::TABS, ["Links", "Groups"]);
         assert_eq!(super::super::group::TABS, ["Members", "Library"]);
@@ -412,11 +458,11 @@ mod tests {
             ["Channels", "Members", "Settings"]
         );
         assert_eq!(super::super::channel::TABS, ["Profile", "Settings"]);
-        for (kind, tabs) in KINDS {
+        for (kind, tabs) in TABBED.iter().chain(OVERVIEW.iter()) {
             let mut seen = std::collections::HashSet::new();
             assert!(
                 tabs.iter().all(|t| seen.insert(*t)),
-                "{kind}: a tab label appears once"
+                "{kind}: a label appears once"
             );
         }
     }

@@ -235,26 +235,18 @@ final class PerfBaselineUITests: XCTestCase {
 
     // MARK: Taps
 
-    func testSettingsSheet() {
+    /// The account circle pushes my own pane — Settings — in from the right, so the page's
+    /// own back chevron takes it away rather than a downward drag on a sheet.
+    func testSettingsPage() {
         let app = launch()
-        measure(metrics: [signpost("settings-sheet"), XCTClockMetric()], options: options(manual: true)) {
+        measure(metrics: [signpost("settings-page"), XCTClockMetric()], options: options(manual: true)) {
             app.buttons["home-account"].tap()
             sleep(2)
             stopMeasuring()
-            dismissSheet(app)
+            app.buttons["Back"].tap()
             XCTAssertTrue(row(app, dm).waitForExistence(timeout: appear), "back on the chat list")
             sleep(1)
         }
-    }
-
-    private func dismissSheet(_ app: XCUIApplication) {
-        let cancel = app.buttons["sheet-cancel"]
-        if cancel.exists {
-            cancel.tap()
-            return
-        }
-        let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12))
-        top.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)))
     }
 
     /// Long press on the group's newest bubble → its reactions and menu.
