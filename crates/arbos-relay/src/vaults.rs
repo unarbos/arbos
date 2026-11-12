@@ -103,13 +103,6 @@ pub(crate) fn vault_connect() -> bool {
     provider_enabled() && connect_enabled()
 }
 
-/// Remote feature flags the apps read (`GET /secrets` and `GET /me` → `features`): the one
-/// object from `crate::features`, so every flag ships on both endpoints.
-#[allow(dead_code)] // kept as the documented alias; handlers use `crate::features::dto()`.
-pub(crate) fn features() -> Value {
-    crate::features::features()
-}
-
 fn cache_ttl() -> Duration {
     Duration::from_secs(env_u64("ARBOS_OP_CACHE_TTL_SECS", 300))
 }
@@ -597,11 +590,6 @@ pub(crate) fn access_dto(state: &AppState, a: &Access) -> SecretAccessDto {
     }
 }
 
-#[allow(dead_code)] // Value form of [`access_dto`].
-fn access_json(state: &AppState, a: &Access) -> Value {
-    to_json(access_dto(state, a))
-}
-
 /// `GET /secrets` → `vaults[]`.
 pub(crate) fn list_dto(state: &AppState, user_id: &str) -> Vec<VaultDto> {
     state
@@ -611,11 +599,6 @@ pub(crate) fn list_dto(state: &AppState, user_id: &str) -> Vec<VaultDto> {
         .iter()
         .map(|v| vault_dto(state, v))
         .collect()
-}
-
-#[allow(dead_code)] // Value form for callers that still want raw JSON arrays.
-pub(crate) fn list_json(state: &AppState, user_id: &str) -> Vec<Value> {
-    list_dto(state, user_id).into_iter().map(to_json).collect()
 }
 
 /// One vault-level access as an item of the agent profile page.
@@ -649,11 +632,6 @@ pub(crate) fn access_item_dto(
             status: v.status,
         }),
     })
-}
-
-#[allow(dead_code)] // Value form of [`access_item_dto`].
-pub(crate) fn access_item_json(state: &AppState, owner: &str, a: &Access) -> Option<Value> {
-    access_item_dto(state, owner, a).map(to_json)
 }
 
 /// Items of connected vaults this project may use (names only), one per cached item.

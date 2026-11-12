@@ -151,14 +151,10 @@ fn rate_limited(retry_s: i64) -> Response {
 
 /// May `adder` put `target` into a people group under the target's `group_add` privacy?
 fn may_add_to_group(state: &AppState, adder: &str, target: &str) -> bool {
-    let policy = state
-        .db
-        .group_add_policy(target)
-        .unwrap_or_else(|_| "anyone".into());
-    match policy.as_str() {
-        "nobody" => false,
-        "people_i_know" => state.db.dm_between(adder, target).ok().flatten().is_some(),
-        _ => true, // anyone (default)
+    match state.db.group_add_policy(target).as_deref() {
+        Ok("anyone") => true,
+        Ok("people_i_know") => state.db.dm_between(adder, target).ok().flatten().is_some(),
+        _ => false,
     }
 }
 
@@ -6522,6 +6518,139 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[derive(Clone, Copy)]
+    enum AddPath {
+        CreateGroup,
+        AddMember,
+        ShareProject,
+        Invite,
+    }
+
+    async fn assert_unreadable_policy_refuses(path: AddPath, invalid_policy: bool) {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 71);
+        let (bob, _) = person(&state, 72);
+        let project = project_of(&state, &alice, "Shared");
+        let group = super::tests_support::group(&state, &[&alice]);
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+        let before_chats = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+        let before_invites: i64 = state
+            .db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get(0)))
+            .unwrap();
+        if invalid_policy {
+            // A corrupt/unknown stored policy is not the documented open default.
+            state.db.set_group_add_policy(&bob, "unrecognized").unwrap();
+        } else {
+            // Keep user lookups and membership tables usable while the policy read fails.
+            state
+                .db
+                .with(|c| {
+                    c.execute_batch(
+                        "ALTER TABLE users RENAME COLUMN group_add TO unavailable_group_add",
+                    )
+                })
+                .unwrap();
+            assert!(state.db.group_add_policy(&bob).is_err());
+            assert!(state.db.user(&bob).unwrap().is_some());
+        }
+        let response = match path {
+            AddPath::CreateGroup => {
+                chats_create_group(
+                    State(state.clone()),
+                    alice_dev,
+                    Json(CreateGroupBody {
+                        kind: "group".into(),
+                        members: vec!["user72".into()],
+                        agent_ids: vec![],
+                        title: Some("Refused".into()),
+                        avatar_disc_color: None,
+                        description: None,
+                    }),
+                )
+                .await
+            }
+            AddPath::AddMember => {
+                member_add(
+                    State(state.clone()),
+                    alice_dev,
+                    Path(group.clone()),
+                    Json(AddMemberBody {
+                        handle: Some("user72".into()),
+                        handles: vec![],
+                        agent_ids: vec![],
+                    }),
+                )
+                .await
+            }
+            AddPath::ShareProject => share(&state, &alice_dev, &project, "user72").await,
+            AddPath::Invite => invite_into(&state, &alice_dev, &project, "user72").await,
+        };
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"error": {"type": "not_available", "message": "this person is not available"}})
+        );
+        assert!(!state.db.is_project_member(&project, &bob).unwrap());
+        assert!(!state
+            .db
+            .members_of(&group)
+            .unwrap()
+            .iter()
+            .any(|m| m.member == format!("user:{bob}")));
+        assert_eq!(
+            state
+                .db
+                .chats_of_member(&format!("user:{alice}"))
+                .unwrap()
+                .len(),
+            before_chats
+        );
+        assert!(state
+            .db
+            .chats_of_member(&format!("user:{bob}"))
+            .unwrap()
+            .is_empty());
+        let after_invites: i64 = state
+            .db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(after_invites, before_invites);
+    }
+
+    #[tokio::test]
+    async fn policy_read_error_refuses_group_create_without_partial_writes() {
+        assert_unreadable_policy_refuses(AddPath::CreateGroup, false).await;
+    }
+
+    #[tokio::test]
+    async fn policy_read_error_refuses_member_add_without_partial_writes() {
+        assert_unreadable_policy_refuses(AddPath::AddMember, false).await;
+    }
+
+    #[tokio::test]
+    async fn policy_read_error_refuses_project_share_without_partial_writes() {
+        assert_unreadable_policy_refuses(AddPath::ShareProject, false).await;
+    }
+
+    #[tokio::test]
+    async fn policy_read_error_refuses_invite_without_partial_writes() {
+        assert_unreadable_policy_refuses(AddPath::Invite, false).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_policy_refuses_project_share() {
+        assert_unreadable_policy_refuses(AddPath::ShareProject, true).await;
     }
 }
 

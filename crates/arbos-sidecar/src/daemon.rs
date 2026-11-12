@@ -1,8 +1,9 @@
 //! `arbos-sidecar run`: the one process that holds the key. It long-polls the inbox, applies each
-//! page to the mirror, hands wake candidates to the waker, and only then persists the cursor
-//! (Buzz L1/L2: exactly-once by cursor, nothing dropped under backpressure). It also serves the
+//! page to the mirror, hands wake candidates to the waker, and only then persists the cursor.
+//! Failed pages remain replayable; channel acceptance is not durable wake delivery. It also serves the
 //! control socket the CLI and MCP server use for actions.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -54,7 +55,9 @@ impl Source for Relay {
     }
 }
 
-/// Apply one page: mirror first, then the waker, then the cursor. Returns the new cursor.
+/// Mirror the whole page, hand off wakes, then commit its cursor. Returns events processed.
+/// A failed handoff/save leaves the cursor unchanged so mirrored rows can recover their wakes.
+/// Accepted channel sends can be repeated after a save failure/crash: this is not an outbox.
 pub fn apply_page(
     mirror: &Mirror,
     state: &mut State,
@@ -62,29 +65,44 @@ pub fn apply_page(
     wake_tx: &mpsc::UnboundedSender<Signal>,
 ) -> Result<usize> {
     let mut applied = 0;
+    let mut wakes = Vec::new();
+    let mut message_wakes = HashSet::new();
     for e in &page.events {
         let id = e["id"].as_i64().unwrap_or(0);
         if id != 0 && id <= state.cursor {
             continue;
         }
-        match mirror.apply_event(e) {
-            Ok(Some(c)) => {
-                let _ = wake_tx.send(Signal::Event(Box::new(c)));
+        if let Some(c) = mirror
+            .apply_uncommitted_event(e)
+            .with_context(|| format!("mirroring inbox event {id}"))?
+        {
+            // Recovery must not turn duplicate copies inside one page into new wakes.
+            if c.reason != "message"
+                || message_wakes.insert((
+                    c.chat.id.clone(),
+                    c.event_id,
+                    e["message"]["id"].as_str(),
+                ))
+            {
+                wakes.push(c);
             }
-            Ok(None) => {}
-            Err(err) => tracing::warn!(event = id, error = %err, "event not mirrored"),
         }
         applied += 1;
     }
-    if page.next > state.cursor {
-        state.cursor = page.next;
+    for c in wakes {
+        wake_tx
+            .send(Signal::Event(Box::new(c)))
+            .map_err(|_| anyhow::anyhow!("wake receiver closed before page commit"))?;
     }
-    state.updated = now_ms();
-    mirror.save_state(state)?;
+    let mut committed = state.clone();
+    committed.cursor = committed.cursor.max(page.next);
+    committed.updated = now_ms();
+    mirror.save_state(&committed)?;
+    *state = committed;
     Ok(applied)
 }
 
-/// The fetch → apply → persist loop. Returns only on a rejected key or a closed waker.
+/// The fetch → apply → persist loop. Stops on rejected keys, local apply/save errors or a closed waker.
 pub async fn poll_loop<S: Source>(
     source: &S,
     mirror: &Mirror,
@@ -835,5 +853,183 @@ mod tests {
         let r = poll_loop(&Rejecting, &m, State::default(), tx, None).await;
         assert_eq!(r.unwrap_err().to_string(), "key rejected");
         assert_eq!(EXIT_KEY_REJECTED, 78);
+    }
+
+    #[test]
+    fn mirror_failure_does_not_advance_page_cursor() {
+        let (_d, m) = temp_mirror();
+        std::fs::create_dir_all(m.paths.chats_file()).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        assert!(apply_page(&m, &mut state, &page(1..2, "c1"), &tx).is_err());
+        assert_eq!(state.cursor, 0);
+        assert_eq!(m.state().cursor, 0);
+        assert!(rx.try_recv().is_err());
+        std::fs::remove_dir(m.paths.chats_file()).unwrap();
+        apply_page(&m, &mut state, &page(1..2, "c1"), &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 1);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn closed_waker_does_not_commit_and_retry_recovers_wake() {
+        let (_d, m) = temp_mirror();
+        let (closed, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let mut state = State::default();
+        let p = page(1..2, "c1");
+        assert!(apply_page(&m, &mut state, &p, &closed).is_err());
+        assert_eq!(state.cursor, 0);
+        assert_eq!(m.state().cursor, 0);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 1);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn uncommitted_mirrored_row_recovers_wake_once() {
+        let (_d, m) = temp_mirror();
+        let p = page(1..2, "c1");
+        assert!(m.apply_event(&p.events[0]).unwrap().is_some());
+        assert_eq!(m.state().cursor, 0);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert_eq!(m.rows("c1").len(), 1);
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn failed_cursor_persistence_keeps_in_memory_state() {
+        let (_d, m) = temp_mirror();
+        std::fs::create_dir_all(m.paths.state_file()).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        let p = InboxPage {
+            events: vec![received(1, "c1", "m1", "context", false)],
+            next: 1,
+        };
+        assert!(apply_page(&m, &mut state, &p, &tx).is_err());
+        assert_eq!(state.cursor, 0);
+        assert_eq!(state.updated, 0);
+        std::fs::remove_dir(m.paths.state_file()).unwrap();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(state.cursor, 1);
+        assert_eq!(m.state().cursor, 1);
+        assert_eq!(m.rows("c1").len(), 1);
+    }
+
+    #[test]
+    fn later_mirror_failure_does_not_partially_dispatch_page() {
+        let (_d, m) = temp_mirror();
+        std::fs::create_dir_all(m.paths.chat_dir("blocked").parent().unwrap()).unwrap();
+        std::fs::write(m.paths.chat_dir("blocked"), "synthetic obstruction").unwrap();
+        let p = InboxPage {
+            events: vec![
+                received(1, "c1", "m1", "@bot first", true),
+                received(2, "blocked", "m2", "@bot second", true),
+            ],
+            next: 2,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        assert!(apply_page(&m, &mut state, &p, &tx).is_err());
+        assert_eq!(state.cursor, 0);
+        assert!(rx.try_recv().is_err());
+        std::fs::remove_file(m.paths.chat_dir("blocked")).unwrap();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(state.cursor, 2);
+        assert_eq!(m.rows("c1").len(), 1);
+        assert_eq!(m.rows("blocked").len(), 1);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn duplicate_message_inside_one_page_wakes_once() {
+        let (_d, m) = temp_mirror();
+        let event = received(1, "c1", "m1", "@bot hello", true);
+        let p = InboxPage {
+            events: vec![event.clone(), event],
+            next: 1,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        apply_page(&m, &mut State::default(), &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 1);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn prior_different_event_row_is_not_a_new_wake() {
+        let (_d, m) = temp_mirror();
+        m.apply_event(&received(1, "c1", "m1", "context", false))
+            .unwrap();
+        let p = InboxPage {
+            events: vec![received(2, "c1", "m1", "@bot hello", true)],
+            next: 2,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        apply_page(&m, &mut State::default(), &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn assert_distinct_messages_wake(event_id: Option<i64>) {
+        let (_d, m) = temp_mirror();
+        let mut events = vec![
+            received(event_id.unwrap_or(0), "c1", "m1", "@bot first", true),
+            received(event_id.unwrap_or(0), "c1", "m2", "@bot second", true),
+        ];
+        if event_id.is_none() {
+            for event in &mut events {
+                event.as_object_mut().unwrap().remove("id");
+            }
+        }
+        let p = InboxPage { events, next: 1 };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 2);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(rx.try_recv().is_err());
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn distinct_unpositioned_messages_in_one_page_each_wake() {
+        assert_distinct_messages_wake(None);
+    }
+
+    #[test]
+    fn distinct_messages_sharing_a_position_each_wake() {
+        assert_distinct_messages_wake(Some(1));
+    }
+
+    #[test]
+    fn unpositioned_message_replay_keeps_original_dedup() {
+        let (_d, m) = temp_mirror();
+        let mut event = received(0, "c1", "m1", "@bot hello", true);
+        event.as_object_mut().unwrap().remove("id");
+        let p = InboxPage {
+            events: vec![event],
+            next: 1,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 1);
+        assert!(rx.try_recv().is_err());
     }
 }

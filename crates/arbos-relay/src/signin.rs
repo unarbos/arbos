@@ -181,11 +181,6 @@ fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
     }
 }
 
-#[allow(dead_code)] // kept for callers that still want Value
-fn user_json(state: &AppState, user_id: &str) -> Value {
-    serde_json::to_value(user_dto(state, user_id)).expect("AccountUserDto")
-}
-
 /// End a device's session everywhere it exists: the relay `devices` row, that device's refresh
 /// tokens, its Matrix device and access token, its live room sockets and its `arbos-local`
 /// helper socket. Returns whether the relay row was still live.

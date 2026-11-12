@@ -29,7 +29,9 @@ pub use arbos_core::avatar::disc;
 
 /// The palette, the index rule and the sender accent live in `arbos-core`
 /// (`avatar.rs`) so the iPhone draws the same colours through arbos-ffi.
-pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
+#[cfg(test)]
+use arbos_core::avatar::color_index;
+pub use arbos_core::avatar::{index_for, GRADIENTS, INITIALS_SCALE};
 use arbos_core::avatar::{Accent, Rgb};
 
 // ----- D92 solid-colour discs ---------------------------------------------------

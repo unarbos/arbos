@@ -1,0 +1,50 @@
+{
+  "source_packet_manifest_sha256": "b24f4560619510d7b79ae395a2c1f30933a7550c5281a439d1f99d188769dd78",
+  "phases": {
+    "p3": {
+      "files": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": {
+          "pre_sha256": "6f86791ddb2fa962799a43119937bbb3a711512f189293d9f92aa3a4dda85a04",
+          "post_sha256": "2c30e3e7d6cce52eee092af50926b080d997ce817805d16311ee27e4d21a3744",
+          "pre_mode": "100644",
+          "post_mode": "100644",
+          "pre_blob": "97602f20f614037530c96c40fd1eaf53d1737c10",
+          "post_blob": "338dd037bcd06453c469648eef2671291b846347"
+        },
+        "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift": {
+          "pre_sha256": "e146312184ac679467495dd3b1da485e0bfb0a4b5c967c5ed8f2d3375c0e2d12",
+          "post_sha256": "030d305d5f681669483e48b7df9ab1436d33dea2a71c9cd1c10f7379d50a5f4b",
+          "pre_mode": "100644",
+          "post_mode": "100644",
+          "pre_blob": "3aab5bf64e9173e58f1b3338b3d9271b2460d2d1",
+          "post_blob": "ed1d1b7be5d7bf1189c3d2984bbd5f09f306733c"
+        }
+      },
+      "release_class_projection_byte_identical": true,
+      "release_class_projection_sha256": "175f0e10ea180ca0dd1e77d74b646fdadb7938f5d1b0e773568e4f64cf26337a"
+    },
+    "p4": {
+      "files": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": {
+          "pre_sha256": "ce7e5c6b54cefdf25c47236e81652e63770a03dcf55eb6d22a44b2b349167240",
+          "post_sha256": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+          "pre_mode": "100644",
+          "post_mode": "100644",
+          "pre_blob": "28f06cae4cbf7f081bb4de91d27b0dea347d73ab",
+          "post_blob": "a0da50a3d73c431b6cd0ed552b9a7eaadd445d8e"
+        },
+        "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift": {
+          "pre_sha256": "e146312184ac679467495dd3b1da485e0bfb0a4b5c967c5ed8f2d3375c0e2d12",
+          "post_sha256": "030d305d5f681669483e48b7df9ab1436d33dea2a71c9cd1c10f7379d50a5f4b",
+          "pre_mode": "100644",
+          "post_mode": "100644",
+          "pre_blob": "3aab5bf64e9173e58f1b3338b3d9271b2460d2d1",
+          "post_blob": "ed1d1b7be5d7bf1189c3d2984bbd5f09f306733c"
+        }
+      },
+      "release_class_projection_byte_identical": true,
+      "release_class_projection_sha256": "175f0e10ea180ca0dd1e77d74b646fdadb7938f5d1b0e773568e4f64cf26337a"
+    }
+  },
+  "scope": "Exact shared DEBUG test-oracle repair; differing complete phase ChatView files preserve their existing behavior."
+}

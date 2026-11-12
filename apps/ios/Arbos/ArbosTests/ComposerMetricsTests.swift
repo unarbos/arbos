@@ -312,6 +312,19 @@ final class ComposerMetricsTests: XCTestCase {
 /// through the view, that chat's rows and messages (about 4 MB a group open, Pass 3).
 @MainActor
 final class ComposerDraftLifetimeTests: XCTestCase {
+    private final class DraftReference {
+        weak var value: ComposerDraft?
+        init(_ draft: ComposerDraft) { value = draft }
+    }
+
+    private func references(excluding existing: Set<ObjectIdentifier>) -> [DraftReference] {
+        ComposerDraft.liveInstances.filter { !existing.contains(ObjectIdentifier($0)) }.map(DraftReference.init)
+    }
+
+    private func released(_ drafts: [DraftReference]) -> Bool {
+        drafts.allSatisfy { $0.value == nil }
+    }
+
     private func settle() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
     }
@@ -319,22 +332,73 @@ final class ComposerDraftLifetimeTests: XCTestCase {
     func testAClosedChatFreesItsDraft() {
         let model = AppModel()
         settle()
-        let before = ComposerDraft.live
-        autoreleasepool {
-            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-            let host = UIHostingController(rootView: AnyView(
-                ChatView(chatId: "draft-lifetime-chat", projectId: "draft-lifetime-project")
-                    .environmentObject(model).environment(\.theme, Theme.dark)))
-            window.rootViewController = host
-            window.makeKeyAndVisible()
+        let existing = ComposerDraft.liveInstances
+        let existingIds = Set(existing.map(ObjectIdentifier.init))
+        var hosted: [DraftReference] = []
+        // Another view may release an earlier draft during our run-loop turns.
+        // Keep those identities alive so only this host's new drafts are observed.
+        withExtendedLifetime(existing) {
+            autoreleasepool {
+                let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+                let host = UIHostingController(rootView: AnyView(
+                    ChatView(chatId: "draft-lifetime-chat", projectId: "draft-lifetime-project")
+                        .environmentObject(model).environment(\.theme, Theme.dark)))
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                settle()
+                hosted = references(excluding: existingIds)
+                XCTAssertFalse(hosted.isEmpty, "the open chat holds a draft")
+                XCTAssertTrue(hosted.allSatisfy { $0.value != nil }, "the hosted draft is alive while open")
+                host.rootView = AnyView(EmptyView())
+                settle()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
             settle()
-            XCTAssertGreaterThan(ComposerDraft.live, before, "the open chat holds a draft")
-            host.rootView = AnyView(EmptyView())
-            settle()
-            window.isHidden = true
-            window.rootViewController = nil
+            XCTAssertTrue(released(hosted), "the closed chat's draft is still alive")
         }
-        settle()
-        XCTAssertEqual(ComposerDraft.live, before, "the closed chat's draft is still alive")
+    }
+
+    func testUnrelatedDraftReleaseCannotFailTheInstanceObservation() {
+        let existing = ComposerDraft.liveInstances
+        withExtendedLifetime(existing) {
+            var unrelated: ComposerDraft? = ComposerDraft()
+            let unrelatedReference = DraftReference(unrelated!)
+            let existingIds = Set(existing.map(ObjectIdentifier.init)).union([ObjectIdentifier(unrelated!)])
+            var observed: [DraftReference] = []
+            autoreleasepool {
+                let draft = ComposerDraft()
+                observed = references(excluding: existingIds)
+                XCTAssertEqual(observed.count, 1)
+                XCTAssertTrue(observed.first?.value === draft)
+            }
+            XCTAssertNotNil(unrelatedReference.value)
+            unrelated = nil
+            XCTAssertNil(unrelatedReference.value)
+            XCTAssertTrue(released(observed), "an unrelated release cannot make a freed draft look retained")
+        }
+    }
+
+    func testRetainedDraftIsDetectedWhenAnUnrelatedDraftFrees() {
+        let existing = ComposerDraft.liveInstances
+        withExtendedLifetime(existing) {
+            var unrelated: ComposerDraft? = ComposerDraft()
+            let unrelatedReference = DraftReference(unrelated!)
+            let existingIds = Set(existing.map(ObjectIdentifier.init)).union([ObjectIdentifier(unrelated!)])
+            var retained: ComposerDraft?
+            var observed: [DraftReference] = []
+            autoreleasepool {
+                retained = ComposerDraft()
+                observed = references(excluding: existingIds)
+                XCTAssertEqual(observed.count, 1)
+            }
+            XCTAssertNotNil(unrelatedReference.value)
+            unrelated = nil
+            XCTAssertNil(unrelatedReference.value)
+            XCTAssertFalse(released(observed), "an unrelated release cannot hide the retained owned draft")
+            XCTAssertTrue(observed.first?.value === retained)
+            retained = nil
+            XCTAssertTrue(released(observed), "the observer itself must not retain the draft")
+        }
     }
 }

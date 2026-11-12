@@ -1,0 +1,19 @@
+{
+  "root_refresh_equals_preview_plus_admission_guard": true,
+  "root_transcript_enum_equals_frozen_preview": true,
+  "calibration_declarations_identical": {
+    "static let runWindowMs:": [
+      "static let runWindowMs: Int64 = 2 * 60 * 1000"
+    ],
+    "static let runGap:": [
+      "static let runGap: CGFloat = 2"
+    ],
+    "static let turnGap:": [
+      "static let turnGap: CGFloat = 13"
+    ],
+    "static let systemGap:": [
+      "static let systemGap: CGFloat = 20"
+    ]
+  },
+  "scope": "exact preview/cache bodies and admission-guard placement; not ownership implementation, UIKit layout or SwiftUI scheduling proof"
+}

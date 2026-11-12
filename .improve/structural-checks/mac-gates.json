@@ -1,0 +1,64 @@
+{
+  "modules": [
+    {
+      "module": "chat_title",
+      "source_sha256": "1e90258dd952d5f56045ddb4c089b8d251cb523a9532723bbbf77d0702cb10ae",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "compile_seconds": 0.10617491591256112,
+      "test_seconds": 0.5220540839945897
+    },
+    {
+      "module": "mentions",
+      "source_sha256": "cf660d65cc7cbae1993531da1220da8ff4ff444bf91d6a1a90136d32ecd8d8ff",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "compile_seconds": 0.08652004098985344,
+      "test_seconds": 0.1761176249710843
+    },
+    {
+      "module": "agent_link_expiry",
+      "source_sha256": "f06065b5c4ff9a785023a381eb604beadea1cf33d731b750c5683a85e9a2444c",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "compile_seconds": 0.08874137501697987,
+      "test_seconds": 0.30841083300765604
+    },
+    {
+      "module": "pending_messages",
+      "source_sha256": "d10299b7eba2c7d608804163c17ccfe8b8cae35ea877221ec920e83dbe46c174",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "compile_seconds": 0.09732837497722358,
+      "test_seconds": 0.2349196249851957
+    },
+    {
+      "module": "snapshot_schedule",
+      "source_sha256": "456a1e2908547917caf5f04eda2595d518be30000152486641722e1ab9ee5154",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "compile_seconds": 0.09215479099657387,
+      "test_seconds": 0.2068214169703424
+    }
+  ],
+  "total_passed": 25,
+  "mutants": [
+    {
+      "name": "always-paint",
+      "detected": true
+    },
+    {
+      "name": "postpone-burst",
+      "detected": true
+    },
+    {
+      "name": "never-timer",
+      "detected": true
+    }
+  ]
+}

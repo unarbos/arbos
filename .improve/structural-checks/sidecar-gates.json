@@ -1,0 +1,150 @@
+{
+  "gates": {
+    "before-controls": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar",
+        "daemon::tests"
+      ],
+      "exit_code": 101,
+      "seconds": 4.461984250112437,
+      "results": [
+        [
+          "FAILED",
+          "7",
+          "5",
+          "0"
+        ]
+      ]
+    },
+    "after-daemon": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar",
+        "daemon::tests"
+      ],
+      "exit_code": 0,
+      "seconds": 2.2912746670190245,
+      "results": [
+        [
+          "ok",
+          "13",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    "after-mirror": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar",
+        "mirror::tests"
+      ],
+      "exit_code": 0,
+      "seconds": 0.10240725008770823,
+      "results": [
+        [
+          "ok",
+          "4",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    "check": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar"
+      ],
+      "exit_code": 0,
+      "seconds": 0.9203183749923483,
+      "results": []
+    },
+    "clippy-alltargets": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 2.5247725419467315,
+      "results": []
+    },
+    "build": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-sidecar"
+      ],
+      "exit_code": 0,
+      "seconds": 1.761295749922283,
+      "results": []
+    }
+  },
+  "selected_final_tests": {
+    "passed": 17,
+    "failed": 0,
+    "ignored": 0,
+    "breakdown": {
+      "daemon": 13,
+      "mirror": 4
+    }
+  },
+  "original_tests_unmodified": true,
+  "all_native_workspace_tests_run": false,
+  "fmt_check": {
+    "exit_code": 0
+  },
+  "source_frozen": true,
+  "source_sha256": {
+    "daemon.rs": "a611dc37d543e58a6d79c86408763d20913f95b6ef5e064604e33b18f5de6521",
+    "mirror.rs": "ce1a0922b6b3e80ee59fa2c1e3d673d52aecd975e7013ec83df2e98d1dbf5a5c"
+  },
+  "unique_per_workspace_target": true,
+  "only_sidecar_package_cleaned_before_red_and_green": true,
+  "shared_target_green_superseded": true
+}

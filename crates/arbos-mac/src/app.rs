@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::chat_search;
+use crate::chat_title::title_from;
 use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
@@ -167,15 +168,6 @@ impl AgentPick {
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Kept for the relay path; the person pane (2026-10-20) and the agent pane
-/// (2026-10-21) no longer offer a call button — calls start from the chat.
-#[allow(dead_code)]
-pub enum CallTarget {
-    User(String),
-    Agent(Id),
 }
 
 fn muted_path() -> PathBuf {
@@ -725,9 +717,6 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
-    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
-    /// the people sheet adds to.
-    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
@@ -1299,7 +1288,6 @@ impl AppState {
             pending_dm_reply: None,
             awaiting_group: None,
             invite_target: None,
-            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
             add_members_secret: None,
@@ -1404,11 +1392,7 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
-            link_previews: {
-                let on = load_link_previews();
-                crate::ui::link_card::set_enabled(on);
-                on
-            },
+            link_previews: load_link_previews(),
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -2279,7 +2263,7 @@ impl AppState {
             }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
-                crate::ui::attachments::reveal(&path);
+                crate::external_open::reveal(&path);
                 cx.notify();
             }
             SyncEvent::AttachmentOpened { key, path } => {
@@ -7202,7 +7186,6 @@ impl AppState {
             return;
         }
         self.link_previews = enabled;
-        crate::ui::link_card::set_enabled(enabled);
         save_link_previews(enabled);
         cx.notify();
     }
@@ -8204,41 +8187,6 @@ impl AppState {
             });
         }
         cx.notify();
-    }
-
-    /// Call a person (their DM) or an agent (its chat; Calls Phase 2). The
-    /// panes no longer offer it (2026-10-21); the composer's call button does.
-    #[allow(dead_code)]
-    pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
-        let kind = if video {
-            CallKind::Video
-        } else {
-            CallKind::Voice
-        };
-        match target {
-            CallTarget::User(handle) => {
-                let dm = self
-                    .people_spaces()
-                    .find(|p| p.person().map(|x| x.handle == handle).unwrap_or(false))
-                    .map(|p| p.id.clone());
-                match dm {
-                    Some(chat_id) => {
-                        self.select_project(chat_id, cx);
-                        self.start_call_in_chat(kind, cx);
-                    }
-                    None => {
-                        self.push_notice(format!("Start a chat with @{handle} first, then call."));
-                        cx.notify();
-                    }
-                }
-            }
-            CallTarget::Agent(project_id) => {
-                // Calls Phase 2: a call in the agent's chat; the voice worker joins as the agent.
-                self.close_profile(cx);
-                self.select_project(project_id, cx);
-                self.start_call_in_chat(kind, cx);
-            }
-        }
     }
 
     /// A person by handle, from any space's member list or the directory.
@@ -9944,7 +9892,6 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
-        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -9976,56 +9923,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// "Give a person access…": the same sheet; a pick lets that person's agents message
-    /// this agent (`PUT /projects/{id}/message-access`). The agent pane's "Who may message"
-    /// card that opened it left on 2026-10-25 ([feedback
-    /// agent-details-remove-sections-mac-2026-10-25]); the list and its calls stay for the
-    /// next way in.
-    #[allow(dead_code)]
-    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        self.open_new_chat(cx);
-        self.message_grant_target = Some(project_id);
-        cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub fn set_message_grant(
-        &mut self,
-        project_id: Id,
-        grantee: String,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
-                g.enabled = enabled;
-            }
-        }
-        self.command(ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        });
-        cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub fn remove_message_grant(
-        &mut self,
-        project_id: Id,
-        grantee: String,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.message_grants.retain(|g| g.grantee != grantee);
-        }
-        self.command(ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        });
-        cx.notify();
-    }
-
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -10034,7 +9931,6 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
-        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -10419,19 +10315,6 @@ impl AppState {
             {
                 self.toggle_group_person(person, cx);
             }
-            return;
-        }
-        if let Some(project_id) = self.message_grant_target.take() {
-            self.new_chat_open = false;
-            let handle = handle.trim().trim_start_matches('@').to_string();
-            if !handle.is_empty() {
-                self.command(ClientCommand::SetMessageGrant {
-                    project_id,
-                    grantee: format!("@{handle}"),
-                    enabled: true,
-                });
-            }
-            cx.notify();
             return;
         }
         match self.invite_target.clone() {
@@ -12750,19 +12633,6 @@ pub fn fnv1a64(s: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
-}
-
-pub fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
-    }
 }
 
 /// MIME from a local path's extension (optimistic echo before the relay replies).

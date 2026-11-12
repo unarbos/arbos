@@ -1,0 +1,138 @@
+[
+  {
+    "name": "append",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "append_row_tests"
+    ],
+    "exit_code": 0,
+    "seconds": 1.0342499169055372,
+    "suites": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "expected_pass": 3,
+    "isolated_workspace_target": true,
+    "passed": true
+  },
+  {
+    "name": "privacy",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "group_add_privacy_tests"
+    ],
+    "exit_code": 0,
+    "seconds": 1.0524460410233587,
+    "suites": [
+      [
+        11,
+        0,
+        0
+      ]
+    ],
+    "expected_pass": 11,
+    "isolated_workspace_target": true,
+    "passed": true
+  },
+  {
+    "name": "sidecar-daemon",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-sidecar",
+      "daemon::tests"
+    ],
+    "exit_code": 0,
+    "seconds": 2.780372167006135,
+    "suites": [
+      [
+        15,
+        0,
+        0
+      ]
+    ],
+    "expected_pass": 15,
+    "isolated_workspace_target": true,
+    "passed": true
+  },
+  {
+    "name": "sidecar-mirror",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-sidecar",
+      "mirror::tests"
+    ],
+    "exit_code": 0,
+    "seconds": 0.29227170802187175,
+    "suites": [
+      [
+        4,
+        0,
+        0
+      ]
+    ],
+    "expected_pass": 4,
+    "isolated_workspace_target": true,
+    "passed": true
+  },
+  {
+    "name": "sites",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "--test",
+      "sites_routes"
+    ],
+    "exit_code": 0,
+    "seconds": 0.2902810829691589,
+    "suites": [
+      [
+        2,
+        0,
+        0
+      ]
+    ],
+    "expected_pass": 2,
+    "isolated_workspace_target": true,
+    "passed": true
+  }
+]

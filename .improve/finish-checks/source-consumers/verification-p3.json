@@ -1,0 +1,66 @@
+{
+  "base": "d40572b8fb43886fa784f6ac7579217fd23bb965",
+  "control": {
+    "scope": "rows",
+    "source_sha256": {
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "6f86791ddb2fa962799a43119937bbb3a711512f189293d9f92aa3a4dda85a04"
+    },
+    "fixture_sha256": "ea527d50c7e518091501846281ab1f1d9ac732d3af5d2cd2d3eeba110fb06827",
+    "mutant": null,
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "total": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "seconds": 1.650279000052251
+  },
+  "eligibility": {
+    "existing_selftests": 7,
+    "existing_selftest_exit": 0,
+    "actual_decision_cases": [
+      {
+        "file": ".improve/finish-checks/source-consumers/check.py",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": ".improve/finish-checks/source-consumers/README.md",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": ".improve/finish-checks/source-consumers/extra/data.json",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": "apps/ios/Arbos/Arbos/UI/ChatView.swift",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": "docs/ordinary.md",
+        "applies": false,
+        "exit_code": 0
+      }
+    ],
+    "seconds": 0.49768849997781217,
+    "workflow_sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+    "decision_script_sha256": "2669df80f1f8d837d504ea3e43dd6dd0764cc48df9e64dc872ac3a5b3e56fd6a",
+    "scope": "Existing actual pattern parser, union, matcher and decide function; only changed() file-list effect is controlled. No refs, dispatch, CI or network changes."
+  },
+  "negative_controls": [
+    {
+      "scope": "rows",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "6f86791ddb2fa962799a43119937bbb3a711512f189293d9f92aa3a4dda85a04"
+      },
+      "fixture_sha256": "d9a7afd384740c14830f196c65ee62c1ddd615fb62211e457b909781c7b9f7f4",
+      "mutant": "omit-hidden",
+      "compile_exit": 1,
+      "seconds": 0.6837490419857204
+    }
+  ]
+}

@@ -14,6 +14,7 @@
 //! `profiles/me.rs` draws it with the pane kit and `agent_link_reveal.rs`
 //! draws the copy sheet.
 
+pub use crate::agent_link_expiry::{EXPIRIES, EXPIRY_DEFAULT_HOURS};
 use crate::model::AgentLinkView;
 
 /// What a link may do. Two values, fixed at mint: to widen one, revoke it and
@@ -99,47 +100,6 @@ impl Scope {
 
 /// The scope rows, in order. Read only leads and is never not the default.
 pub const SCOPES: [Scope; 2] = [Scope::Read, Scope::Reply];
-
-/// How long a new link lives. The spec's own set, with no "Never": an
-/// unbounded grant is not a thing this screen can make
-/// (`spec` §5.3 — 1 hour minimum, 30 days maximum, 7 days by default).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Expiry {
-    pub hours: i64,
-    pub label: &'static str,
-}
-
-pub const EXPIRIES: [Expiry; 4] = [
-    Expiry {
-        hours: 1,
-        label: "1 hour",
-    },
-    Expiry {
-        hours: 24,
-        label: "24 hours",
-    },
-    Expiry {
-        hours: 7 * 24,
-        label: "7 days",
-    },
-    Expiry {
-        hours: 30 * 24,
-        label: "30 days",
-    },
-];
-
-/// The default: the job this feature was asked for is a session, not a
-/// standing integration (that is what outside agents already are).
-pub const EXPIRY_DEFAULT_HOURS: i64 = 7 * 24;
-
-/// "7 days" for the chosen hours, for the copy sheet's one-line restatement.
-pub fn expiry_label(hours: i64) -> &'static str {
-    EXPIRIES
-        .iter()
-        .find(|e| e.hours == hours)
-        .map(|e| e.label)
-        .unwrap_or("7 days")
-}
 
 /// The copy sheet's own once-ness lines, split in two so neither runs long.
 /// The once-ness belongs to the link, because the link *is* the credential:
@@ -364,7 +324,10 @@ mod tests {
         );
         assert_eq!(EXPIRIES.map(|e| e.hours), [1, 24, 168, 720]);
         assert_eq!(EXPIRY_DEFAULT_HOURS, 168);
-        assert_eq!(expiry_label(EXPIRY_DEFAULT_HOURS), "7 days");
+        assert_eq!(
+            crate::agent_link_expiry::expiry_label(EXPIRY_DEFAULT_HOURS),
+            "7 days"
+        );
         assert!(EXPIRIES.iter().all(|e| e.label != "Never"));
         // Every option is inside the relay's own 1 hour … 30 days window
         // (`agent_link::TTL_MIN_MS` / `TTL_MAX_MS`), so no choice on this

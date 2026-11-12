@@ -1,0 +1,451 @@
+{
+  "status": "PASS exact isolated canonical regressions; parent separately owns fresh combined package checks",
+  "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "changed_files": [
+    "crates/arbos-relay/src/db.rs",
+    "crates/arbos-relay/src/db_accounts.rs",
+    "crates/arbos-relay/src/people.rs"
+  ],
+  "source_sha256": {
+    "crates/arbos-relay/src/db.rs": "48c3aa549a25e7f639732c484d01279cd0d533b35ac5e5976f644398205aeb67",
+    "crates/arbos-relay/src/people.rs": "65c455d37f8c38783b35a77b3347c561ce6eb2401fe59a3b41bd747940ec5220",
+    "crates/arbos-relay/src/db_accounts.rs": "f4e48e0c68c859ea973d9541509fa0da99e92023a5689c462870790d6c34445c"
+  },
+  "gates": {
+    "isolated-before-append": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "append_row_tests"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-target",
+      "exit_code": 101,
+      "seconds": 32.85420099995099,
+      "results": [
+        [
+          "FAILED",
+          "1",
+          "2",
+          "0"
+        ]
+      ],
+      "compile_from_expected_source": true
+    },
+    "isolated-before-privacy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "group_add_privacy_tests"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-target",
+      "exit_code": 101,
+      "seconds": 1.4877432499779388,
+      "results": [
+        [
+          "FAILED",
+          "6",
+          "5",
+          "0"
+        ]
+      ],
+      "compile_from_expected_source": false
+    },
+    "isolated-after-append": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "append_row_tests"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/isolated-target",
+      "exit_code": 0,
+      "seconds": 30.888052791007794,
+      "results": [
+        [
+          "ok",
+          "3",
+          "0",
+          "0"
+        ]
+      ],
+      "compile_from_expected_source": true
+    },
+    "isolated-after-privacy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "group_add_privacy_tests"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/isolated-target",
+      "exit_code": 0,
+      "seconds": 1.0982745420187712,
+      "results": [
+        [
+          "ok",
+          "11",
+          "0",
+          "0"
+        ]
+      ],
+      "compile_from_expected_source": false
+    }
+  },
+  "other_gates": [
+    {
+      "name": "format",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2021",
+        "--check",
+        "crates/arbos-relay/src/db.rs",
+        "crates/arbos-relay/src/people.rs",
+        "crates/arbos-relay/src/db_accounts.rs"
+      ],
+      "exit_code": 0,
+      "seconds": 0.08243145805317909
+    },
+    {
+      "name": "apply-check",
+      "command": [
+        "git",
+        "apply",
+        "--check",
+        ".improve/evidence/relay-durability/relay-durability.patch"
+      ],
+      "exit_code": 0,
+      "seconds": 0.013412000029347837
+    }
+  ],
+  "source_frozen": true,
+  "network": "Every executed Cargo gate denied network*; local generated DBs only; no hosted services or credentials",
+  "limits": [
+    "Filtered DB and people test sets overlap: counts must not be summed as unique tests.",
+    "DB filter retained one pre-existing ignored live Daytona E2E test; opt-ins were absent.",
+    "Existing room WebSocket/loopback tests were not executed under the deny-all-network policy.",
+    "Read-error/unknown policy is denied; existing NULL/missing-row SQL defaults stay unchanged; no new legacy-NULL fixture claim.",
+    "No claim that these correctness fixes resolve observed app latency."
+  ],
+  "historical_shared_target_gates": {
+    "before-append": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "append_row_tests"
+      ],
+      "exit_code": 101,
+      "seconds": 23.527548542013392,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "FAILED",
+          "1",
+          "2",
+          "0"
+        ]
+      ]
+    },
+    "before-privacy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "group_add_privacy_tests"
+      ],
+      "exit_code": 101,
+      "seconds": 1.4287950419820845,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "FAILED",
+          "6",
+          "5",
+          "0"
+        ]
+      ]
+    },
+    "after-append": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "append_row_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 23.835177957895212,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "ok",
+          "3",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    "after-privacy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "group_add_privacy_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 1.3662369579542428,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "ok",
+          "11",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    "db-controls": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "db"
+      ],
+      "exit_code": 0,
+      "seconds": 2.288826667005196,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "ok",
+          "33",
+          "0",
+          "1"
+        ]
+      ]
+    },
+    "people-controls": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "people::"
+      ],
+      "exit_code": 0,
+      "seconds": 3.2182329579954967,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": [
+        [
+          "ok",
+          "48",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    "check": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay"
+      ],
+      "exit_code": 0,
+      "seconds": 28.390970042091794,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": []
+    },
+    "clippy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 81.13431220897473,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": []
+    },
+    "build": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay"
+      ],
+      "exit_code": 0,
+      "seconds": 29.68038712500129,
+      "network": "sandbox deny network*",
+      "cargo": "locked offline jobs=2 debug=0 incremental=0",
+      "results": []
+    }
+  },
+  "native_verification": {
+    "shared_cache_status": "All historical shared-target GREEN rows superseded; source Cargo relative-path/mtime alias could reuse another snapshot binary",
+    "provenance": {
+      "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "construction": "APFS clone frozen relay candidate; restore only the exact original batch lookup/append and group-privacy function regions; keep same3append+11privacy tests; before/after each has a unique workspace-cleaned target",
+      "regions": {
+        "crates/arbos-relay/src/db.rs": {
+          "original_region_sha256": "0b0ee8c7d1b33a1a7213d32972dcd4c4ab7c9eb644273be0813dc497cb8e546e"
+        },
+        "crates/arbos-relay/src/people.rs": {
+          "original_region_sha256": "a09d1ddff97a59e576d3fe5be1f8d18b43e335b7f6c416d708780c7d3cac7eaa"
+        }
+      },
+      "before_source_sha256": {
+        "crates/arbos-relay/src/db.rs": "8910105bd9e51c1a10b9aea3e3e7b80db30bf104cb01da322404618167147717",
+        "crates/arbos-relay/src/people.rs": "ff90ee9e709ce4891129bf0c66cbe7644860c196868b205edb7a9ab7125f3cb0",
+        "crates/arbos-relay/src/db_accounts.rs": "df846578540b10222ed5a07e9593a27e689e4949b4b68501b8ef1f928077d436"
+      },
+      "after_source_sha256": {
+        "crates/arbos-relay/src/db.rs": "48c3aa549a25e7f639732c484d01279cd0d533b35ac5e5976f644398205aeb67",
+        "crates/arbos-relay/src/people.rs": "65c455d37f8c38783b35a77b3347c561ce6eb2401fe59a3b41bd747940ec5220",
+        "crates/arbos-relay/src/db_accounts.rs": "f4e48e0c68c859ea973d9541509fa0da99e92023a5689c462870790d6c34445c"
+      }
+    },
+    "clean_before": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "clean",
+        "--offline",
+        "-p",
+        "arbos-core",
+        "-p",
+        "arbos-client",
+        "-p",
+        "arbos-relay",
+        "-p",
+        "arbos-sidecar"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/original-target",
+      "exit_code": 0,
+      "seconds": 0.5839839580003172,
+      "results": [],
+      "compile_from_expected_source": false
+    },
+    "clean_after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "clean",
+        "--offline",
+        "-p",
+        "arbos-core",
+        "-p",
+        "arbos-client",
+        "-p",
+        "arbos-relay",
+        "-p",
+        "arbos-sidecar"
+      ],
+      "source": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/workspace",
+      "target_directory": "/Users/cister/arbos life/arbos-codex/.improve/evidence/relay-durability/isolated-target",
+      "exit_code": 0,
+      "seconds": 0.14943029207643121,
+      "results": [],
+      "compile_from_expected_source": false
+    },
+    "results": "Original1P2F append/6P5F privacy, fixed3P/11P; exactexpectedcounts checked; sources and targetdirs separate; both forcecompiled from expected absolute source path",
+    "parent_coverage": "Root reports unique-target33 combined regressions and fresh4crate Clippy; this metadata does not relabel the historical shared broad gates as authoritative."
+  }
+}
