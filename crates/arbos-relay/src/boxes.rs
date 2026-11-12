@@ -665,9 +665,7 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
         Provider::Boxd => {
             // The daemon has no forced stop yet: a box agentd calls busy keeps running, `force`
             // or not, and the caller is told so.
-            if !crate::boxd::of(state)?.sleep(&state.http, user_id).await? {
-                return Err(anyhow!(crate::boxd::BUSY));
-            }
+            crate::boxd::stop_box(state, user_id).await?;
         }
     }
     sb.last_stopped_at = Some(now_ms());
@@ -1591,11 +1589,21 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
         Ok(Some(s)) => s,
         _ => return json!({ "provider": null }),
     };
-    json!({
+    let mut status = json!({
         "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url, "user_id": sb.user_id,
         "migrated_from": sb.migrated_from,
         "last_started_at": sb.last_started_at, "last_stopped_at": sb.last_stopped_at, "last_seen_at": sb.last_seen_at,
-    })
+    });
+    // A `boxd` box also says where its daemon last left it (docs/box-scaling.md §4.2). No other
+    // box has these, and what it shows is as it was.
+    if let Ok(Some((node_id, lifecycle_state, storage))) = state.db.box_lifecycle(user_id) {
+        status["node_id"] = json!(node_id);
+        status["lifecycle_state"] = json!(lifecycle_state);
+        status["storage"] = storage
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+    }
+    status
 }
 
 /// A person's row landed in `project_id`'s project doc (a settings change): a box with no socket

@@ -2,8 +2,8 @@
 //! A box on it runs as an OCI bundle under the host's root daemon; the relay asks the daemon to
 //! make it, wake it and put it to sleep, and sleeps it itself after 15 idle minutes (§3.1).
 //!
-//! Off unless `ARBOS_BOXD_URL` is set. One daemon, on loopback: `boxes.node_id` and a second
-//! host are Phase 4, and the in-place move of the Docker `runsc` boxes is an operator's step.
+//! Off unless `ARBOS_BOXD_URL` is set. One daemon, on loopback, written to `boxes.node_id` as
+//! [`NODE`]: a second host is Phase 4, and the in-place move of the Docker `runsc` boxes is an operator's step.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
@@ -41,6 +41,8 @@ const MIN_FREE_DISK_GB: f64 = 80.0;
 const MAX_RESIDENT: usize = 160;
 /// Error text of a wake on a full host where no awake box could be put to sleep to make room.
 pub const FULL: &str = "the host is full and every machine on it is busy";
+/// `boxes.node_id` of every box: the one daemon, on this host (§4.1 "Node 0").
+const NODE: &str = "node-0";
 /// Shorter than this is not a secret anyone generated (the daemon's own rule).
 const MIN_TOKEN_LEN: usize = 32;
 /// The largest reply read from the daemon. A host status with a thousand boxes is ~150 KB.
@@ -77,16 +79,15 @@ struct Woken {
     box_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Asleep {
     AsleepClean,
     AsleepCkpt,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct Slept {
     state: Asleep,
     files_bytes: Option<u64>,
@@ -282,20 +283,20 @@ impl Boxd {
         Ok(woken.box_url)
     }
 
-    /// Stop or checkpoint the box and release its disk. `false` is agentd refusing because the
+    /// Stop or checkpoint the box and release its disk. `None` is agentd refusing because the
     /// box is busy: nothing happened to it.
-    pub async fn sleep(&self, http: &reqwest::Client, user_id: &str) -> Result<bool> {
+    async fn sleep(&self, http: &reqwest::Client, user_id: &str) -> Result<Option<Slept>> {
         let path = box_path(user_id, "sleep")?;
         // agentd gets 50 s to stop cleanly, and a checkpoint writes ~0.8 s per GB after that.
         let (status, bytes) = self
             .send(http, Method::POST, &path, None, Duration::from_secs(180))
             .await?;
         if status == StatusCode::CONFLICT && refusal(&bytes).starts_with("busy") {
-            return Ok(false);
+            return Ok(None);
         }
         let slept: Slept = reply(&path, status, &bytes)?;
         tracing::info!(%user_id, state = ?slept.state, work_bytes = slept.work_bytes, ckpt_bytes = slept.ckpt_bytes, "boxd: box asleep");
-        Ok(true)
+        Ok(Some(slept))
     }
 
     async fn host(&self, http: &reqwest::Client) -> Result<HostStatus> {
@@ -359,10 +360,54 @@ pub async fn create_box(
 /// Wake an existing box and record where it listens.
 pub async fn start_box(state: &AppState, user_id: &str, sb: &mut Sandbox) -> Result<()> {
     make_room(state, user_id).await?;
-    sb.box_url = Some(of(state)?.wake(&state.http, user_id).await?);
+    // A box being made has no row yet, and this writes nothing.
+    record(state, user_id, "waking", None);
+    let woken = of(state)?.wake(&state.http, user_id).await;
+    if woken.is_err() {
+        record(state, user_id, "error", None);
+    }
+    sb.box_url = Some(woken?);
     sb.last_started_at = Some(now_ms());
     state.db.upsert_box(sb)?;
+    record(state, user_id, "warm", None);
     Ok(())
+}
+
+/// Put a box to sleep and keep what the daemon said of it: how it sleeps, and its storage split
+/// (§3.3: the Machine card is to be served from this without waking the box). [`BUSY`] when
+/// agentd refused: the daemon has no forced stop yet, and the box keeps running.
+pub async fn stop_box(state: &AppState, user_id: &str) -> Result<()> {
+    let Some(slept) = of(state)?.sleep(&state.http, user_id).await? else {
+        bail!(BUSY);
+    };
+    // The split is agentd's: there is none from a box that was not running to be asked.
+    let storage = slept.files_bytes.map(|files| {
+        json!({ "files_bytes": files, "scratch_bytes": slept.scratch_bytes,
+            "trash_bytes": slept.trash_bytes, "work_bytes": slept.work_bytes,
+            "ckpt_bytes": slept.ckpt_bytes, "at": now_ms() })
+        .to_string()
+    });
+    let lifecycle = serde_json::to_value(slept.state)?;
+    record(
+        state,
+        user_id,
+        lifecycle.as_str().unwrap_or("error"),
+        storage.as_deref(),
+    );
+    Ok(())
+}
+
+/// `boxes.lifecycle_state`: where the daemon last left the box. It is a record of what the
+/// daemon said, not what is counted or acted on: a box that died by itself still reads `warm`
+/// here until its next wake or sleep, and the relay's own view of it (`AppState::box_state`)
+/// is what admission and the idle supervisor go by.
+fn record(state: &AppState, user_id: &str, lifecycle: &str, storage_json: Option<&str>) {
+    if let Err(e) = state
+        .db
+        .set_box_lifecycle(user_id, NODE, lifecycle, storage_json)
+    {
+        tracing::warn!(%user_id, lifecycle, error = %e, "boxd: lifecycle state not written");
+    }
 }
 
 // ---- admission (§4.2) ------------------------------------------------------------------------
@@ -693,7 +738,7 @@ mod tests {
             boxd.wake(&http, "u_a").await.unwrap(),
             "http://10.207.0.2:7788"
         );
-        assert!(boxd.sleep(&http, "u_a").await.unwrap());
+        assert!(boxd.sleep(&http, "u_a").await.unwrap().is_some());
         assert_eq!(boxd.host(&http).await.unwrap().disk_free_gb, 900.0);
         let calls = fake.calls.lock().unwrap().clone();
         assert_eq!(
@@ -781,7 +826,7 @@ mod tests {
         let (fake, boxd) = served(TOKEN).await;
         let http = reqwest::Client::new();
         fake.answer("sleep", 409, json!({ "error": "busy: a turn is running" }));
-        assert!(!boxd.sleep(&http, "u_a").await.unwrap());
+        assert!(boxd.sleep(&http, "u_a").await.unwrap().is_none());
         fake.answer("sleep", 404, json!({ "error": "x".repeat(5000) }));
         let e = boxd.sleep(&http, "u_a").await.unwrap_err().to_string();
         assert!(e.contains("404") && e.len() < 300, "{e}");
@@ -923,6 +968,127 @@ mod tests {
             ops,
             ["status", "ensure", "status", "wake", "sleep", "sleep", "status", "wake"]
         );
+    }
+
+    /// The row says where the daemon last left the box, and keeps the storage split of the last
+    /// sleep that had one. Boxes of other providers say nothing of the kind.
+    #[tokio::test]
+    async fn the_row_keeps_the_lifecycle_state_and_the_last_storage_split() {
+        let (state, fake, user) = relay().await;
+        let at = |state: &AppState| state.db.box_lifecycle(&user).unwrap();
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        assert_eq!(at(&state), Some(("node-0".into(), "warm".into(), None)));
+
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        fake.answer("sleep", 409, json!({ "error": "busy: a turn is running" }));
+        boxes::stop_box(&state, &user, false).await.unwrap_err();
+        assert_eq!(at(&state).unwrap().1, "warm", "a busy box did not sleep");
+
+        fake.answer(
+            "sleep",
+            200,
+            json!({ "state": "asleep_ckpt", "files_bytes": 5, "scratch_bytes": 6,
+                "trash_bytes": null, "work_bytes": 4096, "ckpt_bytes": 7 }),
+        );
+        boxes::stop_box(&state, &user, false).await.unwrap();
+        let shown = boxes::provider_status(&state, &user).await;
+        assert_eq!(shown["lifecycle_state"], "asleep_ckpt");
+        assert_eq!(shown["node_id"], "node-0");
+        let mut storage = shown["storage"].clone();
+        assert!(storage["at"].take().as_i64().unwrap() > 0);
+        assert_eq!(
+            storage,
+            json!({ "files_bytes": 5, "scratch_bytes": 6, "trash_bytes": null,
+                "work_bytes": 4096, "ckpt_bytes": 7, "at": null })
+        );
+
+        // A wake the daemon refuses, then one it takes, then the sleep of a box that was not
+        // running: no agentd to measure a split, so the one before is kept.
+        fake.answer("wake", 500, json!({ "error": "runsc restore failed" }));
+        boxes::start_box(&state, &user).await.unwrap_err();
+        assert_eq!(at(&state).unwrap().1, "error");
+        fake.replies.lock().unwrap().remove("wake");
+        boxes::start_box(&state, &user).await.unwrap();
+        assert_eq!(at(&state).unwrap().1, "warm");
+        fake.answer(
+            "sleep",
+            200,
+            json!({ "state": "asleep_clean", "files_bytes": null, "scratch_bytes": null,
+                "trash_bytes": null, "work_bytes": 8192, "ckpt_bytes": 0 }),
+        );
+        boxes::stop_box(&state, &user, false).await.unwrap();
+        let (_, lifecycle, kept) = at(&state).unwrap();
+        assert_eq!(lifecycle, "asleep_clean");
+        let kept: Value = serde_json::from_str(&kept.unwrap()).unwrap();
+        assert_eq!(
+            (&kept["files_bytes"], &kept["work_bytes"]),
+            (&json!(5), &json!(4096))
+        );
+
+        // The row a relay writes for any box leaves all of it alone, and a box of another
+        // provider shows what it showed before.
+        let mut row = state.db.user_box(&user).unwrap().unwrap();
+        state.db.upsert_box(&row).unwrap();
+        assert_eq!(at(&state).unwrap().1, "asleep_clean");
+        row.user_id = "u_gvisor".into();
+        row.provider = "gvisor".into();
+        state.db.upsert_box(&row).unwrap();
+        let other = boxes::provider_status(&state, "u_gvisor").await;
+        assert!(other.get("lifecycle_state").is_none() && other.get("node_id").is_none());
+    }
+
+    /// The three columns arrive on a database from before them without touching its rows, the
+    /// statements that relay ran still run on it afterwards, and opening it again changes nothing.
+    #[test]
+    fn the_lifecycle_columns_are_added_to_an_old_database_and_an_old_relay_still_reads_it() {
+        let dir = std::env::temp_dir().join(format!("arbos-relay-boxd-db-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("relay.db");
+        // What `write_box` and `user_box` ran before this change, column for column.
+        const OLD_WRITE: &str = "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
+                last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_from)
+             VALUES (?1,'gvisor','s',NULL,'box:s','h','m',NULL,1,NULL,NULL,NULL,NULL,NULL,'[]')";
+        const OLD_READ: &str = "SELECT user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
+                last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_from FROM boxes";
+        drop(crate::db::Db::open(&path).unwrap());
+        let old = rusqlite::Connection::open(&path).unwrap();
+        for col in ["node_id", "lifecycle_state", "storage_json"] {
+            old.execute(&format!("ALTER TABLE boxes DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        old.execute(OLD_WRITE, ["u_before"]).unwrap();
+        drop(old);
+
+        for _ in 0..2 {
+            let db = crate::db::Db::open(&path).expect("migrate");
+            assert_eq!(db.user_box("u_before").unwrap().unwrap().provider, "gvisor");
+            assert_eq!(db.box_lifecycle("u_before").unwrap(), None);
+        }
+        let db = crate::db::Db::open(&path).unwrap();
+        db.set_box_lifecycle("u_before", NODE, "warm", Some("{}"))
+            .unwrap();
+        db.set_box_lifecycle("u_nobody", NODE, "warm", None)
+            .unwrap();
+        drop(db);
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute(OLD_WRITE, ["u_after"]).unwrap();
+        let rows = old
+            .prepare(OLD_READ)
+            .unwrap()
+            .query_map([], |_| Ok(()))
+            .unwrap()
+            .count();
+        assert_eq!(rows, 2);
+        drop(old);
+        let db = crate::db::Db::open(&path).unwrap();
+        assert_eq!(db.box_lifecycle("u_after").unwrap(), None);
+        assert_eq!(
+            db.box_lifecycle("u_before").unwrap(),
+            Some((NODE.into(), "warm".into(), Some("{}".into())))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A full disk, a daemon that refuses, or no daemon configured at all: no box, and no row
