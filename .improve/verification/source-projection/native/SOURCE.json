@@ -1,0 +1,34 @@
+{
+  "assembly_tree": "f3903159bb239a21f68a62ec029b82102ffe3f87",
+  "assembly_source_manifest_sha256": "c9cf2b2d0cec1f7b2369561ba3c66e86ae5e5f25148695f55ad901057748b877",
+  "assembly_provenance_sha256": "f6a01163d0bb14fed10ba2c45faf7ca6489b3e331b0226c20155577e665ba9af",
+  "native_anchor_manifests": {
+    "assembler-final/final-002/source-manifest.json": "49ea39dee1f4be6f5aa5c05d4787920ca455c58ea56c07a9901e218dc5e0e356",
+    "local-xcode-c19/observer-v3-native/SOURCE.json": "b9fc530228092092b084fce600659488dd4823773bda330d159f689974e2d8e8",
+    "local-xcode-c19/FFI-READY.json": "c80fab559eacc49db2e4f1d8d132bbe067eb22806bd0dae6f372bcb50bb9c546",
+    "local-xcode-c19/observer-v3-native/FILELIST-MEMBERSHIP-PRIVATE.json": "d8abefe852db651c2226449f6aac2ca99247f02d3bc1e0d1dc547c9ad6d4a13f"
+  },
+  "native_baseline_sha256": "774188fe2937d48901e82340fe8f5f4dcdb8fa035a3b6efc9fd8058522e72fb3",
+  "native_file_roles": {
+    "Rust_resolution_or_build_configuration": 3,
+    "Xcode_project_or_shared_scheme": 3,
+    "actual_xcode_compiler_input": 192,
+    "iOS_resource_configuration_or_source_read_envelope": 109,
+    "FFI_Rust_package_envelope": 49,
+    "native_golden_fixture": 110,
+    "local_Swift_FFI_package": 3,
+    "reviewed_all_target_relay_plan_helper": 1
+  },
+  "reviewed_Swift_overrides": 9,
+  "source_mode_and_blob_parity": true,
+  "outside_native_projection_changes": {
+    "workflow_metadata": 1,
+    "proof_report_metadata": 40
+  },
+  "unreviewed_code_differences_outside_native_projection": 0,
+  "generated_FFI_artifacts_checked": 6,
+  "private_reviewed_SwiftPM_lock_checked": 1,
+  "prepared_inputs_absent_from_source_only_assembly": 7,
+  "native_static_library_sha256": "586da39d02f3bf42f30cd5fc4f6e9e7af403b5896786a0fac1150faa4f65cef6",
+  "mode_scope": "Five historical framework mode records retained; generatedSwift644 verified here against both frozen generation and final native snapshot. No invented sixth historical mode assertion."
+}

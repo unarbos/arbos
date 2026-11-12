@@ -1,0 +1,112 @@
+[
+  {
+    "gate": "test",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client"
+    ],
+    "exit_code": 0,
+    "seconds": 2.291554542025551,
+    "test_suites": [
+      [
+        "31",
+        "0",
+        "0"
+      ],
+      [
+        "140",
+        "0",
+        "0"
+      ],
+      [
+        "0",
+        "0",
+        "0"
+      ],
+      [
+        "3",
+        "0",
+        "0"
+      ],
+      [
+        "0",
+        "0",
+        "0"
+      ],
+      [
+        "0",
+        "0",
+        "0"
+      ]
+    ]
+  },
+  {
+    "gate": "check",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client"
+    ],
+    "exit_code": 0,
+    "seconds": 19.89804420794826,
+    "test_suites": []
+  },
+  {
+    "gate": "clippy",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 21.492829708964564,
+    "test_suites": []
+  },
+  {
+    "gate": "build",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client"
+    ],
+    "exit_code": 0,
+    "seconds": 0.7135942080058157,
+    "test_suites": []
+  }
+]

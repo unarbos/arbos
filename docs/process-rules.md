@@ -88,8 +88,8 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   foreign material**, not a slightly wrong grey. Most of those tokens already have a Glass-aware
   accessor beside them in `ui/theme.rs`, returning the Matte token unchanged and a wash of the text
   colour on Glass: `surface_2` → `control_fill()`, `field` → `field_fill()`, `surface_1` → `card()`
-  / `popup()`, `pane_card` → `pane_card_fill()`, `sidebar` → `chrome()`, `bubble_assistant` →
-  `filter_on_fill()`, `bubble` → `segment_on_fill()`.
+  / `popup()`, `pane_card` → `pane_card_fill()`, `sidebar` → `chrome()`, `bubble` →
+  `segment_on_fill()`.
 - `scripts/glass-lint.sh` scans `crates/arbos-mac/src` in CI's Layout job and fails the build. It
   keys on the **token**, not on the control flow around it: #2801's defect was a bare
   `.bg(theme.surface_2)` inside an `if selected` leg, which `highlight.rs`'s drift guard — it only

@@ -205,7 +205,13 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("person.badge.plus", "person-plus"),
     ("person.badge.key", "key"),
     ("person.badge.minus", "person"),
+    // Overview Members / group hero ([feedback iphone-entity-profile-edit-2026-11-10]).
+    ("person.2", "people"),
     ("person.2.fill", "people"),
+    // Overview Library row / drill-in hero — pack has no books mark; `doc` stands in.
+    ("books.vertical", "doc"),
+    // Overview Routines row — pack has no clock face; `hourglass` stands in.
+    ("clock", "hourglass"),
     ("stop.fill", "stop"),
     ("play.fill", "play"),
     ("paperclip", "paperclip"),

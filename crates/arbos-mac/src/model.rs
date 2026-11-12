@@ -2117,6 +2117,28 @@ pub struct JobRef {
     pub title: String,
 }
 
+/// Agent-to-agent hand-off payload (`agentMessage` on a spawn / receive row).
+/// The send-side row names the destination; the receive-side copy keeps the
+/// same `id` so a tap on "Messaged ◉ X" can find the landed message.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessageRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub to_project_id: String,
+    #[serde(default)]
+    pub to_name: String,
+    #[serde(default)]
+    pub status: String,
+    /// Destination chat when agentd recorded it (absent on older notices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// Destination message when agentd recorded it (absent on older notices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
 /// Where an open job is in its life — the two states the relay lists
 /// (`activity.jobs[].state`, duplex §2.4). Finished, failed, cancelled and
 /// interrupted jobs are not listed: their outcome is a bubble in the chat.
@@ -2517,6 +2539,10 @@ pub struct Message {
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
     pub agent_reply_to: Option<String>,
+    /// Agent-to-agent hand-off / receive payload (`agentMessage`): tap target for
+    /// "Messaged ◉ X" and the matching id on the destination agent's copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_message: Option<AgentMessageRef>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
@@ -4604,6 +4630,7 @@ impl OptimisticNotice {
             job: None,
             hidden: false,
             agent_reply_to: None,
+            agent_message: None,
             reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,

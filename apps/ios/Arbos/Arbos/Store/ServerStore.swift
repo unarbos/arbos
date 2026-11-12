@@ -599,7 +599,7 @@ extension AppModel {
     /// Does this route show one of these channels — the channel itself, or its own page?
     private func shows(channelIds: Set<Id>, route: Route) -> Bool {
         switch route {
-        case .server: return false
+        case .server, .ownProfile, .newMessage: return false
         case .chat(let chatId, _): return channelIds.contains(chatId)
         case .profile(let target):
             switch target {

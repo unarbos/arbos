@@ -365,6 +365,11 @@ impl Agent {
                     tracing::warn!(error = %e, "agent_reply push failed");
                 }
             }
+            "agent_message_landed" => {
+                if let Err(e) = self.handle_agent_message_landed(payload).await {
+                    tracing::warn!(error = %e, "agent_message_landed push failed");
+                }
+            }
             "agent_message_paused" => {
                 if let Err(e) = self.handle_agent_message_paused(payload).await {
                     tracing::warn!(error = %e, "agent_message_paused push failed");

@@ -1,0 +1,164 @@
+{
+  "run": {
+    "id": 42828800182,
+    "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+    "attempt": 1,
+    "status": "completed",
+    "conclusion": "failure"
+  },
+  "job": {
+    "id": 129873404857,
+    "name": "build-xcframework + fastlane test",
+    "failed_step": "11 fastlane test",
+    "started_at": "2026-11-10T13:55:04Z",
+    "completed_at": "2026-11-10T15:34:30Z"
+  },
+  "build_for_testing": "passed",
+  "unit": {
+    "counts": {
+      "passed": 550,
+      "failed": 1,
+      "skipped": 0
+    },
+    "total_unique_case_records": 551,
+    "failed_cases": [
+      "AddMembersActionTests.testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls()"
+    ],
+    "failed_case_seconds": 35.859,
+    "assertion_detail_available": false,
+    "count_method": "Unique complete lowercase per-case text records; no interleaving repair, unit-target aggregate or xcresult is supplied."
+  },
+  "ui": {
+    "counts": {
+      "passed": 54,
+      "failed": 1,
+      "skipped": 13
+    },
+    "total_unique_case_records": 68,
+    "failure_events": 1,
+    "suite_seconds": 2800.481,
+    "failed_cases": [
+      "-[ArbosUITests.ChatSearchResultJumpUITests testAResultTapOnTheSenderAvatarAlsoStaysInTheChat]"
+    ],
+    "skipped_cases": [
+      "-[ArbosUITests.CaptureRigUITests testCapture]",
+      "-[ArbosUITests.ChatSearchRevealLandingUITests testAResultOutsideTheWindowIsTheSymptomBeforeTheFix]",
+      "-[ArbosUITests.ChatSearchRevealLandingUITests testAResultOutsideTheWindowLandsAfterTheFixAgain]",
+      "-[ArbosUITests.PerfBaselineUITests testComposerTypeAndSend]",
+      "-[ArbosUITests.PerfBaselineUITests testLaunchToChatList]",
+      "-[ArbosUITests.PerfBaselineUITests testMessageMenu]",
+      "-[ArbosUITests.PerfBaselineUITests testOpenLongGroup]",
+      "-[ArbosUITests.PerfBaselineUITests testOpenSmallDM]",
+      "-[ArbosUITests.PerfBaselineUITests testScrollChatList]",
+      "-[ArbosUITests.PerfBaselineUITests testScrollLongChat]",
+      "-[ArbosUITests.PerfBaselineUITests testSettingsSheet]",
+      "-[ArbosUITests.PerfBaselineUITests testStreamingAnswer]",
+      "-[ArbosUITests.PerfBaselineUITests testSwitchChats]"
+    ],
+    "assertion": {
+      "source": "ChatSearchResultJumpUITests.swift:204",
+      "expectation": "The tapped message is realized in the transcript.",
+      "observed": "After tapping sender avatar on long-412, the message is not realized; visible rows are g6\u2013g9."
+    },
+    "search_reveal_case_status": "passed; this is not the earlier shared search-reveal failure method"
+  },
+  "test_plan_fence": {
+    "written_targets": 2,
+    "verified_targets": 2,
+    "relay_override": "http://127.0.0.1:1",
+    "console_sha256": "c7a6fd38022c2f63e4613663323cb5c836ab20ea1561be43fb251ef37909911e",
+    "scope": "Actual job console write/verify proof, not whole-simulator no-egress certification."
+  },
+  "source_comparison": {
+    "BASE": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+    "P6": "84cb882feefc327e67167b723c9441015ab65944",
+    "P8": "b15e3f9ba8080539a9f882cc806478f3ba6a8f33",
+    "exact_sources": {
+      "apps/ios/Arbos/ArbosTests/AddMembersActionTests.swift": {
+        "whole_source_sha256": {
+          "BASE": "2764bf0ab41aed3499ecd4770497e1ad851b2c2ee9f49d78154b38a71ff41291",
+          "P6": "2764bf0ab41aed3499ecd4770497e1ad851b2c2ee9f49d78154b38a71ff41291",
+          "P8": "2764bf0ab41aed3499ecd4770497e1ad851b2c2ee9f49d78154b38a71ff41291"
+        },
+        "all_byte_equal": true
+      },
+      "apps/ios/Arbos/ArbosUITests/ChatSearchResultJumpUITests.swift": {
+        "whole_source_sha256": {
+          "BASE": "4c3d6053ab2f055f0afcaa98e6a1ebc4a15af56df4f128046326b8f0c86f6aa0",
+          "P6": "4c3d6053ab2f055f0afcaa98e6a1ebc4a15af56df4f128046326b8f0c86f6aa0",
+          "P8": "4c3d6053ab2f055f0afcaa98e6a1ebc4a15af56df4f128046326b8f0c86f6aa0"
+        },
+        "all_byte_equal": true
+      },
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": {
+        "whole_source_sha256": {
+          "BASE": "3b8f1353a2923126ca736137dc1266c1edc52dc5bfe241e38ac03e7ea974db86",
+          "P6": "3b8f1353a2923126ca736137dc1266c1edc52dc5bfe241e38ac03e7ea974db86",
+          "P8": "3b8f1353a2923126ca736137dc1266c1edc52dc5bfe241e38ac03e7ea974db86"
+        },
+        "all_byte_equal": true
+      },
+      "apps/ios/Arbos/Arbos/UI/Transcript.swift": {
+        "whole_source_sha256": {
+          "BASE": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+          "P6": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+          "P8": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d"
+        },
+        "all_byte_equal": true
+      }
+    },
+    "direct_method_bodies": {
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift": {
+        "installRelayForTests": {
+          "BASE_sha256": "4d08c03427098d34a48280288f391d98e3115288e982179c93600201054a7919",
+          "P6_sha256": "4d08c03427098d34a48280288f391d98e3115288e982179c93600201054a7919",
+          "byte_equal": true
+        },
+        "addMembers": {
+          "BASE_sha256": "232f231b79a02a3d4c9c1fe7a617d00f437213ce8785ce77f901a3df47acfabd",
+          "P6_sha256": "232f231b79a02a3d4c9c1fe7a617d00f437213ce8785ce77f901a3df47acfabd",
+          "byte_equal": true
+        }
+      },
+      "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": {
+        "request": {
+          "BASE_sha256": "c17751b5a161ee26627cf7b263489a15594a2d30fed63cbe408656ce90cbd546",
+          "P6_sha256": "c17751b5a161ee26627cf7b263489a15594a2d30fed63cbe408656ce90cbd546",
+          "byte_equal": true
+        },
+        "requestOnce": {
+          "BASE_sha256": "f48754e1f77eaa69a987f162c986f086ee6c06a286386df46ccfe9e3a69359dc",
+          "P6_sha256": "f48754e1f77eaa69a987f162c986f086ee6c06a286386df46ccfe9e3a69359dc",
+          "byte_equal": true
+        },
+        "addMembers": {
+          "BASE_sha256": "8bf7e9e6a524fae1d2ed1e0dca62ab85f56df856579cf8e558297946011ae13c",
+          "P6_sha256": "8bf7e9e6a524fae1d2ed1e0dca62ab85f56df856579cf8e558297946011ae13c",
+          "byte_equal": true
+        },
+        "addMember": {
+          "BASE_sha256": "5e824c6e6c4794ee85ae83b5e41d560d2d0bdfd42f651e89a07d983f2111d737",
+          "P6_sha256": "5e824c6e6c4794ee85ae83b5e41d560d2d0bdfd42f651e89a07d983f2111d737",
+          "byte_equal": true
+        },
+        "addAgent": {
+          "BASE_sha256": "8c773619bf94fdfdb605ef5a42d130d8dfb25dcff043278448a6d1b815d17321",
+          "P6_sha256": "8c773619bf94fdfdb605ef5a42d130d8dfb25dcff043278448a6d1b815d17321",
+          "byte_equal": true
+        }
+      }
+    },
+    "P6_changed_iOS_paths": [
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+      "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift",
+      "apps/ios/Arbos/fastlane/Fastfile"
+    ]
+  },
+  "classification": [
+    "An actual historical test failure after successful build and both targets fenced; not runner-capacity or zero-test evidence.",
+    "The legacy add-members fallback unit/test and direct request methods equal BASE. Uploaded text omits the failed assertion; the cause is unresolved, not proven flaky/setup or a fixed P6 defect.",
+    "The sender-avatar result-jump UI assertion is distinct from the prior search-reveal case, which passed here. Its test/ChatView/Transcript bytes equal BASE/P8, but other P6 model/API changes remain; the root cause is unresolved.",
+    "Later corrected integrated sources exercise these cases separately; they do not rewrite this immutable head or prove its historical cause.",
+    "No old P6 rerun, new test/app run, source/ref/index mutation or speculative fix was performed."
+  ]
+}

@@ -1074,6 +1074,41 @@ struct JobRollout: Equatable {
 /// A cross-chat reply reference (crdt-sync §6.2 `replyRef`, core `ReplyRef`): where the
 /// quoted message lives plus a snapshot of it, so a reader who is not in the source chat
 /// still sees the quote.
+/// Agent-to-agent hand-off payload (`agentMessage` on a spawn / receive row).
+/// The send-side row names the destination; the receive-side copy keeps the
+/// same `id` so a tap on "Messaged ◉ X" can find the landed message.
+struct AgentMessageRef: Equatable, Hashable {
+    var id: String
+    var toProjectId: String
+    var toName: String
+    var status: String
+    /// Destination chat when agentd recorded it (absent on older notices).
+    var chatId: Id?
+    /// Destination message when agentd recorded it (absent on older notices).
+    var messageId: Id?
+
+    init(id: String, toProjectId: String, toName: String, status: String,
+         chatId: Id? = nil, messageId: Id? = nil) {
+        self.id = id; self.toProjectId = toProjectId; self.toName = toName
+        self.status = status; self.chatId = chatId; self.messageId = messageId
+    }
+
+    /// The row's `agentMessage` map when it carries enough to be useful.
+    init?(row: Any?) {
+        guard let m = row as? [String: Any] else { return nil }
+        let s = { (k: String) -> String in (m[k] as? String) ?? "" }
+        let id = s("id")
+        let toProjectId = s("toProjectId")
+        let toName = s("toName")
+        // A receive-side copy only has fromProjectId; a send-side notice needs a target.
+        guard !id.isEmpty || !toProjectId.isEmpty || !toName.isEmpty else { return nil }
+        let chat = s("chatId")
+        let msg = s("messageId")
+        self.init(id: id, toProjectId: toProjectId, toName: toName, status: s("status"),
+                  chatId: chat.isEmpty ? nil : chat, messageId: msg.isEmpty ? nil : msg)
+    }
+}
+
 struct ReplyRef: Equatable, Hashable {
     var chatId: Id
     /// `"people"` for DMs and people groups, else the project id.
@@ -1278,6 +1313,9 @@ struct Message: Identifiable, Equatable {
     var notice: MembershipNotice? = nil
     /// `"off"` once the sender removed the link preview for everyone (#2066).
     var preview: String? = nil
+    /// Agent-to-agent messaging: the send-side hand-off payload (`agentMessage`), with the
+    /// destination chat/message ids once the target box has landed the words.
+    var agentMessage: AgentMessageRef? = nil
 
     var isStreaming: Bool { status == .streaming }
 
@@ -1518,7 +1556,8 @@ enum DocJSON {
             greeting: bool(m["greeting"]),
             reactions: reactions(m["reactions"]),
             notice: MembershipNotice(row: m["notice"]),
-            preview: str(m["preview"])
+            preview: str(m["preview"]),
+            agentMessage: AgentMessageRef(row: m["agentMessage"])
         )
     }
 

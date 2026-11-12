@@ -1,0 +1,27 @@
+[
+  {
+    "path": "BLOBS.json",
+    "bytes": 254,
+    "sha256": "0f82951bc480efa0f726681626afaca956650cdeca8f6e4ec31a5a5d036f94b1"
+  },
+  {
+    "path": "GATES.json",
+    "bytes": 1051,
+    "sha256": "41fe76da580fa385782d9c11f7e97998bb871446fcebac05287dd2f5d443c3db"
+  },
+  {
+    "path": "README.md",
+    "bytes": 2077,
+    "sha256": "d459d11b7279a59bc51abceb603f32e927af13a8a294d97f661e8fc999d9a73d"
+  },
+  {
+    "path": "RESULT.json",
+    "bytes": 15608,
+    "sha256": "45575fc803c68f2d727e1d0c11964fc11d739b2144cffce100a897487f9e206a"
+  },
+  {
+    "path": "SOURCE.json",
+    "bytes": 1958,
+    "sha256": "4ffc54c72d02f2a3377cc7ca15b5b6a435d049fe4a1423353eee3ea324305058"
+  }
+]

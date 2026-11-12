@@ -1870,6 +1870,7 @@ impl Shell {
                 footer,
                 done: None,
                 share: None,
+                overview_back: false,
             },
             self,
             cx,

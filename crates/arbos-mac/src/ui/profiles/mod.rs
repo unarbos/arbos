@@ -10,13 +10,13 @@
 
 pub(crate) mod agent;
 mod channel;
-mod group;
+pub(crate) mod group;
 pub(crate) mod kit;
 pub(crate) mod library;
 pub(crate) mod machine;
 mod me;
 pub(crate) mod pane;
-mod server;
+pub(crate) mod server;
 pub(crate) mod user;
 
 use std::sync::Arc;

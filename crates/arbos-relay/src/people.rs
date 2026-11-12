@@ -286,6 +286,11 @@ pub fn with_presence(state: &AppState, mut card: UserCardDto) -> UserCardDto {
     card
 }
 
+#[allow(dead_code)] // helper kept for wire/fixture tests; people_chat_dto uses member_dto
+pub(crate) fn member_json(state: &AppState, m: &Membership) -> Value {
+    serde_json::to_value(member_dto(state, m)).expect("ChatMemberDto")
+}
+
 #[derive(Default)]
 struct MemberProfiles {
     users: HashMap<String, UserPresence>,

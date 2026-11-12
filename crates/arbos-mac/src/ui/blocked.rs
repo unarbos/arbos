@@ -557,6 +557,8 @@ mod render_tests {
                 },
                 cx,
             );
+            // Members is an overview drill-in (group landing has no member list).
+            s.set_profile_subpage(Some(crate::ui::profiles::group::TAB_MEMBERS), cx);
         });
         settle(&state, &shell, vcx);
         let sam_row = vcx.debug_bounds("profile-member-sam").expect("Sam's row");

@@ -754,6 +754,10 @@ async fn main() -> anyhow::Result<()> {
         // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
         .route("/projects/{id}/agent-messages", post(agent_messages::send))
         .route(
+            "/projects/{id}/agent-messages/{mid}/landed",
+            post(agent_messages::landed),
+        )
+        .route(
             "/projects/{id}/agent-messages/{mid}/reply",
             post(agent_messages::reply),
         )

@@ -61,6 +61,10 @@ pub const CHAT_ARBOS_MEDIA: &str = "01J9CHAT0MEDIA000000000000";
 pub const CHAT_ARBOS_VOICE: &str = "01J9CHAT0VOICE000000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
+/// Shared `agentMessage.id` for the fixture agent-to-agent scene (send + receive).
+pub const AGENT_MESSAGE_DELIVERY: &str = "01J9AGENTMSGDELIVERY0000000";
+/// Destination message id in Comms' chat for that delivery.
+pub const AGENT_MESSAGE_DEST: &str = "01J9AGENTMSGDEST00000000000";
 /// F6 demo: a group hosted by Arbos with Affine and Comms.
 pub const CHAT_ARBOS_GROUP: &str = "01J9CHAT0GROUP000000000000";
 
@@ -5900,7 +5904,8 @@ impl Seeder<'_> {
     }
 
     /// Agent-to-agent messaging, sender side: the hand-off row agentd writes after
-    /// `send_message` (what the box writes, byte for byte in shape).
+    /// `send_message` (what the box writes, byte for byte in shape). Carries the
+    /// destination chat/message so a tap can reveal the landed copy.
     fn agent_message_sent(&mut self, to_name: &str, text: &str) -> Id {
         self.t += 6_000;
         let id = new_id();
@@ -5915,7 +5920,17 @@ impl Seeder<'_> {
                     ("turn", json!({ "kind": "spawn" })),
                     ("subagentName", json!(to_name)),
                     ("handoffMessages", json!(2)),
-                    ("agentMessage", json!({ "id": new_id(), "toName": to_name })),
+                    (
+                        "agentMessage",
+                        json!({
+                            "id": AGENT_MESSAGE_DELIVERY,
+                            "toProjectId": PROJECT_COMMS,
+                            "toName": to_name,
+                            "status": "delivered",
+                            "chatId": CHAT_COMMS_MAIN,
+                            "messageId": AGENT_MESSAGE_DEST,
+                        }),
+                    ),
                     ("createdAt", json!(self.t)),
                     ("completedAt", json!(self.t)),
                 ],
@@ -5924,18 +5939,20 @@ impl Seeder<'_> {
                 &id,
                 "agent_message_sent",
                 text,
-                &json!({ "toName": to_name }),
+                &json!({ "toName": to_name, "to": PROJECT_COMMS }),
             );
         });
         id
     }
 
     /// Agent-to-agent messaging, receiving side: another agent's words in this chat.
+    /// Shares [`AGENT_MESSAGE_DELIVERY`] with the sender-side hand-off so a tap can
+    /// find this row by `agentMessage.id`.
     fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) {
         self.t += 30_000;
         self.doc.core.transact(|d| {
             d.append_project_message(
-                &new_id(),
+                AGENT_MESSAGE_DEST,
                 text,
                 DEVICE,
                 &format!("project:{from_id}"),
@@ -5944,7 +5961,10 @@ impl Seeder<'_> {
                     ("senderHandle", json!(Project::mention_slug(from_name))),
                     (
                         "agentMessage",
-                        json!({ "id": new_id(), "fromProjectId": from_id }),
+                        json!({
+                            "id": AGENT_MESSAGE_DELIVERY,
+                            "fromProjectId": from_id,
+                        }),
                     ),
                     ("createdAt", json!(self.t)),
                     ("completedAt", json!(self.t)),
@@ -7126,6 +7146,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         job: None,
         hidden: false,
         agent_reply_to: None,
+        agent_message: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,

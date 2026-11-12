@@ -2,9 +2,10 @@ import XCTest
 @testable import Arbos
 
 /// Home's floating bars ([feedback iphone-home-bar-fades-2026-10-28], Jacob 2026-10-28 18:21 UTC):
-/// the discs + tabs at the top and the search capsule at the bottom float over the list like Grok
+/// the discs at the top and the search capsule at the bottom float over the list like Grok
 /// Bot's; rows stay visible and fade out under them instead of being cut. Geometry from
 /// `ListTopFade.spec(.home)` and `HomeBottomFade.spec`, the same the layers draw from.
+/// The All / Agents / People / Servers tabs are gone ([feedback chat-list-no-filter-ios-2026-11-10]).
 final class HomeBarFadeTests: XCTestCase {
     /// iPhone 17 / Air status bar (Dynamic Island) and the SE's.
     let statusBars: [CGFloat] = [59, 62, 20]
@@ -19,7 +20,7 @@ final class HomeBarFadeTests: XCTestCase {
         return a.alpha + (b.alpha - a.alpha) * Double((y - a.y) / (b.y - a.y))
     }
 
-    func testTopBarsFloat_rowsReadUnderTheDiscsAndTabsAndAreGoneWhereTheFirstRowRests() {
+    func testTopBarsFloat_rowsReadUnderTheDiscsAndAreGoneWhereTheFirstRowRests() {
         for status in statusBars {
             let spec = ListTopFade.spec(.home, statusBar: status)
             XCTAssertEqual(spec.topInset, 0)
@@ -31,14 +32,11 @@ final class HomeBarFadeTests: XCTestCase {
             XCTAssertEqual(alpha(spec.knots, at: discsBottom), HomeChrome.discsWash, accuracy: 0.001)
             XCTAssertLessThan(HomeChrome.discsWash, 1)
             XCTAssertGreaterThanOrEqual(HomeChrome.discsWash, 0.7)
-            // Under the tabs: still over half, so the words stay legible.
-            let tabsBottom = discsBottom + HomeChrome.filterBand
-            XCTAssertEqual(alpha(spec.knots, at: tabsBottom), HomeChrome.tabsWash, accuracy: 0.001)
-            XCTAssertGreaterThan(HomeChrome.tabsWash, 0.5)
-            XCTAssertLessThan(HomeChrome.tabsWash, HomeChrome.discsWash)
-            // Gone where the first row rests, and the layer ends there.
-            XCTAssertEqual(alpha(spec.knots, at: status + HomeChrome.listTop), 0)
-            XCTAssertEqual(spec.height, status + HomeChrome.listTop)
+            // Gone where the first row rests, and the layer ends there — same inset as search mode
+            // now that the filter tabs are gone.
+            XCTAssertEqual(alpha(spec.knots, at: status + HomeChrome.barOnlyListTop), 0)
+            XCTAssertEqual(spec.height, status + HomeChrome.barOnlyListTop)
+            XCTAssertEqual(HomeChrome.listTop, HomeChrome.barOnlyListTop)
             // Monotone: never brighter further down.
             for (a, b) in zip(spec.knots, spec.knots.dropFirst()) {
                 XCTAssertLessThanOrEqual(b.alpha, a.alpha); XCTAssertGreaterThanOrEqual(b.y, a.y)
@@ -47,12 +45,13 @@ final class HomeBarFadeTests: XCTestCase {
         }
     }
 
-    func testSearchModeKeepsTheSameFloatingDiscsWithoutTabs() {
+    func testSearchModeKeepsTheSameFloatingDiscs() {
         let status: CGFloat = 59
         let spec = ListTopFade.spec(.homeSearch, statusBar: status)
         XCTAssertEqual(spec.solid, status + HomeChrome.topSolid)
         XCTAssertEqual(alpha(spec.knots, at: status + HomeChrome.discsBottom), HomeChrome.discsWash, accuracy: 0.001)
         XCTAssertEqual(spec.height, status + HomeChrome.barOnlyListTop)
+        XCTAssertEqual(spec.height, ListTopFade.spec(.home, statusBar: status).height)
     }
 
     func testBottomCapsuleIsTheSharedSeeThroughFade() {

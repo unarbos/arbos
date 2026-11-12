@@ -1,0 +1,437 @@
+{
+  "status": "PASS",
+  "scope": "Read-only final iOS native source/input projection; no build or runtime execution",
+  "tracked_native_count": 470,
+  "reviewed_final_Swift_overrides": 9,
+  "tracked_input_problems": [],
+  "unexpected_native_paths": [],
+  "generated_or_private_prepared_inputs": {
+    "packages/ArbosFFI/ArbosFFIRust.xcframework/Info.plist": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "packages/ArbosFFI/ArbosFFIRust.xcframework/ios-arm64-simulator/libarbos_ffi.a": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "packages/ArbosFFI/ArbosFFIRust.xcframework/ios-arm64-simulator/Headers/arbos_ffiFFI.modulemap": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "packages/ArbosFFI/ArbosFFIRust.xcframework/ios-arm64-simulator/Headers/module.modulemap": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "packages/ArbosFFI/ArbosFFIRust.xcframework/ios-arm64-simulator/Headers/arbos_ffiFFI.h": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    },
+    "apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved": {
+      "assembly_present": false,
+      "frozen_reference_matches": true
+    }
+  },
+  "generated_reference_problems": [],
+  "outside_projection_manifest_differences": [
+    {
+      "path": ".github/workflows/swift-core-check.yml",
+      "classification": "workflow_metadata",
+      "expected": {
+        "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/AFTER.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "fc3a12b82b810aa59100268f32202df796d108a235d81778bdbe3ca392a58fec",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/CLOCK-ORIGINAL.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "fa55520af47e767ca91dfec7b561d714c5296f786a3f4546687c243819b2cfcb",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PORTABLE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "79a3942565fc43a4a0bda2509bcfca0dee05a751abcd264ce45a93108bdb43eb",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PREEXISTING.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "f813219ffc3b76fa81ab83cd45dc5d048710a6193cc417b05daa57cde4c702d4",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PRODUCT-BEFORE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "bac273557f18bc12a9c71f89f306f295b2326aa223c0e69d3f14e16a8144f871",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "42cd5f49e9fd6bc642872138acbe5dc5c82127aa3f0d451e6549b3b5f9ce7b81",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/baseline-date-methods.swift",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "47654913021e020ae86dbfaac0d685ad7169f52c7c292377369f9c7e76a48f4c",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/calendar/check.py",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "58ba3ab68e05c2883d30a2fe3a9705f6a1f5c4f787397f230243d2124da4d93f",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/CONTROLS.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "3003978f586f3f98b1b0327868095f36e05801bb1df7030a716d164cfbfabdf0",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/DIAGNOSIS.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "a7093b0746e0a9bed6c5976d3f5233d65b907dfcc95857757f11811b961a480d",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "2cd06da02115c27664d3880410ac1640b8241067cc7cbc155965e88b9b58af85",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/SOURCE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "e6a8f4748dc802e9f5fd1a963153aa751f34471cd31dd6a8f37e98bb58711d9b",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/STATIC.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "9e25b759c5114c65a2fd88e3d64d7c3d9476022c84518e7e96904776ab5aaee7",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "c06ff9cb36db41db7d50ef15e6224495521c2b96dd05ee62fe8241c8080df461",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/check.py",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "5d5a4f7011b24a06f148245831b2bb589d0431d09df9b8f43eb28fa229c91dcb",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/verification-p3.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "1df57aa6219171360195ca1406848cfe13390bff64abd7c6ae89c467573730ef",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/verification-p4.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "5cdd2abc421201ee5bd982448ef7c96185a1ef35c0ff33ebcac41b8c2e2987b7",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/README.md",
+      "classification": "proof_report_metadata",
+      "expected": {
+        "sha256": "7a62aadc294fde842da7c8a4be91a36998fe41eac7bc6f7fad3ef3a3a3da9056",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "9b9f6535572dbadb3a8e5fd30edb56b8fe357cde5f0cf99126eefd354cb6a2d1",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/AFTER.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "ce8fdd4b2085c419569ae26b1b9fabb28ff2dd4915ca6affe0376b8c1345a621",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/BEFORE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "7ab482005aad2e5a481cae858f29e3e1035a4eadfc0af70b44d4e2e4fb2a3f34",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/COMPILE-GATES.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "2ec4b79a5ef388230ac1575363695bdda2d66b88726ff066c53e3d5a3f417d31",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/DIAGNOSIS.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "4d7f56ed2bf25fa875b42211ef1a97cb8c28e10369b7cded72cba777ae6d9208",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "8a9b750198aa4482a27cd72b4380d51fbe884330e009b707c15b7ee21d28ac0f",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/SOURCE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "ac6ecf6026178b5a727398c4656b25d25c2ba43708a32863d41e16e0aa32e15f",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/ACTUAL-METHODS.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "8d9f97325f8b008aad62d4afe37c1c1ed01c210be143b092fd9c8695b0eabbb3",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/INDEPENDENT-REVIEW.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "8b8dbcd6089ffcadd8ac7b4564b02b1883171b4034b51b78d551a6b6a9deb877",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/MUTANTS.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "c0308b4d6278669d557fb9732da1aa0af43f68687e7dd5a356656a89eb444565",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "bd7eef11563aa7d5f118f6c4c0b0f1b6f20d00154832400f9467c3574afec412",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/SELECTED-RUNNER.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "470a429354cd14b71ed5f97d93fb23186fb9ff450119ebf6664d7d7c0d5b3b1e",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/SOURCE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "b314cfebfe7e6ffca4a93578c44a8efa4e8441df984e11c767cbcce4c498b3e6",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/methods/check_draft_sends.py",
+      "classification": "proof_report_metadata",
+      "expected": {
+        "sha256": "1157982e52501f42095fc9e5edee45d5e48d0a9ad79fde03939d60c5e5ae1efb",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "056b8b6ec111a39581172ebcc3597675507030045ea8c39d267e01099965b7f9",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/run_all.py",
+      "classification": "proof_report_metadata",
+      "expected": {
+        "sha256": "3fd79a17ccd9a1132c66421cb5828e3c3cade01f681182774a0de6acf6009cb2",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "4c93743e70225a4cc55e475b4f6c303fb09ad6319cf0cfe3b7a717a1e15d8394",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/CAUSAL-COMPARISON.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "850b4db0b73ba090124cf5c4fe42a1c4f73290b1dffe51e9267e1d4cdb3e59fe",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/FIXTURE-NONINTERFERENCE.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "3f26e75e03050a8382759f97c3d845b9294c53313fe002e0ccd4494b09ae0c16",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/GATES.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "0d8b36e273cde5ba7dd81719cd6f8465d18457f384afd8fbde0da489f23a9902",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/PARITY.json",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "9d247463676034d6e3b1dd9efdbd08880609813b54325f80103a71ffc23f124c",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/README.md",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "218caf52984d90d165a63d6b23e2a63a8dbf3d36685a0e7c7d0dd5b7e28f5d6b",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/one-line.patch",
+      "classification": "proof_report_metadata",
+      "expected": null,
+      "assembled": {
+        "sha256": "bef1d3738d852bb870e3192df1b4a510582b0b2f7f150717504803b5dcf864db",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/state-machines.md",
+      "classification": "proof_report_metadata",
+      "expected": {
+        "sha256": "f2130c0c882a1f5b5da7f6265a5c3a9efe39dfbc0f46cfd2e2c20d67becca908",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "3909b168ceabbcc9f1dcb7127347eaa494cf3cab6a87a9f3283f2ca661d3ac8f",
+        "mode": "100644"
+      }
+    },
+    {
+      "path": ".improve/structural-checks/structural-exit.md",
+      "classification": "proof_report_metadata",
+      "expected": {
+        "sha256": "ad0f064760d4be59f1e359b2ce38572af680373d1752f29b327042a1e98f9372",
+        "mode": "100644"
+      },
+      "assembled": {
+        "sha256": "7c783e88420fd7c57c8af5989baea56f98deb0ce178f85c3d4398af19cbc19c2",
+        "mode": "100644"
+      }
+    }
+  ],
+  "source_only_assembly_missing_prepared_inputs": 7,
+  "limitations": [
+    "Absence of ignored generated outputs/private SwiftPM lock does not mean the assembly is buildable; frozen FFI outputs and exact reviewed package pins or regeneration are still required.",
+    "Proof/report/workflow metadata differences are reported, never used as native runtime exceptions.",
+    "Other runtime domains and new assembly CI results require their own verification.",
+    "This read-only source comparison does not claim new app/test execution."
+  ],
+  "baseline_sha256": "774188fe2937d48901e82340fe8f5f4dcdb8fa035a3b6efc9fd8058522e72fb3",
+  "assembly_manifest_sha256": "c9cf2b2d0cec1f7b2369561ba3c66e86ae5e5f25148695f55ad901057748b877"
+}
