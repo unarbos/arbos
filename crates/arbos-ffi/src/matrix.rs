@@ -46,6 +46,9 @@ pub struct MatrixSession {
     /// `people_native` of `GET /me/matrix`: list DMs and groups in the snapshot.
     #[uniffi(default = false)]
     pub people_native: bool,
+    /// `history_key` of `GET /me/matrix`: the key the relay signs carried history with.
+    #[uniffi(default = None)]
+    pub history_key: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -255,6 +258,7 @@ pub async fn matrix_start(
             access_token: session.access_token,
             device_id: session.device_id,
             people_native: session.people_native,
+            history_key: session.history_key,
         },
         arbos_matrix::Crypto {
             store_dir: crypto.store_dir.into(),
@@ -349,6 +353,17 @@ impl MatrixClient {
             .inner
             .send(&room_id, &text, Vec::new(), Some(&reply_to), &local_id)
             .await?)
+    }
+
+    /// Carry rows of a people chat's earlier history into its room: `page_json` is the body
+    /// of `GET /chats/{id}/matrix/history`, the result the body to `POST` back (see
+    /// `arbos_matrix::MatrixClient::carry_history`).
+    pub async fn carry_history(
+        &self,
+        room_id: String,
+        page_json: String,
+    ) -> Result<String, MatrixError> {
+        Ok(self.inner.carry_history(&room_id, &page_json).await?)
     }
 
     /// Put (`on`) or take back my reaction `key` on a row of a people chat. Refused in an

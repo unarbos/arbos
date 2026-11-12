@@ -27,6 +27,7 @@ use matrix_sdk::ruma::push::NewPushRule;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
+use matrix_sdk_crypto::vodozemac::Ed25519PublicKey;
 use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,6 +49,43 @@ pub struct Session {
     /// in the [`Snapshot`] and read from the homeserver. Off unless the relay says so.
     #[serde(default)]
     pub people_native: bool,
+    /// The key the relay signs a chat's earlier history with (`history_key`). This device
+    /// keeps the first one it is told ([`pinned_history_key`]).
+    #[serde(default)]
+    pub history_key: Option<String>,
+}
+
+/// `GET /chats/{id}/matrix/history`, as the relay writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryPage {
+    v: u32,
+    key: String,
+    room_id: String,
+    rows: Vec<rows::HistoryRow>,
+    #[allow(dead_code)] // the app's to read: whether to ask again
+    more: bool,
+}
+
+/// The most rows of one [`HistoryPage`] this device carries.
+const HISTORY_BATCH: usize = 50;
+
+/// The relay's history key this device goes by: the one in `store_dir` when there is one,
+/// else `told`, which is then kept there. Pinned so that a relay answer some later day, from
+/// whoever then answers as the relay, cannot make this device believe a different signer.
+fn pinned_history_key(store_dir: &std::path::Path, told: Option<&str>) -> Option<Ed25519PublicKey> {
+    let path = store_dir.join("history-key");
+    if let Ok(pinned) = std::fs::read_to_string(&path) {
+        if told.is_some_and(|t| t != pinned.trim()) {
+            tracing::warn!("the relay names a history key other than the one this device pinned");
+        }
+        return Ed25519PublicKey::from_base64(pinned.trim()).ok();
+    }
+    let key = Ed25519PublicKey::from_base64(told?).ok()?;
+    if let Err(e) = std::fs::write(&path, key.to_base64()) {
+        tracing::warn!(error = %e, "the relay's history key could not be pinned");
+    }
+    Some(key)
 }
 
 /// Where this device keeps its encryption keys.
@@ -151,6 +189,7 @@ pub struct MatrixClient {
     client: Client,
     me: OwnedUserId,
     people_native: bool,
+    history_key: Option<Ed25519PublicKey>,
     listener: Arc<dyn Listener>,
     timelines: Mutex<HashMap<OwnedRoomId, Timeline>>,
     stop: watch::Sender<bool>,
@@ -207,6 +246,7 @@ impl MatrixClient {
             client,
             me: user_id,
             people_native: session.people_native,
+            history_key: pinned_history_key(&crypto.store_dir, session.history_key.as_deref()),
             listener,
             timelines: Mutex::new(HashMap::new()),
             stop,
@@ -323,14 +363,38 @@ impl MatrixClient {
     /// room's rows and handed to the listener. `decrypted` is whether this device decrypted it.
     async fn ingest(&self, room: &Room, mut v: Value, decrypted: bool) {
         let encrypted = Self::is_encrypted(room).await;
-        let people = self.is_people(room).await;
-        if !self.takes(room.room_id(), &v, (encrypted, people), decrypted, true) {
+        let chat = self.people_chat_id(room).await;
+        if !self.takes(
+            room.room_id(),
+            &v,
+            (encrypted, chat.is_some()),
+            decrypted,
+            true,
+        ) {
             return;
         }
         v["room_id"] = json!(room.room_id().as_str());
         let names = self.names_for(room, std::slice::from_ref(&v)).await;
-        if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
+        if let Some(row) = self.row_of(room.room_id(), chat.as_deref(), &v, &names) {
             self.push_rows(room.room_id(), vec![row], true);
+        }
+    }
+
+    /// The row of an event [`Self::takes`] let through; `chat` is the people chat the room
+    /// is. There, an event that carries a row of the chat's earlier history is that row or
+    /// nothing ([`rows::carried_row`]).
+    fn row_of(
+        &self,
+        room_id: &RoomId,
+        chat: Option<&str>,
+        ev: &Value,
+        names: &HashMap<String, String>,
+    ) -> Option<MessageRow> {
+        match chat {
+            Some(chat) if ev["content"].get(rows::HISTORY).is_some() => {
+                rows::carried_row(ev, room_id.as_str(), chat, self.history_key.as_ref()?)
+            }
+            _ => message_row(ev, &|m| names.get(m).cloned()),
         }
     }
 
@@ -354,7 +418,8 @@ impl MatrixClient {
         if people && self.fold(room_id, ev, !encrypted || decrypted, notify) {
             return false;
         }
-        rows::shows(ev, encrypted, decrypted) && (!people || rows::sender_is_own(ev))
+        rows::shows(ev, encrypted, decrypted)
+            && (!people || rows::sender_is_own(ev) || ev["content"].get(rows::HISTORY).is_some())
     }
 
     /// Keep an encrypted event for [`Self::unlock`].
@@ -601,7 +666,15 @@ impl MatrixClient {
 
     /// Whether the room's rows follow the people-chat rule ([`rows::sender_is_own`]).
     async fn is_people(&self, room: &Room) -> bool {
-        self.people_native && Self::people_chat(room).await.is_some()
+        self.people_chat_id(room).await.is_some()
+    }
+
+    /// The people chat a room is, for a device that reads people chats here.
+    async fn people_chat_id(&self, room: &Room) -> Option<String> {
+        if !self.people_native {
+            return None;
+        }
+        Self::people_chat(room).await.map(|(chat_id, _)| chat_id)
     }
 
     /// The newest row's (text, sender, sender name, time) for the list's preview.
@@ -808,6 +881,19 @@ impl MatrixClient {
                     .retain(|x| !(x.pending && x.id == r.id && x.sender == r.sender));
                 changed |= t.rows.len() != before;
             }
+            // One row per id and sender, whichever event brought it: a row carried twice (two
+            // devices) is drawn once, and the sender's own event for it is the one kept.
+            let same = |x: &MessageRow| {
+                x.id == r.id && x.sender.eq_ignore_ascii_case(&r.sender) && x.event_id != r.event_id
+            };
+            if r.carried && t.rows.iter().any(|x| !x.pending && same(x)) {
+                continue;
+            }
+            if !r.carried && !r.pending && !r.locked {
+                let before = t.rows.len();
+                t.rows.retain(|x| !(x.carried && same(x)));
+                changed |= t.rows.len() != before;
+            }
             // Same event again: keep the newest reading (a locked row becomes the message once
             // its key arrives).
             if !r.locked {
@@ -878,21 +964,27 @@ impl MatrixClient {
         opts.limit = UInt::from(HISTORY_PAGE);
         let page = room.messages(opts).await?;
         let encrypted = Self::is_encrypted(room).await;
-        let people = self.is_people(room).await;
+        let chat = self.people_chat_id(room).await;
         let events: Vec<Value> = page
             .chunk
             .iter()
             .filter_map(|e| {
                 let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
                 let decrypted = e.encryption_info().is_some();
-                self.takes(room.room_id(), &v, (encrypted, people), decrypted, false)
-                    .then_some(v)
+                self.takes(
+                    room.room_id(),
+                    &v,
+                    (encrypted, chat.is_some()),
+                    decrypted,
+                    false,
+                )
+                .then_some(v)
             })
             .collect();
         let names = self.names_for(room, &events).await;
         let rows: Vec<MessageRow> = events
             .iter()
-            .filter_map(|v| message_row(v, &|m| names.get(m).cloned()))
+            .filter_map(|v| self.row_of(room.room_id(), chat.as_deref(), v, &names))
             .collect();
         Ok((rows, page.end))
     }
@@ -1001,6 +1093,71 @@ impl MatrixClient {
             self.drop_pending(room.room_id(), local_id);
         }
         Ok(sent?.response.event_id.to_string())
+    }
+
+    /// Carry rows of a chat's earlier history into its room: `page` is what the relay
+    /// answered `GET /chats/{id}/matrix/history`, the result what to `POST` back
+    /// (`{"carried":[{"id","event_id"}]}`), so the relay stops offering them.
+    ///
+    /// Nothing is sent unless the page is for this room, under the history key this device
+    /// pinned, and every row in it verifies: what this device puts in the room under the
+    /// relay's name is what the relay signed. Each row is one event, encrypted where the room
+    /// is; its transaction id is the row's, so a batch sent again doubles nothing. A send that
+    /// fails ends the batch, and what went before it is reported.
+    ///
+    /// Into an encrypted room only a device its owner's identity has signed carries: what
+    /// any other device sends stays locked for everyone, and the relay would count the row as
+    /// carried all the same.
+    pub async fn carry_history(&self, room_id: &str, page: &str) -> Result<String> {
+        let refused = |why: &str| Error::Homeserver(format!("history not carried: {why}"));
+        let room = self.people_room(room_id).await?;
+        let chat = self
+            .people_chat_id(&room)
+            .await
+            .ok_or_else(|| Error::NoRoom(room_id.to_owned()))?;
+        let page: HistoryPage =
+            serde_json::from_str(page).map_err(|_| refused("not a page of history"))?;
+        let key = self
+            .history_key
+            .as_ref()
+            .ok_or_else(|| refused("no history key"))?;
+        if page.v != 1
+            || page.room_id != room_id
+            || page.key != key.to_base64()
+            || page.rows.len() > HISTORY_BATCH
+            || !page
+                .rows
+                .iter()
+                .all(|r| rows::history_verified(key, room_id, &chat, r))
+        {
+            return Err(refused("not this room's history"));
+        }
+        let vouched = match self.client.encryption().get_own_device().await {
+            Ok(Some(device)) => device.is_cross_signed_by_owner(),
+            _ => false,
+        };
+        if Self::is_encrypted(&room).await && !vouched {
+            return Err(Error::Keys(
+                "this device has not opened the key backup".into(),
+            ));
+        }
+        let mut carried = Vec::new();
+        for row in &page.rows {
+            let txn = format!("h{}", row.id);
+            let txn: &TransactionId = txn.as_str().into();
+            match room
+                .send_raw("m.room.message", rows::history_content(row))
+                .with_transaction_id(txn)
+                .await
+            {
+                Ok(sent) => {
+                    carried.push(json!({ "id": row.id, "event_id": sent.response.event_id }))
+                }
+                Err(e) if carried.is_empty() => return Err(e.into()),
+                Err(_) => break,
+            }
+        }
+        Ok(json!({ "carried": carried }).to_string())
     }
 
     /// Put (`on`) or take back this person's reaction `key` on a row of a people chat. Asking
@@ -1114,6 +1271,7 @@ mod backup_tests {
                 access_token: "t".into(),
                 device_id: "D".into(),
                 people_native: false,
+                history_key: None,
             },
             Crypto {
                 store_dir: dir.clone(),

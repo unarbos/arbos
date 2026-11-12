@@ -3,6 +3,7 @@
 //! so the existing transcript draws a channel like any chat; [`ChannelRow`] / [`SpaceRow`] feed
 //! the left list.
 
+use matrix_sdk_crypto::vodozemac::{Ed25519PublicKey, Ed25519Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -27,6 +28,11 @@ pub struct MessageRow {
     /// replaces it. Its `event_id` is not an event's.
     #[serde(default)]
     pub pending: bool,
+    /// A row of the chat's earlier history, carried into the room by a member's device and
+    /// vouched for by the relay ([`carried_row`]): `sender` and `created_at` are the signed
+    /// ones, not the carrying event's.
+    #[serde(default)]
+    pub carried: bool,
     /// Full row for the transcript (same shape as a chat-doc message).
     pub json: String,
 }
@@ -150,6 +156,19 @@ pub fn member_of_mxid(mxid: &str) -> String {
 /// What a message this device cannot decrypt (yet) reads as.
 pub const LOCKED: &str = "🔒 Waiting for this message's key";
 
+/// What a message reads as that was sent while this person was not in the chat: its key was
+/// never meant for them, so there is nothing to wait for.
+pub const LOCKED_BEFORE_JOIN: &str = "🔒 Sent before you joined";
+
+/// Whether the homeserver says the reader was not a member when `ev` was sent
+/// (`unsigned.membership`, Matrix 1.11). It can say so of any event; all that follows from it
+/// is which of the two sentences a row that stays locked either way shows.
+fn sent_before_joining(ev: &Value) -> bool {
+    ev["unsigned"]["membership"]
+        .as_str()
+        .is_some_and(|m| m != "join")
+}
+
 /// Events that become transcript rows: messages, and encrypted events that did not decrypt.
 pub fn is_message(ev: &Value) -> bool {
     matches!(
@@ -182,10 +201,9 @@ pub fn shows(ev: &Value, room_encrypted: bool, decrypted: bool) -> bool {
 /// Whether a people-chat event says nothing about its sender that the homeserver does not:
 /// `life.arbos.sender` is absent, names the Matrix `sender`, or marks the relay's system
 /// line. A row's author in a people chat is the account that sent the event, so a message
-/// carried for someone else (`life.arbos.on_behalf`, a past member's backfilled history) or
-/// one that simply names another member is not drawn.
-// Owner decision (spec §7 phase 3 backfill): dropped rather than attributed to whoever
-// carried it; the backfill slice decides how a past member's history is shown.
+/// that names another member is not drawn, and neither is one the mirror carried for someone
+/// who had left (`life.arbos.on_behalf`). The one row shown under a name its event's sender
+/// does not have is the chat's earlier history with the relay's signature ([`carried_row`]).
 pub fn sender_is_own(ev: &Value) -> bool {
     match ev["content"].get("life.arbos.sender") {
         None => true,
@@ -258,6 +276,168 @@ pub fn reaction(ev: &Value) -> Option<(String, Reaction)> {
             sender: member_of_mxid(ev["sender"].as_str()?),
         },
     ))
+}
+
+/// The content key of a row of the chat's earlier history, carried into the room by a
+/// member's device: what the relay signed besides the id, the sender and the text
+/// (`arbos-relay` `matrix/history.rs`).
+pub const HISTORY: &str = "life.arbos.history";
+
+/// The schema of a carried row this build reads and sends.
+const HISTORY_VERSION: u32 = 1;
+
+/// The most extra parts shown with one carried row.
+const HISTORY_PARTS_MAX: usize = 16;
+
+/// One row of `GET /chats/{id}/matrix/history`, as the relay signs it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRow {
+    pub id: String,
+    /// `user:<id>` | `agent:<project>` | `system`.
+    pub sender: String,
+    /// The sender's handle (a person) or name (an agent) when it was said.
+    pub handle: String,
+    pub ts: i64,
+    pub text: String,
+    /// The id of the row it answers, or empty.
+    pub reply_to: String,
+    /// The extra parts as JSON text, or empty.
+    pub parts: String,
+    pub sig: String,
+}
+
+/// The bytes the relay signed for `row` in `room_id`, the room of `chat_id`; the same function
+/// as the relay's `matrix::history::signing_bytes`.
+pub fn history_bytes(key: &[u8], room_id: &str, chat_id: &str, row: &HistoryRow) -> Vec<u8> {
+    let mut out = b"arbos.history".to_vec();
+    out.extend_from_slice(&HISTORY_VERSION.to_be_bytes());
+    let mut field = |bytes: &[u8]| {
+        out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        out.extend_from_slice(bytes);
+    };
+    field(key);
+    field(room_id.as_bytes());
+    field(chat_id.as_bytes());
+    field(row.id.as_bytes());
+    field(row.sender.as_bytes());
+    field(row.handle.as_bytes());
+    field(&row.ts.to_be_bytes());
+    field(row.text.as_bytes());
+    field(row.reply_to.as_bytes());
+    field(row.parts.as_bytes());
+    out
+}
+
+/// `user:<id>`, `agent:<id>` or `system`, the id in the relay's alphabet.
+fn is_member(sender: &str) -> bool {
+    sender == "system"
+        || sender
+            .strip_prefix("user:")
+            .or_else(|| sender.strip_prefix("agent:"))
+            .is_some_and(is_chat_id)
+}
+
+/// Whether `row` is one the relay signed, with `key`, for this room of this chat, and is
+/// shaped like a row. Nothing else about a carried row is believed.
+pub fn history_verified(
+    key: &Ed25519PublicKey,
+    room_id: &str,
+    chat_id: &str,
+    row: &HistoryRow,
+) -> bool {
+    let shaped = is_chat_id(&row.id)
+        && is_member(&row.sender)
+        && row.ts >= 0
+        && (row.reply_to.is_empty() || is_chat_id(&row.reply_to));
+    let Ok(sig) = Ed25519Signature::from_base64(&row.sig) else {
+        return false;
+    };
+    shaped
+        && key
+            .verify(&history_bytes(key.as_bytes(), room_id, chat_id, row), &sig)
+            .is_ok()
+}
+
+/// The content of the event that carries `row`. `m.relates_to` is the one field that stays
+/// outside an encrypted room's ciphertext, and says only what kind of event this is, so the
+/// homeserver neither counts nor announces old history as new messages
+/// ([`history_push_rule`]).
+pub fn history_content(row: &HistoryRow) -> Value {
+    json!({ "msgtype": "m.text", "body": row.text, "life.arbos.id": row.id,
+            "life.arbos.sender": row.sender,
+            HISTORY: { "v": HISTORY_VERSION, "handle": row.handle, "ts": row.ts,
+                       "reply_to": row.reply_to, "parts": row.parts, "sig": row.sig },
+            "m.relates_to": { "rel_type": HISTORY } })
+}
+
+/// The push rule under which the homeserver neither counts nor announces a carried row. The
+/// relay sets it for every member before it hands a row out.
+pub fn history_push_rule() -> Value {
+    json!({ "rule_id": HISTORY, "actions": [], "conditions": [{ "kind": "event_property_is",
+            "key": "content.m\\.relates_to.rel_type", "value": HISTORY }] })
+}
+
+/// What [`history_content`] puts under [`HISTORY`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryClaim {
+    v: u32,
+    handle: String,
+    ts: i64,
+    reply_to: String,
+    parts: String,
+    sig: String,
+}
+
+/// The row of an event that carries a row of the chat's earlier history, when the relay
+/// signed exactly that row for exactly this room: `key` is the relay's history key this
+/// device pinned, `chat_id` what the room's create event says the room is. The row is its
+/// signed sender's, at its signed time; the account that carried it is not shown. Anything
+/// else under [`HISTORY`] (another room's row, another key's, a changed word) is no row.
+pub fn carried_row(
+    ev: &Value,
+    room_id: &str,
+    chat_id: &str,
+    key: &Ed25519PublicKey,
+) -> Option<MessageRow> {
+    let content = &ev["content"];
+    let claim: HistoryClaim = serde_json::from_value(content[HISTORY].clone()).ok()?;
+    let row = HistoryRow {
+        id: content["life.arbos.id"].as_str()?.to_owned(),
+        sender: content["life.arbos.sender"].as_str()?.to_owned(),
+        handle: claim.handle,
+        ts: claim.ts,
+        text: content["body"].as_str()?.to_owned(),
+        reply_to: claim.reply_to,
+        parts: claim.parts,
+        sig: claim.sig,
+    };
+    if claim.v != HISTORY_VERSION
+        || ev["type"] != "m.room.message"
+        || !history_verified(key, room_id, chat_id, &row)
+    {
+        return None;
+    }
+    // Drawn from what was signed, through the one function that draws a message.
+    let mut signed = json!({ "msgtype": "m.text", "body": row.text, "life.arbos.id": row.id,
+                             "life.arbos.sender": row.sender });
+    let parts: Option<Vec<Value>> = serde_json::from_str(&row.parts).ok();
+    if let Some(parts) =
+        parts.filter(|p| p.len() <= HISTORY_PARTS_MAX && p.iter().all(Value::is_object))
+    {
+        signed["life.arbos.parts"] = Value::Array(parts);
+    }
+    let ev = json!({ "type": "m.room.message", "event_id": ev["event_id"],
+                     "origin_server_ts": row.ts, "content": signed });
+    let mut out = message_row(&ev, &|_| Some(row.handle.clone()))?;
+    if !row.reply_to.is_empty() {
+        let mut v: Value = serde_json::from_str(&out.json).ok()?;
+        v["replyTo"] = json!(row.reply_to);
+        out.json = v.to_string();
+    }
+    out.carried = true;
+    Some(out)
 }
 
 /// The event an `m.room.redaction` removes (top level before room version 11, in the content
@@ -345,7 +525,9 @@ pub fn message_row(
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| event_id.clone());
-    let text = if locked {
+    let text = if locked && sent_before_joining(ev) {
+        LOCKED_BEFORE_JOIN.to_owned()
+    } else if locked {
         LOCKED.to_owned()
     } else {
         content["body"].as_str().unwrap_or_default().to_owned()
@@ -410,6 +592,7 @@ pub fn message_row(
         created_at,
         locked,
         pending: false,
+        carried: false,
         json: row.to_string(),
     })
 }
@@ -745,6 +928,188 @@ mod tests {
         assert_eq!(answer(relates, "m.room.message"), None);
         // An undecrypted event's envelope says nothing the row repeats.
         assert_eq!(answer(json!({ REPLY_TO: "$m" }), "m.room.encrypted"), None);
+    }
+
+    /// The relay's test vector (`matrix::history::tests`): the key of seed `[7; 32]`, and its
+    /// signature over this row in this room.
+    #[test]
+    fn a_carried_row_is_the_relays_word_for_this_room_and_nothing_else() {
+        let key =
+            Ed25519PublicKey::from_base64("6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw").unwrap();
+        let row = HistoryRow {
+            id: "01HISTORY".into(),
+            sender: "user:gh_8".into(),
+            handle: "mira".into(),
+            ts: 1_700_000_000_123,
+            text: "see you at noon".into(),
+            reply_to: String::new(),
+            parts: String::new(),
+            sig: "DA2DHf8+cNdovLKYvOsViEsQuPrDcVDMyLgmSAsErXD3Ubl1JFRzfszRh+Kr9Ov5G5sZcjkn0OuRzyOckTytDQ".into(),
+        };
+        assert!(history_verified(&key, "!r:arbos.test", "01CHAT", &row));
+        // Carried by gh_7, who is not its sender; shown as gh_8's, at the time it was said.
+        let carried = |content: Value| {
+            json!({ "type": "m.room.message", "event_id": "$c", "sender": "@gh_7:arbos.test",
+                    "origin_server_ts": 1_800_000_000_000_i64, "content": content })
+        };
+        let ev = carried(history_content(&row));
+        let shown = carried_row(&ev, "!r:arbos.test", "01CHAT", &key).expect("a row");
+        assert!(shown.carried && !shown.locked && !shown.pending);
+        assert_eq!(
+            (
+                shown.id.as_str(),
+                shown.sender.as_str(),
+                shown.text.as_str()
+            ),
+            ("01HISTORY", "user:gh_8", "see you at noon")
+        );
+        assert_eq!(
+            (shown.created_at, shown.sender_name.as_str()),
+            (row.ts, "mira")
+        );
+        let v: Value = serde_json::from_str(&shown.json).unwrap();
+        assert_eq!(v["senderHandle"], "mira");
+        assert_eq!(v["createdAt"], row.ts);
+        // Outside the ciphertext: what kind of event, and nothing of the row.
+        assert_eq!(
+            ev["content"]["m.relates_to"],
+            json!({ "rel_type": HISTORY })
+        );
+        // The rule every other people-chat row passes does not pass it; only the signature does.
+        assert!(!sender_is_own(&ev));
+
+        let other_key =
+            Ed25519PublicKey::from_base64("iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w").unwrap();
+        let with = |change: &dyn Fn(&mut Value)| {
+            let mut content = history_content(&row);
+            change(&mut content);
+            carried(content)
+        };
+        for (why, ev, room, chat, k) in [
+            (
+                "another room",
+                ev.clone(),
+                "!other:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            ("another chat", ev.clone(), "!r:arbos.test", "01OTHER", &key),
+            (
+                "another key",
+                ev.clone(),
+                "!r:arbos.test",
+                "01CHAT",
+                &other_key,
+            ),
+            (
+                "a changed word",
+                with(&|c| c["body"] = json!("see you at one")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another sender",
+                with(&|c| c["life.arbos.sender"] = json!("user:gh_9")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another id",
+                with(&|c| c["life.arbos.id"] = json!("01OTHER")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another time",
+                with(&|c| c[HISTORY]["ts"] = json!(1)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another handle",
+                with(&|c| c[HISTORY]["handle"] = json!("jacob")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "added parts",
+                with(&|c| c[HISTORY]["parts"] = json!("[{\"kind\":\"cheque\"}]")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "an answer it never was",
+                with(&|c| c[HISTORY]["reply_to"] = json!("01X")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "no signature",
+                with(&|c| c[HISTORY]["sig"] = json!("")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "a later schema",
+                with(&|c| c[HISTORY]["v"] = json!(2)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "a field this build does not know",
+                with(&|c| c[HISTORY]["on_behalf"] = json!(true)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "the mirror's unsigned carry",
+                with(&|c| c[HISTORY] = json!(true)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+        ] {
+            assert!(carried_row(&ev, room, chat, k).is_none(), "{why}");
+        }
+        // Parts the relay signed are drawn; parts beside the signature are not.
+        let beside = with(&|c| c["life.arbos.parts"] = json!([{ "kind": "cheque" }]));
+        let shown = carried_row(&beside, "!r:arbos.test", "01CHAT", &key).unwrap();
+        let v: Value = serde_json::from_str(&shown.json).unwrap();
+        assert_eq!(v["parts"].as_array().unwrap().len(), 1, "{v}");
+    }
+
+    #[test]
+    fn a_row_that_stays_locked_says_why() {
+        let sealed = |unsigned: Value| {
+            let ev = json!({ "type": "m.room.encrypted", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                             "content": { "ciphertext": "x" }, "unsigned": unsigned });
+            message_row(&ev, &|_| None).unwrap()
+        };
+        for (unsigned, text) in [
+            (json!({}), LOCKED),
+            (json!({ "membership": "join" }), LOCKED),
+            (json!({ "membership": "leave" }), LOCKED_BEFORE_JOIN),
+            (json!({ "membership": "invite" }), LOCKED_BEFORE_JOIN),
+            (json!({ "membership": 7 }), LOCKED),
+        ] {
+            let row = sealed(unsigned.clone());
+            assert!(row.locked, "{unsigned}");
+            assert_eq!(row.text, text, "{unsigned}");
+        }
+        // A readable message says what it says, whatever the homeserver adds.
+        let clear = json!({ "type": "m.room.message", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                            "content": { "body": "hi" }, "unsigned": { "membership": "leave" } });
+        assert_eq!(message_row(&clear, &|_| None).unwrap().text, "hi");
     }
 
     #[test]
