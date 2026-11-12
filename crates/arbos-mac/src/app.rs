@@ -913,6 +913,11 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
+    /// Agent / group / server overview drill-in: `None` = Grok overview landing
+    /// (no tab pill); `Some(i)` = row `i` of that kind's overview set
+    /// ([feedback iphone-entity-profile-edit-2026-11-10]). Mac keeps the side
+    /// pane and uses ‹ to clear this (not an iOS push).
+    pub profile_subpage: Option<usize>,
     /// Pages under the open one, outermost first (a sender's profile pushed
     /// from a group, a member from its pane): `‹` pops back to the page with
     /// its tab and scroll.
@@ -1369,6 +1374,7 @@ impl AppState {
             notify_prompt: false,
             profile: None,
             profile_tab: 0,
+            profile_subpage: None,
             profile_stack: Vec::new(),
             profile_opened: 0,
             avatar_picker_request: None,
@@ -2632,12 +2638,24 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
-                            // `agent:library` / `agent:computer` land on that tab.
+                            // `agent:library` / `agent:computer` land on that overview row.
                             match rest {
-                                ":library" => self
-                                    .set_profile_tab(crate::ui::profiles::agent::TAB_LIBRARY, cx),
-                                ":computer" => self
-                                    .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
+                                ":library" => self.set_profile_subpage(
+                                    Some(crate::ui::profiles::agent::TAB_LIBRARY),
+                                    cx,
+                                ),
+                                ":computer" => self.set_profile_subpage(
+                                    Some(crate::ui::profiles::agent::TAB_COMPUTER),
+                                    cx,
+                                ),
+                                ":coding" => self.set_profile_subpage(
+                                    Some(crate::ui::profiles::agent::TAB_CODING),
+                                    cx,
+                                ),
+                                ":routines" => self.set_profile_subpage(
+                                    Some(crate::ui::profiles::agent::TAB_ROUTINES),
+                                    cx,
+                                ),
                                 _ => {}
                             }
                             // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
@@ -2663,7 +2681,10 @@ impl AppState {
                                 cx,
                             );
                             if rest == ":library" {
-                                self.set_profile_tab(1, cx);
+                                self.set_profile_subpage(
+                                    Some(crate::ui::profiles::group::TAB_LIBRARY),
+                                    cx,
+                                );
                             } else if let Some(tab) = rest.strip_prefix(":avatar") {
                                 // `group:avatar[:generate|:upload]` — the avatar picker (D92
                                 // amendment) for the group's picture.
@@ -6143,8 +6164,11 @@ impl AppState {
                     cx,
                 );
                 match part {
-                    "panel-members" => self.set_profile_tab(1, cx),
-                    "panel-settings" => self.set_profile_tab(2, cx),
+                    "panel-members" => {
+                        self.set_profile_subpage(Some(crate::ui::profiles::server::TAB_MEMBERS), cx)
+                    }
+                    "panel-settings" => self
+                        .set_profile_subpage(Some(crate::ui::profiles::server::TAB_SETTINGS), cx),
                     _ => {}
                 }
             } else if part == "add-members" {
@@ -7608,10 +7632,20 @@ impl AppState {
         self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
         self.profile_tab = 0;
+        self.profile_subpage = None;
         self.agent_pick = None;
         self.profile_editing_description = false;
         self.profile_editing_name = false;
         self.renaming_project = None;
+        cx.notify();
+    }
+
+    /// Overview row → subpage (Coding / Library / …). `None` returns to the landing.
+    pub fn set_profile_subpage(&mut self, page: Option<usize>, cx: &mut Context<Self>) {
+        self.profile_subpage = page;
+        self.agent_pick = None;
+        self.profile_editing_description = false;
+        self.profile_editing_name = false;
         cx.notify();
     }
 

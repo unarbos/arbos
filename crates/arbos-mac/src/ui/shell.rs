@@ -494,6 +494,8 @@ pub struct Shell {
     profile_open_at_bottom: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
+    /// Agent overview → Edit modal sheet (name, label, avatar, model / reasoning / voice).
+    pub(crate) agent_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
     pub(crate) handle_input: Entity<ComposerInput>,
     pub members_open: bool,
@@ -1281,6 +1283,7 @@ impl Shell {
             profile_open_at_bottom: std::env::var("ARBOS_PROFILE_SCROLL")
                 .is_ok_and(|v| v == "bottom"),
             profile_edit_open: false,
+            agent_edit_open: false,
             name_input,
             handle_input,
             members_open: false,
@@ -2357,9 +2360,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// Double-click the agent page's name (`description: false`): the name
-    /// becomes a field inside the sheet (owned agents only). `description:
-    /// true` also opens the about field (kept for the former Edit button).
+    /// Inline name / label edit on the agent pane (superseded by the Edit
+    /// sheet; kept for Escape / Done paths that still clear those flags).
+    #[allow(dead_code)]
     pub(crate) fn start_edit_agent(
         &mut self,
         project_id: crate::model::Id,
@@ -2529,6 +2532,7 @@ impl Shell {
         self.hide_settings_page(cx);
         self.library_reset();
         self.profile_edit_open = false;
+        self.agent_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
         self.server_leave_armed = false;
@@ -2781,8 +2785,90 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
+    /// Overview Edit pill → modal Edit Agent sheet.
+    pub(crate) fn open_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ProfilePage::Agent { project_id }) = self.state.read(cx).profile.clone() else {
+            return;
+        };
+        let (name, about, mine) = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            (
+                p.name.clone(),
+                p.description.clone().unwrap_or_default(),
+                !p.is_guest(),
+            )
+        };
+        if !mine {
+            return;
+        }
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(false);
+            input.set_text(name, cx);
+        });
+        self.description_input
+            .update(cx, |input, cx| input.set_text(about, cx));
+        self.agent_edit_open = true;
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.agent_edit_open {
+            return;
+        }
+        self.agent_edit_open = false;
+        self.state.update(cx, |s, cx| {
+            s.agent_pick = None;
+            cx.notify();
+        });
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    /// Done on the Edit Agent sheet: save name + label, then close.
+    pub(crate) fn save_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.agent_edit_open {
+            return;
+        }
+        let (project_id, current_name, current_label) = {
+            let state = self.state.read(cx);
+            let Some(ProfilePage::Agent { project_id }) = state.profile.clone() else {
+                self.close_agent_edit(window, cx);
+                return;
+            };
+            let Some(p) = state.project(&project_id) else {
+                self.close_agent_edit(window, cx);
+                return;
+            };
+            (
+                project_id,
+                p.name.clone(),
+                p.description.clone().unwrap_or_default(),
+            )
+        };
+        let name = self.agent_name_input.read(cx).text().trim().to_string();
+        if !name.is_empty() && name != current_name {
+            self.state
+                .update(cx, |s, cx| s.set_project_name(project_id.clone(), name, cx));
+        }
+        let label = self.description_input.read(cx).text().to_string();
+        if label.trim() != current_label.trim() {
+            self.state
+                .update(cx, |s, cx| s.set_description(project_id, label, cx));
+        }
+        self.close_agent_edit(window, cx);
+    }
+
     /// The agent page's "Done": save whichever of the name / description
     /// fields are open (unchanged text is not sent) and leave edit mode.
+    #[allow(dead_code)]
     pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (project_id, renaming, editing, current) = {
             let state = self.state.read(cx);
@@ -3301,11 +3387,20 @@ impl Shell {
             self.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
             return;
         }
+        if self.agent_edit_open {
+            self.close_agent_edit(window, cx);
+            return;
+        }
         if self.profile_edit_open {
             // Escape while editing my name/handle drops the edit; the pane stays.
             self.profile_edit_open = false;
             Composer::focus(&self.composer, window, cx);
             cx.notify();
+            return;
+        }
+        if self.state.read(cx).profile_subpage.is_some() {
+            self.state
+                .update(cx, |s, cx| s.set_profile_subpage(None, cx));
             return;
         }
         let mut closed = false;
@@ -5677,6 +5772,11 @@ impl Render for Shell {
         }
         if let Some(picker) = self.avatar_picker.clone() {
             root = root.child(avatar_picker::sheet(self, &picker, cx));
+        }
+        if self.agent_edit_open {
+            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
+                root = root.child(sheet);
+            }
         }
         if new_chat_open {
             // D93: "New agent" / "New group" open the Create screen over the same backdrop

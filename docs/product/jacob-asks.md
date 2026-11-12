@@ -33,11 +33,9 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `typing-indicator-left-2026-10-23` | 2026-10-23 | iPhone | The presence row over the composer names who is typing and which agents are working, one mark per handle, newest first. | `PresenceRowTests` |
 | `group-library-links-2026-10-23` | 2026-10-23 | iPhone | A group's Library lists links the way the agent pane does, through the one shared list builder. | `JacobAskGuardTests.testAGroupsLibraryListsLinksThroughTheSharedBuilder` |
 | `mention-chip-hover-2026-10-24` | 2026-10-24 | iPhone | A mention chip is accent on accent at 14 %, 30 % under the finger, so it visibly answers a touch. | `JacobAskGuardTests.testTheMentionChipStillAnswersTheFinger` |
-| `agent-details-remove-sections-ios-2026-10-25` | 2026-10-25 | iPhone | The agent Details tab keeps its Coding and Routines cards hidden. | `JacobAskGuardTests.testTheAgentDetailsTabKeepsCodingAndRoutinesHidden` |
 | `agent-pane-run-by-link-ios-2026-10-25` | 2026-10-25 | iPhone | Someone else's agent shows a "Run by …" line that opens its owner; my own agent shows none. | `BlockRowTests.testForeignAgentRunByLineIsAnOwnerLink` |
 | `create-sheet-avatar-upload-generate-ios-2026-10-25` | 2026-10-25 | iPhone | The create sheet offers Upload and Generate only — the shape grid and pastel swatches are gone. | `AvatarPickerTabsTests.testTheCreateSheetOffersUploadAndGenerateOnly` |
 | `image-caption-bubble-ios-2026-10-25` | 2026-10-25 | iPhone | A picture's caption wraps at the bubble's width, not the tall picture's. | `ImageCaptionBubbleTests` |
-| `iphone-agent-pane-tabs-2026-10-25` | 2026-10-25 | iPhone | Each kind of pane keeps its own tab set, in its own order and wording. | `ProfilePaneStructureTests.testKindsKeepTheirOwnTabSets` |
 | `iphone-bottom-search-bar-2026-10-25` | 2026-10-25 | iPhone | Home's bottom edge is one app-wide search bar; the old Telegram-style tab bar is gone. | `BottomSearchBarTests` |
 | `iphone-composer-grok-parity-2026-10-25` | 2026-10-25 | iPhone | The composer matches Grok's measured geometry, every metric landing on a pixel. | `ComposerMetricsTests` |
 | `ios-header-glass-2026-10-25` | 2026-10-25 | iPhone | The chat header is Liquid Glass — back, name pill, ⋯ — as in Grok's reference. | `HeaderGlassStructureTests` |
@@ -129,6 +127,9 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `in-call-bar` | — | iPhone | The in-call strip's chip stays 36 pt, a recorded exception to the one app-wide control height. | `JacobAskGuardTests.testTheInCallChipKeepsItsRecordedException` |
 | `reply-preview-fixed-height` | — | iPhone | The reply bar above the field is one row high whatever it quotes: the quote is flattened to a line and capped. | `JacobAskGuardTests.testTheReplyPreviewIsOneRowWhateverItQuotes` |
 | `2005` | — | iPhone | After an unblock, the rooms standing refused are asked to resend; a room that is not refused ignores the nudge. | `SessionRoomTests.testChatToRetryNamesOnlyMembershipAndSettingsChanges` |
+| `iphone-entity-profile-edit-2026-11-10` | 2026-11-10 | iPhone | Agent / group / server land on a Grok-style overview (avatar · name · Edit · grouped rows); Edit pushes a sectioned edit page. Coding and Routines are overview rows. | `JacobAskGuardTests.testTheAgentOverviewKeepsCodingAndRoutinesRows` |
+| `iphone-create-entity-edit-style-2026-11-10` | 2026-11-10 | iPhone | Create New Agent / Group / Server / Connect uses the Edit-page hierarchy (Done/Create pill, sectioned Name and Appearance cards), not the old bottom-sheet layout. | `JacobAskGuardTests.testCreateEntityUsesTheEditPageHierarchy` |
+| `iphone-entity-nav-push-2026-11-10` | 2026-11-10 | iPhone | From + → create/profile → edit → sub-pages, every step is a navigation push with edge-swipe back; avatar / model / voice / group edit are pushes, not sheets. | `EntityNavPushUITests` |
 | `closed-app-call-ring-2026-11-11` | 2026-11-11 | iPhone | VoIP and APNs tokens re-upload on every foreground pass so a closed iPhone can still ring after the relay drops a dead Apple token (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995). | `JacobAskGuardTests.testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged` |
 
 ## Superseded
@@ -138,6 +139,8 @@ Kept so the tag in the code resolves, and so nobody re-adds the behaviour by mis
 | ask | asked | why | what replaced it |
 | --- | --- | --- | --- |
 | `iphone-composer-bottom-fade-2026-10-28` | 2026-10-28 | Jacob, on TestFlight 202610281715985037: "we should actually see the text behind the search bar". The opaque band this asked for was the wrong answer. | `iphone-composer-see-through-2026-10-28`, guarded by `BottomBarFadeTests` |
+| `agent-details-remove-sections-ios-2026-10-25` | 2026-10-25 | Details-tab hide of Coding / Routines; the Grok overview puts those rows back on the landing. | `iphone-entity-profile-edit-2026-11-10`, guarded by `JacobAskGuardTests.testTheAgentOverviewKeepsCodingAndRoutinesRows` |
+| `iphone-agent-pane-tabs-2026-10-25` | 2026-10-25 | Agent / group / server no longer land on a tab pill; overview rows push instead. Person / own / channel keep their tab sets. | `iphone-entity-profile-edit-2026-11-10`, guarded by `ProfilePaneStructureTests` |
 | `iphone-filter-tab-taps-2026-10-28` | 2026-10-28 | Jacob asked for the Home filter tabs to go away entirely (2026-11-10). A 44 pt hit target on a control that no longer exists is not the ask. | `chat-list-no-filter-ios-2026-11-10`, guarded by `HomeChatListNoFilterUITests` |
 
 ## Changing a guard
