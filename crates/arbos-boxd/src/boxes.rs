@@ -287,7 +287,9 @@ impl Boxd {
             bail!("{dir} is not a directory");
         }
         Ok(Paths {
-            id: format!("arbos-box-{}", user.0),
+            // runsc takes an id that is the start of exactly one sandbox's as that sandbox, so
+            // `u_bob` would name `u_bobby`'s box. No user id holds a dot: the dot ends ours.
+            id: format!("arbos-box-{}.", user.0),
             img: format!("{dir}/work.img"),
             mnt: format!("{dir}/mnt"),
             config: format!("{dir}/config.json"),
@@ -644,7 +646,16 @@ impl Boxd {
             report = Some(r);
         }
         // Also what clears the id of a sandbox that exited by itself.
-        let _ = self.runsc(&["delete", "--force", &p.id], None).await;
+        let deleted = self.runsc(&["delete", "--force", &p.id], None).await?;
+        // Its disk is not taken from under a sandbox runsc still knows, and it is not called
+        // asleep: the caller gets the error and the box stays as it is.
+        if self.runsc(&["state", &p.id], None).await?.ok {
+            return Err(anyhow!(
+                "the sandbox is still there after runsc delete: {}",
+                deleted.stderr.trim()
+            )
+            .into());
+        }
         if self.holds(&["mountpoint", "-q", &p.mnt]).await? {
             self.run(&["umount", &p.mnt]).await?;
         }
@@ -840,6 +851,18 @@ pub mod tests {
         assert!(UserId::parse(&"a".repeat(64)).is_some());
     }
 
+    /// runsc resolves an id by prefix, so no box's id may be the start of another's.
+    #[tokio::test]
+    async fn no_sandbox_id_is_the_start_of_another() {
+        let (b, _, root) = boxd("ids").await;
+        let id = |u: &str| b.paths(&user(u)).unwrap().id;
+        assert_eq!(id("u_bob"), "arbos-box-u_bob.");
+        for (a, longer) in [("u_bob", "u_bobby"), ("pfx_1", "pfx_10"), ("a", "a-")] {
+            assert!(!id(longer).starts_with(&id(a)), "{a} names {longer}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_version_and_an_environment_are_allowlisted() {
         for ok in ["0.6.409", "1.0-rc_1"] {
@@ -978,7 +1001,7 @@ pub mod tests {
     #[tokio::test]
     async fn wake_starts_a_box_once() {
         let (b, fake, root, u) = awake("wake").await;
-        let id = "arbos-box-01JABCDEFGHJKMNPQRSTVWXYZ0";
+        let id = "arbos-box-01JABCDEFGHJKMNPQRSTVWXYZ0.";
         assert_eq!(fake.ran("losetup --find --show"), 1);
         assert_eq!(fake.ran("mount -o discard,nosuid,nodev /dev/loop0"), 1);
         assert_eq!(fake.ran("arbos-seed-01JABCDEFGHJKMNPQRSTVWXYZ0"), 2);
@@ -1037,6 +1060,23 @@ pub mod tests {
         // And it wakes with a plain run.
         b.wake(&u).await.unwrap();
         assert_eq!((fake.ran(" restore "), fake.ran("--detach")), (0, 2));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sandbox that `runsc delete` did not remove keeps its disk, and the box is not asleep.
+    #[tokio::test]
+    async fn sleep_fails_while_the_sandbox_is_still_there() {
+        let (b, fake, root, u) = awake("sleep-stuck").await;
+        fake.answer(
+            200,
+            r#"{"active_user_pids":0,"files_bytes":0,"scratch_bytes":0,"trash_bytes":0}"#,
+        );
+        fake.stuck.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(status(b.sleep(&u).await), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!((fake.ran("umount"), fake.ran("losetup -d")), (0, 0));
+        fake.stuck
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(b.sleep(&u).await.unwrap()["state"], "asleep_clean");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -11,7 +11,8 @@
 #
 #   ensure -> fresh image under 35 MB on disk -> wake -> grow to 32 and 128 GiB while the box
 #   writes -> a busy box refuses sleep -> sleep clean (no checkpoint) -> wake -> sleep with a
-#   checkpoint -> wake restores it with the background process still counting.
+#   checkpoint -> wake restores it with the background process still counting -> two boxes
+#   whose ids share a prefix stay two boxes.
 #
 # A busybox rootfs stands in for the arbos-agent image: its init answers prepare-sleep the way
 # agentd does and keeps one background process counting on /work. So this proves the
@@ -131,7 +132,8 @@ healthy() {
   fail "the box never answered on $1"
 }
 tick() { cat "$box/mnt/tick"; }
-attached() { [[ -n "$(losetup -j "$box/work.img")" ]] || mountpoint -q "$box/mnt"; }
+# attached [box-dir]: the box's disk is still on a loop device or still mounted.
+attached() { [[ -n "$(losetup -j "${1:-$box}/work.img")" ]] || mountpoint -q "${1:-$box}/mnt"; }
 
 [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7790/v1/host/status)" == 401 ]] \
   || fail "status answered without a token"
@@ -150,7 +152,7 @@ healthy "$url"; log "  healthy in $(ms "$t") ms"
 for _ in $(seq 100); do [[ -f "$box/mnt/loopback" ]] && break; sleep 0.1; done
 [[ -f "$box/mnt/loopback" ]] || fail "nothing in the box reaches 127.0.0.1: its loopback is down"
 [[ "$(api 200 POST "/v1/boxes/$user/wake" | jq -r .restored)" == false ]] || fail "second wake"
-cgroup="/sys/fs/cgroup/arbos-boxd/arbos-box-$user"
+cgroup="/sys/fs/cgroup/arbos-boxd/arbos-box-$user."
 [[ "$(cat "$cgroup/memory.max")" == $((16 << 30)) && "$(cat "$cgroup/cpu.max")" == "800000 100000" ]] \
   || fail "the box does not run under its 16 GiB and 8 vCPU limits"
 
@@ -224,6 +226,31 @@ attached && fail "the disk is still attached"
 # Every box runs on the one unpacked rootfs, so a box must leave nothing in it.
 diff <(tar -tf "$image/rootfs.tar" | sed 's|/$||' | sort) <(cd "$image/rootfs" && find . | sort) \
   || fail "a box changed the shared rootfs"
+
+# runsc takes an id that is the start of exactly one sandbox's as that sandbox. Two users whose
+# ids differ only by a tail must still be two boxes, whichever of them is running.
+log "one user id is the start of another"
+for u in pfx_a pfx_ab; do
+  api 200 POST "/v1/boxes/$u/ensure" '{"version":"test","env":{"ARBOS_MCP_TOKEN":"box-token"}}' >/dev/null
+done
+resident() { api 200 GET /v1/host/status | jq .resident_boxes; }
+url_ab="$(api 200 POST /v1/boxes/pfx_ab/wake | jq -r .box_url)"; healthy "$url_ab"
+# Only the longer one runs: the shorter is not it, and waking it starts its own sandbox.
+url_a="$(api 200 POST /v1/boxes/pfx_a/wake | jq -r .box_url)"; healthy "$url_a"
+[[ "$url_a" != "$url_ab" && "$(resident)" == 2 ]] || fail "waking pfx_a did not start a second sandbox"
+# Both run: sleeping the shorter stops that one and only that one.
+[[ "$(api 200 POST /v1/boxes/pfx_a/sleep | jq -r .state)" == asleep_clean ]] || fail "pfx_a did not sleep"
+attached "$root/boxes/pfx_a" && fail "pfx_a's disk is still attached"
+[[ "$(resident)" == 1 ]] || fail "sleeping pfx_a left $(resident) boxes running"
+curl -s -m 1 -o /dev/null "$url_a/" && fail "pfx_a still answers after its sleep"
+healthy "$url_ab"
+# Only the longer one runs again: a sleep of the shorter must not reach it.
+api 200 POST /v1/boxes/pfx_a/sleep >/dev/null
+healthy "$url_ab"
+api 200 POST /v1/boxes/pfx_ab/sleep >/dev/null
+[[ "$(resident)" == 0 ]] || fail "a box is still resident"
+attached "$root/boxes/pfx_ab" && fail "pfx_ab's disk is still attached"
+
 left="$(ip netns list; ip -br link | grep '^ab' || true)"
 [[ -z "$left" ]] || fail "the box's network is still up: $left"
 log "PASSED on $BOXD_PLATFORM"
