@@ -180,8 +180,8 @@ unable to wake until it is back: their wake answers 502 and says so.
 docs/box-scaling.md Phase 4. The relay's own host is `node-0`, as above. Every other host runs
 the same daemon, and the relay is told of it in a file. A new box is made on the node with the
 most free resident slots (its cap less its awake boxes; none while it is under the memory
-floor), then the most free disk, then the first listed; a node under 80 GB of free disk, or one
-that does not answer, takes none. `boxes.node_id` says where a box is, and it stays there: its
+floor), then the fewest boxes for its cap, then the most free disk, then the first listed; a
+node under 80 GB of free disk, or one that does not answer, takes none. `boxes.node_id` says where a box is, and it stays there: its
 cap, its memory floor and its cold tier are that node's, and nothing moves a box between nodes.
 While a node is down its boxes fail to wake with `boxd node-1 did not answer ...`, and are not
 made anew anywhere else.

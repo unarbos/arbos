@@ -36,7 +36,7 @@ use crate::state::AppState;
 pub const BUSY: &str = "box is busy";
 
 /// §3.1: a box sleeps after this long with nothing running and nothing due.
-const IDLE_MS: i64 = 15 * 60_000;
+pub(crate) const IDLE_MS: i64 = 15 * 60_000;
 /// §3.1 condition 3: a routine due this soon keeps the box up.
 const ROUTINE_HORIZON_MS: i64 = 20 * 60_000;
 /// §4.2: an asleep box is woken this long before its routine is due, so the run finds it up.
@@ -93,6 +93,10 @@ struct Node {
     /// The first two octets of the /16 its boxes' addresses are in. No two nodes share one: the
     /// relay dials a box by that address and sends it the box's MCP token.
     subnet: [u8; 2],
+    /// Held while a box is let onto the node: counting its awake boxes, putting one to sleep
+    /// for the newcomer and waking it are one step, or two wakes at the cap would each take the
+    /// same free slot.
+    door: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// One entry of `ARBOS_BOXD_NODES_FILE`.
@@ -301,10 +305,20 @@ impl Boxd {
                     .with_context(|| format!("ARBOS_BOXD_MAX_RESIDENT must be a count, not {n}"))
             })
             .transpose()?;
+        Self::from_files(&url, &token_file, max_resident, nodes_file.as_deref()).map(Some)
+    }
+
+    /// What [`Self::from_env`] read: this host's daemon, and the file of the others if any.
+    pub(crate) fn from_files(
+        url: &str,
+        token_file: &str,
+        max_resident: Option<usize>,
+        nodes_file: Option<&str>,
+    ) -> Result<Self> {
         let mut cfgs = vec![NodeCfg {
             id: NODE.to_owned(),
-            url,
-            token_file,
+            url: url.to_owned(),
+            token_file: token_file.to_owned(),
             ca_file: None,
             cert_file: None,
             key_file: None,
@@ -312,9 +326,9 @@ impl Boxd {
             box_subnet: None,
         }];
         if let Some(file) = nodes_file {
-            cfgs.extend(nodes_in(&file)?);
+            cfgs.extend(nodes_in(file)?);
         }
-        Self::new(&cfgs).map(Some)
+        Self::new(&cfgs)
     }
 
     /// No two nodes share an id, a daemon or a box subnet.
@@ -457,6 +471,7 @@ impl Node {
             http: http.build().context("boxd node client")?,
             max_resident,
             subnet,
+            door: Arc::default(),
         })
     }
 
@@ -631,20 +646,30 @@ fn node_of<'a>(state: &'a AppState, user_id: &str) -> Result<&'a Node> {
 pub struct Load {
     /// Boxes it can still wake under its cap; none while it is under its memory floor.
     pub free_slots: usize,
+    /// Its cap, and the boxes that live on it, awake or not.
+    pub max_resident: usize,
+    pub boxes: usize,
     pub disk_free_gb: f64,
 }
 
 /// Phase 4's free-headroom placement, pure: which of the nodes a new box goes to. A node that
-/// did not answer (`None`) or is under the disk floor takes none; of the rest, the one with the
-/// most free resident slots, then the most free disk, then the first listed. A node with no
-/// slot left can still be the one: its new box takes an idle one's place ([`make_room`]).
+/// did not answer (`None`) or is under the disk floor takes none. Of the rest, the one with the
+/// most free resident slots; then the one with the fewest boxes for its cap, because a box
+/// stays where it is made and its node's cap is what its wakes will meet; then the most free
+/// disk; then the first listed. A node with no slot left can still be the one: its new box
+/// takes an idle one's place ([`make_room`]).
 pub fn place(loads: &[Option<Load>]) -> Option<usize> {
+    // Boxes per slot, compared without dividing.
+    let crowding = |a: &Load, b: &Load| {
+        (a.boxes as u128 * b.max_resident as u128).cmp(&(b.boxes as u128 * a.max_resident as u128))
+    };
     loads
         .iter()
         .enumerate()
         .filter_map(|(i, l)| Some((i, l.filter(|l| l.disk_free_gb >= MIN_FREE_DISK_GB)?)))
         .max_by(|(i, a), (j, b)| {
             (a.free_slots.cmp(&b.free_slots))
+                .then(crowding(b, a))
                 .then(a.disk_free_gb.total_cmp(&b.disk_free_gb))
                 .then(j.cmp(i))
         })
@@ -687,6 +712,8 @@ async fn node_for_new<'a>(state: &'a AppState, user_id: &str) -> Result<&'a Node
             } else {
                 0
             },
+            max_resident: node.max_resident,
+            boxes: h.boxes.len(),
             disk_free_gb: h.disk_free_gb,
         })
     };
@@ -756,6 +783,7 @@ async fn start_on(state: &AppState, node: &Node, user_id: &str, sb: &mut Sandbox
     if is_cold(state, user_id) && node.prefetch(user_id).await? {
         bail!(FETCHING);
     }
+    let _door = node.door.lock().await;
     make_room(state, node, user_id).await?;
     // A box being made has no row yet, and this writes nothing.
     record(state, user_id, &node.id, "waking", None);
@@ -1010,7 +1038,7 @@ pub async fn spawn_idle_sleeper(state: AppState) {
     });
 }
 
-async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String, i64>) {
+pub(crate) async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String, i64>) {
     let now = now_ms();
     // Fail closed: when the routines cannot be read, nothing is put to sleep this minute.
     let (Ok(due), Ok(rows)) = (
@@ -1170,7 +1198,7 @@ pub async fn spawn_cold_tier(state: AppState) {
     });
 }
 
-async fn tier_tick(state: &AppState) {
+pub(crate) async fn tier_tick(state: &AppState) {
     let Ok(boxd) = of(state) else {
         return;
     };
@@ -1329,6 +1357,7 @@ mod tests {
             http: reqwest::Client::new(),
             max_resident: MAX_RESIDENT,
             subnet: SUBNET,
+            door: Arc::default(),
         };
         (fake, node)
     }
@@ -2577,34 +2606,36 @@ mod tests {
 
     #[test]
     fn a_new_box_goes_to_the_node_with_the_most_room() {
-        let load = |free_slots, disk_free_gb| {
+        let load = |free_slots, boxes, disk_free_gb| {
             Some(Load {
                 free_slots,
+                max_resident: 160,
+                boxes,
                 disk_free_gb,
             })
         };
         assert_eq!(place(&[]), None);
-        assert_eq!(
-            place(&[load(5, 900.0), load(9, 100.0)]),
-            Some(1),
-            "slots first"
-        );
-        assert_eq!(
-            place(&[load(5, 100.0), load(5, 900.0)]),
-            Some(1),
-            "then disk"
-        );
-        assert_eq!(
-            place(&[load(5, 900.0), load(5, 900.0)]),
-            Some(0),
-            "then the first listed"
-        );
+        let slots_first = [load(5, 10, 900.0), load(9, 900, 100.0)];
+        assert_eq!(place(&slots_first), Some(1));
+        let then_the_emptier = [load(5, 700, 900.0), load(5, 300, 100.0)];
+        assert_eq!(place(&then_the_emptier), Some(1));
+        let then_disk = [load(5, 300, 100.0), load(5, 300, 900.0)];
+        assert_eq!(place(&then_disk), Some(1));
+        let then_the_first_listed = [load(5, 300, 900.0), load(5, 300, 900.0)];
+        assert_eq!(place(&then_the_first_listed), Some(0));
+        // The emptier is the one with fewer boxes for its cap, not fewer boxes.
+        let small = Some(Load {
+            free_slots: 0,
+            max_resident: 40,
+            boxes: 100,
+            disk_free_gb: 500.0,
+        });
+        assert_eq!(place(&[small, load(0, 300, 500.0)]), Some(1));
         // A node that did not answer, or is under the disk floor, takes no new box however
         // empty it is; a full one still does (its box takes an idle one's place).
-        assert_eq!(place(&[None, load(1, 80.0)]), Some(1));
-        assert_eq!(place(&[load(160, 79.9), load(0, 80.0)]), Some(1));
-        assert_eq!(place(&[load(160, 79.9), None]), None);
-        assert_eq!(place(&[load(0, 500.0), load(0, 400.0)]), Some(0));
+        assert_eq!(place(&[None, load(1, 0, 80.0)]), Some(1));
+        assert_eq!(place(&[load(160, 0, 79.9), load(0, 900, 80.0)]), Some(1));
+        assert_eq!(place(&[load(160, 0, 79.9), None]), None);
     }
 
     /// A relay with two nodes, each a fake daemon with its own cap and its own box subnet, and
@@ -2651,12 +2682,13 @@ mod tests {
     #[tokio::test]
     async fn a_box_is_placed_once_and_every_later_call_goes_to_its_node() {
         let (state, [fake0, fake1], [a, b, c]) = two_nodes([2, 3]).await;
-        // 2 against 3 free: node-1. Then 2 against 2: the first listed. Then 1 against 2.
+        // 2 against 3 free: node-1. Then 2 against 2, and each daemon lists one box: node-1 has
+        // the fewer for its cap. Then 2 against 1.
         make_awake(&state, &a).await;
         make_awake(&state, &b).await;
         make_awake(&state, &c).await;
         let placed = [&a, &b, &c].map(|u| node_on_row(&state, u));
-        assert_eq!(placed, ["node-1", "node-0", "node-1"]);
+        assert_eq!(placed, ["node-1", "node-1", "node-0"]);
         assert_eq!(state.db.boxd_node(&a).unwrap().as_deref(), Some("node-1"));
         let row = state.db.user_box(&a).unwrap().unwrap();
         assert_eq!(row.box_url.as_deref(), Some("http://10.208.0.2:7788"));
@@ -2665,8 +2697,8 @@ mod tests {
         boxes::start_box(&state, &a).await.unwrap();
         assert_eq!(asked(&fake1, &a), ["ensure", "wake", "sleep", "wake"]);
         assert_eq!(asked(&fake0, &a), [] as [&str; 0]);
-        assert_eq!(asked(&fake0, &b), ["ensure", "wake"]);
-        assert_eq!(asked(&fake1, &b), [] as [&str; 0]);
+        assert_eq!(asked(&fake0, &c), ["ensure", "wake"]);
+        assert_eq!(asked(&fake1, &c), [] as [&str; 0]);
         assert_eq!(node_on_row(&state, &a), "node-1");
         assert_eq!(
             boxes::provider_status(&state, &a).await["node_id"],
@@ -2787,10 +2819,10 @@ mod tests {
     /// The pass that archives looks at each node's own disk and sends each box to its own node.
     #[tokio::test]
     async fn each_node_archives_its_own_sleeping_boxes() {
-        let (state, [fake0, fake1], [a, b, _]) = two_nodes([2, 3]).await;
+        let (state, [fake0, fake1], [a, b, _]) = two_nodes([3, 3]).await;
         make_awake(&state, &a).await;
         make_awake(&state, &b).await;
-        for (fake, user) in [(&fake1, &a), (&fake0, &b)] {
+        for (fake, user) in [(&fake0, &a), (&fake1, &b)] {
             boxes::stop_box(&state, user, false).await.unwrap();
             let mut row = state.db.user_box(user).unwrap().unwrap();
             row.last_stopped_at = Some(now_ms() - CKPT_COLD_MS - 1);
@@ -2803,10 +2835,10 @@ mod tests {
             fake.answer("status", 200, status);
         }
         tier_tick(&state).await;
-        assert_eq!(asked(&fake1, &a).last().unwrap(), "archive");
-        assert_eq!(asked(&fake0, &b).last().unwrap(), "archive");
-        assert!(!asked(&fake0, &a).contains(&"archive".to_owned()));
-        assert!(!asked(&fake1, &b).contains(&"archive".to_owned()));
+        assert_eq!(asked(&fake0, &a).last().unwrap(), "archive");
+        assert_eq!(asked(&fake1, &b).last().unwrap(), "archive");
+        assert!(!asked(&fake1, &a).contains(&"archive".to_owned()));
+        assert!(!asked(&fake0, &b).contains(&"archive".to_owned()));
     }
 
     /// A CA of two days in `dir` as `<ca>.pem`, and for each name a key and a certificate it
