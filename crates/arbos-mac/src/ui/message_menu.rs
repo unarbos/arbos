@@ -3,24 +3,30 @@
 //! **Copy, Reply, Forward, Reply in DM, Edit (own text), Remove preview, Delete**
 //! (Jacob, #1370; Reply in DM joined with #1835; Edit matches the iPhone's
 //! long-press → Edit; **Remove preview** joined with #2065, only on a message
-//! that shows a link card the user may edit). Reactions live in the capsule
-//! (`reactions.rs`), never in this menu. One builder for every bubble, and one
+//! that shows a link card the user may edit). Above them sits the quick-reaction
+//! row — the capsule's palette (`reactions.rs`), as the iPhone's long-press
+//! shows its reaction bar over the menu. One builder for every bubble, and one
 //! placement rule: the menu always sits fully inside the window — flipped to
 //! the other side of the click near the right or bottom edge, clamped to the
 //! edge margin when neither side fits.
 
 use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
 
-use crate::model::{Id, Message, Role};
+use crate::model::{Id, Message, Role, REACTION_PALETTE};
 use crate::ui::glass::{
     self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_DIVIDER_HEIGHT, MENU_GAP, MENU_ROW_HEIGHT,
 };
+use crate::ui::reactions;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
 pub const MESSAGE_MENU_WIDTH: f32 = 180.0;
 /// Space kept between the menu and every window edge.
 pub const MENU_EDGE_MARGIN: f32 = 8.0;
+/// One quick-reaction cell and its emoji: the capsule's cell, sized so the
+/// palette fits the menu's width.
+const REACTION_CELL: f32 = 30.0;
+const REACTION_EMOJI: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageMenuItem {
@@ -117,8 +123,8 @@ pub fn items_for(
         .collect()
 }
 
-/// Divider before the destructive item.
-const DIVIDERS: usize = 1;
+/// Dividers: under the reaction row and before the destructive item.
+const DIVIDERS: usize = 2;
 
 /// The menu's size, from the same constants `glass::menu_card` /
 /// `menu_row` / `menu_divider` lay it out with.
@@ -127,9 +133,10 @@ pub fn menu_size() -> Size<Pixels> {
     menu_size_for(ITEMS.len() - 1)
 }
 
-/// The size of a menu with `n` rows (the full set less the items a bubble is not offered).
+/// The size of a menu with `n` rows (the full set less the items a bubble is not offered)
+/// under the reaction row.
 pub fn menu_size_for(n: usize) -> Size<Pixels> {
-    let rows = n as f32;
+    let rows = n as f32 + 1.0;
     let dividers = DIVIDERS as f32;
     let children = rows + dividers;
     let height = 2.0 * (MENU_CARD_PADDING + MENU_CARD_BORDER)
@@ -211,7 +218,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             _ => false,
         }
     };
-    let (can_dm, can_edit, has_preview) = {
+    let (can_dm, can_edit, has_preview, held) = {
         let state = shell.state.read(cx);
         let me_id = state.me_id();
         let me = format!("user:{me_id}");
@@ -229,11 +236,51 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             message.is_some_and(|m| {
                 crate::ui::transcript::link_preview_of(m, state.link_previews).is_some()
             }),
+            message.map_or_else(Vec::new, |m| {
+                m.reaction_list()
+                    .into_iter()
+                    .filter(|(_, s)| s.contains(&me))
+                    .map(|(e, _)| e)
+                    .collect()
+            }),
         )
     };
     let items = items_for(can_delete, can_dm, can_edit, has_preview);
     let origin = place(at, menu_size_for(items.len()), window.viewport_size());
-    let mut body = div().flex().flex_col().gap(px(MENU_GAP));
+    let mut reaction_row = div()
+        .h(px(MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_between();
+    for emoji in REACTION_PALETTE {
+        let on = held.iter().any(|e| {
+            arbos_core::doc::normalize_reaction_emoji(e)
+                == arbos_core::doc::normalize_reaction_emoji(emoji)
+        });
+        let (chat, msg) = (chat_id.clone(), message_id.clone());
+        reaction_row = reaction_row.child(
+            reactions::cell(
+                format!("message-menu-react-{emoji}"),
+                div().text_size(px(REACTION_EMOJI)).child(emoji),
+                on,
+                &theme,
+                cx.listener(move |this, _, _, cx| {
+                    this.message_menu = None;
+                    this.state.update(cx, |s, cx| {
+                        s.toggle_reaction(chat.clone(), msg.clone(), emoji.to_string(), cx)
+                    });
+                    cx.notify();
+                }),
+            )
+            .size(px(REACTION_CELL)),
+        );
+    }
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap(px(MENU_GAP))
+        .child(reaction_row)
+        .child(glass::menu_divider(&theme));
     for item in items {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
@@ -360,7 +407,7 @@ mod tests {
         assert!(!MessageMenuItem::ReplyInDm.danger());
         assert!(!MessageMenuItem::Edit.danger());
         assert!(!MessageMenuItem::RemovePreview.danger());
-        // No emoji row: every label is plain ASCII text.
+        // The emoji live in the reaction row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
     }
 
@@ -450,9 +497,109 @@ mod tests {
     fn menu_clamps_when_the_window_is_short() {
         // A window shorter than twice the menu: neither side of a mid-height
         // click fits, so the menu hugs the bottom margin.
-        let viewport = size(px(600.0), px(260.0));
-        let (origin, size) = placed_rect(point(px(130.0), px(130.0)), viewport);
+        let viewport = size(px(600.0), px(320.0));
+        let (origin, size) = placed_rect(point(px(160.0), px(160.0)), viewport);
         assert!(size.height < viewport.height && size.height * 2.0 > viewport.height);
         assert!(inside(origin, size, viewport), "{origin:?} {size:?}");
+    }
+
+    /// Keeps the command channel so the test can read what the state sent (`React`).
+    struct Recording(std::sync::Arc<std::sync::Mutex<Option<Commands>>>);
+    type Commands = tokio::sync::mpsc::UnboundedReceiver<crate::sync::ClientCommand>;
+
+    impl crate::sync::SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: tokio::sync::mpsc::UnboundedSender<crate::sync::SyncEvent>,
+            commands: Commands,
+        ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Right-click on a bubble: the quick reactions sit in the menu, and a pick
+    /// sends that reaction and closes it.
+    #[gpui::test]
+    fn right_click_menu_reacts_from_its_emoji_row(cx: &mut gpui::TestAppContext) {
+        use crate::sync::ClientCommand;
+        const DM: &str = "01DMSAM0000000000000000000";
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            crate::ui::motion::PulseClock::init(cx);
+        });
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let state =
+            cx.new(|cx| crate::app::AppState::new(Box::new(Recording(commands.clone())), cx));
+        state.update(cx, |s, cx| {
+            s.account = Some(crate::model::AccountView {
+                id: "gh_me".into(),
+                ..Default::default()
+            });
+            s.projects.push(crate::model::Project {
+                id: DM.into(),
+                name: "sam".into(),
+                kind: crate::model::SpaceKind::Dm,
+                ..Default::default()
+            });
+            let chat = serde_json::from_value(serde_json::json!({
+                "id": DM, "project_id": DM, "title": "sam", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": 1,
+            }))
+            .expect("chat");
+            s.chats.insert(DM.into(), vec![chat]);
+            let message = serde_json::from_value(serde_json::json!({
+                "id": "m1", "chatId": DM, "role": "user", "sender": "user:gh_me",
+                "senderHandle": "unconst", "status": "done", "createdAt": 1, "completedAt": 1,
+                "parts": [{ "id": "m1-t", "kind": "text", "text": "Ship it" }],
+            }))
+            .expect("message");
+            s.messages.insert(DM.into(), vec![message]);
+            s.selected_project = Some(DM.into());
+            s.active_tab.insert(DM.into(), DM.into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        for _ in 0..3 {
+            state.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            rt.block_on(tokio::task::yield_now());
+        }
+
+        let none = gpui::Modifiers::default();
+        let bubble = vcx.debug_bounds("own-bubble#m1#user").expect("the bubble");
+        vcx.simulate_mouse_down(bubble.center(), gpui::MouseButton::Right, none);
+        vcx.simulate_mouse_up(bubble.center(), gpui::MouseButton::Right, none);
+        vcx.run_until_parked();
+        assert!(shell.read_with(&*vcx, |sh, _| sh.message_menu.is_some()));
+        let thumb = vcx
+            .debug_bounds("reaction-cell#message-menu-react-👍")
+            .expect("the 👍 cell");
+        vcx.simulate_click(thumb.center(), none);
+        vcx.run_until_parked();
+        assert!(shell.read_with(&*vcx, |sh, _| sh.message_menu.is_none()));
+        let mut sent = Vec::new();
+        let mut slot = commands.lock().expect("commands");
+        while let Ok(c) = slot.as_mut().expect("the source ran").try_recv() {
+            if let ClientCommand::React {
+                chat_id,
+                message_id,
+                emoji,
+            } = c
+            {
+                sent.push((chat_id, message_id, emoji));
+            }
+        }
+        assert_eq!(sent, [(DM.to_owned(), "m1".to_owned(), "👍".to_owned())]);
     }
 }
