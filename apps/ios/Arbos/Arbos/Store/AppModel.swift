@@ -5395,9 +5395,20 @@ final class AppModel: ObservableObject {
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
     func currentActivity(_ chatId: Id) -> String? {
-        // The newest live row that has words: a short main turn streaming with no activity
-        // yet must not blank a job's "Reading … · 2 tasks" under it (duplex §2.4).
-        for m in messages(of: chatId).reversed() where m.role == .assistant && m.isStreaming {
+        // Newest *live* row that has words. Same liveness as `isStreaming`: a main
+        // turn left `streaming` under a later user line is dead (box died, or the
+        // person asked again) and must not keep its step on the awaiting-reply
+        // line — that was the non-contextual "Finding sock stores…" under a new
+        // ask ([feedback APfcjvZgPRJE2pyaBuczRSI]). A short main turn with no
+        // activity yet still falls through to a live job's "Reading … · 2 tasks"
+        // (duplex §2.4); jobs stay live after a new user line (§2.3).
+        let list = messages(of: chatId)
+        let recent = nowMs() - 15 * 60 * 1000
+        var userAfter = false
+        for m in list.reversed() {
+            if m.role == .user { userAfter = true }
+            guard m.role == .assistant, m.isStreaming, m.createdAt >= recent else { continue }
+            if userAfter && m.job == nil { continue }
             if let words = Self.activityWords(m) { return words }
         }
         return nil
