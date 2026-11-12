@@ -954,6 +954,7 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     state
         .set_box_state(user_id, BoxState::Waking, Some(reason))
         .await;
+    state.wake_kick.notify_one();
 }
 
 /// Stale-box detector (runs from the liveness sweep and from `ensure_awake`): a box that has been
@@ -1512,7 +1513,12 @@ pub async fn spawn_sandboxless_box_check(state: AppState) {
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(750)).await;
+            // A job just queued is run now: a user is waiting on it. The timer is for the jobs
+            // that come due by themselves (a retry, a cold box on its way back).
+            tokio::select! {
+                _ = state.wake_kick.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+            }
             run_wake_jobs(&state).await;
         }
     });

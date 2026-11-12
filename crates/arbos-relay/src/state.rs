@@ -310,6 +310,8 @@ pub struct AppState {
     pub box_conns: Arc<Mutex<HashMap<String, (u32, i64)>>>,
     /// user_id → ms when the current wake started (for wake timing).
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
+    /// Told when a wake job is queued, so the runner takes it now and not at its next look.
+    pub wake_kick: Arc<tokio::sync::Notify>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
     /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
@@ -701,6 +703,7 @@ pub(crate) mod test_support {
             local_children: Arc::new(Mutex::new(HashMap::new())),
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
+            wake_kick: Arc::default(),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             decisions_inflight: Arc::new(Mutex::new(HashMap::new())),

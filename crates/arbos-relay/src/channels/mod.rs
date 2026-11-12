@@ -841,6 +841,7 @@ mod tests {
             local_children: Arc::new(Mutex::new(HashMap::new())),
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
+            wake_kick: Arc::default(),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
