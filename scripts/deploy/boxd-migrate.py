@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -103,6 +104,8 @@ def checks(before, after):
         return "agentd does not answer"
     if after["box_user"] != before["user"]:
         return "the box that answers is another user's"
+    if after["running"] is None:
+        return "the daemon does not answer"
     if not after["running"]:
         return "the daemon does not list it as running"
     if after["file"] != before["file"]:
@@ -110,6 +113,25 @@ def checks(before, after):
     if after["fs_uuid"] != before["fs_uuid"]:
         return "the filesystem in the daemon's work.img is not the one that was linked"
     return None
+
+
+def on_this_host(url):
+    """Is this plain HTTP to an address of this host: loopback, or one an interface here has?
+
+    The kernel routes to one of its own addresses from that same address and to anyone else's
+    from another, so a UDP socket pointed there says which it is; no packet is sent.
+    """
+    if re.match(r"^http://(127\.0\.0\.1|\[::1\]):\d+$", url):
+        return True
+    ip = re.match(r"^http://(\d+\.\d+\.\d+\.\d+):\d+$", url)
+    if not ip:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect((ip[1], 9))
+            return s.getsockname()[0] == ip[1]
+        except OSError:
+            return False
 
 
 def idle(box):
@@ -237,12 +259,16 @@ class World:
         out = subprocess.run(["losetup", "-j", path], capture_output=True, text=True, check=True)
         return bool(out.stdout.strip())
 
-    def wait(self, what, check, seconds):
-        """Poll `check` until it returns None (good) or time is up; the last reason, or None."""
+    def wait(self, what, check, seconds, bind=False):
+        """Poll `check` until it returns None (good) or time is up; the last reason, or None.
+        With `bind`, a good answer that comes after the time is up is not one."""
         deadline = time.monotonic() + seconds
         while True:
             why = check()
-            if why is None or time.monotonic() >= deadline:
+            late = time.monotonic() >= deadline
+            if bind and late and why is None:
+                why = f"not within {seconds:g} s"
+            if why is None or late:
                 return why and f"{what}: {why}"
             time.sleep(self.a.poll)
 
@@ -264,13 +290,17 @@ class World:
         relay, on_box = box.get("relay") or {}, box.get("box") or {}
         provider = relay.get("provider") or {}
         file, _ = self.file_id(self.new(user))
+        try:
+            running = bool(self.daemon_boxes().get(user, {}).get("running"))
+        except (urllib.error.URLError, OSError):
+            running = None  # the daemon did not answer: not verified, and `checks` says so
         return {
             "state": relay.get("state"),
             "provider": provider.get("provider"),
             "node": provider.get("node_id"),
             "answers": bool(on_box.get("reachable")),
             "box_user": (on_box.get("state") or {}).get("user_id"),
-            "running": bool(self.daemon_boxes().get(user, {}).get("running")),
+            "running": running,
             "file": list(file) if file else None,
             "fs_uuid": self.fs_uuid(self.new(user)) if file else None,
         }
@@ -331,7 +361,10 @@ def rollback(w, user, why):
     w.set_provider(user, "gvisor")
     machine = w.users().get(user) or {}
     if machine.get("exists") and machine.get("provider") == "boxd":
-        w.delete_box(user)  # a forced stop on the daemon: nothing holds the disk after it
+        try:
+            w.delete_box(user)  # a forced stop on the daemon: nothing holds the disk after it
+        except (urllib.error.URLError, OSError) as e:
+            return "stuck", f"{why}; not rolled back: the relay did not take the box off the daemon: {e}"
     old, _ = w.file_id(w.old(user))
     new, _ = w.file_id(w.new(user))
     if new is not None:
@@ -405,7 +438,7 @@ def migrate(w, user):
         elif step == "verify":
             if s.record is None:
                 return "skip", "on the daemon, but not by this tool; the old work.img is left alone"
-            bad = w.wait("not verified", lambda: checks(s.record, w.after(user)), w.a.wake_seconds)
+            bad = w.wait("not verified", lambda: checks(s.record, w.after(user)), w.a.wake_seconds, bind=True)
             if bad:
                 return rollback(w, user, bad)
             # The one step that cannot be taken back, and the last.
@@ -421,7 +454,7 @@ def main(argv=None, world=World):
     ap.add_argument("--all", action="store_true", help="every gvisor box, and every box a run left part way")
     ap.add_argument("--user", action="append", default=[], metavar="ID")
     ap.add_argument("--limit", type=int, default=0, help="stop after this many boxes have been moved")
-    ap.add_argument("--relay", default="http://127.0.0.1:7700")
+    ap.add_argument("--relay", default="http://127.0.0.1:7700", help="at an address of this host")
     ap.add_argument("--data", default="/var/lib/arbos-relay", help="the relay's data directory")
     ap.add_argument("--boxd-url", default="http://127.0.0.1:7790")
     ap.add_argument("--boxd-root", default="/var/lib/arbos-boxd")
@@ -444,10 +477,11 @@ def main(argv=None, world=World):
     if bad:
         print(f"boxd-migrate: not a user id: {bad[0]!r}", file=sys.stderr)
         return 2
-    # The admin token and the daemon's go to this host and nowhere else.
+    # The admin token and the daemon's go to this host and nowhere else. The relay may be on
+    # the bridge address, where a box can dial it.
     for url in (a.relay, a.boxd_url):
-        if not re.match(r"^http://(127\.0\.0\.1|\[::1\]):\d+$", url):
-            print(f"boxd-migrate: {url} is not a loopback address; run this on the host", file=sys.stderr)
+        if not on_this_host(url):
+            print(f"boxd-migrate: {url} is not an address of this host; run this on the host", file=sys.stderr)
             return 2
     admin = os.environ.get("ARBOS_RELAY_ADMIN_TOKEN", "").strip()
     if not admin:

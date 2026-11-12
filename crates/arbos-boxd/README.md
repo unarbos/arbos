@@ -93,7 +93,7 @@ Settings are environment variables, all optional:
 | `ARBOS_BOXD_TOKEN_FILE` | `/etc/arbos-boxd/token` |
 | `ARBOS_BOXD_PORT` | `7790` (always on `127.0.0.1`) |
 | `ARBOS_BOXD_PLATFORM` | `systrap` |
-| `ARBOS_BOXD_SUBNET` | `10.207.0.0/16`: the bridge is `.0.1` and the boxes take the rest. A private /16, set before the host's first box. |
+| `ARBOS_BOXD_SUBNET` | `10.207.0.0/16`: the bridge is `.0.1` and the boxes take the rest. A private /16, set before the host's first box. The bridge is one per network namespace: a second daemon on one host needs its own, and one that finds `arbos-boxd0` without its `.0.1` does not start. |
 | `ARBOS_BOXD_TLS_LISTEN`, `_CERT_FILE`, `_KEY_FILE`, `_CLIENT_CA_FILE` | unset: loopback only ([more than one host](#more-than-one-host)) |
 | `ARBOS_BOXD_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_CREDENTIALS_FILE` | unset: no cold tier |
 
@@ -125,7 +125,7 @@ are `{"error": "..."}`.
 | Request | Answer |
 | --- | --- |
 | `POST /v1/boxes/{user_id}/ensure` with `{"version": "0.6.409", "env": {...}}` | `{"created", "size_gb"}`. 409 if the version is not installed, or if it would change the bundle of a box that is running or checkpointed. |
-| `POST /v1/boxes/{user_id}/wake` | `{"state": "warm", "restored", "box_url"}`. Does nothing to a running box. A cold box is fetched and checked first; 502 if it does not come back whole, and the box is not started. |
+| `POST /v1/boxes/{user_id}/wake` | `{"state": "warm", "restored", "box_url"}`. Does nothing to a running box. A cold box is fetched and checked first; 502 if it does not come back whole, and the box is not started. 409 for a box with no disk on the host and no record of one in the store. |
 | `POST /v1/boxes/{user_id}/sleep` | `{"state": "asleep_clean" \| "asleep_ckpt" \| "cold", "files_bytes", "scratch_bytes", "trash_bytes", "work_bytes", "ckpt_bytes"}`. 409 `busy: <reason>` when agentd refuses, and the box keeps running. 502 when agentd does not answer. |
 | `POST /v1/boxes/{user_id}/sleep?force=true` | The same answer, always `asleep_clean` and with a null split. agentd is not asked: a busy box is stopped too, and no checkpoint is written or kept, so every process in the box ends. `/work` is untouched. This is the user's Stop and an operator's delete of the box. |
 | `POST /v1/boxes/{user_id}/grow` | `{"size_gb"}`: 8 → 32 → 128. 409 at 128, or while the box is asleep. |
@@ -197,9 +197,13 @@ for name in node-1 relay; do
   openssl req -new -key $name.key -out $name.csr -subj /CN=$name
 done
 echo 'subjectAltName=IP:10.99.0.2' > node-1.ext    # the node's WireGuard address
+echo 'extendedKeyUsage=clientAuth' > relay.ext
 openssl x509 -req -in node-1.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out node-1.pem -days 825 -extfile node-1.ext
-openssl x509 -req -in relay.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out relay.pem -days 825
+openssl x509 -req -in relay.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out relay.pem -days 825 -extfile relay.ext
 ```
+
+The relay's needs its extension file too: without one `openssl x509` writes an X.509 v1
+certificate, and the daemon cuts that off in the handshake (`sslv3 alert certificate unknown`).
 
 **On the node** (`node-1`), beside everything in [What the host needs](#what-the-host-needs):
 
@@ -208,7 +212,7 @@ openssl x509 -req -in relay.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out re
 | `ARBOS_BOXD_TLS_LISTEN` | `10.99.0.2:7791`: the address the relay dials, on the private link. Setting it opens the second door; the daemon does not start if a file below is missing. Loopback stays open as well. |
 | `ARBOS_BOXD_TLS_CERT_FILE`, `ARBOS_BOXD_TLS_KEY_FILE` | `node-1.pem` and `node-1.key`. The key is a plain file of mode 0600. |
 | `ARBOS_BOXD_TLS_CLIENT_CA_FILE` | `ca.pem`. A caller without a certificate from it is cut off in the handshake; with one, it is still asked for the bearer. |
-| `ARBOS_BOXD_SUBNET` | A /16 no other node has, `10.208.0.0/16`. The relay refuses to configure two nodes on one subnet, and refuses a box whose address is outside its node's. |
+| `ARBOS_BOXD_SUBNET` | A /16 no other node has, `10.208.0.0/16`. The relay refuses to configure two nodes on one subnet, and refuses a box whose address is outside its node's: it stops that box on the node (a forced sleep) and does not have it awake. |
 
 TLS is 1.3 only. No file may be a link or writable by anyone but its owner.
 
@@ -227,7 +231,9 @@ relay's copy of that node's token and `key_file` the relay's key, both mode 0600
 certificate must chain to `ca_file` and name the host in `url`; no other CA is trusted for it,
 and a node that fails the check is a node that did not answer. `max_resident` defaults to 160.
 An `http://127.0.0.1:<port>` url with no certificate files is taken too, for a second daemon on
-the relay's own host. Anything else in the file stops the relay at start.
+the relay's own host; that daemon runs in a network namespace of its own, because the bridge
+`arbos-boxd0` and the veth names are the same for every daemon. Anything else in the file stops
+the relay at start.
 
 **The network between them** is the operator's (the spec's WireGuard link), and three things
 have to route over it:
@@ -264,6 +270,11 @@ scripts/deploy/boxd-migrate.py --yes --user $u     # one box
 scripts/deploy/boxd-migrate.py --yes --all --limit 5
 ```
 
+It asks the relay at `http://127.0.0.1:7700`. A relay that listens on the bridge
+([above](#the-relay-beside-it)) is named with `--relay http://10.207.0.1:7700`: the tool takes
+loopback or an address an interface of this host has, and no other, because the admin token
+goes there.
+
 It refuses to run without `--dry-run` or `--yes`. For each box, in order:
 
 1. **Idle.** The box is awake, agentd answers, and for 30 s no workspace has a turn, a waiting
@@ -298,7 +309,23 @@ its step. The summary at the end has one line per box (`moved`, `done`, `skip` w
 ### Running it on a test host
 
 A Linux host with Docker, `runsc`, a relay on `ARBOS_DEFAULT_PROVIDER=gvisor` with
-`ARBOS_BOXD_URL` set, and the daemon, all as in the sections above.
+`ARBOS_BOXD_URL` set, and the daemon, all as in the sections above. The relay listens on the
+bridge, so every `boxd-migrate.py` below takes `--relay http://10.207.0.1:7700`. The gvisor
+side needs four things the sections above do not name:
+
+- `ARBOS_BOX_WORK_GB=8` on the relay. Its default is 2, and a 2 GiB `work.img` is no tier: the
+  tool would skip the box.
+- The Docker network the relay puts its boxes on: `docker network create arbos-boxes`.
+- `ARBOS_BOX_HELPER_IMAGE` left at its default (`ubuntu:24.04`), or an image with no
+  entrypoint: the relay runs `sh -c ...` in it, and under agentd's entrypoint that is
+  `error: unexpected argument 'sh' found`.
+- Where the firewall drops by default, a way in from that network to the relay, as the bridge
+  has:
+
+  ```sh
+  net=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' arbos-boxes)
+  iptables -I INPUT -s "$net" -d 10.207.0.1 -p tcp --dport 7700 -j ACCEPT
+  ```
 
 1. Make a scratch user and give it a box: `POST /admin/users/test`, then
    `POST /admin/users/$u/devices` and `POST /machine/start` with the device's token. Put a file

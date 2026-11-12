@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import socket
 import tempfile
 import unittest
 import urllib.error
@@ -101,6 +102,7 @@ class FakeWorld(m.World):
     busy = False
     answers_as = U           # whose agentd answers once the box is on the daemon
     refuse_start = False
+    daemon_down = False
 
     def __init__(self, args, admin):
         super().__init__(args, admin)
@@ -138,6 +140,8 @@ class FakeWorld(m.World):
         return None
 
     def daemon_boxes(self):
+        if self.daemon_down:
+            raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
         return {U: {"user_id": U, "running": self.running}}
 
     def attached(self, path):
@@ -168,7 +172,7 @@ class Moves(unittest.TestCase):
         os.environ["ARBOS_RELAY_ADMIN_TOKEN"] = "admin"
         self.world = None
 
-    def run_tool(self, *flags, **fake):
+    def run_tool(self, *flags, wake="5", **fake):
         def world(args, admin):
             self.world = self.world or FakeWorld(args, admin)
             for key, value in fake.items():
@@ -176,7 +180,7 @@ class Moves(unittest.TestCase):
             return self.world
         argv = ["--user", U, "--data", self.data, "--boxd-root", self.boxd,
                 "--boxd-token-file", self.token, "--state-dir", os.path.join(self.boxd, "migrate"),
-                "--idle-seconds", "0", "--idle-wait", "0", "--wake-seconds", "0", "--poll", "0"]
+                "--idle-seconds", "0", "--idle-wait", "0", "--wake-seconds", wake, "--poll", "0"]
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             code = m.main([*flags, *argv], world=world)
@@ -204,7 +208,7 @@ class Moves(unittest.TestCase):
         self.assertIn("done", out)
 
     def test_a_box_that_does_not_verify_is_put_back_on_its_disk(self):
-        code, out = self.run_tool("--yes", answers_as="u_bob")
+        code, out = self.run_tool("--yes", wake="0.05", answers_as="u_bob")
         self.assertEqual(code, 1, out)
         self.assertIn("rolled_back", out)
         self.assertIn("another user's", out)
@@ -216,6 +220,22 @@ class Moves(unittest.TestCase):
         # It can be tried again, and with nothing wrong it goes through.
         code, out = self.run_tool("--yes", answers_as=U)
         self.assertEqual((code, self.ino(self.old), self.ino(self.new)), (0, None, self.disk), out)
+
+    def test_a_daemon_that_does_not_answer_the_check_is_not_verified(self):
+        code, out = self.run_tool("--yes", wake="0.05", daemon_down=True)
+        self.assertEqual(code, 1, out)
+        self.assertIn("rolled_back", out)
+        self.assertIn("the daemon does not answer", out)
+        self.assertNotIn("URLError", out)
+        self.assertEqual((self.ino(self.old), self.world.box["provider"]), (self.disk, "gvisor"))
+        self.assertFalse(os.path.exists(os.path.dirname(self.new)))
+
+    def test_a_box_that_checks_out_after_its_time_is_not_verified(self):
+        code, out = self.run_tool("--yes", wake="0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("rolled_back", out)
+        self.assertIn("not verified: not within 0 s", out)
+        self.assertEqual((self.ino(self.old), self.world.box["provider"]), (self.disk, "gvisor"))
 
     def test_a_refused_start_is_rolled_back_too(self):
         code, out = self.run_tool("--yes", refuse_start=True)
@@ -237,7 +257,7 @@ class Moves(unittest.TestCase):
         self.world = None
         argv = ["--yes", "--user", U, "--data", self.data, "--boxd-root", self.boxd,
                 "--boxd-token-file", self.token, "--state-dir", os.path.join(self.boxd, "migrate"),
-                "--idle-seconds", "0", "--idle-wait", "0", "--wake-seconds", "0", "--poll", "0"]
+                "--idle-seconds", "0", "--idle-wait", "0", "--wake-seconds", "5", "--poll", "0"]
         with contextlib.redirect_stdout(io.StringIO()) as out:
             code = m.main(argv, world=Raced)
         self.assertEqual((code, self.ino(self.old), self.ino(self.new)), (0, None, self.disk), out.getvalue())
@@ -302,10 +322,21 @@ class Moves(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.boxd, "migrate")))
 
     def test_the_tokens_go_to_this_host_only_and_a_user_id_is_one(self):
-        for flags in [("--relay", "https://relay.example"), ("--boxd-url", "http://10.0.0.5:7790"),
-                      ("--user", "../etc"), ("--all",)]:
+        for flags in [("--relay", "https://relay.example"), ("--boxd-url", "http://192.0.2.5:7790"),
+                      ("--relay", "http://0.0.0.0:7700"), ("--user", "../etc"), ("--all",)]:
             code, out = self.run_tool("--yes", *flags)
             self.assertEqual(code, 2, (flags, out))
+        # An address an interface of this host has is this host: the relay on the bridge.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            try:
+                s.connect(("192.0.2.5", 9))
+                mine = s.getsockname()[0]
+            except OSError:
+                mine = None  # a host with no route out has no such address to try
+        if mine:
+            self.assertTrue(m.on_this_host(f"http://{mine}:7700"))
+        self.assertTrue(m.on_this_host("http://127.0.0.1:7700"))
+        self.assertFalse(m.on_this_host("http://192.0.2.5:7700"))
         os.chmod(self.token, 0o644)
         with self.assertRaises(SystemExit):
             self.run_tool("--yes")
