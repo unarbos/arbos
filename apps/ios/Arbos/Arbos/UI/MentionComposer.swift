@@ -307,9 +307,24 @@ struct MentionTextView: UIViewRepresentable {
     /// count to move its controls onto their own row (Grok's multi-line composer), and a second
     /// measurement elsewhere would be a second answer to the same question.
     var onLines: ((Int) -> Void)? = nil
+    /// Left pad inside the text view. Full-width rows (channel, or stacked above the controls)
+    /// keep Grok's 17 pt from the pill's edge; when the `+` sits on the same row the HStack
+    /// spacing is already the gap, so this is `Theme.composerTextInsetBesidePlus` — otherwise
+    /// "Ask …" reads centred ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    var leftInset: CGFloat = Theme.composerTextInset
 
-    /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
-    static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
+    /// Grok: one 22 pt line centred in 48; left is the full-width caret (17 pt from the edge).
+    /// Callers that put the `+` beside the text pass `leftInset: Theme.composerTextInsetBesidePlus`.
+    static let insets = textInsets(left: Theme.composerTextInset)
+
+    /// Text-container insets for a chosen left pad. Pure, so the beside-`+` vs full-width
+    /// choice is assertable without mounting the representable
+    /// ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    static func textInsets(left: CGFloat) -> UIEdgeInsets {
+        UIEdgeInsets(top: Theme.composerTextPadY, left: left, bottom: Theme.composerTextPadY, right: 0)
+    }
+
+    private var textInsets: UIEdgeInsets { Self.textInsets(left: leftInset) }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -318,7 +333,7 @@ struct MentionTextView: UIViewRepresentable {
         view.delegate = context.coordinator
         view.backgroundColor = .clear
         view.isScrollEnabled = false
-        view.textContainerInset = Self.insets
+        view.textContainerInset = textInsets
         view.textContainer.lineFragmentPadding = 0
         view.keyboardDismissMode = .interactive
         view.adjustsFontForContentSizeCategory = false
@@ -345,6 +360,10 @@ struct MentionTextView: UIViewRepresentable {
         c.apply(theme: theme, to: view)
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
+        if view.textContainerInset != textInsets {
+            view.textContainerInset = textInsets
+            view.setNeedsLayout()
+        }
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
         view.placeholderLabel.font = c.font
@@ -384,13 +403,14 @@ struct MentionTextView: UIViewRepresentable {
         let measured = width.isFinite ? width : max(uiView.bounds.width, 10)
         let fit = uiView.sizeThatFits(CGSize(width: measured, height: .greatestFiniteMagnitude))
         let line = context.coordinator.font.lineHeight
-        let minH = line + Self.insets.top + Self.insets.bottom
-        let maxH = line * CGFloat(maxLines) + Self.insets.top + Self.insets.bottom
+        let insets = textInsets
+        let minH = line + insets.top + insets.bottom
+        let maxH = line * CGFloat(maxLines) + insets.top + insets.bottom
         let h = min(max(fit.height, minH), maxH)
         let scroll = fit.height > maxH + 0.5
         if uiView.isScrollEnabled != scroll { uiView.isScrollEnabled = scroll }
         // Deferred: this runs inside layout, and the owner turns the count into state.
-        let lines = MentionTextView.lines(fit: fit.height, line: line, insets: Self.insets)
+        let lines = MentionTextView.lines(fit: fit.height, line: line, insets: insets)
         if context.coordinator.lastLines != lines {
             context.coordinator.lastLines = lines
             DispatchQueue.main.async { onLines?(lines) }

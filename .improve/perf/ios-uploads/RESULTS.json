@@ -1,0 +1,1525 @@
+{
+  "seed": 91208,
+  "seconds": 7.3115368749713525,
+  "samples": [
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 0,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 45.260542,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 20.237791,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 1,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 42.7045,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 21.404333,
+        "max_rss_bytes": 12468224,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 2,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 43.530417,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 20.722417,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 3,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 24.993792,
+        "max_rss_bytes": 12386304,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 47.769584,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 4,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 21.829333,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 45.004,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 5,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 46.463333,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.206375,
+        "max_rss_bytes": 12435456,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 6,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.105208,
+        "max_rss_bytes": 12435456,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 49.648459,
+        "max_rss_bytes": 12271616,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 7,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 24.297959,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 43.880416,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 8,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 19.660167,
+        "max_rss_bytes": 12435456,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 50.629167,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 9,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.292708,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 43.982042,
+        "max_rss_bytes": 12222464,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 10,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 44.743292,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 20.554708,
+        "max_rss_bytes": 12386304,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 11,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 24.077375,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 44.605333,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 12,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 49.315084,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.167083,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 13,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 23.509625,
+        "max_rss_bytes": 12468224,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 47.410125,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 14,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 48.415791,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 23.764625,
+        "max_rss_bytes": 12419072,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 15,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.546333,
+        "max_rss_bytes": 12468224,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 42.025833,
+        "max_rss_bytes": 12222464,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 16,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 50.059708,
+        "max_rss_bytes": 12271616,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.19925,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 17,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.784208,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 50.63975,
+        "max_rss_bytes": 12255232,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 18,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.130667,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 48.829125,
+        "max_rss_bytes": 12238848,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 19,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.162708,
+        "max_rss_bytes": 12402688,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 50.648417,
+        "max_rss_bytes": 12271616,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "people-small",
+      "bytes_per_attachment": 64,
+      "people": true,
+      "index": 20,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 49.79175,
+        "max_rss_bytes": 12288000,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 25.258792,
+        "max_rss_bytes": 12451840,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 0,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 21.152417,
+        "max_rss_bytes": 21577728,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 53.108584,
+        "max_rss_bytes": 21233664,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 1,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 44.454833,
+        "max_rss_bytes": 21430272,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 20.387,
+        "max_rss_bytes": 21594112,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 2,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 48.079458,
+        "max_rss_bytes": 21364736,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.656167,
+        "max_rss_bytes": 21577728,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 3,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 51.350625,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.733416,
+        "max_rss_bytes": 21544960,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 4,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 51.222625,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.667,
+        "max_rss_bytes": 21528576,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 5,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.416209,
+        "max_rss_bytes": 21528576,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 47.427167,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 6,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.723959,
+        "max_rss_bytes": 21528576,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 51.410458,
+        "max_rss_bytes": 21413888,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 7,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.568834,
+        "max_rss_bytes": 21561344,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 48.1255,
+        "max_rss_bytes": 21413888,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 8,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 45.565042,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.826792,
+        "max_rss_bytes": 21561344,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 9,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 48.429209,
+        "max_rss_bytes": 21381120,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 20.822584,
+        "max_rss_bytes": 21528576,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 10,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 23.610917,
+        "max_rss_bytes": 21512192,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 47.849209,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 11,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 29.00175,
+        "max_rss_bytes": 21577728,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 50.200708,
+        "max_rss_bytes": 21430272,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 12,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.228958,
+        "max_rss_bytes": 21512192,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 51.788042,
+        "max_rss_bytes": 21397504,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 13,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.686375,
+        "max_rss_bytes": 21528576,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 44.884208,
+        "max_rss_bytes": 21413888,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 14,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 44.978625,
+        "max_rss_bytes": 21381120,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 25.721667,
+        "max_rss_bytes": 21544960,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 15,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 40.493334,
+        "max_rss_bytes": 21381120,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 22.785333,
+        "max_rss_bytes": 21512192,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 16,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 48.350917,
+        "max_rss_bytes": 21446656,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 27.278375,
+        "max_rss_bytes": 21594112,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 17,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.218667,
+        "max_rss_bytes": 21610496,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 40.895083,
+        "max_rss_bytes": 21118976,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 18,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 19.500375,
+        "max_rss_bytes": 21561344,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 42.913833,
+        "max_rss_bytes": 21413888,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 19,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 44.518875,
+        "max_rss_bytes": 21364736,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 24.716875,
+        "max_rss_bytes": 21610496,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-1MiB",
+      "bytes_per_attachment": 1048576,
+      "people": false,
+      "index": 20,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.212708,
+        "max_rss_bytes": 21544960,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 44.594791,
+        "max_rss_bytes": 21381120,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 0,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 48.566667,
+        "max_rss_bytes": 83394560,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 29.164125,
+        "max_rss_bytes": 81477632,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 1,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.943958,
+        "max_rss_bytes": 81477632,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 85.931375,
+        "max_rss_bytes": 81395712,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 2,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 49.528167,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 28.079417,
+        "max_rss_bytes": 81510400,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 3,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 28.46675,
+        "max_rss_bytes": 81494016,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 57.307542,
+        "max_rss_bytes": 81346560,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 4,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 54.9665,
+        "max_rss_bytes": 81330176,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 27.289333,
+        "max_rss_bytes": 83574784,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 5,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 28.176,
+        "max_rss_bytes": 81477632,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 56.8965,
+        "max_rss_bytes": 81444864,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 6,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 47.904084,
+        "max_rss_bytes": 81395712,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 29.349792,
+        "max_rss_bytes": 81510400,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 7,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 53.733542,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 28.038208,
+        "max_rss_bytes": 81575936,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 8,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 51.805333,
+        "max_rss_bytes": 81346560,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 25.5985,
+        "max_rss_bytes": 81559552,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 9,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.96725,
+        "max_rss_bytes": 81526784,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 51.254708,
+        "max_rss_bytes": 81510400,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 10,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.878541,
+        "max_rss_bytes": 81526784,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 46.313167,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 11,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 47.782292,
+        "max_rss_bytes": 81330176,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.921166,
+        "max_rss_bytes": 81543168,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 12,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 28.638708,
+        "max_rss_bytes": 81510400,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 45.243166,
+        "max_rss_bytes": 81330176,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 13,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 25.366083,
+        "max_rss_bytes": 81494016,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 52.828458,
+        "max_rss_bytes": 81346560,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 14,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 28.60125,
+        "max_rss_bytes": 81477632,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 55.091917,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 15,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 47.763042,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 28.742291,
+        "max_rss_bytes": 81526784,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 16,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 26.488792,
+        "max_rss_bytes": 81494016,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 55.016875,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 17,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 56.486875,
+        "max_rss_bytes": 81362944,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 29.173417,
+        "max_rss_bytes": 81510400,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 18,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "milliseconds": 30.229959,
+        "max_rss_bytes": 83525632,
+        "peak": 2,
+        "put_requests": 4
+      },
+      "before": {
+        "milliseconds": 61.666833,
+        "max_rss_bytes": 81412096,
+        "peak": 1,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 19,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 58.346,
+        "max_rss_bytes": 83427328,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 26.198125,
+        "max_rss_bytes": 81592320,
+        "peak": 2,
+        "put_requests": 4
+      }
+    },
+    {
+      "scenario": "project-8MiB",
+      "bytes_per_attachment": 8388608,
+      "people": false,
+      "index": 20,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "milliseconds": 50.957,
+        "max_rss_bytes": 81379328,
+        "peak": 1,
+        "put_requests": 4
+      },
+      "after": {
+        "milliseconds": 31.642542,
+        "max_rss_bytes": 83607552,
+        "peak": 2,
+        "put_requests": 4
+      }
+    }
+  ],
+  "scenario": "4syntheticattachments;actualselectedsendbranches,actualrawputBlob+requestBearer+boundAPI,FoundationURLSession,intercept-allURLProtocol8msrequestedreplydelay;noHTTPnetwork;bodycopiesarealsoheldbytestforbytevalidation",
+  "sources": {
+    "before": {
+      "sources": {
+        "AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+        "RelayAPI.swift": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+        "WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+      },
+      "compile_exit": 0,
+      "seconds": 2.687843625084497,
+      "fixture_sha256": "37fcb8d177deb9cc72c7e08c112a4ac453375b679b6c30fcf7bd5b81617ca087"
+    },
+    "after": {
+      "sources": {
+        "AppModel.swift": "0ae1e7f9943b9dd82bcc4ef91a3b3e195b6090b2c6efaaedeccd3a9a91c60b71",
+        "RelayAPI.swift": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+        "WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+      },
+      "compile_exit": 0,
+      "seconds": 2.6943600409431383,
+      "fixture_sha256": "1855c513bf5ba751d69e44382b0b0126c58e4ba4eac0a2669efcbfe5569d05ef"
+    }
+  },
+  "statistics": {
+    "people-small": {
+      "before": {
+        "p50_ms": 47.410125,
+        "p95_ms": 50.63975,
+        "p99_ms": 50.6466836,
+        "range_ms": [
+          42.025833,
+          50.648417
+        ],
+        "mean_ms": 46.92174609523809,
+        "median_max_rss_bytes": 12255232
+      },
+      "after": {
+        "p50_ms": 24.993792,
+        "p95_ms": 26.546333,
+        "p99_ms": 26.736632999999998,
+        "range_ms": [
+          19.660167,
+          26.784208
+        ],
+        "mean_ms": 24.138355095238094,
+        "median_max_rss_bytes": 12419072
+      },
+      "pairs": 21,
+      "mean_saved_ms": 22.783390999999998,
+      "mean_saved_bootstrap95_ms": [
+        21.445638197619047,
+        24.02690893690476
+      ],
+      "sign_test_two_sided_p": 9.5367431640625e-07,
+      "p50_ratio": 1.89687603225633,
+      "p50_percent_saved": 47.281742032951826
+    },
+    "project-1MiB": {
+      "before": {
+        "p50_ms": 47.849209,
+        "p95_ms": 51.788042,
+        "p99_ms": 52.8444756,
+        "range_ms": [
+          40.493334,
+          53.108584
+        ],
+        "mean_ms": 47.17338695238095,
+        "median_max_rss_bytes": 21397504
+      },
+      "after": {
+        "p50_ms": 25.721667,
+        "p95_ms": 27.278375,
+        "p99_ms": 28.657075000000003,
+        "range_ms": [
+          19.500375,
+          29.00175
+        ],
+        "mean_ms": 24.948398952380952,
+        "median_max_rss_bytes": 21544960
+      },
+      "pairs": 21,
+      "mean_saved_ms": 22.224988,
+      "mean_saved_bootstrap95_ms": [
+        20.692027383333333,
+        23.839315628571427
+      ],
+      "sign_test_two_sided_p": 9.5367431640625e-07,
+      "p50_ratio": 1.860268582125723,
+      "p50_percent_saved": 46.24432140560568
+    },
+    "project-8MiB": {
+      "before": {
+        "p50_ms": 52.828458,
+        "p95_ms": 61.666833,
+        "p99_ms": 81.07846660000001,
+        "range_ms": [
+          45.243166,
+          85.931375
+        ],
+        "mean_ms": 54.06619252380953,
+        "median_max_rss_bytes": 81362944
+      },
+      "after": {
+        "p50_ms": 28.079417,
+        "p95_ms": 30.229959,
+        "p99_ms": 31.3600254,
+        "range_ms": [
+          25.366083,
+          31.642542
+        ],
+        "mean_ms": 27.80734319047619,
+        "median_max_rss_bytes": 81510400
+      },
+      "pairs": 21,
+      "mean_saved_ms": 26.258849333333334,
+      "mean_saved_bootstrap95_ms": [
+        23.058570977380953,
+        30.40063794642857
+      ],
+      "sign_test_two_sided_p": 9.5367431640625e-07,
+      "p50_ratio": 1.881394403594633,
+      "p50_percent_saved": 46.84793374056082
+    }
+  },
+  "bootstrap": {
+    "seed": 91209,
+    "resamples": 10000,
+    "scenario_order": [
+      "people-small",
+      "project-1MiB",
+      "project-8MiB"
+    ]
+  }
+}

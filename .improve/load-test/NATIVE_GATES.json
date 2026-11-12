@@ -1,0 +1,132 @@
+{
+  "source_before": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "b71d0e2cd597c036e329b6f0c86d357c7fd25f61d0daa272ff363222948d432f",
+    "crates/arbos-relay/src/db_push.rs": "5ac862641c775bd9af1c51e9fa21e403dfd29e4c7a1e6225876d717384d8ee0a",
+    "crates/arbos-relay/src/people.rs": "f29ffdaa13f1eaa096793c0f6333e66885ecc3c7bda67ce705647abfcb7cd780"
+  },
+  "source_after": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "b71d0e2cd597c036e329b6f0c86d357c7fd25f61d0daa272ff363222948d432f",
+    "crates/arbos-relay/src/db_push.rs": "5ac862641c775bd9af1c51e9fa21e403dfd29e4c7a1e6225876d717384d8ee0a",
+    "crates/arbos-relay/src/people.rs": "f29ffdaa13f1eaa096793c0f6333e66885ecc3c7bda67ce705647abfcb7cd780"
+  },
+  "sources_unchanged": true,
+  "network": "sandbox deny network*",
+  "separate_cleaned_target": "unique local target; ignored, not a release artifact",
+  "records": [
+    {
+      "name": "roster",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "roster_batch_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 41.23020975000691,
+      "suites": [
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "expected_pass": 3,
+      "passed": true
+    },
+    {
+      "name": "unread",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "unread_query_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 0.7190422499552369,
+      "suites": [
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "expected_pass": 2,
+      "passed": true
+    },
+    {
+      "name": "position",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "room_position_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 0.2898584579816088,
+      "suites": [
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "expected_pass": 2,
+      "passed": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "-p",
+        "arbos-core",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 28.175655166967772,
+      "suites": [],
+      "expected_pass": null,
+      "passed": true
+    }
+  ],
+  "cache_safety": "All 12 workspace packages were cleaned in an APFS clone before building this source. Historical cross-workspace shared-target greens are superseded.",
+  "before_roster": {
+    "passed": 2,
+    "failed": 1,
+    "ignored": 0,
+    "seconds": 39.829,
+    "failure": "10 rooms executed 11 statements; budget is 2",
+    "same_behavior_tests": true
+  },
+  "characterization_note": "Unread tests do not change the query or schema. Position tests characterize preserved defaults/statistics/error behavior."
+}

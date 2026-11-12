@@ -1,0 +1,46 @@
+{
+  "source_commit": "57dc7bcf141ef00b637e2afba86162a87ebddc94",
+  "toolchain": {
+    "exit": 1,
+    "seconds": 2.5575909580802545,
+    "command": "cargo +stable fmt --all --check",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "network": "macOS deny-network sandbox + Cargo offline"
+  },
+  "gates": [
+    {
+      "gate": "apply",
+      "exit": 0,
+      "seconds": 2.516685582930222
+    },
+    {
+      "gate": "check",
+      "exit": 0,
+      "seconds": 2.2842865829588845
+    }
+  ],
+  "changed_files": [
+    "crates/arbos-mac/src/sync/relay.rs"
+  ],
+  "other_projection_files_unchanged": 436,
+  "method_body_and_all_other_file_bytes_unchanged": true,
+  "only_change": "rustfmt multiline function signature with permitted trailing argument comma; no function body, type, name, argument order, macro, output or policy changed",
+  "before": {
+    "crates/arbos-mac/src/sync/relay.rs": {
+      "mode": "100644",
+      "git_blob": "57f22da1a9fb15e3284f8b7e3cc0dfe43ddd5318",
+      "sha256": "17f6e0d0f54ab902881e37f56ab7d59d8925d44dfdf738be30e105be0020590b",
+      "bytes": 396511
+    }
+  },
+  "after": {
+    "crates/arbos-mac/src/sync/relay.rs": {
+      "mode": "100644",
+      "sha256": "5f0b53c5e1e93e3f310c247f4a568107d471972916c99de20ae55f825f1301d0"
+    }
+  },
+  "patch_sha256": "13b718c92f42e1bf748e22ef714a172c86a9cdaf34346c2c626b6f5d99840ea3",
+  "patch_bytes": 717,
+  "verification_limit": "No retiming or compile rerun: only signature whitespace/trailing comma, actual function body and remaining436 projected source/manifest files identical. Standalone CI compilation/tests remain their own gates."
+}

@@ -1,0 +1,29 @@
+{
+  "scope": "full Mac P3 + provisional native auth/calls + P6 metadata, compiler-only gate",
+  "command": [
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-mac",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "seconds": 21.499674207996577,
+  "exit_code": 0,
+  "source_unchanged": true,
+  "network": "deny network*",
+  "workspace_packages_cleaned": 12,
+  "relay_composed_sha256": "c53acb9cc87a18a96b4031eb029af0ef846f21f99a138a8e60d463b443c73054",
+  "function_sha256": {
+    "hydrate_project": "48b9325ce0e85b30b17960efe276e1edccbaa3427342bb8d87289953e54e3d1e",
+    "fetch_people_list": "148a0c831ac625edc525f2d46abde5a84b026c212dd71b623be5977089ead6ab",
+    "refresh_registry": "1d9384ad424ec5ced2f8e5def367c985085d27281a106deaa317a1f2ed4afae1"
+  },
+  "composition_reconciliation": "P3 shared core avatar call retained instead of old UI forwarding helper; helper behavior unchanged",
+  "log_sha256": "a6551d614cf0c14e798957c763f1683526d61a6ce803ea092f0499c15c269c4d",
+  "limits": "compiler-only gate for this exact P3/provisional-native/P6 composition; final native successor, runtime and full CI gates remain separate"
+}

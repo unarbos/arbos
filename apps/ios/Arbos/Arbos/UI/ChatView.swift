@@ -1274,8 +1274,14 @@ struct ChatSession: View {
         // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01) — placed
         // from the composer's measured frame, since that inset is wrong on some hardware.
         .overlay(alignment: .bottom) { ChatBarFade(bar: chatBarHeight, composer: composerEdge, keyboard: composerFocused) }
+        // Both jump chips sit centred just above the chat bar. While Search-in-chat is open
+        // they overlay the lower result rows: a tap aimed at a hit there lands on the chip
+        // instead, `jumpToLatest` re-pins the filtered list to its end, and the bar stays
+        // open — the reveal never runs. Gate run 43133707619 is that miss on `long-265` at
+        // y457 (24 pt above the bar, dead centre of the chevron's 44 pt hit). Hide them for
+        // the life of the bar; they return the moment it closes.
         .overlay(alignment: .bottom) {
-            if newBelowCount > 0 {
+            if newBelowCount > 0, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     newMessagesPill.padding(.bottom, bar + 10)
                 }
@@ -1289,7 +1295,7 @@ struct ChatSession: View {
         // straight through — so the hit target is the disc and not a full-width bar, and a
         // UIKit tap inside it still works while the transcript decelerates.
         .overlay(alignment: .bottom) {
-            if newBelowCount == 0, awayFromBottom {
+            if newBelowCount == 0, awayFromBottom, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     scrollToBottomButton
                         .padding(.bottom, bar + 10)
@@ -1594,6 +1600,11 @@ struct ChatSession: View {
             }
             demoQueue = ["model", "threads", "attach", "voice", "settings"]
             demoPresentNext()
+        }
+        .task {
+            guard DebugHooks.timeReveal else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            timeReveal = RowView.timeRevealWidth(theme)
         }
         .task {
             guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
@@ -2345,7 +2356,7 @@ struct ChatSession: View {
             // iMessage feel: 1:1 up to the reveal width, then rubber-band
             // (a fifth of the excess, at most 24 pt) instead of a hard stop.
             let raw = max(0, -dx)
-            let w = RowView.timeRevealWidth
+            let w = RowView.timeRevealWidth(theme)
             let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
@@ -3323,7 +3334,8 @@ struct ChatSession: View {
                 }
             }()
             HStack(spacing: 6) {
-                if let mark { StatusMarkView(mark: mark, size: 9) }
+                // Floats over the transcript, so it keeps turning while the reader scrolls.
+                if let mark { StatusMarkView(mark: mark, size: 9, whileScrolling: true) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -3779,32 +3791,47 @@ struct ChatSession: View {
                 }
             },
             onMicEnd: { value in
+                // A pure tap can deliver onEnded with no onChanged
+                // (`DragGesture(minimumDistance: 0)` on current iOS). Decide
+                // here so a click is never a no-op ([feedback
+                // app-01M69J94RZRMZXKGMC6XDGWBFH]).
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                let action = MemoMicRelease.decide(
+                    holdActive: memoHoldActive,
+                    recording: recorder.recording,
+                    ignoreRelease: memoIgnoreRelease,
+                    cancelArmed: memoCancelArmed,
+                    translationWidth: value.translation.width,
+                    heldSeconds: held,
+                    cancelDistance: Self.memoCancelDistance)
                 memoHoldActive = false
                 memoPressStartedAt = nil
                 memoDragX = 0
                 memoCancelArmed = false
-                if memoIgnoreRelease {
-                    memoIgnoreRelease = false
-                    return
-                }
-                // Slide-left discard: drop the memo instead of sending.
-                if cancel {
+                memoIgnoreRelease = false
+                switch action {
+                case .toggleTap:
                     memoFinishWhenPermission = false
-                    if recorder.recording { recorder.cancel() }
-                    return
-                }
-                // Hold-to-talk: release after the threshold sends.
-                if held >= 0.25 {
                     if recorder.recording {
                         finishMemoHold()
                     } else {
-                        // Permission still pending; finish when it starts.
-                        memoFinishWhenPermission = true
+                        Haptics.recordStart()
+                        recorder.start()
                     }
+                case .ignore:
+                    break
+                case .cancel:
+                    memoFinishWhenPermission = false
+                    if recorder.recording { recorder.cancel() }
+                case .finishHold:
+                    finishMemoHold()
+                case .waitForPermission:
+                    // Permission still pending; finish when it starts.
+                    memoFinishWhenPermission = true
+                case .keepRecording:
+                    // Short tap after hold tracked: leave recording on (click-to-toggle).
+                    break
                 }
-                // Short tap: leave recording on (click-to-toggle).
             },
             onPrimary: {
                 if recorder.recording {
@@ -4927,6 +4954,44 @@ final class ComposerDraft: ObservableObject {
     #endif
 }
 
+/// What a mic press/release should do. Pure so a tap that never sees
+/// `onChanged` still starts recording ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+enum MemoMicRelease: Equatable {
+    /// `onEnded` arrived with no `onChanged` — toggle start/finish.
+    case toggleTap
+    /// Second press already finished the memo; ignore this release.
+    case ignore
+    /// Slide-left discard (or cancel armed).
+    case cancel
+    /// Hold past the send threshold; recording is live — finish and send.
+    case finishHold
+    /// Hold past the send threshold; permission still pending — finish once it starts.
+    case waitForPermission
+    /// Short tap after hold was tracked: leave recording on (click-to-toggle).
+    case keepRecording
+
+    static func decide(
+        holdActive: Bool,
+        recording: Bool,
+        ignoreRelease: Bool,
+        cancelArmed: Bool,
+        translationWidth: CGFloat,
+        heldSeconds: TimeInterval,
+        cancelDistance: CGFloat,
+        holdSendThreshold: TimeInterval = 0.25
+    ) -> MemoMicRelease {
+        // Ended-only tap: `DragGesture(minimumDistance: 0)` can skip onChanged.
+        if !holdActive { return .toggleTap }
+        if ignoreRelease { return .ignore }
+        let cancel = cancelArmed || translationWidth < -cancelDistance
+        if cancel { return .cancel }
+        if heldSeconds >= holdSendThreshold {
+            return recording ? .finishHold : .waitForPermission
+        }
+        return .keepRecording
+    }
+}
+
 /// Which of the composer's trailing controls the field's state calls for. The
 /// mic and the round pill are decided apart, because a recording wants both:
 /// the mic so a hold-to-talk release lands somewhere, the arrow so a tap can
@@ -5197,13 +5262,17 @@ private struct ComposerField<Leading: View>: View {
         } else {
             // The field with mention chips (#1596): one to eight lines, the
             // chips as attachments; `draft.text` stays the plain `@handle` text.
+            // Beside the `+` the HStack's 8 pt is the only gap; the full-width
+            // 17 pt inset is for channels and the stacked text row above the
+            // controls ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
             MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                             placeholder: prompt(draft.text), theme: theme,
                             agentProject: { model.agent(member: $0, chatId: chatId) },
                             onPasteMedia: onPasteMedia,
                             onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                             onPasteImage: onPasteImage,
-                            onLines: { lines = $0 })
+                            onLines: { lines = $0 },
+                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : Theme.composerTextInsetBesidePlus)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -5296,7 +5365,9 @@ private struct ComposerField<Leading: View>: View {
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
-        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Rim is paint only: a hit-testing stroke over the trailing edge would
+        // swallow taps on the mic ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint).allowsHitTesting(false))
         // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
         .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {

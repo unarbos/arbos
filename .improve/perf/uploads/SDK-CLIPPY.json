@@ -1,0 +1,28 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1) (allow default) (deny network*)",
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-mac",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "exit_code": 0,
+  "seconds": 15.149810416973196,
+  "workspace_packages_cleaned": 12,
+  "source_unchanged": true,
+  "dependency_seed": "session-owner/final-sdk/target (APFS clone; all twelve workspace packages cleaned in clone)",
+  "scope": "FinalP3+P4 SDK source plus exact prior3hydration helpers plus uploads only; compile/lint, not runtime media or whole app latency",
+  "network": "deny network*",
+  "source_manifest": {
+    "relay_sha256": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+    "composition": "Final SDK P3+P4 immutable source + three metadata hydration helper bodies + narrow upload allocation delta"
+  }
+}

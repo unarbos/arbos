@@ -82,12 +82,10 @@ pub fn hint_bare_urls(text: &str) -> String {
 
 /// Where the next `http://` or `https://` begins in `text`.
 fn find_url_start(text: &str) -> Option<usize> {
-    let https = text.find("https://");
-    let http = text.find("http://");
-    match (https, http) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
+    text.match_indices("http").find_map(|(start, _)| {
+        let candidate = &text[start..];
+        (candidate.starts_with("https://") || candidate.starts_with("http://")).then_some(start)
+    })
 }
 
 /// The byte after the bare URL that starts at `start`.
