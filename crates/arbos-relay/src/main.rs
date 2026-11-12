@@ -503,6 +503,9 @@ async fn main() -> anyhow::Result<()> {
             "/_matrix/client/{*rest}",
             axum::routing::any(matrix::servers::proxy),
         )
+        // A file of an encrypted people chat is uploaded as ciphertext; the SDK has only this
+        // path for it (downloads are under /_matrix/client/v1/media).
+        .route("/_matrix/media/v3/upload", post(matrix::servers::proxy))
         .route(
             "/servers",
             get(matrix::servers::list).post(matrix::servers::create),
