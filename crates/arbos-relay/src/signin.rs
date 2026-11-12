@@ -1319,9 +1319,12 @@ pub async fn patch_me(
     principal: Principal,
     Json(body): Json<PatchMeBody>,
 ) -> Response {
+    // Devices and the owner's box (act-as-user) may change safe profile fields. Login changes
+    // stay device-only below so a box cannot rename the handle.
     let (user_id, device_id) = match &principal {
         Principal::Device { user_id, id, .. } => (user_id.clone(), id.clone()),
-        Principal::Box { .. } | Principal::Admin => {
+        Principal::Box { user_id } => (user_id.clone(), format!("box:{user_id}")),
+        Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
     };
@@ -1346,6 +1349,15 @@ pub async fn patch_me(
     let login = match body.login.as_ref() {
         None => None,
         Some(raw) => {
+            // Handle changes stay on a signed-in device; a box may only set display name /
+            // group_add (safe app-control settings).
+            if matches!(principal, Principal::Box { .. }) {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "devices_only",
+                    "changing the handle needs a signed-in device",
+                );
+            }
             let handle = raw.trim().trim_start_matches('@').to_owned();
             if !valid_handle(&handle) {
                 return api_error(

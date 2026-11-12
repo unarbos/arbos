@@ -215,7 +215,11 @@ pub(crate) fn continues_run(tail: Option<&RunTail>, sender: &str, at: u64, quote
 /// `replyTo`; an agent's `replyTo`, else `inReplyTo` in an attributed chat (a
 /// people-chat reply or another Project's row, the fallback the row builder
 /// uses). A quoted bubble names its sender and starts its own run.
-fn carries_quote(message: &Message) -> bool {
+///
+/// `names_senders`: group / channel / people group. In a solo 1:1 agent chat
+/// (`!names_senders`) agent bubbles never quote — even when an older box
+/// attached `replyTo` ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]).
+fn carries_quote(message: &Message, names_senders: bool) -> bool {
     let non_empty = |id: Option<&str>| id.is_some_and(|id| !id.is_empty());
     match message.role {
         Role::User => {
@@ -226,6 +230,9 @@ fn carries_quote(message: &Message) -> bool {
                 || non_empty(message.reply_to.as_deref())
         }
         Role::Assistant | Role::Project => {
+            if !names_senders {
+                return false;
+            }
             let in_people =
                 message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
             let attributed = message.role == Role::Project || in_people;
@@ -4482,7 +4489,7 @@ pub fn build_rows_with_cache(
             run_tail.as_ref(),
             &message.sender,
             message.created_at,
-            carries_quote(message),
+            carries_quote(message, names_senders),
         );
         let run_start = !continues;
         let version = message_render_version(
@@ -4823,21 +4830,28 @@ pub fn build_rows_with_cache(
                     || (names_senders && message.sender.starts_with("agent:"));
                 // Quote the message this answers: `replyTo` is the platform reply the
                 // box sets by the #1521 rule (always in groups / channels / people chats
-                // and for a row another agent sent; in a 1:1 only when answering an
-                // earlier message than the latest). Rows from older boxes in attributed
-                // chats fall back to `inReplyTo` (#1447); a plain 1:1 answer to the
-                // latest message carries no quote.
+                // and for a row another agent sent; never in a solo 1:1 agent chat —
+                // Jacob 2026-11-10). Rows from older boxes in attributed chats fall
+                // back to `inReplyTo` (#1447). Clients also hide a stale `replyTo` on
+                // agent bubbles in solo 1:1 so older rows render clean
+                // ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]).
                 let attributed = message.role == Role::Project || in_people;
-                let reply_quote = message
-                    .reply_to
-                    .as_deref()
-                    .filter(|id| !id.is_empty())
-                    .or_else(|| {
-                        attributed
-                            .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
-                            .flatten()
+                let reply_quote = names_senders
+                    .then(|| {
+                        message
+                            .reply_to
+                            .as_deref()
+                            .filter(|id| !id.is_empty())
+                            .or_else(|| {
+                                attributed
+                                    .then(|| {
+                                        message.in_reply_to.as_deref().filter(|id| !id.is_empty())
+                                    })
+                                    .flatten()
+                            })
+                            .map(|id| Quote::for_reply(id, messages))
                     })
-                    .map(|id| Quote::for_reply(id, messages));
+                    .flatten();
                 if agent_speaker {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
                     // the disc on the last block names it. No meta line — "answering
@@ -12547,6 +12561,147 @@ mod delivery_tests {
             f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
             "the clock sits outside the pending bubble"
         );
+    }
+}
+
+#[cfg(test)]
+mod solo_agent_reply_quote_tests {
+    //! Jacob 2026-11-10 ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]):
+    //! in a solo 1:1 agent chat the agent's bubbles never show a reply/quote header
+    //! — even when an older box still attached `replyTo`. Groups and channels still
+    //! quote. A human's own explicit reply still quotes. iPhone twin:
+    //! `SoloAgentReplyQuoteTests`.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn user(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_solo",
+            "role": "user",
+            "sender": "user",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("user")
+    }
+
+    fn agent_with_reply(id: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_solo",
+            "role": "assistant",
+            "sender": "agent:box",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "inReplyTo": reply_to,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent")
+    }
+
+    fn group_agent_with_reply(id: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "inReplyTo": reply_to,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("group agent")
+    }
+
+    fn rows_of(messages: &[Message], names_senders: bool) -> Vec<Row> {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            names_senders,
+        )
+    }
+
+    fn assistant_quote(rows: &[Row]) -> Option<Quote> {
+        rows.iter().find_map(|r| match &r.kind {
+            RowKind::Markdown {
+                first: true, quote, ..
+            } => quote.clone(),
+            RowKind::NoAnswer { quote, .. } => quote.clone(),
+            _ => None,
+        })
+    }
+
+    fn user_quote(rows: &[Row]) -> Option<Quote> {
+        rows.iter().find_map(|r| match &r.kind {
+            RowKind::User { quote, .. } => quote.clone(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn solo_agent_chat_hides_agent_reply_quote_even_when_reply_to_is_set() {
+        let t = 1_700_000_000_000u64;
+        let ask = user("u1", "what's the weather", t);
+        let answer = agent_with_reply("a1", "sunny", "u1", t + 1_000);
+        let rows = rows_of(&[ask, answer.clone()], false);
+        assert!(
+            assistant_quote(&rows).is_none(),
+            "solo 1:1: agent bubble carries no quote header"
+        );
+        assert!(!carries_quote(&answer, false));
+    }
+
+    #[test]
+    fn group_still_shows_agent_reply_quote() {
+        let t = 1_700_000_000_000u64;
+        let ask = serde_json::from_value(serde_json::json!({
+            "id": "u1",
+            "chatId": "chat_group",
+            "role": "user",
+            "sender": "user:gh_me",
+            "senderHandle": "me",
+            "status": "done",
+            "createdAt": t,
+            "parts": [{ "id": "p-u1", "kind": "text", "text": "what's the weather" }],
+        }))
+        .expect("ask");
+        let answer = group_agent_with_reply("a1", "sunny", "u1", t + 1_000);
+        let rows = rows_of(&[ask, answer.clone()], true);
+        let quote = assistant_quote(&rows).expect("group agent quotes the ask");
+        assert_eq!(quote.message_id, "u1");
+        assert_eq!(quote.text, "what's the weather");
+        assert!(carries_quote(&answer, true));
+    }
+
+    #[test]
+    fn human_explicit_reply_in_solo_still_shows_quote() {
+        let t = 1_700_000_000_000u64;
+        let first = user("u1", "first thought", t);
+        let mut reply = user("u2", "following up", t + 2_000);
+        reply.reply_to = Some("u1".into());
+        let rows = rows_of(&[first, reply.clone()], false);
+        let quote = user_quote(&rows).expect("a human's own reply still quotes in 1:1");
+        assert_eq!(quote.message_id, "u1");
+        assert_eq!(quote.text, "first thought");
+        assert!(carries_quote(&reply, false));
     }
 }
 

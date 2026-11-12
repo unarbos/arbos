@@ -1135,7 +1135,10 @@ struct ChatSession: View {
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        let multiParty = isChannel || (people?.isGroup ?? false)
+        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+        // `names_senders`, and the solo-1:1 quote-header hide depends on it
+        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
