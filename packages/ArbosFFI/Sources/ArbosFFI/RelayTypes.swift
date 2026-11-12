@@ -1226,18 +1226,16 @@ public struct HealthDto: Codable {
 	public let ok: Bool?
 	public let proto: Int64?
 	public let devices: Int64?
-	public let daytona: Bool?
 	/// Present on current relays; absent on very old ones that only had `auth`.
 	public let auth_mode: String?
 	/// Older relays only (`"github"`); omitted on current relays.
 	public let auth: String?
 	public let providers: HealthProvidersDto?
 
-	public init(ok: Bool?, proto: Int64?, devices: Int64?, daytona: Bool?, auth_mode: String?, auth: String?, providers: HealthProvidersDto?) {
+	public init(ok: Bool?, proto: Int64?, devices: Int64?, auth_mode: String?, auth: String?, providers: HealthProvidersDto?) {
 		self.ok = ok
 		self.proto = proto
 		self.devices = devices
-		self.daytona = daytona
 		self.auth_mode = auth_mode
 		self.auth = auth
 		self.providers = providers

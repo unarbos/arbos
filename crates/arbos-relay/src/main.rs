@@ -21,7 +21,6 @@ mod calls;
 mod channels;
 mod connectors;
 mod credits;
-mod daytona;
 mod db;
 mod db_accounts;
 mod db_agent_messages;
@@ -52,7 +51,6 @@ mod link_icons;
 mod livekit;
 mod local;
 mod matrix;
-mod migrate;
 mod moderation;
 #[cfg(test)]
 mod module_lookup_tests;
@@ -66,9 +64,9 @@ mod people;
 mod perf;
 mod pins;
 #[cfg(test)]
-mod preview_token_tests;
-#[cfg(test)]
 mod project_lookup_tests;
+#[cfg(test)]
+mod provider_retired_tests;
 mod proxy;
 mod proxy_trace;
 #[cfg(test)]
@@ -87,18 +85,10 @@ mod signin;
 mod site_icons;
 mod sites;
 mod skills;
-mod smoke;
 mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
-#[cfg(test)]
-mod upgrade_box_fake;
-mod upgrade_carry;
-#[cfg(test)]
-mod upgrade_rollback_tests;
-#[cfg(test)]
-mod upgrade_room_tests;
 mod vault;
 mod vaults;
 mod voice;
@@ -121,7 +111,7 @@ use crate::state::{AppState, AuthMode, Config};
 #[command(
     name = "arbos-relay",
     version,
-    about = "Arbos relay: registry, pairing, sync rooms, blobs, model proxy, Daytona"
+    about = "Arbos relay: registry, pairing, sync rooms, blobs, model proxy, boxes"
 )]
 struct Args {
     /// Listen address.
@@ -136,16 +126,18 @@ struct Args {
     /// Admin token for `POST /pair/new`; generated and printed when absent.
     #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
     admin_token: Option<String>,
-    /// Daytona snapshot name for new boxes.
+    /// Snapshot name new boxes are made from. It names the agentd image version
+    /// (`arbos-agent-<version>` → `…/arbos-agent:<version>`, `fleet::image_for_snapshot`).
+    ///
+    /// The variable keeps Daytona's name: the deploy worker writes it into relay.env on every
+    /// image roll and every live relay reads it, so renaming it here would need a config change on
+    /// the host rather than a code change.
     #[arg(
         long,
         env = "ARBOS_DAYTONA_SNAPSHOT",
         default_value = "arbos-agent-0.1.11"
     )]
-    daytona_snapshot: String,
-    /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
-    #[arg(long, env = "ARBOS_DAYTONA_DOCKERFILE")]
-    daytona_dockerfile: Option<PathBuf>,
+    default_snapshot: String,
     /// Directory served to boxes at /bootstrap/{file} (arbos-agentd, arbos-pi-ext.tar).
     #[arg(long, env = "ARBOS_BOOTSTRAP_DIR")]
     bootstrap_dir: Option<PathBuf>,
@@ -182,15 +174,6 @@ enum Cmd {
     Serve,
     /// Print a one-time pairing code (writes to the same SQLite file).
     PairCode,
-    /// D25 lifecycle check against the live Daytona API with timings (create → stop → start → archive → start → delete).
-    DaytonaSmoke {
-        /// Snapshot name; when absent, an inline Dockerfile (node:24 + pi) is built by Daytona.
-        #[arg(long)]
-        snapshot: Option<String>,
-        /// Keep the sandbox instead of deleting it.
-        #[arg(long)]
-        keep: bool,
-    },
 }
 
 #[tokio::main]
@@ -220,9 +203,6 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     let openai_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let daytona_key = std::env::var("DAYTONA_API_KEY")
         .ok()
         .filter(|s| !s.is_empty());
     let anthropic_base = args.anthropic_base.clone().unwrap_or_else(|| {
@@ -273,8 +253,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         openai_images_base: args.openai_images_base.clone(),
         anthropic_base,
-        daytona_snapshot: args.daytona_snapshot.clone(),
-        daytona_dockerfile: args.daytona_dockerfile.clone(),
+        default_snapshot: args.default_snapshot.clone(),
         bootstrap_dir: args.bootstrap_dir.clone(),
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
@@ -336,17 +315,6 @@ async fn main() -> anyhow::Result<()> {
         Some(k) => connectors::crypto::RelayKey::derive(&k).subkey("jwt"),
         None => relay_key.subkey("jwt"),
     };
-    let daytona = daytona_key.map(|k| {
-        daytona::Daytona::new(
-            k,
-            std::env::var("DAYTONA_API_URL").ok(),
-            std::env::var("DAYTONA_ORG_ID").ok(),
-        )
-    });
-    if let Some(Cmd::DaytonaSmoke { snapshot, keep }) = args.cmd {
-        let dt = daytona.ok_or_else(|| anyhow::anyhow!("DAYTONA_API_KEY is required"))?;
-        return smoke::run(&dt, snapshot, keep).await;
-    }
     let data_dir_for_voice = args.data.clone();
     let state = AppState {
         db: db.clone(),
@@ -354,7 +322,6 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(300))
             .build()?,
-        daytona,
         rooms: Arc::new(RwLock::new(HashMap::new())),
         box_states: Arc::new(RwLock::new(HashMap::new())),
         local_children: Arc::new(Mutex::new(HashMap::new())),
@@ -370,7 +337,6 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
-        upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
         push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
@@ -379,7 +345,6 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
-        fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
@@ -437,7 +402,6 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
-    upgrade::spawn_history_sweeper(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;
@@ -697,6 +661,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/chats/dm", post(people::dm_create))
         .route("/chats/join", post(people::group_join))
+        .route("/chats/search/messages", get(people::messages_search))
         .route(
             "/chats/{id}",
             get(people::chat_get)
@@ -760,6 +725,10 @@ async fn main() -> anyhow::Result<()> {
         // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
         // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
         .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/landed",
+            post(agent_messages::landed),
+        )
         .route(
             "/projects/{id}/agent-messages/{mid}/reply",
             post(agent_messages::reply),
@@ -842,14 +811,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/machine", get(api::machine))
         .route("/machine/start", post(api::machine_start))
         .route("/machine/stop", post(api::machine_stop))
-        .route("/machine/migrate", post(api::machine_migrate))
         .route("/machine/restart", post(api::machine_restart))
         .route("/machine/upgrade", post(upgrade::machine_upgrade))
         .route(
             "/admin/users/{id}/box/upgrade",
             post(upgrade::admin_upgrade),
         )
-        .route("/admin/users/{id}/box/repair", post(upgrade::admin_repair))
         .route(
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box).delete(api::admin_delete_user_box),

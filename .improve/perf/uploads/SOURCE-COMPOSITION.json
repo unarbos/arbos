@@ -1,0 +1,7 @@
+{
+  "phase6_old": "6cb8420bad823288be6977da0d232721a24095d5dd2ffb1c9546593f178705bc",
+  "phase6_candidate": "17f6e0d0f54ab902881e37f56ab7d59d8925d44dfdf738be30e105be0020590b",
+  "composed_candidate": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+  "resolution": "Only fetch response/bytes +upload_outgoing +upload_voice_memo; preserve standalone token/refresh authority body; no other composed Shared changes copied. Public fakes adapt only collaborator signature, leaf lock retained; production bodies unmodified.",
+  "baseline_upload_bodies_byte_equal": true
+}

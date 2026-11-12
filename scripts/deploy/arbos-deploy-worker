@@ -19,9 +19,9 @@
 #                /etc/arbos/voice.deployed-sha
 #        agentd  `roll-image` in its own transient unit (arbos-deploy-agentd), because it takes
 #                15–40 minutes: tag image-v0.1.N, wait for the `image` workflow's build + smoke,
-#                prune Daytona snapshots (quota 30), register the snapshot, switch the relay
-#                default, restart the relay, roll every real box at a quiet moment
-#                (docs/memory-tree-production.md §8b); writes <state>/agentd.deployed-sha.
+#                check the seed, run the canaries, switch the relay default, roll every real box at
+#                a quiet moment (docs/memory-tree-production.md §8b); writes
+#                <state>/agentd.deployed-sha.
 #   A failed deploy is logged as a `deploy_failed` line in /var/lib/arbos-feedback/deploy-events.jsonl
 #   (the feedback loop surfaces it in its audits), retried once after 10 minutes, then left for the
 #   next commit. A roll whose window closes with boxes still pending keeps retrying every 15 minutes;
@@ -31,8 +31,8 @@
 # knobs in /etc/arbos/deploy.env (AUTO_DEPLOY_RELAY/AGENTD/VOICE=0|1, SETTLE_S, MAX_WAIT_S,
 # RELAY_DEPLOY_MIN_S, RELAY_DEPLOY_MAX_WAIT_S);
 # kill switch /etc/arbos/deploy.disabled. Secrets are read from /etc/arbos/feedback.env
-# (GITHUB_TOKEN) and /etc/arbos/relay.env (DAYTONA_API_KEY, ARBOS_RELAY_ADMIN_TOKEN); none is
-# printed. The feedback loop judges "live" from the deployed shas, not from this script.
+# (GITHUB_TOKEN) and /etc/arbos/relay.env (ARBOS_RELAY_ADMIN_TOKEN); none is printed. The feedback
+# loop judges "live" from the deployed shas, not from this script.
 set -euo pipefail
 
 STATE="${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}"
@@ -400,7 +400,12 @@ deploy_voice() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# agentd: image build (GitHub Actions) + Daytona snapshot + roll (§8b)
+# agentd: image build (GitHub Actions) + roll (§8b)
+#
+# Daytona is retired (2026-11-09): every box runs as a gVisor sandbox on this host and is rolled by
+# re-creating its container on the new image, so the roll registers no snapshot and needs no sandbox
+# provider at all. What stays is the snapshot NAME (`arbos-agent-<version>`): the relay turns it into
+# the image tag for the host sandboxes, and `ARBOS_DAYTONA_SNAPSHOT` in relay.env still carries it.
 # ---------------------------------------------------------------------------------------------
 
 next_image_version() {
@@ -469,107 +474,6 @@ else:
 
 relay_db() { sudo -u arbos sqlite3 /var/lib/arbos-relay/relay.db "$@"; }
 
-DAYTONA_API=https://app.daytona.io/api
-DAYTONA_ORG=${DAYTONA_ORG:-72b8ee38-8559-48e8-9535-f40fab6e68cd}
-QUOTA_MIN_FREE_GIB=${QUOTA_MIN_FREE_GIB:-100}     # a box upgrade creates one 10 GiB sandbox before the old one is stopped
-QUOTA_KEEP_RETAINED=${QUOTA_KEEP_RETAINED:-2}     # retained (stopped) old sandboxes kept per user as rollback fallback
-
-daytona_disk_free_gib() {
-  # free GiB in the org's disk quota; empty when the usage endpoint does not answer
-  curl -fsS --max-time 20 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" "$DAYTONA_API/organizations/$DAYTONA_ORG/usage" 2>/dev/null \
-    | python3 -c 'import json,sys; r=json.load(sys.stdin)["regionUsage"][0]; print(int(r["totalDiskQuota"])-int(r["currentDiskUsage"]))' 2>/dev/null || true
-}
-
-daytona_archive_retained() {
-  # Archive (never delete — an archived sandbox can be started again) the stopped sandboxes nobody needs
-  # running: every stopped test_ sandbox, and a user's retained old sandboxes beyond the QUOTA_KEEP_RETAINED
-  # newest. 2026-10-22 03:59: 15 rolls a day x 12 boxes had left 450 stopped 10 GiB sandboxes, the org hit
-  # its 5000 GiB disk quota, `daytona create` answered 400 and four real users' boxes went to `error`.
-  local key n=0 id kind
-  key="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)"
-  while read -r kind id; do
-    [[ -n "$id" ]] || continue
-    if [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $key" "$DAYTONA_API/sandbox/$id/archive")" =~ ^2 ]]; then
-      n=$((n+1)); log "agentd: archived $kind sandbox $id"
-    fi
-    sleep 0.3
-  done < <(python3 - "$key" "$QUOTA_KEEP_RETAINED" <<'EOF2'
-import json, re, sys, urllib.request, collections
-key, keep = sys.argv[1], int(sys.argv[2])
-items, cur = {}, ""
-for _ in range(20):
-    url = "https://app.daytona.io/api/sandbox?limit=200" + (f"&cursor={cur}" if cur else "")
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
-    d = json.load(urllib.request.urlopen(req, timeout=30))
-    for x in d.get("items", []): items[x["id"]] = x
-    cur = d.get("nextCursor") or ""
-    if not cur: break
-per = collections.defaultdict(list)
-for x in items.values():
-    if x.get("state") != "stopped": continue
-    n = x.get("name", "")
-    if n.startswith("arbos-test-"): print("test", x["id"])
-    elif n.startswith(("arbos-gh-", "arbos-01m", "arbos-u-")): per[re.sub(r"-[a-z0-9]{6}$", "", n)].append(x)
-for v in per.values():
-    v.sort(key=lambda x: x.get("createdAt", ""))
-    for x in v[:-keep]: print("user-old", x["id"])
-EOF2
-)
-  log "agentd: archived $n stopped sandbox(es); disk quota free now $(daytona_disk_free_gib) GiB"
-}
-
-quota_headroom_or_wait() {
-  # Before the boxes roll: enough disk quota for the upgrades, else archive retained sandboxes, re-check,
-  # and if still short refuse (ALERT) instead of hammering `daytona create` 400s and racing rollbacks.
-  local free
-  free="$(daytona_disk_free_gib)"
-  [[ -n "$free" ]] || { log "agentd: Daytona usage endpoint did not answer; rolling without a quota check"; return 0; }
-  if (( free < QUOTA_MIN_FREE_GIB )); then
-    log "agentd: Daytona disk quota has only ${free} GiB free (< ${QUOTA_MIN_FREE_GIB}); archiving retained sandboxes first"
-    daytona_archive_retained
-    free="$(daytona_disk_free_gib)"
-  fi
-  if [[ -n "$free" ]] && (( free < QUOTA_MIN_FREE_GIB )); then
-    event agentd "$1" quota_short "Daytona disk quota ${free} GiB free (< ${QUOTA_MIN_FREE_GIB}) after archiving; boxes not rolled"
-    log "ALERT agentd: Daytona disk quota ${free} GiB free after archiving — boxes not rolled; free quota by hand (archive/delete sandboxes) and the roll-continue pass retries"
-    return 1
-  fi
-  log "agentd: Daytona disk quota ${free} GiB free; rolling"
-  return 0
-}
-
-prune_snapshots() {
-  # §8b step 4. keep = relay default + every live box's snapshot + this and the two previous versions.
-  local cur="$1" api=https://app.daytona.io/api key def live keep all total count
-  key="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)"
-  def="$(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT)"
-  live="$(relay_db "select distinct snapshot from boxes where sandbox_id is not null and snapshot is not null" | tr '\n' ' ')"
-  local maj="${cur%.*}" n="${cur##*.}"
-  keep="$def arbos-agent-$cur arbos-agent-$maj.$((n-1)) arbos-agent-$maj.$((n-2)) $live"
-  log "agentd: snapshot keep list: $(echo "$keep" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-  all="$(curl -fsS -H "Authorization: Bearer $key" "$api/snapshots?limit=200" | python3 -c '
-import sys, json
-d = json.load(sys.stdin); items = d.get("items", d if isinstance(d, list) else [])
-for s in sorted(items, key=lambda x: x.get("createdAt", "")):
-    print(s["id"], s["name"], s.get("state"), s.get("createdAt", ""))')"
-  total="$(printf '%s\n' "$all" | grep -c . || true)"
-  count=$total
-  log "agentd: $total Daytona snapshots before pruning"
-  local id name st created code
-  while read -r id name st created; do
-    [[ "$name" == arbos-agent-* ]] || continue
-    if [[ " $keep " == *" $name "* ]]; then continue; fi
-    (( count <= 25 )) && break
-    code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $key" "$api/snapshots/$id")"
-    if [[ "$code" =~ ^2 ]]; then
-      log "agentd: deleted snapshot $name ($st, $created)"; count=$((count-1))
-    else
-      log "agentd: skipped snapshot $name (HTTP $code; a hibernated sandbox may still point at it)"
-    fi
-  done <<< "$all"
-  log "agentd: $count Daytona snapshots after pruning"
-}
-
 admin_users() {
   curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/users"
 }
@@ -577,9 +481,8 @@ admin_users() {
 pending_boxes() {
   # pending_boxes <target> [real|test|all] — boxes not on the target snapshot and not upgrading.
   # Real users first; test_ boxes follow so they do not drift and `all_same` stays meaningful.
-  # A test_ box whose Daytona sandbox is in state `error` ("Job timed out") cannot be upgraded (HTTP 400
-  # "Sandbox is in an errored state") and box/repair ignores it; it is NOT pending — it belongs to its
-  # owner (the CD rig, the code-mode eval) and must not hold the roll (2026-10-22: 0.1.56 held the agentd
+  # A test_ box whose sandbox is in state `error` cannot be upgraded; it is NOT pending — it belongs to
+  # its owner (the CD rig, the code-mode eval) and must not hold the roll (2026-10-22: 0.1.56 held the agentd
   # slot 98 min on two such boxes, so 0.1.57 never built). Real users' errored boxes still count: they
   # are the point of the roll and the operator must see them.
   # The same shape came back through the pin door (2026-11-03: 0.1.184 held the agentd slot the full
@@ -602,6 +505,13 @@ for u in json.load(sys.stdin):
     if tier == "test" and not is_test: continue
     if not m.get("sandbox_id"):
         continue
+    # Only a gVisor box is rolled (upgrade.rs refuses every other provider, the retired daytona
+    # one included). Such a box is NOT pending: asking would be refused on every pass, which
+    # would stop the roll on ROLL_MAX_CONSECUTIVE_FAILURES and leave a real user looking like a
+    # roll failure. `unrollable_boxes` names them instead. A relay too old to report the provider
+    # says nothing, and then the box is judged on its snapshot as before.
+    if (m.get("provider") or "gvisor") != "gvisor":
+        continue
     if is_test and m.get("state") == "error":
         continue
     if m.get("pinned_snapshot") and m.get("snapshot") == m.get("pinned_snapshot"):
@@ -612,29 +522,20 @@ for u in json.load(sys.stdin):
         print(u["id"])' "$1" "${2:-all}" "$(skipped_boxes | tr '\n' ' ')"
 }
 
-# A box the relay cannot carry over — "/work is N MiB; too large to carry through the relay in one
-# piece" (gh_268993031, 3979 MiB > the relay's 3500, 2026-10-26 17:13–17:27) — fails the same way on
-# every attempt, and each attempt first quiesces the box's agentd, so the retries themselves hurt the
-# user. Three attempts on that ONE box were counted as "3 consecutive boxes in error" and held the lane
-# for every later image. Such a box is written to $STATE/agentd.skip (uid, reason, when) after its
-# first failure: it is left on its image, it is not pending for this or any later roll, it does not
-# count toward the consecutive-failure stop, and `status` names it until the operator clears it with
-# `arbos-deploy-worker unskip <uid>` (after shrinking /work or raising the relay's limit).
-# Since ARB-339 the relay measures /work BEFORE quiescing and carries it in parts (ceiling 16 GiB,
-# ARBOS_UPGRADE_MAX_WORK_MIB); a refusal arrives as `upgrade.last_refused` with the box untouched
-# (box_outcome → `refused`), and this regex stays for the error-state path of older relays.
-UNCARRYABLE_RE='too large to carry|nothing to carry over'
+# $STATE/agentd.skip (uid|reason|when, one box per line) holds the boxes the roll leaves alone: they
+# are not pending for this or any later roll, they do not count toward the consecutive-failure stop,
+# and `status` names each one until the operator clears it with `arbos-deploy-worker unskip <uid>`.
+# The roll used to write it by itself for a box whose /work the relay could not carry over
+# (gh_268993031, "/work is 3979 MiB; too large to carry", 2026-10-26 17:13–17:27). Carrying /work was
+# Daytona's upgrade, where a roll meant a brand-new sandbox; a host box is rolled by re-creating its
+# container over the /work image it already has, so there is nothing to carry and no refusal to
+# classify. The file is now the operator's alone, and an entry in it is still honoured here.
 skipped_boxes() { [[ -f "$STATE/agentd.skip" ]] && cut -d'|' -f1 "$STATE/agentd.skip" || true; }
 box_fail_reason() {
   # box_fail_reason <uid> — the relay's own reason for the last failed upgrade of this box (its journal
   # carries it; the admin JSON only says "error").
   journalctl -u arbos-relay --since "-20 min" --no-pager -o cat 2>/dev/null \
     | grep -E "box upgrade failed user=$1 " | tail -n 1 | sed -n 's/.*error=//p' | tr -d '\r' | cut -c1-200
-}
-skip_box() {
-  # skip_box <uid> <reason> — idempotent
-  grep -q "^$1|" "$STATE/agentd.skip" 2>/dev/null && return 0
-  printf '%s|%s|%s\n' "$1" "$2" "$(date -u +%FT%TZ)" >> "$STATE/agentd.skip"
 }
 
 errored_test_boxes() {
@@ -661,6 +562,19 @@ for u in json.load(sys.stdin):
         print(u["id"], pin)'
 }
 
+unrollable_boxes() {
+  # Boxes left out of the roll because the relay does not roll their provider — `<uid> <provider>`.
+  # Today that is the sandboxes still on the retired daytona provider: read-only rows an operator
+  # deletes by hand. Printed by the roll and by `status` so they are accounted for, not missing.
+  admin_users | python3 -c '
+import sys, json
+for u in json.load(sys.stdin):
+    m = u.get("machine") or {}
+    p = m.get("provider")
+    if m.get("sandbox_id") and p and p != "gvisor":
+        print(u["id"], p)'
+}
+
 real_min_sha() {
   # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
   # box), recomputed here from the same box list so that skipped boxes and LIMBO boxes do not count.
@@ -668,8 +582,10 @@ real_min_sha() {
   # hello from 01:03 and a ticking meter, and held the 0.1.183 roll at "not done" although every real box
   # ran the image. A box whose row has no sandbox/snapshot, or whose last hello predates the row's
   # last_started_at while naming another image than the row's snapshot, is logged (so it stays visible) and left out.
+  # So is a box on a provider the relay does not roll (the retired daytona one): its agentd never moves
+  # again, so counting it would hold every deploy from here on at "not done yet".
   local rows out
-  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0) from boxes" 2>/dev/null || true)"
+  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0), provider from boxes" 2>/dev/null || true)"
   out="$(curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
     | ROWS="$rows" python3 -c '
 import sys, json, os
@@ -678,8 +594,8 @@ skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
 rows = {}
 for line in (os.environ.get("ROWS") or "").splitlines():
     f = line.split("\t")
-    if len(f) == 4:
-        rows[f[0]] = (f[1], f[2], int(f[3] or 0))
+    if len(f) == 5:
+        rows[f[0]] = (f[1], f[2], int(f[3] or 0), f[4])
 real, ignored = [], []
 for b in a.get("boxes") or []:
     uid = b.get("user_id") or ""
@@ -688,8 +604,12 @@ for b in a.get("boxes") or []:
     row = rows.get(uid)
     why = None
     if row is not None:
-        sandbox, snapshot, started = row
-        if not sandbox or not snapshot:
+        sandbox, snapshot, started, provider = row
+        if provider and provider != "gvisor":
+            # The relay does not roll this box, so its agentd stays on an older commit for good
+            # and would hold every later deploy at "not done yet". It is out of the reading.
+            why = f"on the {provider} provider, which the relay does not roll"
+        elif not sandbox or not snapshot:
             why = "no sandbox/snapshot on its row"
         elif started and (b.get("reported_at") or 0) < started and not snapshot.endswith("-" + str(b.get("image") or "?")):
             # a stale hello from before the row was (re)started AND for another image than the row says:
@@ -737,11 +657,11 @@ BUSY_SKIP_AFTER_S="${BUSY_SKIP_AFTER_S:-1800}"
 
 # box_idle_probe <uid> → idle | busy | unknown (asleep, no url, unreachable, unexpected body).
 box_idle_probe() {
-  local row url token preview body
-  row="$(relay_db -separator $'\t' "select coalesce(box_url,''), coalesce(mcp_token,''), coalesce(preview_token,'') from boxes where user_id='$1' limit 1" 2>/dev/null)"
-  url="${row%%$'\t'*}"; row="${row#*$'\t'}"; token="${row%%$'\t'*}"; preview="${row#*$'\t'}"
+  local row url token body
+  row="$(relay_db -separator $'\t' "select coalesce(box_url,''), coalesce(mcp_token,'') from boxes where user_id='$1' limit 1" 2>/dev/null)"
+  url="${row%%$'\t'*}"; token="${row#*$'\t'}"
   [[ -n "$url" && -n "$token" ]] || { echo unknown; return 0; }
-  body="$(curl -fsS --max-time 8 -H "Authorization: Bearer $token" ${preview:+-H "x-daytona-preview-token: $preview"} "$url/box/state" 2>/dev/null)" || { echo unknown; return 0; }
+  body="$(curl -fsS --max-time 8 -H "Authorization: Bearer $token" "$url/box/state" 2>/dev/null)" || { echo unknown; return 0; }
   python3 -c '
 import sys, json
 try:
@@ -805,36 +725,33 @@ upgrade_box() {
     /usr/local/bin/arbosctl --relay "$RELAY_URL" admin upgrade-box "$1" 2>&1 | tr -d '\n' | cut -c1-200
 }
 
-# box_outcome <uid> <target> [since-ms] → ok | error | pending | refused<TAB><reason> : what the relay reports
-# for the box after its upgrade. `refused` (relay ≥ ARB-339): the relay measured /work BEFORE quiescing the box,
-# said no, and left the box running on its image — `upgrade.last_refused` carries the reason and the time; only a
-# refusal newer than this attempt (since-ms) counts, an older one is history.
+# box_outcome <uid> <target> → ok | error | pending : what the relay reports for the box after its
+# upgrade. A roll of a host box re-creates its container over the same /work, so there is no measure-
+# first refusal to read any more (that was the Daytona carry, `upgrade.last_refused`, ARB-339).
 box_outcome() {
   admin_users | python3 -c '
 import sys, json
-uid, target, since = sys.argv[1], sys.argv[2], int(sys.argv[3] or 0)
+uid, target = sys.argv[1], sys.argv[2]
 for u in json.load(sys.stdin):
     if u["id"] == uid:
         m = u.get("machine") or {}
         up = m.get("upgrade") or {}
-        refused = up.get("last_refused") or {}
         if up.get("in_progress"):
             print("pending")
         elif m.get("state") == "error":
             print("error")
-        elif refused.get("at") and int(refused["at"]) >= since and m.get("snapshot") != target:
-            print("refused\t" + str(refused.get("reason") or "refused")[:200].replace("\n", " "))
         elif m.get("snapshot") == target and m.get("state") == "awake":
             print("ok")
         else:
             print("pending")
         sys.exit(0)
-print("pending")' "$1" "$2" "${3:-0}" 2>/dev/null || echo pending
+print("pending")' "$1" "$2" 2>/dev/null || echo pending
 }
 
 # A roll stops itself after ROLL_MAX_CONSECUTIVE_FAILURES boxes in a row end in `error` (2026-10-25 05:10:
-# every host box failed its upgrade with EACCES and the roll marched through all 17 while the Daytona canary
-# had passed). The lane is held with the reason; the fleet owner recreates the boxes; nothing is deleted.
+# every host box failed its upgrade with EACCES and the roll marched through all 17 while the canary box,
+# which ran elsewhere, had passed). The lane is held with the reason; the fleet owner recreates the boxes;
+# nothing is deleted.
 ROLL_MAX_CONSECUTIVE_FAILURES="${ROLL_MAX_CONSECUTIVE_FAILURES:-3}"
 ROLL_FAILURES=0
 ROLL_FAILED_UIDS=""
@@ -864,7 +781,6 @@ roll_pass() {
       fi
       if (( go )); then
         busy_counter "$uid" "$target" reset >/dev/null
-        attempt_ms=$(date +%s%3N)
         answer="$(upgrade_box "$uid")"
         log "agentd: upgrading box of $uid → $target: $answer"
         if [[ "$answer" == *"the relay is restarting"* ]]; then
@@ -875,26 +791,11 @@ roll_pass() {
         outcome=pending
         for _ in $(seq 1 24); do
           sleep 10
-          outcome="$(box_outcome "$uid" "$target" "$attempt_ms")"
+          outcome="$(box_outcome "$uid" "$target")"
           [[ "$outcome" != "pending" ]] && break
         done
-        if [[ "$outcome" == refused* ]]; then
-          # The relay measured first and said no; the box was never quiesced and is still awake on its
-          # image. Same bookkeeping as the uncarryable skip: not pending, not a failure, operator clears.
-          reason="${outcome#refused}"; reason="${reason#"${reason%%[![:space:]]*}"}"
-          skip_box "$uid" "$reason"
-          log "agentd: $uid box_upgrade_skipped — the relay refused the carry before touching the box ($reason); left on its image, not retried; operator: shrink /work or raise ARBOS_UPGRADE_MAX_WORK_MIB, then 'arbos-deploy-worker unskip $uid'"
-          event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_skipped "$uid: $reason; box untouched, left on its image until the operator clears the skip"
-          continue
-        fi
         if [[ "$outcome" == "error" ]]; then
           reason="$(box_fail_reason "$uid")"
-          if [[ "$reason" =~ $UNCARRYABLE_RE ]]; then
-            skip_box "$uid" "$reason"
-            log "agentd: $uid box_upgrade_skipped — the relay cannot carry its /work ($reason); left on its image, not retried; operator: shrink /work or raise the relay limit, then 'arbos-deploy-worker unskip $uid'"
-            event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_skipped "$uid: $reason; left on its image until the operator clears the skip"
-            continue
-          fi
           # Consecutive failures count distinct boxes: the same box failing three times is one bad box.
           if [[ " $ROLL_FAILED_UIDS " != *" $uid "* ]]; then
             ROLL_FAILURES=$((ROLL_FAILURES + 1)); ROLL_FAILED_UIDS="$ROLL_FAILED_UIDS $uid"
@@ -921,11 +822,13 @@ roll_boxes() {
   # roll_boxes <target> — passes every 2 min for up to ROLL_WAIT_S; 0 when no box is pending.
   local target="$1" t0
   t0=$(date +%s)
-  local errored pinned
+  local errored pinned legacy
   errored="$(errored_test_boxes | tr '\n' ' ')"
   [[ -n "$errored" ]] && log "agentd: skipping errored test boxes (needs their owner, not the roll): $errored"
   pinned="$(pinned_boxes | sed 's/ /=/' | tr '\n' ' ')"
   [[ -n "$pinned" ]] && log "agentd: skipping boxes already on their users.snapshot pin (deliberate, not a failure): $pinned"
+  legacy="$(unrollable_boxes | sed 's/ /=/' | tr '\n' ' ')"
+  [[ -n "$legacy" ]] && log "agentd: skipping boxes on a provider the relay does not roll (read-only rows; an operator retires the sandbox): $legacy"
   while (( $(date +%s) - t0 < ROLL_WAIT_S )); do
     if [[ -z "$(pending_boxes "$target" all || true)" ]]; then
       log "agentd: every box (real and test) is on $target"
@@ -984,10 +887,8 @@ roll_continue() {
   sha="$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   snapshot="$(sed -n 's/^snapshot=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   [[ -n "$sha" && -n "$snapshot" ]] || exit 0
-  if quota_headroom_or_wait "$sha"; then
-    roll_pass "$snapshot"
-    sleep 60
-  fi
+  roll_pass "$snapshot"
+  sleep 60
   finish_roll "$sha" "$snapshot" || true
 }
 
@@ -1057,12 +958,8 @@ roll_image() {
   image="ghcr.io/$GH_REPO/arbos-agent:$version"
   snapshot="arbos-agent-$version"
   seed_check "$sha" "$version" "$image" || exit 1
-  prune_snapshots "$version"
+  # The commit's own canary script runs below; nothing else is taken from the checkout.
   git -C "$REPO" checkout -q --detach "$sha"
-  DAYTONA_API_KEY="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" \
-    bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" 4 8 10 > "$STATE/runs/agentd-$version-register.log" 2>&1 \
-    || { record_failure agentd "$sha" "snapshot registration failed: $(tail -2 "$STATE/runs/agentd-$version-register.log" | tr '\n' ' ')"; exit 1; }
-  log "agentd: snapshot $snapshot active"
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
@@ -1079,10 +976,11 @@ roll_image() {
     hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
     exit 1
   fi
-  # Second canary on a HOST (gvisor) box: the Daytona canary passed image 0.1.127 while every host box's
-  # upgrade failed (2026-10-25 05:10, EACCES in the host /etc refresh). SMOKE_HOST_USER_ID in deploy.env
-  # names a test user whose box runs on the host provider; empty = skipped (logged) until the fleet owner
-  # provides one. Same script, same gate: upgrade, in-box seed check, busy-reply smoke.
+  # A second canary box, named by SMOKE_HOST_USER_ID in deploy.env: one box passing says less than two
+  # (2026-10-25 05:10, image 0.1.127 passed on the canary while every host box's upgrade failed with
+  # EACCES in the host /etc refresh — the canary ran on Daytona then, the rest of the fleet did not).
+  # Empty = skipped (logged) until the fleet owner names one. Same script, same gate: upgrade, in-box
+  # seed check, busy-reply smoke.
   if [[ -n "${SMOKE_HOST_USER_ID:-}" && -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
     local host_rc=0
     RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" SMOKE_USER_ID="$SMOKE_HOST_USER_ID" \
@@ -1093,7 +991,7 @@ roll_image() {
       hold_agentd "$sha" "$version" "host-box canary failed on $SMOKE_HOST_USER_ID; log $STATE/runs/agentd-$version-smoke.log"
       exit 1
     elif (( host_rc == 2 )); then
-      log "agentd: host-box canary skipped/inconclusive for $SMOKE_HOST_USER_ID (rc 2); proceeding on the Daytona canary alone"
+      log "agentd: host-box canary skipped/inconclusive for $SMOKE_HOST_USER_ID (rc 2); proceeding on the first canary alone"
     else
       log "agentd: host-box canary ok on $SMOKE_HOST_USER_ID"
     fi
@@ -1126,10 +1024,8 @@ roll_image() {
   event agentd "$sha" image_registered "image $version, snapshot $snapshot is the relay default"
   # The request is served from here on; a newer request supersedes the retry cadence.
   if [[ "$(sed -n 's/^sha=//p' "$QUEUE/agentd" 2>/dev/null)" == "$sha" ]]; then rm -f "$QUEUE/agentd"; fi
-  if quota_headroom_or_wait "$sha"; then
-    roll_boxes "$snapshot" || true
-    sleep 30
-  fi
+  roll_boxes "$snapshot" || true
+  sleep 30
   finish_roll "$sha" "$snapshot" || true
   log "agentd: image $version from $sha — $(( $(date +%s) - t0 )) s so far"
 }
@@ -1546,11 +1442,16 @@ status() {
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
   fi
-  local pinned
+  local pinned legacy
   pinned="$(pinned_boxes 2>/dev/null || true)"
   if [[ -n "$pinned" ]]; then
     echo "pinned boxes (on their users.snapshot pin, deliberately not rolling; clear the pin to roll them):"
     while read -r u p; do [[ -n "$u" ]] && echo "  $u → $p"; done <<< "$pinned"
+  fi
+  legacy="$(unrollable_boxes 2>/dev/null || true)"
+  if [[ -n "$legacy" ]]; then
+    echo "boxes on a provider the relay does not roll (read-only rows; the sandbox is retired by hand):"
+    while read -r u p; do [[ -n "$u" ]] && echo "  $u on $p"; done <<< "$legacy"
   fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
@@ -1584,25 +1485,28 @@ selftest() {
   [[ "$(seed_check_parse "$(printf '%s\n3\n' "$sha40")")" == "$sha40 3" ]] || { echo "selftest: seed_check_parse without newline" >&2; return 1; }
   [[ "$(seed_check_parse "$(printf '%s\n\n0\n' "$sha40")")" == "$sha40 0" ]] || { echo "selftest: seed_check_parse zero hits" >&2; return 1; }
   [[ "$(seed_check_parse "$(printf '\n\n')")" == "? 0" ]] || { echo "selftest: seed_check_parse no seed" >&2; return 1; }
-  # Uncarryable boxes: classified by the relay's reason, skipped once, listed, cleared.
-  [[ "/work is 3979 MiB; too large to carry through the relay in one piece" =~ $UNCARRYABLE_RE ]] || { echo "selftest: uncarryable regex" >&2; return 1; }
-  [[ "upgrade failed: daytona start: HTTP 500" =~ $UNCARRYABLE_RE ]] && { echo "selftest: uncarryable regex too wide" >&2; return 1; }
-  skip_box gh_1 "/work is 3979 MiB; too large"; skip_box gh_1 "again"; skip_box gh_2 "nothing to carry over"
+  # The skip list: every box named in it is left out of the pending set and `unskip` clears it. The
+  # file is written by the operator (the carry refusals that used to write it went with Daytona).
+  printf 'gh_1|/work too big for the old carry|2026-10-26T17:13:00Z\ngh_2|left alone by the operator|2026-11-09T10:00:00Z\n' > "$STATE/agentd.skip"
   [[ "$(skipped_boxes | tr '\n' ' ')" == "gh_1 gh_2 " ]] || { echo "selftest: skipped_boxes ($(skipped_boxes | tr '\n' ' '))" >&2; return 1; }
-  [[ "$(grep -c . "$STATE/agentd.skip")" == 2 ]] || { echo "selftest: skip_box not idempotent" >&2; return 1; }
-  # box_outcome with the relay's measure-first refusal (ARB-339): a refusal newer than the attempt is
-  # `refused<TAB>reason`; an older one is history (pending); a run in progress wins; a box already on the
-  # target is ok whatever it was refused before.
-  local users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"old","upgrade":{"in_progress":false,"last_refused":{"reason":"/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)","at":2000,"work_mib":3979}}}}]'
+  # box_outcome: a run in progress wins, an errored box is an error, a box on the target is ok, and
+  # anything else is still pending.
+  local users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"old","upgrade":{"in_progress":false}}}]'
   admin_users() { echo "$users"; }
-  [[ "$(box_outcome gh_9 new 1000)" == $'refused\t/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)' ]] || { echo "selftest: box_outcome refused ($(box_outcome gh_9 new 1000))" >&2; return 1; }
-  [[ "$(box_outcome gh_9 new 3000)" == "pending" ]] || { echo "selftest: box_outcome stale refusal must be pending" >&2; return 1; }
-  users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"new","upgrade":{"in_progress":false,"last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
-  [[ "$(box_outcome gh_9 new 1000)" == "ok" ]] || { echo "selftest: box_outcome on target must be ok" >&2; return 1; }
-  users='[{"id":"gh_9","machine":{"state":"waking","snapshot":"old","upgrade":{"in_progress":true,"phase":"measure","last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
-  [[ "$(box_outcome gh_9 new 1000)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
-  local o; o="$(box_outcome gh_9 new 1000)"; o="${o#refused}"; o="${o#"${o%%[![:space:]]*}"}"
-  [[ "$o" == "pending" ]] || { echo "selftest: reason strip" >&2; return 1; }
+  [[ "$(box_outcome gh_9 new)" == "pending" ]] || { echo "selftest: box_outcome behind the target must be pending" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"new","upgrade":{"in_progress":false}}}]'
+  [[ "$(box_outcome gh_9 new)" == "ok" ]] || { echo "selftest: box_outcome on target must be ok" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"error","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(box_outcome gh_9 new)" == "error" ]] || { echo "selftest: box_outcome errored box must be error" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"waking","snapshot":"old","upgrade":{"in_progress":true,"phase":"recreate"}}}]'
+  [[ "$(box_outcome gh_9 new)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
+  # A box nobody skipped is pending; the same box in the skip list is not (the exclusion above, through
+  # the real pending_boxes).
+  users='[{"id":"gh_1","machine":{"state":"awake","sandbox_id":"s1","snapshot":"old","upgrade":{"in_progress":false}}},
+          {"id":"gh_9","machine":{"state":"awake","sandbox_id":"s9","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "gh_9 " ]] \
+    || { echo "selftest: pending_boxes must leave out a skipped box ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  rm -f "$STATE/agentd.skip"
   # pending_boxes and the users.snapshot pin (2026-11-03): a box already on its pin is deliberately not
   # rolling and must leave the pending set, or it holds the lane for the whole ROLL_WAIT_S. A box whose
   # pin it has NOT reached yet stays pending, and an unpinned box behind the target stays pending.
@@ -1619,6 +1523,20 @@ selftest() {
   # A box on the roll target is not pending whether or not the pin names that same snapshot.
   users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
   [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
+  # A box on a provider the relay does not roll (the retired daytona one) is left out of the roll, and
+  # `unrollable_boxes` names it. Asking for its upgrade is refused every pass, so counting it as pending
+  # would stop the roll on ROLL_MAX_CONSECUTIVE_FAILURES and read as a real user's box failing.
+  users='[{"id":"gh_carro","machine":{"state":"awake","sandbox_id":"old-sb","provider":"daytona","snapshot":"old","upgrade":{"in_progress":false}}},
+          {"id":"gh_host","machine":{"state":"awake","sandbox_id":"s5","provider":"gvisor","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "gh_host " ]] \
+    || { echo "selftest: pending_boxes must leave out a box the relay does not roll ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(unrollable_boxes | tr '\n' ' ')" == "gh_carro daytona " ]] \
+    || { echo "selftest: unrollable_boxes ($(unrollable_boxes | tr '\n' ' '))" >&2; return 1; }
+  # A relay too old to report the provider leaves the judgement to the snapshot, as before.
+  users='[{"id":"gh_host","machine":{"state":"awake","sandbox_id":"s5","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "gh_host " ]] \
+    || { echo "selftest: pending_boxes without a provider field ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ -z "$(unrollable_boxes)" ]] || { echo "selftest: unrollable_boxes without a provider field" >&2; return 1; }
   hold_cases "$h"
   image_tag_prune_cases "$h/prune"
   echo "selftest ok"

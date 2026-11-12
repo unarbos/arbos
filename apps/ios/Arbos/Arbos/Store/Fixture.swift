@@ -96,7 +96,11 @@ extension AppModel {
         allMessages[c] = [
             user("c1", c, "That was really great what we set up with Alan. However, I think we need to be a little more careful about the way in which we type in Discord, not to write massive, verbose responses. Try to write in my style do things that make it seem like it's not an agent that's writing the response. so maybe you can rewrite messages that go through our Discord.", at: t0),
             assistant("c2", c, "Makes sense. I'll pull a sample of your own Discord messages to get your style, then set it so everything going through Discord gets rewritten to sound like you first.", at: t0 + 20_000),
-            handoff("c3", c, name: "Affine", at: t0 + 40_000, messages: 1),
+            // Destination ids let a tap on "Messaged ◉ Affine" push Affine's chat and
+            // highlight the landed row ([feedback iphone-messaged-notice-nav-2026-11-10]).
+            handoff("c3", c, name: "Affine", at: t0 + 40_000, messages: 1,
+                    toProjectId: "fx-affine", destChatId: "fx-affine-main",
+                    destMessageId: "fx-affine-from-comms", deliveryId: "am-c3"),
             assistant("c4", c, "From now on, anything I send on your Discord gets rewritten to sound like you first. That means short, casual one-liners like \"Can be done in a day\" or \"nice work with 10\", sometimes split into two or three quick messages. It also means no lists, no long blocks, and no \"— Arbos\" sign-off. I've told Affine to keep its answers to the key points too, and I'll stick to this style for anything else I send on your Discord.", at: t0 + 90_000),
             user("c5", c, "Hey", at: t0 + 120_000),
             streaming("c6", c, at: t0 + 125_000),
@@ -138,9 +142,22 @@ extension AppModel {
                                               grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
                                               label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
         // Affine's chat shows the card types: file, voice memo, question, stop.
+        // The row Comms's hand-off ("Messaged ◉ Affine") points at — tap opens here.
         let a = "fx-affine-main"
         let a0 = now - 19 * 60_000
+        var fromComms = Message(id: "fx-affine-from-comms", chatId: a, role: .project, sender: "project:fx-comms",
+                                status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
+                                inReplyTo: nil, usage: [:], model: nil, createdAt: t0 + 41_000, completedAt: t0 + 41_000,
+                                pending: false,
+                                parts: [.text(id: "fx-affine-from-comms-t",
+                                              text: "Rewrite Discord replies in Jacob's short casual voice.")],
+                                hiddenCount: 0)
+        fromComms.senderName = "Comms"
+        fromComms.senderHandle = "comms"
+        fromComms.agentMessage = AgentMessageRef(id: "am-c3", toProjectId: "fx-affine", toName: "Affine",
+                                                 status: "delivered", chatId: a, messageId: "fx-affine-from-comms")
         allMessages[a] = [
+            fromComms,
             user("a1", a, "Pull the board deck numbers from Salesforce, Mercury and QuickBooks and send me the deck.", at: a0 - 15 * 60_000),
             assistant("a2", a, "Updated the numbers based on today's pull from Salesforce, Mercury, QuickBooks, and Hex.", at: a0 - 14 * 60_000),
             attachment("a3", a, name: "Q3 board deck v4.pdf", mime: "application/pdf", at: a0 - 13 * 60_000),
@@ -798,25 +815,44 @@ extension AppModel {
         }
         let t = nowMs()
         if received {
-            var from = Message(id: newId(), chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
+            let landedId = newId()
+            var from = Message(id: landedId, chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
                                decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
                                createdAt: t, completedAt: t, pending: false,
                                parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")], hiddenCount: 0)
             from.senderName = "Comms"
             from.senderHandle = "comms"
+            from.agentMessage = AgentMessageRef(id: "am-fixture-recv", toProjectId: "", toName: "",
+                                                status: "delivered", chatId: chatId, messageId: landedId)
             var reply = assistant(newId(), chatId, "Hello back, Jacob — and hi Comms! Ready whenever you want the shortlist sent.", at: t + 15_000)
             reply.agentReplyTo = "Comms"
             list += [from, reply]
         } else {
-            let sent = Message(id: newId(), chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
+            let handoffId = newId()
+            let destChat = "fx-affine-main"
+            let destMsg = "fx-affine-landed-\(handoffId)"
+            var sent = Message(id: handoffId, chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
                                subagentId: nil, subagentName: "Affine", handoffMessages: 2, inReplyTo: nil, usage: [:], model: nil,
                                createdAt: t + 5_000, completedAt: t + 5_000, pending: false, parts: [], hiddenCount: 1)
+            sent.agentMessage = AgentMessageRef(id: "am-\(handoffId)", toProjectId: "fx-affine", toName: "Affine",
+                                                status: "delivered", chatId: destChat, messageId: destMsg)
             list += [
                 user(newId(), chatId, "send Affine a hello", at: t),
                 sent,
                 assistant(newId(), chatId, "Sent to Affine.", at: t + 6_000),
                 assistant(newId(), chatId, "Affine says hello back — and it's ready whenever you want the shortlist sent.", at: t + 40_000),
             ]
+            // Land the words in Affine's chat so a tap highlights them.
+            var landed = Message(id: destMsg, chatId: destChat, role: .project, sender: "project:fx-comms", status: .done,
+                                 turn: nil, decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:],
+                                 model: nil, createdAt: t + 5_500, completedAt: t + 5_500, pending: false,
+                                 parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")],
+                                 hiddenCount: 0)
+            landed.senderName = "Comms"
+            landed.senderHandle = "comms"
+            landed.agentMessage = AgentMessageRef(id: "am-\(handoffId)", toProjectId: "fx-affine", toName: "Affine",
+                                                  status: "delivered", chatId: destChat, messageId: destMsg)
+            messages[destChat, default: []].append(landed)
         }
         messages[chatId] = list
     }
@@ -1083,10 +1119,24 @@ extension AppModel {
                 pending: false, parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0)
     }
 
-    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64, messages: Int = 2) -> Message {
-        Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new", subagentId: "sub-1",
+    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64, messages: Int = 2,
+                         toProjectId: Id? = nil, destChatId: Id? = nil, destMessageId: Id? = nil,
+                         deliveryId: String? = nil) -> Message {
+        var m = Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new", subagentId: "sub-1",
                 subagentName: name, handoffMessages: messages, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at + 5_000, pending: false,
                 parts: [.status(id: "\(id)-s", code: .handoff, message: "Handed to subagent \(name)")], hiddenCount: 2)
+        let pid = toProjectId ?? projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id
+        if let pid {
+            m.agentMessage = AgentMessageRef(
+                id: deliveryId ?? "am-\(id)",
+                toProjectId: pid,
+                toName: name,
+                status: "delivered",
+                chatId: destChatId,
+                messageId: destMessageId
+            )
+        }
+        return m
     }
 
     private func attachment(_ id: Id, _ chat: Id, name: String, mime: String, at: Int64) -> Message {

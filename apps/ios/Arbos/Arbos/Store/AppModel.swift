@@ -445,6 +445,14 @@ final class AppModel: ObservableObject {
         /// below it, so it never replaces the chat on screen: `PerfSignpost.pathChanged`
         /// skips it for exactly that reason.
         case profile(ProfileTarget)
+        /// My own pane — the Settings screen behind Home's account circle (Jacob,
+        /// 2026-11-04: my own profile comes in from the right like every other profile
+        /// item, instead of rising as a bottom sheet). `landing` is the page it opens
+        /// on: a Settings row tapped in search, or the rig's `ARBOS_SETTINGS_PAGE`.
+        case ownProfile(landing: String?)
+        /// Home's "+" — New Message (Jacob, 2026-11-10: the compose panel pushes in from
+        /// the right like a chat and Settings, instead of rising as a bottom sheet).
+        case newMessage
     }
 
     // MARK: Servers (D88)
@@ -880,6 +888,14 @@ final class AppModel: ObservableObject {
     @Published var devices: [AuthDevice] = []
     @Published var devicesLoaded = false
     @Published var devicesError: UserError?
+    /// Settings → Agent access link (`GET /me/agent-links`). Holds both the links I minted
+    /// and the older reader tokens, which this page took over from Devices.
+    @Published var agentLinks: [AgentAccessLink] = []
+    @Published var agentLinksLoaded = false
+    @Published var agentLinksError: UserError?
+    /// False while the relay has no mint route yet: the page lists and revokes, but offers
+    /// no Create button that would only fail.
+    @Published var agentLinksMintable = false
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
@@ -3648,14 +3664,14 @@ final class AppModel: ObservableObject {
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
+        let api = api
         Task {
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: api) else { return }
             var uploaded: [Attachment] = []
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
-                } catch {
+            for outcome in outcomes {
+                switch outcome {
+                case .uploaded(let attachment): uploaded.append(attachment)
+                case .failed(_, let error):
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
@@ -4494,10 +4510,6 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
-    /// The Settings page the next Settings sheet lands on (a Settings row opened
-    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
-    /// sheet when this is set and clears it when the sheet closes.
-    @Published var pendingSettingsLanding: String?
     /// The agent pane's settings row to drop open once the pane shows (a search
     /// result for "voice" / "model" / "reasoning").
     @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
@@ -4542,6 +4554,31 @@ final class AppModel: ObservableObject {
         case .sheet:
             showProfileInSheet(target)
         }
+    }
+
+    /// Open my own pane — Settings. Like every other profile item it is a push, so it
+    /// comes in from the right and the stack's back swipe takes it away. `landing` is
+    /// the page it opens on and travels in the route rather than in the model, so a
+    /// second open cannot inherit the first one's page.
+    func showOwnProfile(landing: String? = nil) {
+        // The pane is already on top: a second tap would push a duplicate of it.
+        if case .ownProfile? = path.last { return }
+        path.append(.ownProfile(landing: landing))
+    }
+
+    /// Open New Message from Home's "+". A push, so it slides in from the right and the
+    /// stack's back swipe returns to the chat list — the same motion as opening a chat.
+    func showNewMessage() {
+        if case .newMessage? = path.last { return }
+        path.append(.newMessage)
+    }
+
+    /// Leave the New Message push (and any Create screen stacked on it) for Home.
+    /// Create's Cancel / Close call this so they drop the whole compose flow, not only
+    /// the Create page — the old sheet's `dismiss()` closed the whole sheet the same way.
+    func dismissNewMessage() {
+        guard let i = path.firstIndex(where: { if case .newMessage = $0 { return true }; return false }) else { return }
+        path.removeSubrange(i...)
     }
 
     /// The sheet-local presentation, for a profile opened from inside another sheet.
@@ -5383,9 +5420,20 @@ final class AppModel: ObservableObject {
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
     func currentActivity(_ chatId: Id) -> String? {
-        // The newest live row that has words: a short main turn streaming with no activity
-        // yet must not blank a job's "Reading … · 2 tasks" under it (duplex §2.4).
-        for m in messages(of: chatId).reversed() where m.role == .assistant && m.isStreaming {
+        // Newest *live* row that has words. Same liveness as `isStreaming`: a main
+        // turn left `streaming` under a later user line is dead (box died, or the
+        // person asked again) and must not keep its step on the awaiting-reply
+        // line — that was the non-contextual "Finding sock stores…" under a new
+        // ask ([feedback APfcjvZgPRJE2pyaBuczRSI]). A short main turn with no
+        // activity yet still falls through to a live job's "Reading … · 2 tasks"
+        // (duplex §2.4); jobs stay live after a new user line (§2.3).
+        let list = messages(of: chatId)
+        let recent = nowMs() - 15 * 60 * 1000
+        var userAfter = false
+        for m in list.reversed() {
+            if m.role == .user { userAfter = true }
+            guard m.role == .assistant, m.isStreaming, m.createdAt >= recent else { continue }
+            if userAfter && m.job == nil { continue }
             if let words = Self.activityWords(m) { return words }
         }
         return nil
@@ -5472,6 +5520,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// How long after the user's last line we keep the working cheat before the
+    /// agent has opened a streaming row. The old 15 s bridge went blank on a
+    /// cold workspace start and left a dead transcript with no "didn't answer"
+    /// line ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
+    static let awaitingReplyMs: Int64 = 60_000
+
     /// Visual cheat: the last row is the user's and no assistant turn has
     /// started yet — show the working line immediately so a simple first
     /// question does not sit on a dead transcript while the box wakes.
@@ -5482,9 +5536,34 @@ final class AppModel: ObservableObject {
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
         guard let at = activity(chatId).lastUserAt else { return false }
-        // Short bridge until the agent opens a streaming row (cold wake).
+        // Always-on collapses the shown machine state to awake; rawState still
+        // says waking, and a project can be waking on its own.
+        if machineWaiting(for: chatId) { return true }
+        // Bridge until the agent opens a streaming row (cold workspace start).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - at < 15_000
+        return nowMs() - at < Self.awaitingReplyMs
+    }
+
+    /// The machine (or this chat's project) is still coming up — presence says
+    /// "waiting for the machine" and the awaiting cheat must not expire.
+    func machineWaiting(for chatId: Id) -> Bool {
+        if machine.rawState == .waking { return true }
+        if let chat = chat(chatId), let p = project(chat.projectId), p.state == .waking {
+            return true
+        }
+        return false
+    }
+
+    /// Awaiting expired and the last row is still the user's: the chat would
+    /// otherwise go silent with no assistant row for Transcript's stock line.
+    /// ChatView draws "{name} didn't answer. Ask again." until a reply lands
+    /// or the user sends again ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
+    func missedReply(_ chatId: Id) -> Bool {
+        if isStreaming(chatId) || hasOpenSubagent(chatId) { return false }
+        if isAwaitingReply(chatId) { return false }
+        if peopleChat(chatId) != nil { return false }
+        if channel(chatId) != nil { return false }
+        return activity(chatId).lastUserAt != nil
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
@@ -5534,17 +5613,16 @@ final class AppModel: ObservableObject {
             }, replyTo: replyTo)
             return
         }
+        let api = api
         Task {
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: api) else { return }
             var uploaded: [Attachment] = []
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
-                } catch {
+            for outcome in outcomes {
+                switch outcome {
+                case .uploaded(let attachment): uploaded.append(attachment)
+                case .failed(let attachment, let error):
                     setSendError(chatId, UserError.classify("upload the attachment", error))
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
+                    uploaded.append(attachment)
                 }
             }
             // The forward header rides along with the pictures ([feedback
@@ -5638,6 +5716,61 @@ final class AppModel: ObservableObject {
                 fail("transcribe your memo", error)
             }
             return nil
+        }
+    }
+
+    private enum AttachmentUpload {
+        case uploaded(Attachment)
+        case failed(Attachment, Error)
+    }
+
+    /// Keep two bodies in flight; preserve key/row/error order independently of
+    /// completion order. The caller owns account admission and the final commit.
+    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI) async -> [AttachmentUpload]? {
+        guard !Task.isCancelled else { return nil }
+        let plans = attachments.map { input in
+            let key = Self.blobKey(for: input.name)
+            let row = Attachment(name: input.name, mime: input.mime, blobRef: key,
+                                 kind: Self.attachmentKind(mime: input.mime, name: input.name))
+            return (input: input, key: key, row: row)
+        }
+        return await withTaskGroup(of: (Int, AttachmentUpload).self) { group in
+            var results = [AttachmentUpload?](repeating: nil, count: plans.count)
+            var next = min(2, plans.count)
+            for index in 0..<next {
+                let plan = plans[index]
+                group.addTask {
+                    do {
+                        _ = try await api.putBlob(projectId: slot, key: plan.key, mime: plan.input.mime, data: plan.input.data)
+                        return (index, .uploaded(plan.row))
+                    } catch {
+                        var row = plan.row
+                        row.blobRef = nil
+                        return (index, .failed(row, error))
+                    }
+                }
+            }
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if Task.isCancelled { group.cancelAll() }
+                if !group.isCancelled, next < plans.count {
+                    let index = next
+                    let plan = plans[index]
+                    next += 1
+                    group.addTask {
+                        do {
+                            _ = try await api.putBlob(projectId: slot, key: plan.key, mime: plan.input.mime, data: plan.input.data)
+                            return (index, .uploaded(plan.row))
+                        } catch {
+                            var row = plan.row
+                            row.blobRef = nil
+                            return (index, .failed(row, error))
+                        }
+                    }
+                }
+            }
+            guard !Task.isCancelled, !group.isCancelled, results.allSatisfy({ $0 != nil }) else { return nil }
+            return results.compactMap { $0 }
         }
     }
 
@@ -6091,6 +6224,94 @@ final class AppModel: ObservableObject {
         } else {
             return false
         }
+        return true
+    }
+
+    /// Tap on a "Messaged ◉ X" hand-off ([feedback iphone-messaged-notice-nav-2026-11-10]):
+    /// push the destination chat (swipe-back returns here) and highlight the landed message
+    /// when known. Falls back to opening the target agent's chat for older notices.
+    @discardableResult
+    func openHandoff(fromChat chatId: Id, messageId: Id) -> Bool {
+        guard let msg = messages(of: chatId).first(where: { $0.id == messageId }) else { return false }
+        guard let dest = handoffDestination(msg) else { return false }
+        switch dest {
+        case .reveal(let projectId, let destChat, let destMsg):
+            return pushAndReveal(chatId: destChat, projectId: projectId, messageId: destMsg)
+        case .openChat(let projectId, let destChat):
+            pushChat(chatId: destChat, projectId: projectId)
+            return true
+        case .openProject(let projectId):
+            guard let project = project(projectId) else { return false }
+            if let chat = singleChat(of: projectId) {
+                pushChat(chatId: chat.id, projectId: projectId)
+            } else {
+                // No landing chat yet — open replaces the path (same as tapping the agent).
+                open(project: project)
+            }
+            return true
+        }
+    }
+
+    /// Whether a hand-off row can open a destination the viewer owns.
+    func canOpenHandoff(fromChat chatId: Id, messageId: Id) -> Bool {
+        guard let msg = messages(of: chatId).first(where: { $0.id == messageId }) else { return false }
+        return handoffDestination(msg) != nil
+    }
+
+    private enum HandoffDest {
+        case reveal(projectId: Id, chatId: Id, messageId: Id)
+        case openChat(projectId: Id, chatId: Id)
+        case openProject(projectId: Id)
+    }
+
+    /// Resolve where a hand-off should go: explicit destination ids, then a scan of the
+    /// target agent's chat for the matching delivery id, then the target project alone.
+    private func handoffDestination(_ msg: Message) -> HandoffDest? {
+        let am = msg.agentMessage
+        if let chat = am?.chatId, !chat.isEmpty, let mid = am?.messageId, !mid.isEmpty {
+            let pid = projectId(owning: chat) ?? am?.toProjectId
+            if let pid, !pid.isEmpty, project(pid) != nil {
+                return .reveal(projectId: pid, chatId: chat, messageId: mid)
+            }
+        }
+        let projectId = resolveHandoffProjectId(msg)
+        guard let projectId, project(projectId) != nil else { return nil }
+        let chat = singleChat(of: projectId)
+        if let delivery = am?.id, !delivery.isEmpty, let chat {
+            if let landed = messages(of: chat.id).first(where: { $0.agentMessage?.id == delivery }) {
+                return .reveal(projectId: projectId, chatId: chat.id, messageId: landed.id)
+            }
+            return .openChat(projectId: projectId, chatId: chat.id)
+        }
+        if let chat { return .openChat(projectId: projectId, chatId: chat.id) }
+        return .openProject(projectId: projectId)
+    }
+
+    private func resolveHandoffProjectId(_ msg: Message) -> Id? {
+        if let id = msg.agentMessage?.toProjectId, !id.isEmpty { return id }
+        let name = msg.agentMessage?.toName ?? msg.subagentName
+        guard let name, !name.isEmpty else { return nil }
+        return projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id
+    }
+
+    private func projectId(owning chatId: Id) -> Id? {
+        if peopleChat(chatId) != nil { return peopleSlot }
+        return chats.first(where: { $0.value.contains { $0.id == chatId } })?.key
+    }
+
+    /// Push a chat onto the stack (keep the source under it for swipe-back), unlike
+    /// `open(chat:)` which replaces the path.
+    func pushChat(chatId: Id, projectId: Id) {
+        let route = Route.chat(chatId: chatId, projectId: projectId)
+        if path.last == route { return }
+        path.append(route)
+    }
+
+    /// Push the destination chat and arm `pendingReveal` so ChatView scrolls and tints.
+    @discardableResult
+    func pushAndReveal(chatId: Id, projectId: Id, messageId: Id) -> Bool {
+        pendingReveal = MessageReveal(chatId: chatId, messageId: messageId)
+        pushChat(chatId: chatId, projectId: projectId)
         return true
     }
 

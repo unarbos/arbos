@@ -1,0 +1,2 @@
+# Unified-diff context represents an empty source line with one space.
+*.diff -whitespace

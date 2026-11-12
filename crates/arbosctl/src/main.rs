@@ -311,7 +311,7 @@ enum ProjectCmd {
         name: String,
         #[arg(long)]
         instructions: Option<String>,
-        /// Box provider: daytona (default when the relay has a key), process, docker.
+        /// Box provider: gvisor (the default on the arbos.life host), process, docker.
         #[arg(long)]
         provider: Option<String>,
         /// Shorthand for `--provider process` (runs agentd on the relay host).

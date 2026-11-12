@@ -1498,8 +1498,6 @@ pub struct HealthDto {
     #[serde(default)]
     #[typeshare(serialized_as = "I54")]
     pub devices: i64,
-    #[serde(default)]
-    pub daytona: bool,
     /// Present on current relays; absent on very old ones that only had `auth`.
     #[serde(default)]
     pub auth_mode: Option<String>,

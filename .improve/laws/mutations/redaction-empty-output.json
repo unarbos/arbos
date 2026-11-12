@@ -1,0 +1,33 @@
+{
+  "law": "nonsecret-text-preservation",
+  "seed": 81007,
+  "control": {
+    "_tag": "Passed",
+    "runs": 256,
+    "discards": 0
+  },
+  "mutation": {
+    "_tag": "Falsified",
+    "initialInput": "1",
+    "shrunkInput": "1",
+    "failure": {
+      "_tag": "ReturnedFalse"
+    },
+    "runs": 3,
+    "discards": 0,
+    "shrinks": 0,
+    "replay": "[0,\"81007\",2,1,[],\"ReturnedFalse\"]"
+  },
+  "replay": {
+    "_tag": "Falsified",
+    "initialInput": "1",
+    "shrunkInput": "1",
+    "failure": {
+      "_tag": "ReturnedFalse"
+    },
+    "runs": 1,
+    "discards": 0,
+    "shrinks": 0,
+    "replay": "[0,\"81007\",2,1,[],\"ReturnedFalse\"]"
+  }
+}

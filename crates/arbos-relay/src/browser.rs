@@ -1,7 +1,7 @@
 //! `GET /projects/{id}/browser/stream` (WebSocket): the relay dials the box's `/browser/stream`
-//! (agentd's proxy of agent-browser's JPEG stream, S16) with the preview token a laptop never
-//! holds, and pipes frames to the device. Watch-only: client messages are forwarded too, so a
-//! later version can enable input.
+//! (agentd's proxy of agent-browser's JPEG stream, S16), which a laptop cannot reach itself, and
+//! pipes frames to the device. Watch-only: client messages are forwarded too, so a later version
+//! can enable input.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -43,25 +43,16 @@ pub async fn browser_stream(
             .replacen("http://", "ws://", 1),
         project.id
     );
-    let token = crate::boxes::preview_token_for(&state, &sb).await;
     ws.max_message_size(32 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = pipe(socket, &upstream, token.as_deref()).await {
+            if let Err(e) = pipe(socket, &upstream).await {
                 tracing::debug!(error = %e, project = %project.id, "browser stream proxy closed");
             }
         })
 }
 
-async fn pipe(
-    client: WebSocket,
-    upstream: &str,
-    preview_token: Option<&str>,
-) -> anyhow::Result<()> {
-    let mut req = upstream.into_client_request()?;
-    if let Some(t) = preview_token {
-        req.headers_mut()
-            .insert("x-daytona-preview-token", t.parse()?);
-    }
+async fn pipe(client: WebSocket, upstream: &str) -> anyhow::Result<()> {
+    let req = upstream.into_client_request()?;
     let (up, _) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio_tungstenite::connect_async(req),

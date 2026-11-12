@@ -42,6 +42,14 @@ const STEER_PREFIX = "[Arbos steer:";
 // result, an approval outcome, an agent's reply) — turns whose only valid route is `reply`.
 const RELAY_TURN_MARK = "[Arbos relay turn]";
 
+const DETACHED_SHELL_PATTERNS: readonly RegExp[] = [
+  /(^|[;&|(`'"]\s*|\bsudo\s+|\bexec\s+)(nohup|setsid)\b/m,
+  /\bdisown\b/,
+  /\b(tmux\s+new(-session)?|screen\s+-[dD]|systemd-run|start-stop-daemon|at\s+now)\b/,
+  // `cmd &` / `(cmd) &` / `cmd & disown` / `cmd &\n…` — not `&&`, not `2>&1`, not `&>`.
+  /(?<![&<>|\d])&(?![&>])\s*(?:$|[;)\n]|\n|disown\b|\\n)/m,
+];
+
 /**
  * A shell command that would outlive the turn (nohup / setsid / disown / a trailing `&` / tmux /
  * screen / systemd-run) in the main agent's own turn. That work is a job: `start_job` runs it on a
@@ -55,14 +63,7 @@ export function detachedShell(toolName: string, input: Record<string, unknown>):
     : toolName === "codemode" ? String(input?.code ?? "")
     : "";
   if (!text) return null;
-  const patterns: RegExp[] = [
-    /(^|[;&|(`'"]\s*|\bsudo\s+|\bexec\s+)(nohup|setsid)\b/m,
-    /\bdisown\b/,
-    /\b(tmux\s+new(-session)?|screen\s+-[dD]|systemd-run|start-stop-daemon|at\s+now)\b/,
-    // `cmd &` / `(cmd) &` / `cmd & disown` / `cmd &\n…` — not `&&`, not `2>&1`, not `&>`.
-    /(?<![&<>|\d])&(?![&>])\s*(?:$|[;)\n]|\n|disown\b|\\n)/m,
-  ];
-  for (const re of patterns) {
+  for (const re of DETACHED_SHELL_PATTERNS) {
     const m = re.exec(text);
     if (m) return text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\s+/g, " ").trim();
   }

@@ -157,8 +157,13 @@ struct Theme: Equatable {
     static let plusGlyph: CGFloat = 22.5
     /// `+` disc → field: 30 px (= `Controls.gap`).
     static let plusFieldGap: CGFloat = Controls.gap
-    /// The field's text starts 51 px in from its outer edge (the caret's centre; = `Controls.textInset`).
+    /// Full-width caret inset: 51 px from the pill's outer edge (`Controls.textInset`).
+    /// Used when the text runs the pill's width (channel, or stacked above the controls).
     static let composerTextInset: CGFloat = Controls.textInset
+    /// When the `+` sits on the same row as the text, the field's own left inset is 0 —
+    /// the HStack spacing is already the gap. A second 17 pt pad made "Ask …" read
+    /// centred ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    static let composerTextInsetBesidePlus: CGFloat = 0
     /// One 22 pt body line centred in the 48 pt field.
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
     /// The white action is a 96 × 96 px circle, 24 px from the field's top and bottom and
@@ -813,7 +818,7 @@ enum Controls {
         case callControls
         /// In-call strip chip and voice button: 36 pt (the strip is 48 tall).
         case inCallStrip
-        /// Grok's 30 pt filter chips (All · Agents · People · Servers) and pane tab pills.
+        /// Grok's 30 pt pane tab pills (Profile | Settings, and the other pane tab sets).
         case filterChips
         /// Row-leading 36 pt icon tiles (home banners, sheet rows, the camera badge on a hero).
         case rowIconTiles
@@ -887,7 +892,7 @@ struct ControlSurface<S: InsettableShape>: View {
         ZStack {
             if theme.isGlass {
                 // Not `PillSurface`: that one is now the see-through field pill, and a button
-                // flattened to a 22 % fill would be a change nobody asked for.
+                // flattened to a 12 % fill would be a change nobody asked for.
                 SystemPillGlass(shape: shape)
             } else {
                 shape.fill(theme.field)
@@ -959,9 +964,15 @@ struct SystemPillGlass<S: InsettableShape>: View {
 struct PillSurface<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
     let shape: S
-    /// How much of `field` sits over the transcript. Lower than the `0.3` the rig used, because
-    /// the rig only had to be *legible* as an alternative and this has to let text through.
-    static var translucentAlpha: Double { 0.22 }
+    /// How much of `field` sits over the transcript. Lower than the `0.22` that still read as
+    /// too opaque on the phone ([feedback iphone-composer-less-opaque-2026-11-11], TestFlight
+    /// AN3UriU0uCgR4fM7ShS16cc), and lower than the `0.3` the rig used — the rig only had to be
+    /// *legible* as an alternative; this has to let text through.
+    ///
+    /// Scoped to this surface (the composer field pill). The chat header's name pill is
+    /// `GlassPill` / `HeaderGlassBackground` Liquid Glass, not this fill — same complaint
+    /// does not move that path.
+    static var translucentAlpha: Double { 0.12 }
 
     var body: some View {
         if !theme.isGlass {
@@ -1016,14 +1027,13 @@ extension View {
 // MARK: - List top fade ([feedback iphone-list-top-fade-2026-10-26], Jacob 2026-10-26 16:05 CR)
 
 /// The fade every floating top bar sits on. Jacob's TestFlight shot: scrolled chat rows read at
-/// full strength behind the status bar and around the All · Agents · People · Servers tabs —
-/// Home's fade was a 100 pt gradient that began at the safe-area top, under the status bar, and
-/// the tabs scrolled with the list. Now one layer for every list: it starts at the **physical top
-/// edge** (`ignoresSafeArea(.container, edges: .top)` on the fade, never on the list), is opaque
-/// through the status bar and the whole chrome (bar, and the tab bar where there is one), then
-/// fades out over `band` — the Mac's list / transcript top fade (`header::metrics::FADE_BAND`:
-/// text gone at the edge, full ≈ 50 pt down). On Glass the band is `.ultraThinMaterial` under the
-/// wash (the iOS 26 glass discs blur only their own capsule); on Matte it is the page colour.
+/// full strength behind the status bar and around the floating discs — Home's fade was a 100 pt
+/// gradient that began at the safe-area top, under the status bar. Now one layer for every list:
+/// it starts at the **physical top edge** (`ignoresSafeArea(.container, edges: .top)` on the fade,
+/// never on the list), is opaque through the status bar and the whole chrome, then fades out over
+/// `band` — the Mac's list / transcript top fade (`header::metrics::FADE_BAND`: text gone at the
+/// edge, full ≈ 50 pt down). On Glass the band is `.ultraThinMaterial` under the wash (the iOS 26
+/// glass discs blur only their own capsule); on Matte it is the page colour.
 /// `ListTopFadeTests` asserts the layer's top inset is 0 and its height covers status bar + chrome
 /// on every screen in `Screen`.
 struct ListTopFade: View {
@@ -1042,55 +1052,51 @@ struct ListTopFade: View {
     /// stays opaque; `band` is the Mac-family gradient after it (the Mac's `FADE_BAND` = bar + 6:
     /// rows gone at the edge, full where the content starts at rest).
     enum Screen: String, CaseIterable {
-        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library
+        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library, newMessage
         /// The bar's top gap: pane pages keep `ProfileTopBar`'s 16, the rest `Controls.top`.
         var barTop: CGFloat {
             switch self {
-            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 16
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 16
             case .home, .homeSearch, .hiddenChats, .serverChannels, .chat: return Controls.top
             }
         }
-        /// Fixed chrome under the bar: Home's filter tabs. The pane pages pin hero + tabs themselves.
+        /// Fixed chrome under the bar. Home no longer carries filter tabs
+        /// ([feedback chat-list-no-filter-ios-2026-11-10]); pane pages pin hero + tabs themselves.
         var chrome: CGFloat {
             switch self {
-            case .home: return HomeChrome.filterBand
-            case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 0
             }
         }
         /// Opaque past the status bar. Home and its search: a hair (`HomeChrome.topSolid`), then the
         /// bars float over the rows ([feedback iphone-home-bar-fades-2026-10-28] — Jacob reversed
-        /// #1988's opaque-through-the-tabs block: Grok's buttons float and the rows fade out under
+        /// #1988's opaque-through-the-chrome block: Grok's buttons float and the rows fade out under
         /// them). Chat: 20 pt into the header (its `headerBlur` since #1336). Bar-only lists and
         /// pane pages: the status bar alone.
         var solid: CGFloat {
             switch self {
             case .home, .homeSearch: return HomeChrome.topSolid
             case .chat: return 20
-            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 0
             }
         }
         /// The gradient after `solid`, ending where the content starts at rest.
         var band: CGFloat {
             switch self {
-            case .home: return HomeChrome.listTop - solid
-            case .homeSearch: return HomeChrome.barOnlyListTop - solid
+            case .home, .homeSearch: return HomeChrome.barOnlyListTop - solid
             case .chat: return Controls.top + Controls.diameter + 6 - solid
-            case .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .hiddenChats, .serverChannels, .newMessage: return HomeChrome.barOnlyListTop
             case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
             }
         }
         /// The gradient's shape after `solid`: `(pt into the band, wash alpha)` knots before the
-        /// clear end. Home: the rows pass under the discs at a quarter strength and under the tabs
-        /// at under half (`HomeChrome.discsWash` / `tabsWash`), gone where the first row rests —
-        /// Grok's floating bars; the other screens keep the Mac family's straight ramp.
+        /// clear end. Home: the rows pass under the discs at a quarter strength (`HomeChrome.discsWash`),
+        /// gone where the first row rests — Grok's floating bars; the other screens keep the Mac
+        /// family's straight ramp.
         var knots: [(at: CGFloat, alpha: Double)] {
             switch self {
-            case .home:
-                return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash),
-                        (HomeChrome.discsBottom + HomeChrome.filterBand - solid, HomeChrome.tabsWash)]
-            case .homeSearch:
+            case .home, .homeSearch:
                 return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash)]
-            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library:
+            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage:
                 return []
             }
         }
@@ -1159,24 +1165,17 @@ extension View {
     }
 }
 
-/// Home's fixed chrome under the account / `+` discs: the filter tabs
-/// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
-/// fade can be opaque through them).
+/// Home's fixed chrome under the account / `+` discs. The list filter tabs are gone
+/// ([feedback chat-list-no-filter-ios-2026-11-10]); Home and its search mode share the bar-only
+/// top inset ([feedback iphone-list-top-fade-2026-10-26]).
 extension HomeChrome {
-    /// Tab pill (32) with `filterTop` above and `filterBottom` below — the whole band is the
-    /// tabs' hit area ([feedback iphone-filter-tab-taps-2026-10-28]: 44 pt tall taps).
-    static let filterTop: CGFloat = 8
-    static let filterBottom: CGFloat = 4
-    static let filterBand: CGFloat = filterTop + PaneTabsMetrics.pill + filterBottom
-    /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
-    static let fadeBand: CGFloat = 20
-    /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
-    static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
-    /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
+    /// Lists with a bar and nothing under it (home, search results, hidden chats, server channels).
     static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
+    /// Alias kept for call sites that still name the home list's leading clear row.
+    static let listTop: CGFloat = barOnlyListTop
 
     // Home's floating bars ([feedback iphone-home-bar-fades-2026-10-28], Jacob 2026-10-28 18:21):
-    // the discs, the tabs and the bottom search capsule float over the list like Grok's; rows stay
+    // the discs and the bottom search capsule float over the list like Grok's; rows stay
     // visible and fade out under them. Same geometry on Glass and Matte, each with its material.
     /// Opaque this far past the status bar, then the rows show (nothing ever reads behind the
     /// status bar itself, #1988).
@@ -1185,9 +1184,6 @@ extension HomeChrome {
     static let discsBottom: CGFloat = Controls.top + Controls.diameter
     /// The wash's alpha at the disc row's bottom: rows read at a quarter strength under the discs.
     static let discsWash: Double = 0.75
-    /// … and at the tab bar's bottom: under half under the tabs (the words stay legible; the
-    /// selected tab has its own capsule), then gone over `fadeBand` where the first row rests.
-    static let tabsWash: Double = 0.55
     /// The bottom search capsule's padding over the home indicator.
     static let bottomPad: CGFloat = 8
     /// The bar on the bottom edge: the capsule + its padding (the safe-area inset it takes).

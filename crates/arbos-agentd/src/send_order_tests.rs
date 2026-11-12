@@ -376,7 +376,9 @@ async fn the_turn_finish_sweep_cannot_hide_a_held_answer() {
         .join(chat, &younger)
         .expect("the ask behind it");
 
-    // The ask ran as a job beside that turn and has finished. Its answer is written and waiting.
+    // A JobSpec-shaped result (name is not `ask-…`) waits on send order. `ask-…` jobs from
+    // `start_job_for_send` skip that wait on purpose — busy-reply / #2964 — so this case uses a
+    // plain job name to pin the hold the sweep must not reach.
     let job = {
         let agent = agent.clone();
         let host = host.clone();
@@ -387,7 +389,7 @@ async fn the_turn_finish_sweep_cannot_hide_a_held_answer() {
                     chat,
                     &host,
                     &younger,
-                    "ask-reply-with-only-2",
+                    "job-reply-with-only-2",
                     "done",
                     "The answer is 2.",
                     None,
@@ -984,7 +986,8 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
         .join(chat, &younger)
         .expect("the ask behind it");
 
-    // The job task carries the handle it resolved before any of this.
+    // The job task carries the handle it resolved before any of this. Non-`ask-…` name so the
+    // result still waits on send order (see `the_turn_finish_sweep_cannot_hide_a_held_answer`).
     let job = {
         let agent = agent.clone();
         let host = dropped.clone();
@@ -995,7 +998,7 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
                     chat,
                     &host,
                     &younger,
-                    "ask-reply-with-only-2",
+                    "job-reply-with-only-2",
                     "done",
                     "The answer is 2.",
                     None,

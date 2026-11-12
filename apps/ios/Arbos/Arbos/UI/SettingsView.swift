@@ -3,7 +3,8 @@
 // short grouped cards of icon-tile rows that push to subpages. Everything that
 // was on the old flat form is still here, regrouped:
 //
-//   Account              Credits · Connected apps · On this iPhone
+//   Account              Credits · Secrets · Devices · On this iPhone
+//                        (Connected apps hidden until implemented — same as Mac)
 //   Agents & Computer    Machine
 //   Notifications        Notifications (system permission + relay push)
 //   Appearance           Theme · Surface (Glass / Matte)
@@ -48,13 +49,17 @@ struct SettingsView: View {
     @State private var showPrivacyPage: Bool
     @State private var showAboutPage: Bool
     @State private var showDevicesPage: Bool
+    @State private var showAgentLinksPage: Bool
     @State private var showRelayPage: Bool
     @State private var showSecretsPage: Bool
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
     /// the structure test checks the shared index finds each of them.
+    /// Connected apps stays off this list (and out of search) until the feature
+    /// ships — same rule as the Mac me-pane Settings tab
+    /// ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
     static let listedPages: [GlobalSearch.SettingsPageRoute] = [
-        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+        .credits, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
     ]
 
     init(landing: String? = DebugHooks.settingsPage) {
@@ -69,111 +74,114 @@ struct SettingsView: View {
         _showPrivacyPage = State(initialValue: landing == "privacy")
         _showAboutPage = State(initialValue: landing == "about")
         _showDevicesPage = State(initialValue: landing == "devices")
+        _showAgentLinksPage = State(initialValue: landing?.hasPrefix("agent-links") == true)
         _showRelayPage = State(initialValue: landing == "relay")
         _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
     }
 
     var body: some View {
-        NavigationStack {
-            // The shared pane (D93): my picture (tap → the photo picker), name,
-            // @handle; Profile | Settings; Sign out pinned under Settings — the
-            // Mac me pane, row for row.
-            ZStack(alignment: .top) {
-                theme.bg.ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 18) {
-                        Color.clear.frame(height: PaneKit.pageTop)
-                        ProfilePane(
-                            hero: PaneHero(
-                                picture: .image(AnyView(profilePicture)),
-                                name: model.user?.name ?? model.user?.login ?? "Arbos",
-                                subtitle: who
-                            ),
-                            tabs: PaneKinds.ownProfile,
-                            selected: $tab,
-                            body: tab == "Profile" ? profileSections : settingsSections,
-                            footer: tab == "Profile" ? [] : settingsFooter
-                        )
-                        Color.clear.frame(height: 40)
-                    }
-                }
-                .scrollIndicators(.visible)
-                // Settings is a sheet (from Home's account circle): back closes it.
-                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            .navigationBarBackButtonHidden(true)
-            .confirm(ConfirmSpec(
-                title: "Sign out?",
-                message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
-                action: "Sign out"
-            ), isPresented: $confirmUnpair) {
-                if model.tokens != nil { model.signOut() } else { model.unpair() }
-                dismiss()
-            }
-            .onAppear {
-                model.refreshConnectors()
-                Task { await push.refreshStatus() }
-                Task { await model.refreshSecrets() }
-                Task { await model.refreshDevices() }
-                Task { await model.refreshGoals() }
-                if let page = landing, page.hasPrefix("avatar") {
-                    tab = "Profile"
-                    let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
+        // The shared pane (D93): my picture (tap → the photo picker), name,
+        // @handle; Profile | Settings; Sign out pinned under Settings — the
+        // Mac me pane, row for row.
+        //
+        // This page is pushed onto Home's own stack (`AppModel.Route.ownProfile`), so it
+        // has no NavigationStack of its own: the rows below push their sub-pages onto the
+        // stack it was pushed onto, as the other profile pages' rows do.
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .image(AnyView(profilePicture)),
+                            name: model.user?.name ?? model.user?.login ?? "Arbos",
+                            subtitle: who
+                        ),
+                        tabs: PaneKinds.ownProfile,
+                        selected: $tab,
+                        body: tab == "Profile" ? profileSections : settingsSections,
+                        footer: tab == "Profile" ? [] : settingsFooter
+                    )
+                    Color.clear.frame(height: 40)
                 }
             }
-            // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    model.refreshConnectors()
-                    Task { await push.refreshStatus() }
-                }
-            }
-            // The sheet's own toast layer (Jacob 2026-10-26): a failure while Settings is up —
-            // Connect, a picture save, a secret — is the shared note at the top of this sheet,
-            // not an alert and not a toast hidden under it.
-            .overlay(alignment: .top) {
-                ToastHost()
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
-            }
-            .sheet(item: $showAvatarPicker) { initial in
-                AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
-            }
-            .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
-            .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
-            .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
-            .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
-            .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
-            .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
-            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
-            .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
-            .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
-            .navigationDestination(isPresented: $showRelayPage) {
-                // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
-                #if DEBUG
-                RelayPage()
-                #else
-                EmptyView()
-                #endif
-            }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
-            .sheet(isPresented: $showProfileEdit) {
-                NavigationStack {
-                    ProfileEditView()
-                }
-                .environmentObject(model)
-                .environment(\.theme, theme)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
+            .scrollIndicators(.visible)
+            // The page's own back chevron pops it, like every other profile page's.
+            ProfileTopBar(screen: .ownProfile) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .confirm(ConfirmSpec(
+            title: "Sign out?",
+            message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
+            action: "Sign out"
+        ), isPresented: $confirmUnpair) {
+            if model.tokens != nil { model.signOut() } else { model.unpair() }
+            dismiss()
+        }
+        .onAppear {
+            model.refreshConnectors()
+            Task { await push.refreshStatus() }
+            Task { await model.refreshSecrets() }
+            Task { await model.refreshDevices() }
+            Task { await model.refreshAgentLinks() }
+            Task { await model.refreshGoals() }
+            if let page = landing, page.hasPrefix("avatar") {
+                tab = "Profile"
+                let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
             }
         }
+        // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                model.refreshConnectors()
+                Task { await push.refreshStatus() }
+            }
+        }
+        // Settings' own toast layer (Jacob 2026-10-26): a failure while Settings is up —
+        // Connect, a picture save, a secret — is the shared note at the top of this page,
+        // not an alert and not a toast hidden under it.
+        .overlay(alignment: .top) {
+            ToastHost()
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+        .sheet(item: $showAvatarPicker) { initial in
+            AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
+        }
+        .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
+        .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
+        .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
+        .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
+        .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
+        .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+        .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
+        .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
+        .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
+        .navigationDestination(isPresented: $showAgentLinksPage) { AgentAccessLinkPage(landing: landing) }
+        .navigationDestination(isPresented: $showRelayPage) {
+            // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
+            #if DEBUG
+            RelayPage()
+            #else
+            EmptyView()
+            #endif
+        }
+        .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
+        .sheet(isPresented: $showProfileEdit) {
+            NavigationStack {
+                ProfileEditView()
+            }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(theme.bg)
+            .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .tint(theme.text)
-        .preferredColorScheme(theme.isDark ? .dark : .light)
-        .presentationBackground(theme.bg)
     }
 
     /// "@login", or where we are pointed when not signed in.
@@ -186,21 +194,38 @@ struct SettingsView: View {
         let inset = SettingsRow.separatorInset
         var out: [PaneSection] = []
         var account: [AnyView] = [
-            AnyView(NavigationLink { CreditsPage() } label: {
+            // Button + `showCreditsPage`, not NavigationLink: links under PaneCard are
+            // visible to XCTest but not hittable / do not push (same fix as Agent access link).
+            AnyView(Button {
+                showCreditsPage = true
+            } label: {
                 SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
-            }),
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-credits")),
         ]
         if model.credentials != nil {
-            account.append(AnyView(NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
-                SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
-            }))
-            // D83: a secret is "an app you connected by key"; it sits right after.
+            // Connected apps stays off the list until the feature ships (Mac already
+            // hides it; the Connectors page remains reachable from the rig only).
+            // D83: a secret is "an app you connected by key".
             account.append(AnyView(NavigationLink { SecretsPage() } label: {
                 SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
         if model.credentials != nil || model.isFixture {
+            // Agent access link (Nov 3): the one place an outside agent is given a way in,
+            // and the one place every agent token is listed — including the reader tokens
+            // that used to show under Devices. A Button drives the same
+            // `showAgentLinksPage` destination the rig lands on (NavigationLink taps under
+            // PaneCard were visible to XCTest but did not push).
+            account.append(AnyView(Button {
+                showAgentLinksPage = true
+            } label: {
+                SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-agent-links")))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)
@@ -311,21 +336,24 @@ struct SettingsView: View {
     // MARK: Row summaries
 
     private var devicesSummary: String? {
-        switch AuthDevice.visible(model.devices).count {
+        switch AuthDevice.signedIn(model.devices).count {
         case 0: return nil
         case 1: return "1 device"
         case let n: return "\(n) devices"
         }
     }
 
+    private var agentLinksSummary: String? {
+        switch model.agentLinkRows.count {
+        case 0: return nil
+        case 1: return "1 link"
+        case let n: return "\(n) links"
+        }
+    }
+
     private var creditsSummary: String? {
         guard let c = model.credits else { return nil }
         return String(format: "$%.0f left", c.balanceUsd)
-    }
-
-    private var connectorsSummary: String? {
-        let n = model.connectors.items.filter { $0.status == .connected }.count
-        return n == 0 ? nil : "\(n) connected"
     }
 
     private var machineSummary: String {
@@ -432,25 +460,11 @@ struct SettingsPage<Content: View>: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
-        // Custom back hides the system edge-swipe; ScrollView in this sheet also
-        // eats InteractivePopGestureEnabler. Same swipe-right → back as ChatView.
-        .simultaneousGesture(settingsBackSwipe)
-    }
-
-    /// Swipe right pops a pushed settings page (Credits, Machine, …). Root
-    /// Settings passes `onBack` to dismiss the sheet — leave that to the
-    /// back button / sheet drag so a casual swipe does not close Settings.
-    private var settingsBackSwipe: some Gesture {
-        DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in
-                guard onBack == nil else { return }
-                let dx = value.translation.width
-                let absX = abs(dx), absY = abs(value.translation.height)
-                let vx = value.velocity.width, vy = value.velocity.height
-                if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-                    dismiss()
-                }
-            }
+        // Custom back hides the system edge-swipe; `backSwipeToPop` re-enables
+        // `interactivePopGestureRecognizer` and the full-screen right swipe, the
+        // same path every chat and profile page uses ([feedback
+        // iphone-settings-nav-push-2026-11-10]).
+        .backSwipeToPop()
     }
 
     /// Strip under the back button + title — Apple Account always frosts what
@@ -1184,7 +1198,7 @@ struct DevicesPage: View {
     @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
-        AuthDevice.visible(model.devices)
+        AuthDevice.signedIn(model.devices)
     }
 
     var body: some View {
@@ -1193,14 +1207,14 @@ struct DevicesPage: View {
                 // The page's note: under the page header, before the first card.
                 ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
                           onTryAgain: { Task { await model.refreshDevices() } })
-            } else if !model.devicesLoaded && model.devices.isEmpty {
+            } else if !model.devicesLoaded && rows.isEmpty {
                 Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
-            } else if model.devices.isEmpty {
+            } else if rows.isEmpty {
                 Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
             } else {
-                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab. Agent tokens live in Agent access link.") {
                     ForEach(rows) { d in
                         PaneRow(
                             leading: .tile(d.glyph),
