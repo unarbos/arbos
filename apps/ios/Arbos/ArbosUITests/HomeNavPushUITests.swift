@@ -84,8 +84,18 @@ final class HomeNavPushUITests: XCTestCase {
         app.buttons["home-account"].tap()
         XCTAssertTrue(app.buttons["Back"].firstMatch.waitForExistence(timeout: settle), "Settings opened")
 
-        let credits = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR identifier == %@", "Credits", "Credits")).firstMatch
+        // Agent access (#2965) and other Settings rows push Credits below the first
+        // viewport on smaller sims — scroll until the row is hittable.
+        let credits = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@ OR identifier == %@", "Credits", "Credits")
+        ).firstMatch
         XCTAssertTrue(credits.waitForExistence(timeout: settle), "the Credits row is on Settings")
+        if !credits.isHittable {
+            app.swipeUp()
+            app.swipeUp()
+        }
+        XCTAssertTrue(credits.waitForExistence(timeout: settle) && (credits.isHittable || credits.exists),
+                      "Credits is reachable after scrolling Settings")
         credits.tap()
 
         // Credits page title is on screen; Settings root chrome is under it.
@@ -113,10 +123,15 @@ final class HomeNavPushUITests: XCTestCase {
     /// [feedback iphone-compose-nav-push-2026-11-10]
     func testPlusPushesNewMessageNotASheet() {
         let app = launch()
-        app.buttons["home-new"].tap()
+        let plus = app.buttons["home-new"]
+        XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
+        plus.tap()
         let page = app.descendants(matching: .any)["new-message"]
         XCTAssertTrue(page.waitForExistence(timeout: settle), "New Message pushed in")
-        XCTAssertTrue(app.buttons["new-message-back"].waitForExistence(timeout: settle),
+        // Prefer the identifier over the buttons query — the glass back is a Button, but
+        // descendants are more reliable across SwiftUI accessibility trees.
+        let back = app.descendants(matching: .any)["new-message-back"]
+        XCTAssertTrue(back.waitForExistence(timeout: settle),
                       "New Message drew its glass back chevron")
         assertNotASheet(app)
         XCTAssertTrue(app.staticTexts["New Message"].exists || app.staticTexts["New agent"].exists,
@@ -127,8 +142,10 @@ final class HomeNavPushUITests: XCTestCase {
     /// [feedback iphone-compose-nav-push-2026-11-10]
     func testNewMessageEdgeSwipeReturnsToChatList() {
         let app = launch()
-        app.buttons["home-new"].tap()
-        let back = app.buttons["new-message-back"]
+        let plus = app.buttons["home-new"]
+        XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
+        plus.tap()
+        let back = app.descendants(matching: .any)["new-message-back"]
         XCTAssertTrue(back.waitForExistence(timeout: settle), "New Message opened")
         edgeSwipeBack(app)
         assertGone(back)
