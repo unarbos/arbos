@@ -360,6 +360,9 @@ impl Worker {
                 }
                 Ok(())
             }
+            Job::NativeMessage { .. } | Job::NativeRemoval { .. } => {
+                super::native::apply(&self.state, job).await
+            }
         }
     }
 
@@ -749,9 +752,10 @@ impl Worker {
         ts: Option<i64>,
     ) -> MxResult<()> {
         // Phase 3: a chat its members read on the homeserver (`people_native_room`) is still
-        // mirrored. A device that sends there writes no Loro row, so nothing arrives here to
-        // double; what does arrive is from a member's device that still writes the Loro room
-        // (every iPhone so far), and dropping it would hide the message from the others.
+        // mirrored. A device that sends there writes no Loro row; the relay writes it
+        // (`native.rs`), under an event it has recorded first, so that row is not sent back
+        // here. What does arrive is from a member's device that still writes the Loro room,
+        // and dropping it would hide the message from the others.
         // Owner decision: stop mirroring such a chat only once no shipped app writes its Loro
         // room. The one thing never sent twice is a message id this chat already has an
         // event for (below, and the transaction id).

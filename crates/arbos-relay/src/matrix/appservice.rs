@@ -76,12 +76,18 @@ pub async fn transaction(
     let events = v["events"].as_array().map(Vec::len).unwrap_or(0) as i64;
     let ephemeral = v["ephemeral"].as_array().map(Vec::len).unwrap_or(0);
     let to_device = v["to_device"].as_array().map(Vec::len).unwrap_or(0);
-    match state.db.matrix_txn_mark(who.id(), &txn, events) {
+    let seen = state.db.matrix_txn_mark(who.id(), &txn, events);
+    match &seen {
         Ok(true) => {
             tracing::debug!(appservice = who.id(), txn = %txn, events, ephemeral, to_device, "matrix transaction");
         }
         Ok(false) => {}
         Err(e) => tracing::warn!(error = %e, "matrix transaction: record failed"),
+    }
+    // People are the users registration's; a transaction seen before was acted on then (and
+    // acting twice is harmless when that cannot be told).
+    if who == Appservice::Users && !matches!(seen, Ok(false)) {
+        super::native::on_transaction(&state, v["events"].as_array().map_or(&[], Vec::as_slice));
     }
     Json(json!({})).into_response()
 }

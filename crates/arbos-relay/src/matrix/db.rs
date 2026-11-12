@@ -372,6 +372,18 @@ impl Db {
         })
     }
 
+    /// The message a chat's event is (`matrix_events`, read the other way).
+    pub fn matrix_message_of(&self, chat_id: &str, event_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT message_id FROM matrix_events WHERE chat_id = ?1 AND event_id = ?2",
+                params![chat_id, event_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn matrix_insert_event(
         &self,
         chat_id: &str,

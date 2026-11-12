@@ -21,6 +21,7 @@ pub mod appservice;
 pub mod backfill;
 pub mod client;
 pub mod db;
+pub mod native;
 pub mod reads;
 pub mod servers;
 pub mod servers_db;
@@ -324,6 +325,22 @@ pub enum Job {
         chat_id: String,
         project_id: Option<String>,
     },
+    /// Phase 3: a member's device sent this message into the chat's room on the homeserver;
+    /// write it into the Loro room (`native.rs`). `reply_to` is the event it answers.
+    NativeMessage {
+        chat_id: String,
+        event_id: String,
+        user_id: String,
+        message_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parts: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+        ts: i64,
+    },
+    /// Phase 3: an event was removed in the chat's room on the homeserver; remove its Loro row.
+    NativeRemoval { chat_id: String, event_id: String },
 }
 
 impl Job {
@@ -335,7 +352,9 @@ impl Job {
             | Job::Read { chat_id, .. }
             | Job::Archive { chat_id, .. }
             | Job::CloseRoom { chat_id }
-            | Job::Resync { chat_id, .. } => chat_id,
+            | Job::Resync { chat_id, .. }
+            | Job::NativeMessage { chat_id, .. }
+            | Job::NativeRemoval { chat_id, .. } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
             Job::SyncServer { server_id } => server_id,
             Job::SyncChannel { channel_id } | Job::ChannelNotice { channel_id, .. } => channel_id,
