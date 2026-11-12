@@ -130,12 +130,23 @@ enum WalletVault {
         return key
     }
 
-    /// This device's Matrix store directory (Application Support, excluded from backups: the
-    /// keys in it are only good on this device).
+    /// This device's Matrix store directory (excluded from backups: the keys in it are only
+    /// good on this device). In the App Group's container, where the notification extension
+    /// can read a message's key (`PreviewVault`); a store an earlier build kept in Application
+    /// Support is moved there once, whole. Without the group, or if the move fails, the store
+    /// stays where it was.
     static func storeDir(device: String) -> String {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        var dir = base.appendingPathComponent("matrix", isDirectory: true).appendingPathComponent(device, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let old = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("matrix", isDirectory: true).appendingPathComponent(device, isDirectory: true)
+        var dir = old
+        if let root = PreviewVault.storeRoot {
+            let shared = root.appendingPathComponent(device, isDirectory: true)
+            try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+            let here = fm.fileExists(atPath: shared.path)
+            if here || !fm.fileExists(atPath: old.path) || (try? fm.moveItem(at: old, to: shared)) != nil { dir = shared }
+        }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? dir.setResourceValues(values)

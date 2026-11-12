@@ -17,11 +17,13 @@ use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent};
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::api::client::push::set_pushrule;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
+use matrix_sdk::ruma::events::room::{EncryptedFile, MediaSource};
 use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
 use matrix_sdk::ruma::push::NewPushRule;
 use matrix_sdk::ruma::serde::Raw;
@@ -86,6 +88,16 @@ fn pinned_history_key(store_dir: &std::path::Path, told: Option<&str>) -> Option
         tracing::warn!(error = %e, "the relay's history key could not be pinned");
     }
     Some(key)
+}
+
+/// One file of a message on its way out ([`MatrixClient::send_files`]).
+#[derive(Clone)]
+pub struct Upload {
+    pub name: String,
+    pub mime: String,
+    /// The attachment's `kind` as the apps write it (`image`, `sticker`, …), when they do.
+    pub kind: Option<String>,
+    pub bytes: Vec<u8>,
 }
 
 /// Where this device keeps its encryption keys.
@@ -174,6 +186,12 @@ impl Timeline {
     }
 }
 
+/// Whose messages this device reads: those from a device its owner's cross-signing identity
+/// has signed (or from before there were such identities).
+pub(crate) const TRUST: DecryptionSettings = DecryptionSettings {
+    sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
+};
+
 /// Channel read receipts are private (#1484; Jacob, 2026-10-30: "make all mirrored read
 /// receipts private"). Private still clears the room's own unread count and still reaches
 /// this person's other devices; it is not federated and no other member can read it.
@@ -224,9 +242,7 @@ impl MatrixClient {
             // its owner's cross-signing identity is sent room keys, and a message from one
             // that is not stays locked.
             .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
-            .with_decryption_settings(DecryptionSettings {
-                sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
-            })
+            .with_decryption_settings(TRUST)
             .build()
             .await
             .map_err(|e| Error::Homeserver(e.to_string()))?;
@@ -1238,6 +1254,90 @@ impl MatrixClient {
             self.drop_pending(room.room_id(), local_id);
         }
         Ok(sent?.response.event_id.to_string())
+    }
+
+    /// [`Self::send`] into a people chat with files. Each is encrypted on this device and its
+    /// ciphertext uploaded to the homeserver (the SDK's `upload_encrypted_file`); where it is
+    /// and the key that opens it go in the message ([`rows::file_part`]), which an encrypted
+    /// room encrypts. The homeserver holds bytes it cannot read and is not told their name or
+    /// type. Nothing is sent unless every file is uploaded.
+    pub async fn send_files(
+        &self,
+        room_id: &str,
+        text: &str,
+        files: Vec<Upload>,
+        reply_to: Option<&str>,
+        local_id: &str,
+    ) -> Result<String> {
+        self.people_room(room_id).await?;
+        let refused = |why: &str| Err(Error::Homeserver(why.to_owned()));
+        if files.is_empty() || files.len() > rows::MEDIA_MAX_FILES {
+            return refused("too many files in one message");
+        }
+        if files
+            .iter()
+            .any(|f| f.bytes.len() as u64 > rows::MEDIA_MAX_BYTES)
+        {
+            return refused("That file is too large (25 MB max).");
+        }
+        let mut parts = Vec::new();
+        for (i, f) in files.iter().enumerate() {
+            let file = self
+                .client
+                .upload_encrypted_file(&mut std::io::Cursor::new(&f.bytes))
+                .await?;
+            let file = serde_json::to_value(file).map_err(|e| Error::Homeserver(e.to_string()))?;
+            let (id, size) = (format!("{local_id}.{i}"), f.bytes.len() as u64);
+            let part = rows::file_part(&id, &f.name, &f.mime, f.kind.as_deref(), size, file);
+            if rows::part_file(&part).is_none() {
+                return refused("not a file this chat can send");
+            }
+            parts.push(part);
+        }
+        self.send(room_id, text, parts, reply_to, local_id).await
+    }
+
+    /// `(media type, bytes)` of a file of a people chat's message: `reference` is what follows
+    /// [`rows::MEDIA_REF`] in the attachment's `ref`, the event and the part. The event is
+    /// read through the rules a row is ([`rows::shows`]: in an encrypted room, only one this
+    /// device decrypted), the part must be a file the apps take ([`rows::part_file`]), and
+    /// the bytes are what its sender encrypted or nothing: the SDK checks the ciphertext's
+    /// hash before it decrypts, and they are bounded again once here. Kept in the device's
+    /// store afterwards, under the store's key.
+    pub async fn media(&self, room_id: &str, reference: &str) -> Result<(String, Vec<u8>)> {
+        let none = || Error::Homeserver("no such file".into());
+        let room = self.people_room(room_id).await?;
+        let (event_id, index) = reference.rsplit_once('/').ok_or_else(none)?;
+        let index: usize = index.parse().map_err(|_| none())?;
+        let event_id = EventId::parse(event_id).map_err(|_| none())?;
+        let mut ev = room.load_or_fetch_event(&event_id, None).await?;
+        // Stored before its key came: ask again, now that a row names it.
+        if ev.encryption_info().is_none() {
+            ev = room.event(&event_id, None).await?;
+        }
+        let v: Value = serde_json::from_str(ev.raw().json().get()).map_err(|_| none())?;
+        let encrypted = Self::is_encrypted(&room).await;
+        if v["type"] != "m.room.message"
+            || !rows::shows(&v, encrypted, ev.encryption_info().is_some())
+        {
+            return Err(none());
+        }
+        let part = &v["content"]["life.arbos.parts"][index];
+        let (mime, file) = rows::part_file(part).ok_or_else(none)?;
+        let file: EncryptedFile = serde_json::from_value(file.clone()).map_err(|_| none())?;
+        let request = MediaRequestParameters {
+            source: MediaSource::Encrypted(Box::new(file)),
+            format: MediaFormat::File,
+        };
+        let bytes = self
+            .client
+            .media()
+            .get_media_content(&request, true)
+            .await?;
+        if bytes.len() as u64 > rows::MEDIA_MAX_BYTES {
+            return Err(none());
+        }
+        Ok((mime.to_owned(), bytes))
     }
 
     /// Carry rows of a chat's earlier history into its room: `page` is what the relay

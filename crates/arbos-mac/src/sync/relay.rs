@@ -3353,13 +3353,21 @@ fn native_target(shared: &Arc<Shared>, chat_id: &str) -> Option<(Arc<MatrixClien
     Some((matrix_client(shared)?, shared.native_room(chat_id)?))
 }
 
-/// A text message into a native chat; `message_id` is the row id the app already shows and
-/// the transaction id, so a retry never doubles it. `reply_to` is a row id of this chat.
+/// A message into a native chat; `message_id` is the row id the app already shows and the
+/// transaction id, so a retry never doubles it. `reply_to` is a row id of this chat.
+///
+/// Files go where the chat's messages are readable from. In an end-to-end encrypted chat
+/// each is encrypted on this Mac and its ciphertext kept on the homeserver, the key inside
+/// the message (`MatrixClient::send_files`); the relay sees none of it. In any other native
+/// chat they are the relay's blobs, like a Loro room's, so the row the relay carries back to
+/// the Loro room still finds them.
 async fn native_send(
     shared: &Arc<Shared>,
     chat_id: &str,
     message_id: &str,
     text: &str,
+    attachments: Vec<Outgoing>,
+    voice_wav: Option<Arc<Vec<u8>>>,
     reply_to: Option<&str>,
 ) -> Result<(), String> {
     let (client, room) = native_target(shared, chat_id).ok_or("chat is not ready")?;
@@ -3372,11 +3380,119 @@ async fn native_send(
         ),
         None => None,
     };
-    client
-        .send(&room, text, Vec::new(), answers.as_deref(), message_id)
-        .await
-        .map(drop)
-        .map_err(|e| e.to_string())
+    let answers = answers.as_deref();
+    // Not knowing counts as encrypted, as it does for the client.
+    let encrypted = shared
+        .matrix_people
+        .lock()
+        .unwrap()
+        .get(&room)
+        .is_none_or(|r| r.encrypted);
+    let sent = if attachments.is_empty() && voice_wav.is_none() {
+        client
+            .send(&room, text, Vec::new(), answers, message_id)
+            .await
+    } else if encrypted {
+        let mut files = Vec::new();
+        for outgoing in attachments {
+            files.push(outgoing_file(shared, outgoing).await?);
+        }
+        if let Some(wav) = voice_wav {
+            files.push(arbos_matrix::Upload {
+                name: "voice-memo.wav".into(),
+                mime: "audio/wav".into(),
+                kind: Some("audio".into()),
+                bytes: Arc::unwrap_or_clone(wav),
+            });
+        }
+        client
+            .send_files(&room, text, files, answers, message_id)
+            .await
+    } else {
+        let slot = shared.blob_slot(chat_id);
+        let mut uploaded = Vec::new();
+        for outgoing in attachments {
+            uploaded.push(upload_outgoing(shared, &slot, outgoing).await);
+        }
+        if let Some(wav) = voice_wav {
+            if let Part::Attachment { attachment, .. } = upload_voice_memo(shared, &slot, wav).await
+            {
+                uploaded.push(user_attachment_from_part(attachment));
+            }
+        }
+        let parts = uploaded.into_iter().map(attachment_part).collect();
+        client.send(&room, text, parts, answers, message_id).await
+    };
+    sent.map(drop).map_err(|e| e.to_string())
+}
+
+/// The `attachment` part of a row for a file already on the relay, as the chat doc writes it
+/// (`arbos_core::doc`, crdt-sync §6.2).
+fn attachment_part(a: UserAttachment) -> Value {
+    let mut attachment = json!({ "name": a.name, "mime": a.mime });
+    if let Some(kind) = a.kind {
+        attachment["kind"] = json!(kind);
+    }
+    if let Some(key) = a.blob_ref {
+        attachment["ref"] = json!(key);
+    }
+    if let Some(url) = a.url {
+        attachment["url"] = json!(url);
+    }
+    if let Some(s) = a.source {
+        attachment["source"] = json!({ "provider": s.provider, "id": s.id, "pageUrl": s.page_url });
+    }
+    json!({ "id": new_id(), "kind": "attachment", "attachment": attachment })
+}
+
+/// An outgoing attachment's bytes, for a chat whose files this Mac encrypts. A picked GIF
+/// has none to encrypt: it is a provider's address, which every reader would then ask the
+/// relay for. A sticker's row names its pack (`source`), which a file part does not carry.
+async fn outgoing_file(
+    shared: &Arc<Shared>,
+    outgoing: Outgoing,
+) -> Result<arbos_matrix::Upload, String> {
+    let (name, mime, kind, bytes) = match outgoing {
+        Outgoing::Gif { .. } | Outgoing::Sticker { .. } => {
+            return Err("Stickers and GIFs can't be sent in an encrypted chat yet".into())
+        }
+        Outgoing::Path(path) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            // Before it is read: the client refuses it after.
+            let size = tokio::fs::metadata(&path).await.map(|m| m.len());
+            if size.is_ok_and(|s| s > arbos_matrix::rows::MEDIA_MAX_BYTES) {
+                return Err("That file is too large (25 MB max).".into());
+            }
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|err| format!("Could not read {}: {err}", path.display()))?;
+            (name, mime_for(&path).to_string(), None, bytes)
+        }
+        Outgoing::Copy {
+            from_slot,
+            attachment,
+        } => {
+            let key = attachment
+                .blob_ref
+                .as_deref()
+                .ok_or_else(|| format!("{} has no file on the relay", attachment.name))?;
+            let (_, bytes) = fetch_blob_bytes(shared, &from_slot, key)
+                .await
+                .map_err(|err| format!("Could not read {}: {err}", attachment.name))?;
+            let kind = attachment.kind.map(attachment_kind_str);
+            (attachment.name, attachment.mime, kind, bytes)
+        }
+    };
+    Ok(arbos_matrix::Upload {
+        name,
+        mime,
+        kind,
+        bytes,
+    })
 }
 
 /// Flip my reaction on a native chat's row, as the Loro path does (`ClientCommand::React`).
@@ -6326,6 +6442,12 @@ fn blob_request_url(shared: &Shared, id: &str, key: &str) -> String {
 
 /// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
 async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
+    // A file of a native chat kept on the homeserver: the Matrix client decrypts it.
+    if let Some(reference) = key.strip_prefix(arbos_matrix::rows::MEDIA_REF) {
+        let chat = id.strip_prefix(PEOPLE_BLOB_PREFIX).unwrap_or(id);
+        let (client, room) = native_target(shared, chat).context("chat is not ready")?;
+        return Ok(client.media(&room, reference).await?);
+    }
     let response = fetch_blob_response(shared, id, key).await?;
     let mime = response
         .headers()
@@ -6641,6 +6763,12 @@ async fn upload_outgoing(
             let body = match attachment.blob_ref.as_deref() {
                 // Keep the response's reusable Bytes body; converting it to Vec
                 // first would duplicate the complete forwarded attachment.
+                Some(key) if key.starts_with(arbos_matrix::rows::MEDIA_REF) => {
+                    fetch_blob_bytes(shared, &from_slot, key)
+                        .await
+                        .map(|(_, bytes)| reqwest::Body::from(bytes))
+                        .map_err(|err| format!("Could not read {}: {err}", attachment.name))
+                }
                 Some(key) => async {
                     let response = fetch_blob_response(shared, &from_slot, key).await?;
                     Ok::<_, anyhow::Error>(reqwest::Body::from(response.bytes().await?))
@@ -6775,17 +6903,23 @@ async fn send_message(
     mentions: Vec<String>,
 ) {
     if shared.is_native(&chat_id) {
-        let plain = attachments.is_empty()
-            && voice_wav.is_none()
-            && answer.is_none()
-            && forwarded.is_none()
-            && reply_ref.is_none()
-            && command == "send";
-        let sent = if plain {
-            native_send(&shared, &chat_id, &message_id, &text, reply_to.as_deref()).await
+        let carried =
+            answer.is_none() && forwarded.is_none() && reply_ref.is_none() && command == "send";
+        let sent = if carried {
+            let reply_to = reply_to.as_deref();
+            native_send(
+                &shared,
+                &chat_id,
+                &message_id,
+                &text,
+                attachments,
+                voice_wav,
+                reply_to,
+            )
+            .await
         } else {
-            // Only text and an answer to a row of this chat go to the homeserver so far.
-            Err("This chat can only send text for now".to_string())
+            // Text, files and an answer to a row of this chat go to the homeserver so far.
+            Err("This chat can only send text and files for now".to_string())
         };
         if let Err(error) = sent {
             let _ = shared.events.send(SyncEvent::MessageSendFailed {
@@ -12005,5 +12139,47 @@ mod native_people_tests {
         // A sender nobody in the chat's roster matches keeps the homeserver's spelling.
         let stranger = native_messages("C1", &rows[..1], &["user:gh_7".to_owned()]);
         assert_eq!(stranger[0].sender, "user:test_01abc");
+    }
+
+    #[test]
+    fn a_native_rows_files_are_the_transcripts_attachments() {
+        // One kept on the homeserver (its key stays in the client) and one on the relay, as
+        // `attachment_part` writes it for a chat that is not encrypted.
+        let on_hs = arbos_matrix::rows::file_part(
+            "p0",
+            "plan.png",
+            "image/png",
+            Some("image"),
+            3,
+            json!({ "url": "mxc://arbos.life/abc", "key": { "k": "secret" } }),
+        );
+        let on_relay = attachment_part(UserAttachment {
+            name: "notes.pdf".into(),
+            mime: "application/pdf".into(),
+            blob_ref: Some("att-1-notes.pdf".into()),
+            ..Default::default()
+        });
+        let ev = json!({ "type": "m.room.message", "event_id": "$e", "sender": "@gh_7:arbos.life",
+            "origin_server_ts": 1700, "content": { "msgtype": "m.text", "body": "", "life.arbos.id": "01F",
+            "life.arbos.parts": [on_hs, on_relay] } });
+        let row = arbos_matrix::rows::message_row(&ev, &|_| None).expect("row");
+        let messages = native_messages("C1", &[row], &[]);
+        let refs: Vec<_> = messages[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { attachment, .. } => {
+                    Some((attachment.name.as_str(), attachment.blob_ref.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refs,
+            [
+                ("plan.png", Some("mx:$e/0")),
+                ("notes.pdf", Some("att-1-notes.pdf"))
+            ]
+        );
     }
 }

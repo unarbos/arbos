@@ -125,6 +125,22 @@ pub struct MatrixSnapshot {
     pub people: Vec<MatrixPeopleRow>,
 }
 
+/// One file of a message on its way out (see `arbos_matrix::Upload`).
+#[derive(Clone, uniffi::Record)]
+pub struct MatrixUpload {
+    pub name: String,
+    pub mime: String,
+    /// The attachment's `kind` (`image`, `sticker`, …), when the app writes one.
+    pub kind: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct MatrixMedia {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
 fn row(r: CoreMessage) -> MatrixMessageRow {
     MatrixMessageRow {
         event_id: r.event_id,
@@ -322,12 +338,14 @@ impl MatrixClient {
         Ok(self.inner.send_text(&room_id, &text, &local_id).await?)
     }
 
-    /// [`Self::send_text`] plus transcript parts, each a JSON object (e.g. a cheque part).
+    /// [`Self::send_text`] plus transcript parts, each a JSON object (e.g. a cheque part, or
+    /// an attachment already on the relay); `reply_to` is the event id of the row it answers.
     pub async fn send_parts(
         &self,
         room_id: String,
         text: String,
         parts_json: Vec<String>,
+        reply_to: Option<String>,
         local_id: String,
     ) -> Result<String, MatrixError> {
         let parts = parts_json
@@ -337,7 +355,7 @@ impl MatrixClient {
             .map_err(|e| MatrixError::Homeserver(format!("bad part: {e}")))?;
         Ok(self
             .inner
-            .send(&room_id, &text, parts, None, &local_id)
+            .send(&room_id, &text, parts, reply_to.as_deref(), &local_id)
             .await?)
     }
 
@@ -353,6 +371,42 @@ impl MatrixClient {
             .inner
             .send(&room_id, &text, Vec::new(), Some(&reply_to), &local_id)
             .await?)
+    }
+
+    /// A message with files into a people chat, each encrypted on this device before it is
+    /// uploaded (see `arbos_matrix::MatrixClient::send_files`). `reply_to` is an event id.
+    pub async fn send_files(
+        &self,
+        room_id: String,
+        text: String,
+        files: Vec<MatrixUpload>,
+        reply_to: Option<String>,
+        local_id: String,
+    ) -> Result<String, MatrixError> {
+        let files = files
+            .into_iter()
+            .map(|f| arbos_matrix::Upload {
+                name: f.name,
+                mime: f.mime,
+                kind: f.kind,
+                bytes: f.bytes,
+            })
+            .collect();
+        Ok(self
+            .inner
+            .send_files(&room_id, &text, files, reply_to.as_deref(), &local_id)
+            .await?)
+    }
+
+    /// The bytes of a file of a people chat's message, decrypted: `reference` is what follows
+    /// `mx:` in the attachment's `ref` (see `arbos_matrix::MatrixClient::media`).
+    pub async fn media(
+        &self,
+        room_id: String,
+        reference: String,
+    ) -> Result<MatrixMedia, MatrixError> {
+        let (mime, bytes) = self.inner.media(&room_id, &reference).await?;
+        Ok(MatrixMedia { mime, bytes })
     }
 
     /// Carry rows of a people chat's earlier history into its room: `page_json` is the body
@@ -416,6 +470,45 @@ impl MatrixClient {
     pub async fn mark_read(&self, room_id: String) -> Result<(), MatrixError> {
         Ok(self.inner.mark_read(&room_id).await?)
     }
+}
+
+/// The words of an encrypted message, for its notification (see `arbos_matrix::Preview`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MatrixPreview {
+    /// `user:<id>` of the account the message's key is from.
+    pub sender: String,
+    pub text: String,
+}
+
+/// For the notification extension: read one encrypted event (`event_json`, as the alert
+/// carries it) with the keys in this device's store, or `None` (see
+/// `arbos_matrix::preview`). No client and no request. Blocks the calling thread, on a
+/// runtime of that one thread: the extension runs nothing else of this library and has
+/// little memory to run it in.
+#[uniffi::export]
+pub fn matrix_preview(
+    crypto: MatrixCrypto,
+    user_id: String,
+    device_id: String,
+    room_id: String,
+    event_json: String,
+) -> Option<MatrixPreview> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let preview = runtime.block_on(arbos_matrix::preview(
+        crypto.store_dir.as_ref(),
+        crypto.store_key.as_deref()?,
+        &user_id,
+        &device_id,
+        &room_id,
+        &event_json,
+    ))?;
+    Some(MatrixPreview {
+        sender: preview.sender,
+        text: preview.text,
+    })
 }
 
 #[cfg(test)]

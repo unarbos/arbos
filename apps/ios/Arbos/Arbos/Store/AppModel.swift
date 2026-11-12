@@ -4119,9 +4119,9 @@ final class AppModel: ObservableObject {
             return
         }
         if nativeRooms[chatId] != nil {
-            // Only text and an answer to a row of this chat go to the homeserver so far.
-            if attachments.isEmpty, forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
-                sendNativePeople(chatId: chatId, text: text, replyTo: replyTo)
+            // Text, files and an answer to a row of this chat go to the homeserver so far.
+            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
+                sendNativePeople(chatId: chatId, text: text, replyTo: replyTo, attachments: attachments)
             } else {
                 failRefused("send your message", Self.nativeTextOnly)
             }
@@ -5879,6 +5879,8 @@ final class AppModel: ObservableObject {
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
     func blobURL(projectId: Id, key: String) -> URL? {
+        // A native chat's file on the homeserver: decrypted on this phone, not a relay URL.
+        if key.hasPrefix(MatrixMediaProtocol.refPrefix) { return MatrixMediaProtocol.url(slot: projectId, key: key) }
         let base = api.endpoint.httpUrl
         guard !base.isEmpty else { return nil }
         // Build via URLComponents so a people-slot `:` and JWT characters stay valid;

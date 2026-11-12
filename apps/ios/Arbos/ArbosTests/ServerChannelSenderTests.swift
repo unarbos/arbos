@@ -187,6 +187,36 @@ final class ServerChannelSenderTests: XCTestCase {
         forged.json = forged.json.replacingOccurrences(of: "user:test_01abc", with: "user:gh_7")
         XCTAssertEqual(AppModel.nativeMessages([forged], chatId: "C1", members: members)[0].sender, "user:test_01ABC")
     }
+
+    /// A file kept on the homeserver is loaded through the Matrix client, wherever an
+    /// attachment is loaded by URL; a relay blob's key is not such a URL.
+    func testAFileOnTheHomeserverIsLoadedThroughTheMatrixClient() async throws {
+        XCTAssertNil(MatrixMediaProtocol.url(slot: "people:C1", key: "att-1-plan.png"))
+        XCTAssertNil(MatrixMediaProtocol.url(slot: "01PROJECT", key: "mx:$e/0"), "only a people chat has such files")
+        let model = AppModel()
+        model.isFixture = true
+        let url = try XCTUnwrap(model.blobURL(projectId: "people:C1", key: "mx:$abc_-/0"))
+        XCTAssertEqual(url.scheme, MatrixMediaProtocol.scheme)
+        MatrixMediaProtocol.serve { chat, reference in
+            guard chat == "C1", reference == "$abc_-/0" else { throw URLError(.fileDoesNotExist) }
+            return ("image/png", Data([1, 2, 3]))
+        }
+        let fetched = await MediaFetch.data(url, headers: model.authHeaders)
+        XCTAssertEqual(fetched?.0, Data([1, 2, 3]))
+        XCTAssertEqual(fetched?.1, "image/png")
+        let other = try XCTUnwrap(model.blobURL(projectId: "people:C2", key: "mx:$abc_-/0"))
+        let missing = await MediaFetch.data(other, headers: [:])
+        XCTAssertNil(missing)
+    }
+
+    /// A file on the relay goes into a native chat's message as the part the chat doc writes.
+    func testAnAttachmentPartIsTheChatDocsShape() throws {
+        let json = try AppModel.attachmentPart(Attachment(name: "plan.png", mime: "image/png", blobRef: "att-1-plan.png", kind: "image"))
+        let part = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(part["kind"] as? String, "attachment")
+        XCTAssertEqual(part["attachment"] as? [String: String],
+                       ["name": "plan.png", "mime": "image/png", "ref": "att-1-plan.png", "kind": "image"])
+    }
 }
 
 private extension Server {
