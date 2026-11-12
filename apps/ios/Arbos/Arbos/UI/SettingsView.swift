@@ -201,7 +201,8 @@ struct SettingsView: View {
             } label: {
                 SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
             }
-            .buttonStyle(.plain)),
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-credits")),
         ]
         if model.credentials != nil {
             // Connected apps stays off the list until the feature ships (Mac already

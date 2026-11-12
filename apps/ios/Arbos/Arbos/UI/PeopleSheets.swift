@@ -223,12 +223,19 @@ struct NewChatSheet: View {
     }
 
     /// Glass back chevron + centred title — same chrome as Settings / profile pages.
-    /// Title is a ZStack sibling (not an HStack `.overlay`): overlaying the title on the
-    /// bar collapsed the back button out of the accessibility tree, so UI tests could not
-    /// find `new-message-back` even though the page itself was on screen.
+    /// Title sits under the bar in the ZStack (and is hidden from VoiceOver): a full-width
+    /// title drawn above the HStack collapsed `new-message-back` out of the accessibility
+    /// tree even with `allowsHitTesting(false)`, so UI tests could not find the chevron.
     private var topBar: some View {
         ZStack(alignment: .top) {
             ListTopFade(screen: .newMessage)
+            Text("New Message")
+                .font(.system(size: Theme.body, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .padding(.top, 16)
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             HStack {
                 Button { dismiss() } label: {
                     GlassCircle {
@@ -244,12 +251,6 @@ struct NewChatSheet: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
-            Text("New Message")
-                .font(.system(size: Theme.body, weight: .semibold))
-                .foregroundStyle(theme.text)
-                .padding(.top, 16)
-                .frame(maxWidth: .infinity)
-                .allowsHitTesting(false)
         }
     }
 

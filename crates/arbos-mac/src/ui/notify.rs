@@ -568,16 +568,18 @@ pub fn init() {
 
 /// Does this platform ask the user before showing notifications?
 pub fn needs_permission() -> bool {
-    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
-        return true;
-    }
+    // Split by OS so Linux CI does not see `if … { true } else { false }` (clippy
+    // needless_bool) while macOS still consults Notification Center availability.
     #[cfg(target_os = "macos")]
     {
+        if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+            return true;
+        }
         mac::available()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some()
     }
 }
 
