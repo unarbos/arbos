@@ -95,10 +95,11 @@ pub fn effective_color_index(stable_id: &str, override_index: Option<i64>) -> u8
 /// avatars this replaced: renaming it would rewrite the whole `projects` table and break any
 /// relay still running the previous binary, for no change in behaviour.
 pub fn effective_disc(p: &crate::db::Project) -> u8 {
-    disc::color_for(
-        &p.id,
-        p.avatar_leaf_color.and_then(|v| u8::try_from(v).ok()),
-    )
+    effective_disc_for(&p.id, p.avatar_leaf_color)
+}
+
+pub(crate) fn effective_disc_for(id: &str, color: Option<i64>) -> u8 {
+    disc::color_for(id, color.and_then(|v| u8::try_from(v).ok()))
 }
 
 /// Validate `avatar_disc_color` from a request body. Besides the colour index it accepts

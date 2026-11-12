@@ -1,0 +1,28 @@
+{
+  "suite_preexisting_tests": "not applicable: new suite",
+  "initial_suite_gate": {
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skip": 0,
+    "seconds": 8.138
+  },
+  "final_suite_gate": {
+    "command": "python3 -m unittest discover -s .improve/load-test -p test_suite.py -v",
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skip": 0,
+    "seconds": 6.028
+  },
+  "profile": {
+    "fixtures": 8,
+    "changed_before_executions": 1616,
+    "changed_after_executions": 1616,
+    "control_before_executions": 168,
+    "control_after_executions": 168,
+    "total_timed_executions": 3568,
+    "equivalence_and_integrity": "8/8PASS"
+  },
+  "native_integration": "BLOCKED; no local native test execution"
+}

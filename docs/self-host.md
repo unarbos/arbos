@@ -5,8 +5,8 @@ Arbos has one server-side piece: the **relay** (`arbos-relay`). Everything else 
 Words used here:
 
 - **Relay**: the one internet-facing service. It holds the chat rooms, provider keys, connector tokens and the vault, meters model calls, and wakes machines.
-- **Machine** (also "box"): the user's cloud computer, one per user. By default a [Daytona](https://www.daytona.io) sandbox built from the `arbos-agent` image. Each project is a **workspace** on it.
-- **Process box**: the same machine, run as a child process of the relay on the relay host. No Daytona, no Docker. Good for a first run.
+- **Machine** (also "box"): the user's computer, one per user, built from the `arbos-agent` image. On a server it is a gVisor (`runsc`) sandbox on the relay host (§5). Each project is a **workspace** on it.
+- **Process box**: the same machine, run as a child process of the relay on the relay host. No sandbox, no Docker. Good for a first run.
 - **Public URL**: the `https://` address machines and devices dial back to. It must be stable for persistent projects.
 
 ## 1. Prerequisites
@@ -15,7 +15,7 @@ Words used here:
 - Node 22.19+ and pnpm 9 for `harness/` (pi needs zstd in `zlib`; 22.14 is too old).
 - `pi` 1.2.0 (`npm i -g @earendil-works/pi-coding-agent@1.2.0`) for a process box; `prime-agent` 0.10.0 plus its kernel venv (see `image/Dockerfile`) for Prime subagents. Without Prime, set `ARBOS_DEFAULT_HARNESS=pi`.
 - A model key: `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`). It lives on the relay host only; a machine never sees it.
-- For real machines: `DAYTONA_API_KEY`.
+- For real machines: Docker with the `runsc` (gVisor) runtime on the relay host (§5).
 - For the Mac app on Linux: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev` (and `mesa-vulkan-drivers` without a GPU). The iPhone app needs Xcode 16+ and fastlane.
 
 Build everything:
@@ -64,19 +64,21 @@ All optional unless noted.
 | Variable | Meaning |
 | --- | --- |
 | `ARBOS_RELAY_LISTEN` | bind address, default `127.0.0.1:7700`; use `0.0.0.0:7700` on a server |
-| `ARBOS_RELAY_PUBLIC_URL` | the URL machines and devices dial back (**required for Daytona machines**), e.g. `https://relay.example.com`; WebSockets must pass through |
+| `ARBOS_RELAY_PUBLIC_URL` | the URL machines and devices dial back (**required for sandbox machines**), e.g. `https://relay.example.com`; WebSockets must pass through |
 | `ARBOS_RELAY_DATA` | SQLite + blobs + local boxes, default `./.arbos-local/relay` |
 | `ARBOS_RELAY_ADMIN_TOKEN` | token for the admin endpoints (`/admin/*`, `POST /pair/new`); generated and logged when unset |
 | `ARBOS_RELAY_KEY` | the key-encryption key for connector tokens and secrets (each user's secret values are AES-256-GCM under a per-user key wrapped by this one); generated once into the `meta` table when unset — fine for a laptop, a loud boot warning in `github` mode: set it from the environment (for example `op run`) on a real server |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a machine) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `ARBOS_OPENAI_ROUTE`, `ARBOS_OPENAI_DIRECT_BASE` | where `openai/*` chat models go: `auto` (default — straight to OpenAI at `https://api.openai.com/v1` with `OPENAI_API_KEY` when that key exists, else OpenRouter), `direct`, or `openrouter`; usage is metered the same way (token prices from the relay table when the upstream reports no cost) |
-| `ARBOS_DECISION_SCORER` (`typesafe/jev-1.14`), `ARBOS_DECISION_THRESHOLD` (0.6) | agentd defaults (read in the box's environment; Daytona machines use the built-in values) for who replies in group chats: one judge call per human message to a decision model through the relay's `/proxy/decisions` (OpenRouter Decisions API, needs `OPENROUTER_API_KEY`) asking who the message is for — one agent, any one agent, several, all, or nobody — plus one yes/no per agent; an agent replies only when its verdict's probability reaches the threshold. No keyword rule runs before it. A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it names, whatever the judge says or when it fails — the woken agent may still post nothing when the line only names it; on a judge error unmentioned messages stay silent. An agent's own bubble never wakes another agent. Per project: `PATCH /projects/{id} {"models": {"decision_model": {"scorer": …, "threshold": 0.6}}}`. `ARBOS_DECISION_PROVIDER` is accepted for old configs and ignored (there is one judge). The relay serves an identical decision request made within 15 minutes from its cache, so every box in a room gets the same answer and the room pays once |
+| `ARBOS_DECISION_SCORER` (`typesafe/jev-1.14`), `ARBOS_DECISION_THRESHOLD` (0.6) | agentd defaults (read in the box's environment; image machines use the built-in values) for who replies in group chats: one judge call per human message to a decision model through the relay's `/proxy/decisions` (OpenRouter Decisions API, needs `OPENROUTER_API_KEY`) asking who the message is for — one agent, any one agent, several, all, or nobody — plus one yes/no per agent; an agent replies only when its verdict's probability reaches the threshold. No keyword rule runs before it. A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it names, whatever the judge says or when it fails — the woken agent may still post nothing when the line only names it; on a judge error unmentioned messages stay silent. An agent's own bubble never wakes another agent. Per project: `PATCH /projects/{id} {"models": {"decision_model": {"scorer": …, "threshold": 0.6}}}`. `ARBOS_DECISION_PROVIDER` is accepted for old configs and ignored (there is one judge). The relay serves an identical decision request made within 15 minutes from its cache, so every box in a room gets the same answer and the room pays once |
 | `ARBOS_OPENAI_AUDIO_BASE`, `ARBOS_VOICE_MOCK` | speech-to-text / text-to-speech upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_VOICE_MOCK=1` answers without a key |
 | `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MODEL`, `ARBOS_IMAGE_MOCK` | image generation upstream and model; `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG |
-| `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get process boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new machines (the current registered `arbos-agent-<version>`) |
-| `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (§6) |
+| `ARBOS_DEFAULT_PROVIDER` | where a user without a machine gets one: `gvisor` (a sandbox on this host, §5), `docker`, or `process`; unset = `process`. Daytona was retired as a provider on 2026-11-09 and is refused here |
+| `ARBOS_DAYTONA_SNAPSHOT` | the image version new machines are made from (`arbos-agent-<version>`; the name is historical). The relay turns it into the image tag `…/arbos-agent:<version>` |
+| `ARBOS_HOST_MAX_BOXES`, `ARBOS_HOST_MIN_FREE_DISK_GB`, `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, `ARBOS_HOST_EVICT_MAX_SWAP_GB`, `ARBOS_HOST_EVICT_LOAD` | host fleet limits: resident sandboxes before sign-ups go on the waitlist, the disk floor, and the memory/swap/load triggers for eviction (§5) |
+| `ARBOS_BOX_CPUS`, `ARBOS_BOX_MEM_GB`, `ARBOS_BOX_WORK_GB`, `ARBOS_BOX_PIDS`, `ARBOS_BOX_NETWORK`, `ARBOS_BOX_DNS`, `ARBOS_BOX_RUNTIME`, `ARBOS_LOCAL_BOX_IMAGE` | per-sandbox spec and the container runtime (`runsc`) / image override (§5) |
+| `ARBOS_BOOTSTRAP_DIR` | directory served at `/bootstrap/{file}` to machines (the `arbos-agentd` binary, `arbos-pi-ext.tar`) |
 | `ARBOS_AUTH_MODE` | `github` or `paircode` (§3) |
 | `ARBOS_GITHUB_CLIENT_ID`, `ARBOS_GITHUB_CLIENT_SECRET`, `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` | GitHub OAuth app and the relay's public origin (§3) |
 | `ARBOS_AUTH_REDIRECTS` | comma-separated **origins** (`scheme://host[:port]`, no path) `/auth/github/start?redirect=…` may send the browser to, besides the apps' `arbos://auth/callback`, `http` loopback and the relay's own origin — your site, e.g. `https://arbos.life`; anything else answers 400 `bad_redirect` (`relay-server.sh` writes `ARBOS_SITE_URL` by default). Each entry is compared as a whole origin: any path on a listed origin is allowed, a different scheme, host or port is not, and a host that merely starts with a listed one (`arbos.life.example.com`) is not. An entry that is not an origin matches nothing; the relay warns about it at start |
@@ -104,33 +106,29 @@ ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com
 
 If the public URL changes, the relay writes the new one into every machine at the next wake (`/work/.arbos/relay-url`) and agentd prefers that file; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
 
-## 5. Real machines on Daytona
+## 5. Real machines: gVisor sandboxes on the relay host
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a sandbox from `ARBOS_DAYTONA_SNAPSHOT` at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum; about $0.33 per active hour, $0.013 per stopped day). The relay must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).
+With `ARBOS_DEFAULT_PROVIDER=gvisor`, `project create` (without `--local-box`) gives the user a gVisor (`runsc`) container on the relay host, made from the image version in `ARBOS_DAYTONA_SNAPSHOT`, with the spec in `ARBOS_BOX_CPUS` / `ARBOS_BOX_MEM_GB` / `ARBOS_BOX_WORK_GB`. The relay needs Docker with the `runsc` runtime, and must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).
+
+Each user's `/work` and `$HOME` live on a per-user sparse ext4 image that stays on disk, so an evicted or re-created sandbox comes back with its files. The host holds `ARBOS_HOST_MAX_BOXES` sandboxes at a time; a sign-up past that goes on a FIFO waitlist, and sandboxes are evicted (never deleted) only under real memory, swap or load pressure.
 
 - One machine per user; every project is a workspace `/work/<project>` owned by its own Unix user at mode 700, with its own pi session, subagents, SQLite memory/history, blob dir, browser profile and cgroup slice. One `arbos-agentd` per machine supervises them; up to 4 subagents per workspace and 8 per machine run at once.
 - `GET /machine` shows state, spec, spend and workspace states; `POST /machine/start|stop` drives it; `arbosctl machine status|start|stop` from a terminal. Per-user snapshot override: `PUT /admin/users/{id}/box {"snapshot": "…"}` before the machine exists.
-- `cargo run -p arbos-relay -- daytona-smoke` runs the lifecycle check (`create → stop → start → archive → start → delete`) against the live API.
-- Older per-project sandboxes are copied into the user machine with `arbosctl migrate-to-user-box` (idempotent; old sandboxes are stopped and marked, never deleted).
+- A box row left on the retired Daytona provider is read-only. Every listing and status route shows it as it is, and nothing starts, stops, rolls or replaces it — including the always-on sweep and the deploy worker's roll, which leaves it out and names it in `status`. Deleting those sandboxes is an operator step outside the relay; the row is what names the sandbox to delete, so it stays until then.
 
 ## 6. The machine image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public) and smoke-tests it. The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
 
-CI does not register a Daytona snapshot any more: Daytona is being retired (2026-11-09), the key is not exposed to the workflow, and a host machine pulls the GHCR tag straight. `image/register-snapshot.sh` is still there and the deploy worker's image roll still calls it; run it by hand for a Daytona sandbox that is still alive.
+Nothing registers a Daytona snapshot any more: Daytona is retired as a provider (2026-11-09), the key is not exposed to the workflow, and a host machine pulls the GHCR tag straight. `image/register-snapshot.sh` is still there, but neither CI nor the deploy worker's roll calls it; run it by hand for a Daytona sandbox that is still alive.
 
-Without CI, the same build runs on any Docker host and goes to Daytona's transient registry (tags are immutable: bump the version for every rebuild):
+Without CI, the same build runs on any Docker host; tags are immutable, so bump the version for every rebuild and point `ARBOS_LOCAL_BOX_IMAGE` at the result:
 
 ```bash
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
 docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:<v> .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-<v>
-docker tag arbos-agent:<v> cr.app.daytona.io/<project>/arbos-agent:<v> && docker push cr.app.daytona.io/<project>/arbos-agent:<v>
-image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-agent:<v> 4 8 10
 ```
-
-While no production snapshot is registered, point the relay at the dev image instead: `ARBOS_DAYTONA_DOCKERFILE=image/Dockerfile.dev-inline ARBOS_BOOTSTRAP_DIR=./dist ARBOS_DEFAULT_HARNESS=pi` (`dist/` holds the static agentd and `arbos-pi-ext.tar`; the machine fetches both at boot).
 
 ## 7. Pointing the apps at your relay
 

@@ -26,6 +26,8 @@ pub struct BoxAgentd {
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
+const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -55,7 +57,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER
 );
--- One Daytona computer per user (design change 2026-10-15): every project of a user is a workspace
+-- One computer per user (design change 2026-10-15): every project of a user is a workspace
 -- on that box. `sandboxes` above is the legacy per-project registry, kept for migration only.
 CREATE TABLE IF NOT EXISTS boxes (
   user_id TEXT PRIMARY KEY, provider TEXT NOT NULL, sandbox_id TEXT,
@@ -70,9 +72,9 @@ CREATE TABLE IF NOT EXISTS box_creates (
   user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
   replacing TEXT, started_at INTEGER NOT NULL
 );
--- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
--- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
--- it and recreating the box; no code change needed.
+-- Per-user box class: the snapshot a user's box is created from; NULL = the relay default
+-- (ARBOS_DAYTONA_SNAPSHOT, which keeps its name). Raise a user's class later by setting it and
+-- recreating the box; no code change needed.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, snapshot TEXT, spend_cap_usd REAL NOT NULL DEFAULT 25.0, created_at INTEGER NOT NULL
 );
@@ -86,6 +88,7 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+CREATE INDEX IF NOT EXISTS rows_room_activity ON rows(room, created_at);
 -- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
 -- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
 -- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
@@ -1488,10 +1491,10 @@ impl Db {
 
     /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
     /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
-    /// is refused with an error and the row stays as it was. Use
-    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
+    /// is refused with an error and the row stays as it was. A box whose sandbox is really gone
+    /// loses the whole row ([`Db::delete_box_row`]), so nothing needs to blank one in place.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
-        let written = self.write_box(s, false)?;
+        let written = self.write_box(s)?;
         if !written {
             tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
             anyhow::bail!(
@@ -1500,11 +1503,6 @@ impl Db {
             );
         }
         Ok(())
-    }
-
-    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
-    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
-        self.write_box(s, true).map(|_| ())
     }
 
     /// Write back a row read before a slow provider call (start, stop) only while the row still
@@ -1529,7 +1527,7 @@ impl Db {
         })
     }
 
-    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
+    fn write_box(&self, s: &Sandbox) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1540,12 +1538,11 @@ impl Db {
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
                     preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
-                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
+                 WHERE excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
                     serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
-                    may_clear_sandbox
                 ],
             )
             .map(|n| n > 0)
@@ -1778,63 +1775,24 @@ impl Db {
         })
     }
 
-    /// Legacy per-project sandboxes (pre one-box-per-user) that still hold a project's /work.
-    pub fn legacy_sandboxes(&self) -> Result<Vec<(String, Sandbox, Option<String>)>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT project_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
-                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_to
-                 FROM sandboxes",
-            )?;
-            let rows = st.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Sandbox {
-                        user_id: r.get(0)?,
-                        provider: r.get(1)?,
-                        sandbox_id: r.get(2)?,
-                        daytona_state: r.get(3)?,
-                        device_id: r.get(4)?,
-                        box_token_hash: r.get(5)?,
-                        mcp_token: r.get(6)?,
-                        snapshot: r.get(7)?,
-                        last_started_at: r.get(8)?,
-                        last_stopped_at: r.get(9)?,
-                        last_seen_at: r.get(10)?,
-                        box_url: r.get(11)?,
-                        preview_token: r.get(12)?,
-                        local_pid: r.get(13)?,
-                        migrated_from: Vec::new(),
-                    },
-                    r.get::<_, Option<String>>(14)?,
-                ))
-            })?;
-            rows.collect()
-        })
-    }
-
-    pub fn mark_legacy_migrated(&self, project_id: &str, user_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE sandboxes SET migrated_to = ?2, migrated_at = ?3 WHERE project_id = ?1",
-                params![project_id, user_id, now_ms()],
-            )
-            .map(|_| ())
-        })
-    }
-
     // ---- rooms --------------------------------------------------------------------------------
+
+    fn room_position_from(c: &Connection, room: &str) -> rusqlite::Result<(i64, i64)> {
+        c.query_row(ROOM_POSITION_SQL, params![room], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .map(|position| position.unwrap_or((0, 0)))
+    }
+
+    /// Stored room head and checkpoint floor; unknown rooms start at `(0, 0)`.
+    pub fn room_position(&self, room: &str) -> Result<(i64, i64)> {
+        self.with(|c| Self::room_position_from(c, room))
+    }
 
     pub fn room_state(&self, room: &str) -> Result<RoomState> {
         self.with(|c| {
-            let (head, floor): (i64, i64) = c
-                .query_row(
-                    "SELECT head, floor FROM room_seq WHERE room = ?1",
-                    params![room],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?
-                .unwrap_or((0, 0));
+            let (head, floor) = Self::room_position_from(c, room)?;
             let cp: Option<(i64, i64, Vec<u8>)> = c
                 .query_row(
                     "SELECT seq, size, frontier FROM checkpoints WHERE room = ?1",
@@ -3835,6 +3793,51 @@ impl Db {
             let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod room_position_tests {
+    use super::*;
+
+    #[test]
+    fn position_and_statistics_track_appends_and_checkpoints() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)));
+        let check = |position, counts, checkpoint_seq| {
+            let state = db.room_state("project/chat").unwrap();
+            assert_eq!((state.head, state.floor), position);
+            assert_eq!(db.room_position("project/chat").unwrap(), position);
+            assert_eq!((state.row_count, state.row_bytes), counts);
+            assert_eq!(state.checkpoint_seq, checkpoint_seq);
+        };
+        check((0, 0), (0, 0), 0);
+        db.append_row("project/chat", "device", "batch1", b"abc")
+            .unwrap();
+        db.append_row("project/chat", "device", "batch2", b"12345")
+            .unwrap();
+        check((2, 0), (2, 8), 0);
+        assert!(db
+            .put_checkpoint("project/chat", 1, b"frontier", b"snapshot")
+            .unwrap());
+        check((2, 1), (1, 5), 1);
+        let checkpoint = db.room_state("project/chat").unwrap();
+        assert_eq!(checkpoint.checkpoint_size, 8);
+        assert_eq!(checkpoint.checkpoint_frontier, b"frontier");
+        db.append_row("project/chat", "device", "batch3", b"x")
+            .unwrap();
+        check((3, 1), (2, 6), 1);
+    }
+
+    #[test]
+    fn a_position_query_error_is_not_a_missing_room() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)));
+        db.with(|c| c.execute_batch("DROP TABLE room_seq")).unwrap();
+        assert!(db.room_state("project/chat").is_err());
+        assert!(db.room_position("project/chat").is_err());
     }
 }
 

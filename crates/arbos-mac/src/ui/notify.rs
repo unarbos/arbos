@@ -568,16 +568,13 @@ pub fn init() {
 
 /// Does this platform ask the user before showing notifications?
 pub fn needs_permission() -> bool {
-    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
-        return true;
-    }
     #[cfg(target_os = "macos")]
     {
-        mac::available()
+        std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() || mac::available()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some()
     }
 }
 

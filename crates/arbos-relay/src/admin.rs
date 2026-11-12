@@ -50,6 +50,10 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
             "exists": sb.is_some(),
             "state": bs,
             "since": since,
+            // What the box runs on. The deploy worker reads it to leave a box the relay does not
+            // roll — anything but `gvisor`, including a row left on the retired provider — out of
+            // the roll instead of asking for an upgrade that is refused every pass.
+            "provider": sb.as_ref().map(|s| s.provider.clone()),
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
             "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
             // The `users.snapshot` pin, null when the user follows the default. An upgrade targets

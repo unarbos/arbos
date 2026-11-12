@@ -78,6 +78,12 @@ struct RegistryResult {
     var incomplete: Bool
 }
 
+private enum RegistryDetail {
+    case project(RegistryProject)
+    case skipped(String)
+    case omitted
+}
+
 /// List rows from `GET /projects` may overwrite `owner` with a user-id string; that
 /// fails `ProjectDto` decoding, so we only need the id to fetch the detail.
 private struct ProjectListId: Decodable {
@@ -264,8 +270,7 @@ final class RelayAPI {
         guard let list = try await json("GET", "/projects") as? [Any] else {
             return RegistryResult(projects: [], skippedIds: [], incomplete: false)
         }
-        var out: [RegistryProject] = []
-        var skippedIds: Set<String> = []
+        var entries: [(id: String, archivedAt: Int64?)] = []
         var incomplete = false
         let decoder = JSONDecoder()
         for item in list {
@@ -274,60 +279,99 @@ final class RelayAPI {
                 incomplete = true
                 continue
             }
-            let id: String
             // The per-user archive flag rides on the list only; the detail is shared.
-            var listArchivedAt: Int64? = nil
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
-                id = dto.id
-                listArchivedAt = dto.archived_at.flatMap { $0 }
+                entries.append((dto.id, dto.archived_at.flatMap { $0 }))
             } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
-                id = bare.id
+                entries.append((bare.id, nil))
             } else {
                 NSLog("ProjectDto: bad list item")
                 incomplete = true
-                continue
             }
-            // A project the list shows but this user may not open (403) is an
-            // access answer, not a parse skip — leave it out of skippedIds.
-            let detailRaw: Any
-            do {
-                detailRaw = try await json("GET", "/projects/\(id)")
-            } catch let e as RelayError where e.status == 403 || e.status == 404 {
-                continue
-            }
-            guard JSONSerialization.isValidJSONObject(detailRaw),
-                  let detailData = try? JSONSerialization.data(withJSONObject: detailRaw) else {
-                skippedIds.insert(id)
-                continue
-            }
-            let detail: GetProjectResponseDto
-            do {
-                detail = try decoder.decode(GetProjectResponseDto.self, from: detailData)
-            } catch {
-                NSLog("GetProjectResponseDto: \(error)")
-                skippedIds.insert(id)
-                continue
-            }
-            var project = Arbos.Project(dto: detail.project)
-            project.archivedAt = listArchivedAt
-            project.imageURL = Arbos.Project.pictureURL(httpUrl: endpoint.httpUrl, id: id, imageKey: project.imageKey, version: project.avatarVersion)
-            // Prefer the detail's live box word when present (same as the old parse).
-            project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
-            project.stateSince = detail.box_since
-            // `models` is free-form JSON (skipped on the Dto); read talking model id + effort only.
-            if let detailMap = detailRaw as? [String: Any] {
-                let p = (detailMap["project"] as? [String: Any]) ?? [:]
-                let models = p["models"] as? [String: Any] ?? [:]
-                let talking = models["talking_model"] as? [String: Any] ?? [:]
-                if let modelId = talking["id"] as? String, !modelId.isEmpty {
-                    project.model = modelId
+        }
+        // Bound independent detail requests without letting completion order change
+        // list order or which fatal error is reported. Already-admitted GETs finish.
+        let results = await withTaskGroup(of: (Int, Result<RegistryDetail, Error>).self) { group in
+            var results = [Result<RegistryDetail, Error>?](repeating: nil, count: entries.count)
+            var next = min(4, entries.count)
+            var firstFailure = entries.count
+            for index in 0..<next {
+                let entry = entries[index]
+                group.addTask {
+                    do { return (index, .success(try await self.registryDetail(entry.id, archivedAt: entry.archivedAt))) }
+                    catch { return (index, .failure(error)) }
                 }
-                project.effort = Effort.from(talking["effort"] as? String)
             }
-            let chats = detail.chats.map { Arbos.Chat(dto: $0) }
-            out.append(RegistryProject(project: project, chats: chats))
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if case .failure = result { firstFailure = min(firstFailure, index) }
+                if Task.isCancelled {
+                    group.cancelAll()
+                } else if next < entries.count, next < firstFailure {
+                    let index = next
+                    let entry = entries[index]
+                    next += 1
+                    group.addTask {
+                        do { return (index, .success(try await self.registryDetail(entry.id, archivedAt: entry.archivedAt))) }
+                        catch { return (index, .failure(error)) }
+                    }
+                }
+            }
+            return results
+        }
+        try Task.checkCancellation()
+        var out: [RegistryProject] = []
+        var skippedIds: Set<String> = []
+        for result in results {
+            guard let result else { throw CancellationError() }
+            switch try result.get() {
+            case .project(let project): out.append(project)
+            case .skipped(let id): skippedIds.insert(id)
+            case .omitted: break
+            }
         }
         return RegistryResult(projects: out, skippedIds: skippedIds, incomplete: incomplete)
+    }
+
+    private func registryDetail(_ id: String, archivedAt: Int64?) async throws -> RegistryDetail {
+        let decoder = JSONDecoder()
+        // A project the list shows but this user may not open (403) is an
+        // access answer, not a parse skip — leave it out of skippedIds.
+        let detailRaw: Any
+        do {
+            detailRaw = try await json("GET", "/projects/\(id)")
+        } catch let e as RelayError where e.status == 403 || e.status == 404 {
+            return .omitted
+        }
+        guard JSONSerialization.isValidJSONObject(detailRaw),
+              let detailData = try? JSONSerialization.data(withJSONObject: detailRaw) else {
+            return .skipped(id)
+        }
+        let detail: GetProjectResponseDto
+        do {
+            detail = try decoder.decode(GetProjectResponseDto.self, from: detailData)
+        } catch {
+            NSLog("GetProjectResponseDto: \(error)")
+            return .skipped(id)
+        }
+        var project = Arbos.Project(dto: detail.project)
+        project.archivedAt = archivedAt
+        project.imageURL = Arbos.Project.pictureURL(httpUrl: endpoint.httpUrl, id: id, imageKey: project.imageKey, version: project.avatarVersion)
+        // Prefer the detail's live box word when present (same as the old parse).
+        project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
+        project.stateSince = detail.box_since
+        // `models` is free-form JSON (skipped on the Dto); read talking model id + effort only.
+        if let detailMap = detailRaw as? [String: Any] {
+            let p = (detailMap["project"] as? [String: Any]) ?? [:]
+            let models = p["models"] as? [String: Any] ?? [:]
+            let talking = models["talking_model"] as? [String: Any] ?? [:]
+            if let modelId = talking["id"] as? String, !modelId.isEmpty {
+                project.model = modelId
+            }
+            project.effort = Effort.from(talking["effort"] as? String)
+        }
+        let chats = detail.chats.map { Arbos.Chat(dto: $0) }
+        return .project(RegistryProject(project: project, chats: chats))
     }
 
     static func parseChat(_ raw: Any) -> Arbos.Chat? {
@@ -434,13 +478,21 @@ final class RelayAPI {
         _ = try await request("DELETE", "/outside-agents/\(projectId)")
     }
 
+    /// The PATCH body: an absent field is left alone, a blank one is cleared with `NSNull`.
+    static func wakeBody(url: String?, auth: String?) -> [String: Any] {
+        var body: [String: Any] = [:]
+        func field(_ v: String) -> Any {
+            v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : v
+        }
+        if let url { body["wake_url"] = field(url) }
+        if let auth { body["wake_auth"] = field(auth) }
+        return body
+    }
+
     /// `PATCH /outside-agents/{id} {wake_url, wake_auth}` ([feedback outside-agents-wake-ios-2026-10-28]):
     /// `nil` leaves a field alone, an empty string clears it. → the agent's connection.
     func setOutsideWake(_ projectId: Id, url: String?, auth: String?) async throws -> OutsideAgentInfo? {
-        var body: [String: Any] = [:]
-        if let url { body["wake_url"] = url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : url }
-        if let auth { body["wake_auth"] = auth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : auth }
-        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: body)
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: Self.wakeBody(url: url, auth: auth))
         return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
     }
 
@@ -1690,6 +1742,12 @@ struct OutsideLogEntry: Equatable, Identifiable {
     /// Rows worth a line on the card: replies, errors and session events; wakes, typing, reads
     /// and uploads are the plumbing behind them.
     var shown: Bool { kind == "reply" || kind == "post" || isError || isSession }
+
+    /// The lines the Session log card shows, newest first ([feedback sidecar-sessions-ios-2026-10-28]).
+    /// The rest are behind View all.
+    static func newestShown(_ entries: [OutsideLogEntry], limit: Int = 4) -> [OutsideLogEntry] {
+        Array(entries.reversed().filter(\.shown).prefix(limit))
+    }
 
     private static func secs(_ ms: Int64) -> String { String(format: "%.1f s", Double(ms) / 1000) }
 
