@@ -1436,11 +1436,28 @@ pub async fn machine_stop(
     }
     // A manual Stop holds the box down until the user starts it (or sends a message): the
     // always-on sweep leaves held boxes alone. It also pauses every secret (D83 decision 8).
+    let was_held = state.db.box_held(&user_id).unwrap_or(false);
+    let secrets = state.db.secrets_settings(&user_id).unwrap_or_default();
     let _ = state.db.set_box_held(&user_id, true);
     crate::secrets::set_paused(&state, &user_id, true, "stop_machine").await;
-    boxes::stop_box(&state, &user_id, q.force)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Err(e) = boxes::stop_box(&state, &user_id, q.force).await {
+        if e.to_string() != crate::boxd::BUSY {
+            return Err((StatusCode::BAD_GATEWAY, e.to_string()));
+        }
+        // agentd refused an unforced sleep (only a boxd box is asked) and the box runs on. It is
+        // not stopped, so it is not held down and its secrets are as they were before the Stop.
+        let _ = state.db.set_box_held(&user_id, was_held);
+        match secrets.paused_by.as_deref() {
+            Some(by) if secrets.paused => {
+                let _ = state.db.set_secrets_paused(&user_id, true, by);
+            }
+            _ => drop(crate::secrets::set_paused(&state, &user_id, false, "stop_refused").await),
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            "the machine is busy: a turn or a job is still running on it".into(),
+        ));
+    }
     let (bs, since) = state.box_state(&user_id).await;
     Ok(Json(MachineStateDto {
         state: bs,

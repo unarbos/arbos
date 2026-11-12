@@ -1145,6 +1145,60 @@ mod tests {
         assert!(!fake.paths()[..before].iter().any(|p| p.contains("force")));
     }
 
+    /// The user's Stop is not forced. agentd refusing it (a turn is running) is a 409, and the
+    /// box that runs on is neither held down nor left with its secrets paused; a pause the user
+    /// set before stays theirs. Any other failure is the 502 it was, with the hold in place.
+    #[tokio::test]
+    async fn a_stop_refused_as_busy_leaves_the_box_as_it_was() {
+        use axum::extract::Query;
+        let (state, fake, user) = relay().await;
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        let device = || crate::auth::Principal::Device {
+            id: "d".into(),
+            token: String::new(),
+            user_id: user.clone(),
+        };
+        let stop = || {
+            let q = Query(crate::api::StopQuery { force: false });
+            crate::api::machine_stop(State(state.clone()), device(), q)
+        };
+        let paused = || state.db.secrets_settings(&user).unwrap();
+
+        fake.answer(
+            "sleep",
+            409,
+            json!({ "error": "busy: p: a turn is running" }),
+        );
+        let refused = stop().await.unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert!(refused.1.contains("busy"), "{}", refused.1);
+        assert!(!state.db.box_held(&user).unwrap());
+        assert!(!paused().paused, "{:?}", paused());
+
+        crate::secrets::set_paused(&state, &user, true, "user").await;
+        stop().await.unwrap_err();
+        assert_eq!(
+            paused().paused_by.as_deref(),
+            Some("user"),
+            "{:?}",
+            paused()
+        );
+        crate::secrets::set_paused(&state, &user, false, "user").await;
+
+        fake.answer("sleep", 500, json!({ "error": "umount failed" }));
+        assert_eq!(stop().await.unwrap_err().0, StatusCode::BAD_GATEWAY);
+        assert!(state.db.box_held(&user).unwrap());
+        assert!(paused().paused);
+
+        fake.replies.lock().unwrap().clear();
+        stop().await.unwrap();
+        assert!(state.db.box_held(&user).unwrap());
+        assert_eq!(paused().paused_by.as_deref(), Some("stop_machine"));
+    }
+
     /// A full disk, a daemon that refuses, or no daemon configured at all: no box, and no row
     /// left behind to be woken later.
     #[tokio::test]
