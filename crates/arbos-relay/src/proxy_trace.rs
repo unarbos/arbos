@@ -140,10 +140,11 @@ pub fn upstream_marks(headers: &HeaderMap) -> UpstreamMarks {
 pub fn generation_marks(text: &str) -> (Option<String>, Option<String>) {
     let mut id = None;
     let mut provider = None;
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
-            continue;
-        };
+    for line in std::iter::once(text).chain(text.lines()) {
+        let payload = line
+            .strip_prefix("data:")
+            .map(str::trim)
+            .unwrap_or(line.trim());
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
@@ -154,6 +155,7 @@ pub fn generation_marks(text: &str) -> (Option<String>, Option<String>) {
             id = chunk
                 .get("id")
                 .or_else(|| chunk.pointer("/message/id"))
+                .or_else(|| chunk.pointer("/response/id"))
                 .and_then(Value::as_str)
                 .map(clip);
         }

@@ -2111,6 +2111,72 @@ pub async fn usage(
     Ok(Json(json!({ "today": today, "all": all })).into_response())
 }
 
+#[derive(Default, Deserialize)]
+pub struct SessionUsageQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    #[serde(default)]
+    pub include_children: bool,
+}
+
+impl SessionUsageQuery {
+    fn window(&self) -> Result<(i64, i64), (StatusCode, String)> {
+        let (from, to) = (self.from.unwrap_or(0), self.to.unwrap_or(i64::MAX));
+        if from < 0 || to <= from {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "expected 0 <= from < to (Unix milliseconds)".into(),
+            ));
+        }
+        Ok((from, to))
+    }
+}
+
+pub async fn sessions_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    if q.include_children {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "include_children requires a session id".into(),
+        ));
+    }
+    let sessions = state
+        .db
+        .session_usage(&id, None, from, to, false)
+        .map_err(internal)?;
+    Ok(Json(json!({ "from": from, "to": to, "sessions": sessions })).into_response())
+}
+
+pub async fn session_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, session)): Path<(String, String)>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    let summary = state
+        .db
+        .session_usage(&id, Some(&session), from, to, q.include_children)
+        .map_err(internal)?;
+    let usage = summary
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| crate::usage::SessionUsage {
+            session_id: Some(session.clone()),
+            ..Default::default()
+        });
+    Ok(Json(json!({ "session_id": session, "from": from, "to": to,
+        "include_children": q.include_children, "usage": usage }))
+    .into_response())
+}
+
 #[derive(Deserialize)]
 pub struct TimingBody {
     pub kind: String,

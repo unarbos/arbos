@@ -598,7 +598,7 @@ pub struct VaultRequest {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageTotals {
     pub input: i64,
     pub output: i64,
@@ -636,6 +636,7 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        crate::usage::migrate(&c)?;
         c.execute_batch(crate::outside::SCHEMA)?;
         c.execute_batch(crate::outside_log::SCHEMA)?;
         c.execute_batch(crate::agent_link::SCHEMA)?;
@@ -2087,14 +2088,17 @@ impl Db {
         latency_ms: i64,
         ttfb_ms: Option<i64>,
     ) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO usage(project_id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![project_id, now_ms(), api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms],
-            )
-            .map(|_| ())
+        self.record_model_usage(crate::usage::UsageRecord {
+            project_id,
+            api,
+            model,
+            tokens: [input, output, cache_read, cache_write],
+            usd,
+            latency_ms,
+            ttfb_ms,
+            ..Default::default()
         })
+        .map(|_| ())
     }
 
     /// How many usage rows a project wrote since `since_ms` for one API whose model starts with

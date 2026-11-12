@@ -106,6 +106,36 @@ ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com
 
 If the public URL changes, the relay writes the new one into every machine at the next wake (`/work/.arbos/relay-url`) and agentd prefers that file; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
 
+Model usage is recorded once per upstream response on the relay, including failed responses
+whose usage is unknown. Use `arbosctl usage <project>`
+for today's and all-time project totals, or query individual agent sessions:
+
+```bash
+arbosctl usage <project> --sessions
+arbosctl usage <project> --session <chat-id> --include-children
+arbosctl usage <project> --session <subagent-id> --from 1794412800000 --to 1794499200000
+```
+
+The corresponding endpoints are `GET /projects/{id}/sessions/usage` and
+`GET /projects/{id}/sessions/{session}/usage?include_children=true`. `from` and `to` are
+Unix milliseconds, inclusive/exclusive respectively. A main session uses its chat id;
+a worker uses its subagent id. Resuming preserves the logical session's totals, and context
+rotation is recorded as a separate `session_run_id` in request details (`inspect`).
+`include_children` adds workers attributed to that chat, counting each request once.
+
+`input`, `output`, `cache_read` and `cache_write` are disjoint token buckets; `total_tokens`
+is their sum. `actual_usd` sums only costs explicitly reported by the upstream and is `null`
+when none were reported; `reported_cost_calls` identifies how many calls that subtotal covers.
+`estimated_usd` and `estimated_cost_calls` describe the relay's local price estimates.
+`usd` retains the existing combined accounting amount. None of these fields represents an
+account's credit-ledger debit or a reconciled provider invoice. `unknown_cost_calls` and
+`incomplete_calls` expose missing provenance or incomplete streams, including cancellation.
+Historical calls, old harness processes during upgrades, and project-wide background work
+remain in the `session_id: null` bucket; dedicated image and voice endpoints retain their
+project-level accounting. Calls made by outside agents using their own provider
+credentials do not pass through this meter. Upgrade the relay before agentd; the relay migrates
+the existing database additively and agentd rewrites provider configuration at workspace start.
+
 ## 5. Real machines: gVisor sandboxes on the relay host
 
 With `ARBOS_DEFAULT_PROVIDER=gvisor`, `project create` (without `--local-box`) gives the user a gVisor (`runsc`) container on the relay host, made from the image version in `ARBOS_DAYTONA_SNAPSHOT`, with the spec in `ARBOS_BOX_CPUS` / `ARBOS_BOX_MEM_GB` / `ARBOS_BOX_WORK_GB`. The relay needs Docker with the `runsc` runtime, and must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).

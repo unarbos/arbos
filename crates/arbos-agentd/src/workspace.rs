@@ -1137,11 +1137,11 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     }
     let mut models = json!({
         "providers": {
-            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
+            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": "ARBOS_MODEL_TOKEN" },
             "arbos-relay": {
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
-                "apiKey": cfg.box_token,
+                "apiKey": "ARBOS_MODEL_TOKEN",
                 "models": relay_models
             }
         }
@@ -1151,6 +1151,10 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
         cfg.prime_dir().join("models.json"),
         serde_json::to_string_pretty(&models)?,
     )?;
+    // Prime 0.10 resolves a bare environment variable name; pi 1.2 uses ${VAR}.
+    for provider in ["openrouter", "arbos-relay"] {
+        models["providers"][provider]["apiKey"] = json!("${ARBOS_MODEL_TOKEN}");
+    }
     models["providers"]["openrouter"]["modelOverrides"] = Value::Object(window_overrides);
     std::fs::write(
         cfg.pi_dir().join("models.json"),

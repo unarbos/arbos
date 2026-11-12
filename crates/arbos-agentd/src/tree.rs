@@ -1676,6 +1676,7 @@ impl Tree {
     /// Score sibling candidates with the decision model; one request per chunk, chunks in parallel.
     async fn score(
         &self,
+        llm: &Llm,
         scorer: &str,
         query: &Value,
         cards: &[(String, Value)],
@@ -1702,8 +1703,7 @@ impl Tree {
                 .collect();
             let state = json!({ "query": query, "candidates": Value::Object(cands) });
             async move {
-                let r = self
-                    .llm
+                let r = llm
                     .decide(
                         scorer,
                         &state,
@@ -1749,6 +1749,7 @@ impl Tree {
     #[allow(clippy::too_many_arguments)]
     async fn score_cached(
         &self,
+        llm: &Llm,
         scorer: &str,
         query: &Value,
         cards: &[(String, Value)],
@@ -1774,7 +1775,7 @@ impl Tree {
             }
         }
         if !todo.is_empty() {
-            let fresh = self.score(scorer, query, &todo, tally).await;
+            let fresh = self.score(llm, scorer, query, &todo, tally).await;
             let puts: Vec<(String, f64)> = todo
                 .iter()
                 .zip(&todo_keys)
@@ -1963,6 +1964,7 @@ impl Tree {
     #[allow(clippy::too_many_arguments)]
     async fn score_round(
         &self,
+        llm: &Llm,
         fast: bool,
         scorer: &str,
         query: &Value,
@@ -1981,10 +1983,10 @@ impl Tree {
             return;
         }
         let got = if fast {
-            self.score_cached(scorer, query, &todo, ctx, tally, cache_hits)
+            self.score_cached(llm, scorer, query, &todo, ctx, tally, cache_hits)
                 .await
         } else {
-            self.score(scorer, query, &todo, tally).await
+            self.score(llm, scorer, query, &todo, tally).await
         };
         probs.extend(got);
     }
@@ -2017,6 +2019,11 @@ impl Tree {
     ) -> Pack {
         let t0 = Instant::now();
         let asked_at = now_ms();
+        let llm = self.llm.with_context(
+            self.store
+                .usage_context(chat_id)
+                .unwrap_or_else(|_| arbos_core::usage::UsageContext::for_chat(chat_id)),
+        );
         let mut pack = Pack::default();
         let scope = Scope {
             chat_id,
@@ -2137,6 +2144,7 @@ impl Tree {
         }
         // round 1: threads (and, when small, everything under them)
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
@@ -2191,6 +2199,7 @@ impl Tree {
         };
         // round 2: episode cards not scored yet (none when round 1 covered them)
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
@@ -2249,6 +2258,7 @@ impl Tree {
             .map(|l| (l.id.clone(), self.leaf_card_json(l)))
             .collect();
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
