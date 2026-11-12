@@ -951,9 +951,14 @@ mod tests {
     #[tokio::test]
     async fn a_box_on_the_provider_is_made_slept_and_woken_through_the_daemon() {
         let (state, fake, user) = relay().await;
-        let sb = boxes::create_box(&state, &user, Provider::Boxd, Some("arbos-agent-1.2.3"))
-            .await
-            .unwrap();
+        let sb = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            Some("arbos-agent-1.2.3"),
+        )
+        .await
+        .unwrap();
         assert_eq!(sb.provider, "boxd");
         let row = state.db.user_box(&user).unwrap().expect("row");
         assert_eq!(row.box_url.as_deref(), Some("http://10.207.0.2:7788"));
@@ -997,9 +1002,14 @@ mod tests {
     async fn the_row_keeps_the_lifecycle_state_and_the_last_storage_split() {
         let (state, fake, user) = relay().await;
         let at = |state: &AppState| state.db.box_lifecycle(&user).unwrap();
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(at(&state), Some(("node-0".into(), "warm".into(), None)));
 
         state.set_box_state(&user, BoxState::Awake, None).await;
@@ -1120,9 +1130,14 @@ mod tests {
         use axum::extract::Path;
         let (state, fake, user) = relay().await;
         let (_, device) = person(&state, 9701);
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
         let delete =
             |who| crate::api::admin_delete_user_box(State(state.clone()), who, Path(user.clone()));
@@ -1157,9 +1172,14 @@ mod tests {
     async fn a_stop_refused_as_busy_leaves_the_box_as_it_was() {
         use axum::extract::Query;
         let (state, fake, user) = relay().await;
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
         let device = || crate::auth::Principal::Device {
             id: "d".into(),
@@ -1212,7 +1232,13 @@ mod tests {
         let mut full = usual("status").1;
         full["disk_free_gb"] = json!(79.9);
         fake.answer("status", 200, full);
-        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("disk"));
         assert_eq!(fake.paths(), ["/v1/host/status"]);
         assert!(state.db.user_box(&user).unwrap().is_none());
@@ -1226,7 +1252,13 @@ mod tests {
         let mut small = usual("status").1;
         small["mem_available_gb"] = json!(14.6);
         fake.answer("status", 200, small);
-        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         let e = e.unwrap_err().to_string();
         assert!(
             e.contains("15 GB of memory") && e.contains("ARBOS_HOST_EVICT_MIN_AVAILABLE_GB"),
@@ -1240,12 +1272,24 @@ mod tests {
             409,
             json!({ "error": "version 9 is not installed" }),
         );
-        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("not installed"));
         assert!(state.db.user_box(&user).unwrap().is_none());
 
         Arc::get_mut(&mut state.cfg).expect("one holder").boxd = None;
-        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("ARBOS_BOXD_URL"));
         assert!(state.db.user_box(&user).unwrap().is_none());
     }
@@ -1335,9 +1379,14 @@ mod tests {
             fake.paths().iter().filter(|p| **p == path).count()
         };
         for user in [&a, &b] {
-            boxes::create_box(&state, user, Provider::Boxd, None)
-                .await
-                .unwrap();
+            boxes::create_box(
+                &state,
+                &mut state.restart.admit_creation(user).await,
+                Provider::Boxd,
+                None,
+            )
+            .await
+            .unwrap();
             state.set_box_state(user, BoxState::Awake, None).await;
         }
         assert_eq!(
@@ -1349,9 +1398,14 @@ mod tests {
         let mut pushes = state.last_client_push.lock().await;
         pushes.insert(a.clone(), now_ms() + 60_000);
         drop(pushes);
-        boxes::create_box(&state, &c, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&c).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!((sleeps(&a), sleeps(&b)), (0, 1));
         assert_eq!(state.box_state(&b).await.0, BoxState::Asleep);
         assert_eq!(state.box_state(&a).await.0, BoxState::Awake);
@@ -1391,9 +1445,14 @@ mod tests {
     async fn an_asleep_box_is_woken_a_minute_ahead_of_its_routine() {
         let (mut state, _fake, user) = relay().await;
         let project_id = crate::people::tests_support::project_of(&state, &user, "First");
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         let now = now_ms();
         let due = |id: &str, at: i64| crate::db::Routine {
             id: id.into(),
@@ -1458,9 +1517,14 @@ mod tests {
     #[tokio::test]
     async fn the_supervisor_sleeps_only_the_idle_box() {
         let (state, fake, user) = relay().await;
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
         let long_ago = now_ms() - IDLE_MS - 1;
         let clock = || HashMap::from([(user.clone(), long_ago)]);
