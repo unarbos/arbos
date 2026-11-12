@@ -1084,11 +1084,14 @@ pub mod tests {
             r#"{"active_user_pids":0,"files_bytes":0,"scratch_bytes":0,"trash_bytes":0}"#,
         );
         fake.stuck.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(status(b.sleep(&u).await), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status(b.sleep(&u, false).await),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
         assert_eq!((fake.ran("umount"), fake.ran("losetup -d")), (0, 0));
         fake.stuck
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(b.sleep(&u).await.unwrap()["state"], "asleep_clean");
+        assert_eq!(b.sleep(&u, false).await.unwrap()["state"], "asleep_clean");
         let _ = std::fs::remove_dir_all(&root);
     }
 
