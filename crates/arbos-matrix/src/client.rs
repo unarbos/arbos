@@ -186,6 +186,12 @@ impl Timeline {
     }
 }
 
+/// Whose messages this device reads: those from a device its owner's cross-signing identity
+/// has signed (or from before there were such identities).
+pub(crate) const TRUST: DecryptionSettings = DecryptionSettings {
+    sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
+};
+
 /// Channel read receipts are private (#1484; Jacob, 2026-10-30: "make all mirrored read
 /// receipts private"). Private still clears the room's own unread count and still reaches
 /// this person's other devices; it is not federated and no other member can read it.
@@ -236,9 +242,7 @@ impl MatrixClient {
             // its owner's cross-signing identity is sent room keys, and a message from one
             // that is not stays locked.
             .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
-            .with_decryption_settings(DecryptionSettings {
-                sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
-            })
+            .with_decryption_settings(TRUST)
             .build()
             .await
             .map_err(|e| Error::Homeserver(e.to_string()))?;

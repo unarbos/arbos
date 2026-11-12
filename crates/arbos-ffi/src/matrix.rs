@@ -472,6 +472,45 @@ impl MatrixClient {
     }
 }
 
+/// The words of an encrypted message, for its notification (see `arbos_matrix::Preview`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MatrixPreview {
+    /// `user:<id>` of the account the message's key is from.
+    pub sender: String,
+    pub text: String,
+}
+
+/// For the notification extension: read one encrypted event (`event_json`, as the alert
+/// carries it) with the keys in this device's store, or `None` (see
+/// `arbos_matrix::preview`). No client and no request. Blocks the calling thread, on a
+/// runtime of that one thread: the extension runs nothing else of this library and has
+/// little memory to run it in.
+#[uniffi::export]
+pub fn matrix_preview(
+    crypto: MatrixCrypto,
+    user_id: String,
+    device_id: String,
+    room_id: String,
+    event_json: String,
+) -> Option<MatrixPreview> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let preview = runtime.block_on(arbos_matrix::preview(
+        crypto.store_dir.as_ref(),
+        crypto.store_key.as_deref()?,
+        &user_id,
+        &device_id,
+        &room_id,
+        &event_json,
+    ))?;
+    Some(MatrixPreview {
+        sender: preview.sender,
+        text: preview.text,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

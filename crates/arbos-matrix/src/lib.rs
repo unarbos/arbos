@@ -16,9 +16,11 @@
 //! device cannot decrypt shows as a locked row ([`rows::LOCKED`]) until its key arrives.
 
 pub mod client;
+pub mod preview;
 pub mod rows;
 
 pub use client::{Backup, Crypto, Listener, MatrixClient, Session, Snapshot, Upload};
+pub use preview::{preview, Preview};
 pub use rows::{ChannelRow, MessageRow, PeopleRoomRow, SpaceRow};
 
 /// Anything that can go wrong talking to the homeserver, flattened for the apps and the FFI.

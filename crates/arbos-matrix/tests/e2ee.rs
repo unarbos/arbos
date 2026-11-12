@@ -2139,3 +2139,197 @@ async fn a_file_in_an_encrypted_chat_is_ciphertext_on_the_homeserver() {
     alice1.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Phase 5, what the phone's notification extension does: the words of an encrypted message
+/// are read from the event the alert carries and the keys in the device's store, with no
+/// client, sync or request, while the app has the same store open or after it has gone; and
+/// anything but a message this device would show reads as nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notification_reads_an_encrypted_message_from_the_devices_store() {
+    use arbos_matrix::{preview, Preview, Upload};
+
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-preview-{tag}"));
+    let native = |s: Session| Session {
+        people_native: true,
+        ..s
+    };
+    let a = native(hs.register(&format!("na{tag}")).await);
+    let b = native(hs.register(&format!("nb{tag}")).await);
+    let (alice1, bob1) = (start(&a, &dir).await, start(&b, &dir).await);
+    alice1.recover("alice's passphrase").await.unwrap();
+    bob1.recover("bob's passphrase").await.unwrap();
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P5PREVIEW" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P5PREVIEW", "kind": "dm", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b.access_token),
+        json!({}),
+    )
+    .await;
+    eventually(|| async { alice1.open_room(&room).await.ok() }).await;
+    eventually(|| async { bob1.open_room(&room).await.ok() }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let said = alice1
+        .send_text(
+            &room,
+            "the launch\n is at noon",
+            "01P5PREVIEWONE000000000000",
+        )
+        .await
+        .unwrap();
+    let file = Upload {
+        name: "plan.png".into(),
+        mime: "image/png".into(),
+        kind: Some("image".into()),
+        bytes: vec![7; 64],
+    };
+    let filed = alice1
+        .send_files(&room, "", vec![file], None, "01P5PREVIEWTWO000000000000")
+        .await
+        .unwrap();
+    // Bob's app has the room's key: it read the first message.
+    let row = eventually(|| async {
+        let rows = bob1.open_room(&room).await.ok()?;
+        rows.into_iter().find(|r| r.event_id == said && !r.locked)
+    })
+    .await;
+    alice1
+        .react(&room, &row.event_id, "👍", true)
+        .await
+        .unwrap();
+
+    // The events as the homeserver holds them, which is what the relay puts in the alert.
+    let sealed = |event_id: String| {
+        let (hs, room, token) = (&hs, &room, &b.access_token);
+        async move {
+            let path = format!("/_matrix/client/v3/rooms/{room}/event/{event_id}");
+            let ev = hs.call("GET", &path, Some(token), Value::Null).await;
+            assert_eq!(ev["type"], "m.room.encrypted");
+            ev
+        }
+    };
+    let (store, key) = (dir.join(&b.device_id), "test store key");
+    let read = |store: std::path::PathBuf, key: &'static str, room: String, ev: Value| {
+        let b = &b;
+        async move {
+            preview(
+                &store,
+                key,
+                &b.user_id,
+                &b.device_id,
+                &room,
+                &ev.to_string(),
+            )
+            .await
+        }
+    };
+    let alice = format!("user:{}", a.user_id[1..].split(':').next().unwrap());
+    let words = Some(Preview {
+        sender: alice.clone(),
+        text: "the launch is at noon".into(),
+    });
+    let message = sealed(said.clone()).await;
+    // While the app has the store open.
+    assert_eq!(
+        read(store.clone(), key, room.clone(), message.clone()).await,
+        words
+    );
+    // And once it is gone: nothing below is running as Bob.
+    bob1.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        read(store.clone(), key, room.clone(), message.clone()).await,
+        words
+    );
+    assert_eq!(
+        read(store.clone(), key, room.clone(), sealed(filed).await).await,
+        Some(Preview {
+            sender: alice,
+            text: "Attachment".into()
+        })
+    );
+
+    // Nothing: a reaction, another room, a changed ciphertext, a session this device has no
+    // key for, the wrong store key, and a store that is not there (which is not made).
+    let reaction = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=1"),
+            Some(&b.access_token),
+            Value::Null,
+        )
+        .await["chunk"][0]
+        .clone();
+    assert_eq!(
+        reaction["content"]["m.relates_to"]["rel_type"],
+        "life.arbos.reaction"
+    );
+    let mut changed = message.clone();
+    let cut = changed["content"]["ciphertext"].as_str().unwrap().len() - 8;
+    let cipher = changed["content"]["ciphertext"].as_str().unwrap()[..cut].to_owned();
+    changed["content"]["ciphertext"] = json!(cipher);
+    let mut unknown = message.clone();
+    unknown["content"]["session_id"] = json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    for (why, room_id, ev) in [
+        ("a reaction", room.clone(), reaction),
+        (
+            "another room",
+            "!other:arbos.test".to_owned(),
+            message.clone(),
+        ),
+        ("a changed ciphertext", room.clone(), changed),
+        ("an unknown session", room.clone(), unknown),
+    ] {
+        let got = read(store.clone(), key, room_id, ev).await;
+        assert_eq!(got, None, "{why}");
+    }
+    let wrong_key = read(store.clone(), "another key", room.clone(), message.clone()).await;
+    assert_eq!(wrong_key, None);
+    let nowhere = dir.join("NOSUCHDEVICE");
+    assert_eq!(
+        read(nowhere.clone(), key, room.clone(), message.clone()).await,
+        None
+    );
+    assert!(!nowhere.exists());
+
+    // For the simulator rig that measures the extension: the store and the alert's event.
+    if let Ok(out) = std::env::var("ARBOS_MATRIX_TEST_PREVIEW_OUT") {
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(out.join("store")).unwrap();
+        for f in std::fs::read_dir(&store).unwrap().flatten() {
+            std::fs::copy(f.path(), out.join("store").join(f.file_name())).unwrap();
+        }
+        let fixture = json!({ "user_id": b.user_id, "device_id": b.device_id, "store_key": key,
+                              "room_id": room, "event": message });
+        std::fs::write(out.join("fixture.json"), fixture.to_string()).unwrap();
+    }
+
+    alice1.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
