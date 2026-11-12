@@ -1,11 +1,12 @@
 //! The chat list: the iPhone home screen as a Mac sidebar. The top strip holds
 //! three round buttons on the right — search (opens the command palette,
 //! `ui::palette`; ⌘⇧F / ⌘K do the same), "+", and the collapse toggle — then
-//! the iPhone home's All · Agents · People · Servers filter, then every agent,
-//! person and server as one row — avatar, name, time, last line. The footer
-//! is Grok Bot's: my avatar (its dot is the machine state) and name at the
-//! left, and — only while an update is ready for a click — the blue
-//! cloud-download disc at the right end.
+//! every agent, person and server as one linear list of rows — avatar, name,
+//! time, last line. No All · Agents · People · Servers filter
+//! ([feedback chat-list-no-filter-mac-2026-11-10]). The footer is Grok Bot's:
+//! my avatar (its dot is the machine state) and name at the left, and — only
+//! while an update is ready for a click — the blue cloud-download disc at the
+//! right end.
 //!
 //! # Three-pane rule (app-wide, Jacob 2026-10-20; `docs/mac-design-rules.md`)
 //!
@@ -34,7 +35,7 @@ use crate::search;
 use crate::ui::avatars;
 use crate::ui::back_swipe;
 use crate::ui::composer::Composer;
-use crate::ui::frost::{edge_faded, edge_faded_sides};
+use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::highlight::{self, Shape};
@@ -69,7 +70,7 @@ impl Render for SidebarResizeDragGhost {
 /// A pinned row being dragged to a new slot in the Pinned section ([feedback
 /// sidebar-pinning-mac-2026-10-28]). The row itself moves live in the list (the
 /// ghost under the pointer draws nothing); `to` is the slot under the pointer among
-/// the pinned rows the current filter shows.
+/// the pinned rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PinDragState {
     pub(crate) id: Id,
@@ -277,20 +278,6 @@ pub(crate) const STRIP_GAP: f32 = CONTROL_GAP;
 /// The strip's right inset: the discs end 4 pt past the rows' card edge, as
 /// Grok's do (rows are inset 8; 12 − 8).
 pub(crate) const STRIP_INSET: f32 = 12.0;
-/// The filter capsules under the strip: the iPhone `PaneTabs` geometry (32 pt
-/// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
-/// four segments at 16 would be wider than the 296 pt default sidebar.
-pub(crate) const FILTER_HEIGHT: f32 = 32.0;
-pub(crate) const FILTER_GAP: f32 = 4.0;
-pub(crate) const FILTER_PAD_X: f32 = 10.0;
-/// Space between the strip's bottom edge and the capsules: Grok Bot's first
-/// chat card starts 64 pt under the window top, 16 under its discs (bottom
-/// 48). The filter is the first thing under our strip, so its capsules start
-/// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
-pub(crate) const FILTER_TOP: f32 = 4.0;
-pub(crate) const FILTER_BOTTOM: f32 = 8.0;
-/// The side fade on the capsule row when it scrolls (a narrow column).
-pub(crate) const FILTER_FADE_BAND: f32 = 12.0;
 /// Server rows draw their picture as a rounded square (corner = this fraction
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
@@ -436,109 +423,6 @@ pub(crate) fn strip_controls(in_server: bool, show_plus: bool) -> Vec<StripContr
     controls.push(StripControl::Collapse);
     controls
 }
-
-/// The filter row is drawn under the strip whenever the chat list is, and
-/// never inside a server (the channel list has nothing to scope).
-pub(crate) fn filter_shown(in_server: bool) -> bool {
-    !in_server
-}
-
-/// The segment under the strip — the iPhone home's `HomeListFilter`
-/// (`HomeView.swift`) with the same four labels; both apps scope the same list.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ListFilter {
-    #[default]
-    All,
-    /// My agents only — not people, not agents shared in by someone else.
-    Agents,
-    /// People chats: DMs and groups.
-    People,
-    /// Servers only.
-    Servers,
-}
-
-impl ListFilter {
-    pub(crate) const ALL: [ListFilter; 4] = [
-        ListFilter::All,
-        ListFilter::Agents,
-        ListFilter::People,
-        ListFilter::Servers,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            ListFilter::All => "All",
-            ListFilter::Agents => "Agents",
-            ListFilter::People => "People",
-            ListFilter::Servers => "Servers",
-        }
-    }
-
-    /// `ARBOS_SIDEBAR_FILTER=…` (rig) and the labels, case-insensitively.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        ListFilter::ALL
-            .into_iter()
-            .find(|f| f.label().eq_ignore_ascii_case(s.trim()))
-    }
-
-    /// Whether a chat row (agent, DM, group) is in this segment.
-    pub(crate) fn admits_space(self, space: &Project) -> bool {
-        match self {
-            ListFilter::All => true,
-            ListFilter::Agents => !space.is_people() && !space.is_guest(),
-            ListFilter::People => space.is_people(),
-            ListFilter::Servers => false,
-        }
-    }
-
-    /// Whether server rows are in this segment.
-    pub(crate) fn admits_servers(self) -> bool {
-        matches!(self, ListFilter::All | ListFilter::Servers)
-    }
-
-    /// Copy for an empty list under this segment (no query typed).
-    pub(crate) fn empty_copy(self) -> &'static str {
-        match self {
-            ListFilter::All => "No conversations yet",
-            ListFilter::Agents => "No agents yet",
-            ListFilter::People => "No people chats yet",
-            ListFilter::Servers => "No servers yet",
-        }
-    }
-
-    /// The segment persists with the sidebar state (`<config>/sidebar_filter`,
-    /// the label in lower case) so the rail reopens on the segment it was
-    /// left on ([feedback mac-sidebar-rail-2026-10-26]). The rig's
-    /// `ARBOS_SIDEBAR_FILTER` wins over the file.
-    pub(crate) fn load() -> Self {
-        if let Some(f) = std::env::var("ARBOS_SIDEBAR_FILTER")
-            .ok()
-            .and_then(|v| Self::parse(&v))
-        {
-            return f;
-        }
-        Self::load_from(&crate::sync::credentials::config_dir())
-    }
-
-    pub(crate) fn save(self) {
-        self.save_to(&crate::sync::credentials::config_dir());
-    }
-
-    /// A missing or unknown value means All (today's default).
-    pub(crate) fn load_from(dir: &std::path::Path) -> Self {
-        std::fs::read_to_string(dir.join(FILTER_FILE))
-            .ok()
-            .and_then(|s| Self::parse(&s))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn save_to(self, dir: &std::path::Path) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join(FILTER_FILE), self.label().to_ascii_lowercase());
-    }
-}
-
-const FILTER_FILE: &str = "sidebar_filter";
 
 /// Newest message with prose across a space's chats (archived ones too — the
 /// history is still there), for the preview line.
@@ -869,10 +753,10 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
 }
 
 /// The list in two parts ([feedback sidebar-pinning-mac-2026-10-28]): the **Pinned**
-/// section — the rows of `AppState::pins` the current filter admits, in the pin order,
-/// never re-sorted by unread or activity — and the rest in today's order. While a pin
-/// is being dragged, the dragged row sits at the slot under the pointer. Hidden chats
-/// have no pinned part (an archived row is never pinned).
+/// section — the rows of `AppState::pins` in the pin order, never re-sorted by unread
+/// or activity — and the rest in today's order. While a pin is being dragged, the
+/// dragged row sits at the slot under the pointer. Hidden chats have no pinned part
+/// (an archived row is never pinned).
 pub(crate) fn list_sections(
     shell: &Shell,
     cx: &Context<Shell>,
@@ -907,12 +791,8 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
     let selected = state.selected_project.clone();
     let hidden_mode = shell.hidden_open;
     let shows = |archived: bool| hidden_mode == archived;
-    let filter = shell.list_filter;
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
-        if !filter.admits_servers() {
-            break;
-        }
         let Some(hit) = search::server_hit(s, "") else {
             continue;
         };
@@ -939,9 +819,6 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
         ));
     }
     for p in state.projects.iter() {
-        if !filter.admits_space(p) {
-            continue;
-        }
         let Some(hit) = state.space_search_hit(p, "") else {
             continue;
         };
@@ -1180,9 +1057,8 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // hit, ordered by activity.
     let hidden_mode = shell.hidden_open;
     let hidden_count = state.archived_space_count();
-    // The All · Agents · People · Servers segment scopes the list, like the
-    // iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
-    let filter = shell.list_filter;
+    // One linear list of every chat kind — agents, people, servers together
+    // ([feedback chat-list-no-filter-mac-2026-11-10]).
     let empty = state.projects.is_empty() && state.servers.is_empty();
     let link_connecting = state.link == crate::model::Link::Connecting;
     if machine == MachineState::Waking {
@@ -1278,88 +1154,8 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         };
     }
     let strip = strip.window_drag();
-    // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
-    // Bare labels, the selected one on a capsule, centred; no track, no border.
-    // Narrow column ([feedback sidebar-narrow-wrap-2026-10-27]): the capsules
-    // scroll horizontally under an edge fade when they do not fit, like Grok
-    // Bot's iPhone filter row — the first and last capsule carry `auto` side
-    // margins, which centre the set while there is room and resolve to 0 (a
-    // left-aligned, scrollable row) once there is not; the selected capsule
-    // is scrolled into view (`Shell::filter_scroll`) once per selection /
-    // width — not every frame, or a scroll back toward "All" is undone by the
-    // next paint (`sidebar_fit::FilterPin`, [feedback
-    // server-strip-scroll-2026-10-28]).
-    let filter_count = ListFilter::ALL.len();
-    if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
-        let measured = shell.filter_scroll.bounds().size.width > px(0.0);
-        if shell.filter_pin.take(ix, sidebar_width, measured) {
-            shell.filter_scroll.scroll_to_item(ix);
-        }
-    }
-    let filter_bar = div()
-        .id("sidebar-filter")
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(FILTER_GAP))
-        .pt(px(FILTER_TOP))
-        .pb(px(FILTER_BOTTOM))
-        .px(px(8.0))
-        .overflow_x_scroll()
-        .track_scroll(&shell.filter_scroll)
-        .map(back_swipe::mark_sideways_scroller)
-        .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
-            let on = f == filter;
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "sidebar-filter-{}",
-                    f.label().to_ascii_lowercase()
-                ))))
-                .h(px(FILTER_HEIGHT))
-                .px(px(FILTER_PAD_X))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .map(|mut el| {
-                    if ix == 0 {
-                        el.style().margin.left = Some(gpui::Length::Auto);
-                    }
-                    if ix + 1 == filter_count {
-                        el.style().margin.right = Some(gpui::Length::Auto);
-                    }
-                    el
-                })
-                .rounded_full()
-                .cursor_pointer()
-                // On: the bubble fill, Grok's (§ Chat-list filter); off: the
-                // highlight token's washes plus the label brightening.
-                .map(|el| {
-                    if on {
-                        highlight::washed(el, theme.filter_on_fill(), &theme)
-                    } else {
-                        let text = theme.text;
-                        highlight::button_with(el, &theme, move |s| s.text_color(text))
-                    }
-                })
-                .text_size(px(TEXT_BODY))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(if on { theme.text } else { theme.text_muted })
-                .child(f.label())
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.menu_open = false;
-                    this.row_menu = None;
-                    this.list_filter = f;
-                    f.save();
-                    cx.notify();
-                }))
-        }));
-    // ----- rows -------------------------------------------------------------
+    // ----- rows (strip then the linear chat list; no filter band) -------------
+    // [feedback chat-list-no-filter-mac-2026-11-10]
     let mut list = div()
         .id("chat-list")
         .flex()
@@ -1449,15 +1245,14 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 ),
         );
     } else if rows.is_empty() && !hidden_mode {
-        // Nothing under this segment — the iPhone's copy.
         list = list.child(
             div()
-                .id("sidebar-filter-empty")
+                .id("sidebar-list-empty")
                 .pt(px(40.0))
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(filter.empty_copy()),
+                .child("No conversations yet"),
         );
     }
     if hidden_mode {
@@ -1672,10 +1467,6 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .border_color(theme.border)
         .when(swipe_offset != 0.0, |el| el.overflow_hidden())
         .child(strip)
-        // The filter belongs to the chat list, not to a server's channel list.
-        .when(filter_shown(open_server.is_some()), |el| {
-            el.child(edge_faded_sides(FILTER_FADE_BAND, filter_bar))
-        })
         .child(list);
     // Grok Bot's update disc at the footer's right end, only when an update is
     // ready for a click ([feedback footer-update-button-grok-2026-10-24]).
@@ -3033,11 +2824,7 @@ mod row_menu_tests {
 mod strip_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
-    use super::{
-        strip_controls, top_strip, ListFilter, StripControl, FILTER_HEIGHT, FILTER_TOP,
-        STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
-    };
-    use crate::model::{Project, SpaceKind};
+    use super::{strip_controls, top_strip, StripControl, STRIP_BUTTON, STRIP_GAP, STRIP_INSET};
     use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
     use crate::ui::theme::{
         CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
@@ -3064,8 +2851,9 @@ mod strip_tests {
 
     /// The lights sit where Grok's do, the discs are centred on Grok's line
     /// (8 pt under the lights' — they are not one line in Grok either), and
-    /// the first thing under the strip starts at Grok's 64. (`HEADER_HEIGHT`
-    /// is the Mac strip; `top_strip` returns it on macOS and 40 elsewhere.)
+    /// the list starts under the strip (Grok's next-content gap is list top
+    /// padding now that the filter band is gone). (`HEADER_HEIGHT` is the Mac
+    /// strip; `top_strip` returns it on macOS and 40 elsewhere.)
     #[test]
     fn the_strip_is_groks_height_and_the_discs_sit_on_groks_line() {
         assert_eq!(
@@ -3091,16 +2879,14 @@ mod strip_tests {
         let disc_top = (HEADER_HEIGHT - STRIP_BUTTON) / 2.0;
         assert_eq!(disc_top, grok::DISC_TOP);
         assert_eq!(disc_top + STRIP_BUTTON, 48.0, "disc bottom");
+        // Without the filter band the list starts under the strip; Grok's 64
+        // is the next-content reference (16 under the discs).
         assert_eq!(
-            HEADER_HEIGHT + FILTER_TOP,
-            grok::NEXT_CONTENT_TOP,
-            "filter capsules start where Grok's first card does"
-        );
-        assert_eq!(
-            HEADER_HEIGHT + FILTER_TOP - (disc_top + STRIP_BUTTON),
+            grok::NEXT_CONTENT_TOP - (disc_top + STRIP_BUTTON),
             16.0,
-            "gap from the discs down to the filter: Grok's 16"
+            "Grok's gap from the discs down to next content"
         );
+        assert_eq!(HEADER_HEIGHT, 60.0, "list sits under the 60 strip");
         // The three lights (frame right edge 15 + 2 × 23 + 14 = 75) end inside
         // the band the strip keeps clear for them.
         let lights_right = TRAFFIC_LIGHT_POSITION + 2.0 * grok::LIGHT_PITCH + 14.0;
@@ -3117,12 +2903,12 @@ mod strip_tests {
         assert_eq!(top_strip(true), top_strip(false));
     }
 
-    /// The strip and filter rows as `render` composes them (same div shape),
-    /// laid out for real: a disc's box lands at 12–48 and the first capsule
-    /// at 64, Grok's numbers.
-    struct StripAndFilter;
+    /// The strip as `render` composes it (same div shape), laid out for real:
+    /// a disc's box lands at 12–48. No filter capsules under it
+    /// ([feedback chat-list-no-filter-mac-2026-11-10]).
+    struct StripOnly;
 
-    impl gpui::Render for StripAndFilter {
+    impl gpui::Render for StripOnly {
         fn render(
             &mut self,
             _: &mut gpui::Window,
@@ -3149,37 +2935,24 @@ mod strip_tests {
                         .flex_shrink_0()
                         .debug_selector(move || sel.into())
                 }));
-            let filter = div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(super::FILTER_GAP))
-                .pt(px(FILTER_TOP))
-                .pb(px(super::FILTER_BOTTOM))
-                .px(px(8.0))
-                .children(ListFilter::ALL.into_iter().map(|f| {
-                    let sel: &'static str =
-                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
-                    div()
-                        .h(px(FILTER_HEIGHT))
-                        .px(px(super::FILTER_PAD_X))
-                        .debug_selector(move || sel.into())
-                        .child(f.label())
-                }));
+            // First content under the strip — stands in for the chat list.
+            let list = div()
+                .flex_1()
+                .debug_selector(|| "list-under-strip".into())
+                .child("rows");
             div()
                 .w(px(296.0))
                 .h(px(400.0))
                 .flex()
                 .flex_col()
                 .child(strip)
-                .child(filter)
+                .child(list)
         }
     }
 
     #[gpui::test]
-    fn the_discs_and_the_filter_land_on_groks_pixels(cx: &mut TestAppContext) {
-        let (_view, vcx) = cx.add_window_view(|_, _| StripAndFilter);
+    fn the_discs_land_on_groks_pixels_with_no_filter_band(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| StripOnly);
         vcx.run_until_parked();
         let strip = vcx.debug_bounds("strip").expect("strip drawn");
         assert_eq!(f32::from(strip.size.height), HEADER_HEIGHT);
@@ -3203,10 +2976,18 @@ mod strip_tests {
             right_edges[2],
             "discs 8 apart"
         );
-        let capsule = vcx.debug_bounds("capsule-All").expect("first capsule");
-        let cap_top: f32 = capsule.origin.y.into();
-        assert_eq!(cap_top, grok::NEXT_CONTENT_TOP, "capsule row at Grok's 64");
-        assert_eq!(f32::from(capsule.size.height), FILTER_HEIGHT);
+        // No filter capsules / filter ids under the strip.
+        assert!(vcx.debug_bounds("sidebar-filter").is_none());
+        assert!(vcx.debug_bounds("capsule-All").is_none());
+        assert!(vcx.debug_bounds("capsule-Agents").is_none());
+        let list = vcx
+            .debug_bounds("list-under-strip")
+            .expect("list under the strip");
+        let list_top: f32 = list.origin.y.into();
+        assert_eq!(
+            list_top, HEADER_HEIGHT,
+            "first content sits under the strip with no filter band"
+        );
     }
 
     /// Three-pane rule: the chat list's strip holds exactly three controls —
@@ -3278,267 +3059,6 @@ mod strip_tests {
             vec![StripControl::New, StripControl::Collapse]
         );
         assert_eq!(strip_controls(true, false), vec![StripControl::Collapse]);
-    }
-
-    fn agent(shared: bool) -> Project {
-        Project {
-            kind: SpaceKind::Project,
-            shared,
-            ..Project::default()
-        }
-    }
-
-    /// The segment persists beside the collapsed state, so a rail left on
-    /// Servers reopens on Servers ([feedback mac-sidebar-rail-2026-10-26]).
-    #[test]
-    fn the_filter_is_restored_from_the_config_dir() {
-        let dir = std::env::temp_dir().join(format!("arbos-rail-filter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(
-            ListFilter::load_from(&dir),
-            ListFilter::All,
-            "nothing saved → All"
-        );
-        for f in ListFilter::ALL {
-            f.save_to(&dir);
-            assert_eq!(ListFilter::load_from(&dir), f);
-        }
-        assert_eq!(
-            std::fs::read_to_string(dir.join("sidebar_filter")).unwrap(),
-            "servers",
-            "the label in lower case, the rig's spelling"
-        );
-        std::fs::write(dir.join("sidebar_filter"), "nope").unwrap();
-        assert_eq!(ListFilter::load_from(&dir), ListFilter::All);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn people(kind: SpaceKind) -> Project {
-        Project {
-            kind,
-            ..Project::default()
-        }
-    }
-
-    /// The four segments scope the list like the iPhone home: All shows
-    /// everything; Agents my agents only; People DMs and groups; Servers only
-    /// servers (the new fourth segment).
-    #[test]
-    fn the_filter_scopes_agents_people_and_servers() {
-        let mine = agent(false);
-        let shared_in = agent(true);
-        let dm = people(SpaceKind::Dm);
-        let group = people(SpaceKind::Group);
-        for f in [ListFilter::All, ListFilter::Servers] {
-            assert!(f.admits_servers(), "{f:?} shows servers");
-        }
-        for f in [ListFilter::Agents, ListFilter::People] {
-            assert!(!f.admits_servers(), "{f:?} hides servers");
-        }
-        assert!(ListFilter::All.admits_space(&mine));
-        assert!(ListFilter::All.admits_space(&shared_in));
-        assert!(ListFilter::All.admits_space(&dm));
-        assert!(ListFilter::All.admits_space(&group));
-        assert!(ListFilter::Agents.admits_space(&mine));
-        assert!(!ListFilter::Agents.admits_space(&shared_in));
-        assert!(!ListFilter::Agents.admits_space(&dm));
-        assert!(ListFilter::People.admits_space(&dm));
-        assert!(ListFilter::People.admits_space(&group));
-        assert!(!ListFilter::People.admits_space(&mine));
-        for p in [&mine, &shared_in, &dm, &group] {
-            assert!(
-                !ListFilter::Servers.admits_space(p),
-                "Servers shows only servers"
-            );
-        }
-    }
-
-    /// The labels are the iPhone's (`HomeListFilter` in HomeView.swift), in
-    /// the same order, with "Servers" fourth; the rig parses them.
-    #[test]
-    fn the_segments_match_the_iphone_home() {
-        let labels: Vec<_> = ListFilter::ALL.iter().map(|f| f.label()).collect();
-        assert_eq!(labels, ["All", "Agents", "People", "Servers"]);
-        assert_eq!(ListFilter::parse("servers"), Some(ListFilter::Servers));
-        assert_eq!(ListFilter::parse("nope"), None);
-        assert_eq!(ListFilter::default(), ListFilter::All);
-    }
-
-    /// The filter row as `render_with` builds it in a column too narrow for
-    /// the four capsules: a horizontal scroll under `scroll`, the selected
-    /// capsule pinned into view through `pin` — once per selection / width,
-    /// or on every frame when `pin_every_frame` (the behaviour before
-    /// [feedback server-strip-scroll-2026-10-28], kept here to show the test
-    /// tells the two apart).
-    struct NarrowFilter {
-        scroll: gpui::ScrollHandle,
-        pin: crate::ui::sidebar_fit::FilterPin,
-        pin_every_frame: bool,
-        selected: usize,
-        width: f32,
-    }
-
-    impl gpui::Render for NarrowFilter {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
-            let measured = self.scroll.bounds().size.width > px(0.0);
-            if self.pin_every_frame || self.pin.take(self.selected, self.width, measured) {
-                self.scroll.scroll_to_item(self.selected);
-            }
-            let count = ListFilter::ALL.len();
-            let row = div()
-                .id("narrow-filter")
-                .debug_selector(|| "filter-row".into())
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap(px(super::FILTER_GAP))
-                .px(px(8.0))
-                .overflow_x_scroll()
-                .track_scroll(&self.scroll)
-                .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
-                    let sel: &'static str =
-                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
-                    div()
-                        .h(px(FILTER_HEIGHT))
-                        .px(px(super::FILTER_PAD_X))
-                        .flex_shrink_0()
-                        .map(|mut el| {
-                            if ix == 0 {
-                                el.style().margin.left = Some(gpui::Length::Auto);
-                            }
-                            if ix + 1 == count {
-                                el.style().margin.right = Some(gpui::Length::Auto);
-                            }
-                            el
-                        })
-                        .debug_selector(move || sel.into())
-                        .child(f.label())
-                }));
-            div()
-                .w(px(self.width))
-                .h(px(120.0))
-                .flex()
-                .flex_col()
-                .child(row)
-        }
-    }
-
-    fn narrow_filter(scroll: &gpui::ScrollHandle, pin_every_frame: bool) -> NarrowFilter {
-        NarrowFilter {
-            scroll: scroll.clone(),
-            pin: Default::default(),
-            pin_every_frame,
-            selected: 3,
-            // Narrower than the four capsules need: the row scrolls.
-            width: 150.0,
-        }
-    }
-
-    /// Affinity, Arbonites, 2026-10-28 ("if on server cannot scroll back to
-    /// make 'all' visible again"; Scout confirmed): with Servers selected in
-    /// a narrow column the strip opens scrolled so Servers shows (All
-    /// clipped) — and after the user scrolls back, the offset must be able to
-    /// reach 0 with "All" fully in view, and stay there across repaints.
-    #[gpui::test]
-    fn the_strip_scrolls_back_to_all_and_stays_there(cx: &mut TestAppContext) {
-        let scroll = gpui::ScrollHandle::new();
-        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, false));
-        // The pin lands on the frame after the one that measured the capsules.
-        for _ in 0..3 {
-            view.update(vcx, |_, cx| cx.notify());
-            vcx.run_until_parked();
-        }
-        let row = vcx.debug_bounds("filter-row").expect("the row");
-        let all = vcx.debug_bounds("capsule-All").expect("All");
-        let servers = vcx.debug_bounds("capsule-Servers").expect("Servers");
-        assert!(
-            f32::from(scroll.max_offset().x) > 0.0,
-            "the column is narrow enough for the row to scroll"
-        );
-        assert!(
-            f32::from(scroll.offset().x) < 0.0,
-            "opens pinned to the selected capsule: offset {:?}",
-            scroll.offset()
-        );
-        assert!(
-            servers.right() <= row.right() + px(0.5),
-            "Servers in view: {servers:?} in {row:?}"
-        );
-        assert!(all.left() < row.left(), "All clipped on the left: {all:?}");
-
-        // The user scrolls back to the start (what the wheel / trackpad does
-        // to the handle's offset), and the strip repaints.
-        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-        view.update(vcx, |_, cx| cx.notify());
-        vcx.run_until_parked();
-        let row = vcx.debug_bounds("filter-row").expect("the row");
-        let all = vcx.debug_bounds("capsule-All").expect("All");
-        assert_eq!(
-            f32::from(scroll.offset().x),
-            0.0,
-            "the offset reaches 0 and holds across the repaint"
-        );
-        assert!(
-            all.left() >= row.left() && all.right() <= row.right(),
-            "All fully visible: {all:?} in {row:?}"
-        );
-        // And another frame (a hover, a notify) does not drag it back either.
-        view.update(vcx, |_, cx| cx.notify());
-        vcx.run_until_parked();
-        assert_eq!(f32::from(scroll.offset().x), 0.0, "still 0 a frame later");
-
-        // The same row pinned on every frame — the bug — snaps back to Servers.
-        let scroll = gpui::ScrollHandle::new();
-        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, true));
-        for _ in 0..3 {
-            view.update(vcx, |_, cx| cx.notify());
-            vcx.run_until_parked();
-        }
-        assert!(f32::from(scroll.offset().x) < 0.0, "pinned to Servers");
-        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-        view.update(vcx, |_, cx| cx.notify());
-        vcx.run_until_parked();
-        assert!(
-            f32::from(scroll.offset().x) < 0.0,
-            "pinning every frame undoes the scroll back (the old behaviour)"
-        );
-    }
-
-    /// The pin fires once per selection and once per width (after the handle
-    /// has a frame behind it); otherwise never.
-    #[test]
-    fn the_pin_fires_on_selection_and_width_changes_only() {
-        let pin = crate::ui::sidebar_fit::FilterPin::default();
-        assert!(pin.take(3, 220.0, false), "before the first frame: ask");
-        assert!(
-            pin.take(3, 220.0, false),
-            "…and keep asking until one can land"
-        );
-        assert!(pin.take(3, 220.0, true), "the first measured frame");
-        assert!(!pin.take(3, 220.0, true), "a repaint");
-        assert!(
-            !pin.take(3, 220.2, true),
-            "sub-pixel width noise is the same width"
-        );
-        assert!(pin.take(0, 220.0, true), "the selection moved");
-        assert!(!pin.take(0, 220.0, true));
-        assert!(pin.take(0, 260.0, true), "the column was resized");
-        assert!(!pin.take(0, 260.0, true));
-    }
-
-    /// The filter stays in the sidebar unchanged (Jacob, search-palette item
-    /// point 4): drawn whenever the chat list is, never inside a server.
-    #[test]
-    fn the_filter_stays_under_the_strip() {
-        assert!(
-            super::filter_shown(false),
-            "filter drawn with the chat list"
-        );
-        assert!(!super::filter_shown(true), "no filter inside a server");
     }
 }
 
@@ -4591,7 +4111,6 @@ mod pin_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::ListFilter;
     use crate::app::AppState;
     use crate::model::{Person, Project, ServerInfo, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -4776,15 +4295,13 @@ mod pin_tests {
         );
     }
 
+    /// Agent and server pins both show when present — no filter scoping
+    /// ([feedback chat-list-no-filter-mac-2026-11-10]).
     #[gpui::test]
-    fn the_filter_shows_only_the_pins_it_admits(cx: &mut TestAppContext) {
-        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+    fn pinned_agent_and_server_both_show_with_no_filter(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, _shell, vcx) = mount(cx);
         state.update(vcx, |s, cx| {
             s.pins = vec!["server:srv".into(), "agent:lium".into()];
-            cx.notify();
-        });
-        shell.update(vcx, |sh, cx| {
-            sh.list_filter = ListFilter::Agents;
             cx.notify();
         });
         vcx.run_until_parked();
@@ -4794,28 +4311,40 @@ mod pin_tests {
             "the pinned agent"
         );
         assert!(
-            vcx.debug_bounds("row-pin-srv").is_none(),
-            "Agents never shows the pinned server"
-        );
-        state.update(vcx, |s, cx| {
-            s.pins = vec!["server:srv".into()];
-            cx.notify();
-        });
-        vcx.run_until_parked();
-        assert!(
-            vcx.debug_bounds("sidebar-pinned-header").is_none(),
-            "no pin passes the filter → no section"
-        );
-        assert!(vcx.debug_bounds("sidebar-pinned-divider").is_none());
-        shell.update(vcx, |sh, cx| {
-            sh.list_filter = ListFilter::Servers;
-            cx.notify();
-        });
-        vcx.run_until_parked();
-        assert!(
             vcx.debug_bounds("row-pin-srv").is_some(),
-            "Servers shows it again"
+            "the pinned server shows alongside the agent"
         );
+        assert!(vcx.debug_bounds("sidebar-filter").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-all").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-agents").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-people").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-servers").is_none());
+    }
+
+    /// No filter UI; an agent, a people chat, and a server all appear as rows
+    /// together ([feedback chat-list-no-filter-mac-2026-11-10]).
+    #[gpui::test]
+    fn the_list_shows_agents_people_and_servers_together_with_no_filter(cx: &mut TestAppContext) {
+        let (_rt, _cmds, _state, shell, vcx) = mount(cx);
+        assert!(vcx.debug_bounds("sidebar-filter").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-all").is_none());
+        assert!(vcx.debug_bounds("sidebar-filter-agents").is_none());
+        assert!(vcx.debug_bounds("row-time-arbos").is_some(), "agent row");
+        assert!(vcx.debug_bounds("row-time-dm").is_some(), "people chat row");
+        // Server rows use ElementId, not a `row-time-*` debug selector; the
+        // list model is the observable that every kind is present together.
+        let ids: Vec<String> = shell.update(vcx, |sh, cx| {
+            super::list_entries(sh, cx)
+                .into_iter()
+                .map(|e| e.id().to_string())
+                .collect()
+        });
+        assert!(ids.contains(&"arbos".into()), "agent in the list: {ids:?}");
+        assert!(
+            ids.contains(&"dm".into()),
+            "people chat in the list: {ids:?}"
+        );
+        assert!(ids.contains(&"srv".into()), "server in the list: {ids:?}");
     }
 
     #[gpui::test]

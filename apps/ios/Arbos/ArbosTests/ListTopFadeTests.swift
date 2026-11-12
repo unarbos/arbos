@@ -4,8 +4,8 @@ import XCTest
 /// The list top fade ([feedback iphone-list-top-fade-2026-10-26], Jacob 2026-10-26 16:05 CR):
 /// on every iPhone list with a floating bar the fade layer starts at the physical top edge
 /// (top inset 0 — it ignores the safe area, the list does not) and is at least status bar +
-/// bar tall (+ the tab bar on Home), so scrolled rows never read through behind the status
-/// bar or around the tabs. Geometry from `ListTopFade.spec`, the same the view draws from.
+/// bar tall, so scrolled rows never read through behind the status bar. Geometry from
+/// `ListTopFade.spec`, the same the view draws from.
 final class ListTopFadeTests: XCTestCase {
     /// iPhone 17 / Air status bar (Dynamic Island) and the SE's.
     let statusBars: [CGFloat] = [59, 62, 20]
@@ -25,16 +25,17 @@ final class ListTopFadeTests: XCTestCase {
 
     func testHomeFloatsItsBarsOverTheRowsAndFadesOutWhereTheFirstRowStarts() {
         // Jacob 2026-10-28 ([feedback iphone-home-bar-fades-2026-10-28]) reversed the opaque block
-        // through the discs and the tabs: the bars float, the rows fade out under them. Opaque
-        // through the status bar and a hair past it only; clear exactly where the list's first
-        // row sits at rest (the band's end never moved). `HomeBarFadeTests` pins the curve.
+        // through the discs: the bars float, the rows fade out under them. Opaque through the
+        // status bar and a hair past it only; clear exactly where the list's first row sits at
+        // rest. Home no longer carries filter tabs ([feedback chat-list-no-filter-ios-2026-11-10]),
+        // so its top inset matches search mode. `HomeBarFadeTests` pins the curve.
         let status: CGFloat = 59
         let spec = ListTopFade.spec(.home, statusBar: status)
         XCTAssertEqual(spec.solid, status + HomeChrome.topSolid)
         XCTAssertLessThan(spec.solid, status + Controls.top, "the discs are not under the opaque part")
-        XCTAssertEqual(spec.height, status + HomeChrome.listTop)
-        XCTAssertEqual(HomeChrome.listTop, Controls.top + Controls.diameter + HomeChrome.filterBand + HomeChrome.fadeBand)
-        XCTAssertEqual(HomeChrome.filterBand, 44)
+        XCTAssertEqual(spec.height, status + HomeChrome.barOnlyListTop)
+        XCTAssertEqual(HomeChrome.listTop, HomeChrome.barOnlyListTop)
+        XCTAssertEqual(HomeChrome.barOnlyListTop, Controls.top + Controls.diameter + 12)
     }
 
     func testBarOnlyListsAndPanePagesFadeToWhereTheirContentStarts() {

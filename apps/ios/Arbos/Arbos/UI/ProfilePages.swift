@@ -384,20 +384,18 @@ enum PaneTabsMetrics {
     /// Between two capsules; half of it is hit area on either side so the row tiles.
     static let gap: CGFloat = 4
     /// Hit band above and below the capsule when the caller gives none: the whole tab is
-    /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
+    /// Apple's 44 pt tall.
     static let hitBand: CGFloat = 6
     static var hitHeight: CGFloat { pill + 2 * hitBand }
 }
 
-/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
-/// All | Agents | People | Servers).
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
 ///
 /// Every tab takes a tap over its WHOLE area — capsule, the band above and below it and half
-/// the gap to its neighbours — not only over the glyphs of its label. Jacob, 2026-10-28
-/// (TestFlight 202610281148575584): "can't click All". A `.plain` Button hit-tests only what
-/// its label draws: an unselected tab's capsule is `.clear`, so its hit area was the text's
-/// own box (≈ 22 × 20 pt for "All"); the selected one reached its 32 pt capsule. Now the
-/// label carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
+/// the gap to its neighbours — not only over the glyphs of its label. A `.plain` Button
+/// hit-tests only what its label draws: an unselected tab's capsule is `.clear`, so its hit
+/// area was the text's own box; the selected one reached its 32 pt capsule. Now the label
+/// carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
 struct PaneTabs: View {
     @Environment(\.theme) private var theme
     let tabs: [String]

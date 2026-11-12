@@ -30,10 +30,11 @@ final class HomeNavPushUITests: XCTestCase {
     }
 
     private func assertHome(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(app.buttons["Agents"].waitForExistence(timeout: settle),
-                      "Home's list filter is on screen", file: file, line: line)
-        XCTAssertTrue(app.buttons["People"].exists, file: file, line: line)
-        XCTAssertTrue(app.buttons["home-account"].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["home-account"].waitForExistence(timeout: settle),
+                      "Home's account circle is on screen", file: file, line: line)
+        XCTAssertTrue(app.buttons["home-new"].exists, "Home's + is on screen", file: file, line: line)
+        // Filter tabs are gone ([feedback chat-list-no-filter-ios-2026-11-10]).
+        XCTAssertFalse(app.buttons["Agents"].exists, "the list filter is gone", file: file, line: line)
     }
 
     private func assertGone(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
@@ -63,7 +64,7 @@ final class HomeNavPushUITests: XCTestCase {
         let settingsTab = app.buttons["Settings"].firstMatch
         XCTAssertTrue(credits.waitForExistence(timeout: settle) || settingsTab.exists,
                       "Settings content is on screen")
-        // Home's filter is covered / not the frontmost screen.
+        // Home's chrome is covered / not the frontmost screen.
         XCTAssertFalse(app.buttons["home-new"].isHittable, "Home's + is behind the pushed Settings")
     }
 
