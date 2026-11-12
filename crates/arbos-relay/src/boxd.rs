@@ -3,8 +3,7 @@
 //! make it, wake it and put it to sleep, and sleeps it itself after 15 idle minutes (§3.1).
 //!
 //! Off unless `ARBOS_BOXD_URL` is set. One daemon, on loopback: `boxes.node_id` and a second
-//! host are Phase 4, the resident/present admission split and the in-place move of the Docker
-//! `runsc` boxes are the rest of Phase 2.
+//! host are Phase 4, and the in-place move of the Docker `runsc` boxes is an operator's step.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
@@ -15,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use arbos_core::ids::now_ms;
@@ -35,6 +34,11 @@ const IDLE_MS: i64 = 15 * 60_000;
 const ROUTINE_HORIZON_MS: i64 = 20 * 60_000;
 /// §4.2: below this much free disk on the daemon's host no new box is made.
 const MIN_FREE_DISK_GB: f64 = 80.0;
+/// §4.2 `max_resident_boxes`: awake and waking boxes on the spec's 503 GB host.
+/// `ARBOS_BOXD_MAX_RESIDENT` sets it for another one.
+const MAX_RESIDENT: usize = 160;
+/// Error text of a wake on a full host where no awake box could be put to sleep to make room.
+pub const FULL: &str = "the host is full and every machine on it is busy";
 /// Shorter than this is not a secret anyone generated (the daemon's own rule).
 const MIN_TOKEN_LEN: usize = 32;
 /// The largest reply read from the daemon. A host status with a thousand boxes is ~150 KB.
@@ -45,6 +49,7 @@ const MAX_REPLY: usize = 4 << 20;
 pub struct Boxd {
     url: String,
     token: String,
+    max_resident: usize,
 }
 
 /// Every field the daemon sends is named in these, so a reply of any other shape is refused.
@@ -161,7 +166,15 @@ impl Boxd {
         };
         let file = var("ARBOS_BOXD_TOKEN_FILE")
             .context("ARBOS_BOXD_URL is set; ARBOS_BOXD_TOKEN_FILE must name the token file")?;
-        Self::new(&url, &file).map(Some)
+        let mut boxd = Self::new(&url, &file)?;
+        if let Some(n) = var("ARBOS_BOXD_MAX_RESIDENT") {
+            boxd.max_resident = n
+                .parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .with_context(|| format!("ARBOS_BOXD_MAX_RESIDENT must be a count, not {n}"))?;
+        }
+        Ok(Some(boxd))
     }
 
     /// The bearer goes over plain HTTP, so the daemon must be on loopback (mTLS to another host
@@ -188,6 +201,7 @@ impl Boxd {
         Ok(Self {
             url: format!("http://{addr}"),
             token,
+            max_resident: MAX_RESIDENT,
         })
     }
 
@@ -282,16 +296,17 @@ impl Boxd {
         Ok(true)
     }
 
-    async fn disk_free_gb(&self, http: &reqwest::Client) -> Result<f64> {
+    async fn host(&self, http: &reqwest::Client) -> Result<HostStatus> {
         let path = "/v1/host/status";
         let (status, bytes) = self
             .send(http, Method::GET, path, None, Duration::from_secs(30))
             .await?;
         let host: HostStatus = reply(path, status, &bytes)?;
-        if !host.disk_free_gb.is_finite() || host.disk_free_gb < 0.0 {
-            bail!("boxd {path}: free disk is not a size");
+        let size = |gb: f64| gb.is_finite() && gb >= 0.0;
+        if !size(host.disk_free_gb) || !host.mem_available_gb.is_none_or(size) {
+            bail!("boxd {path}: free disk or memory is not a size");
         }
-        Ok(host.disk_free_gb)
+        Ok(host)
     }
 }
 
@@ -313,7 +328,7 @@ pub async fn create_box(
     mcp_token: &str,
 ) -> Result<()> {
     let boxd = of(state)?;
-    let free = boxd.disk_free_gb(&state.http).await?;
+    let free = boxd.host(&state.http).await?.disk_free_gb;
     if free < MIN_FREE_DISK_GB {
         bail!("boxd host has {free:.0} GB of disk free; no new box below {MIN_FREE_DISK_GB:.0} GB");
     }
@@ -341,9 +356,116 @@ pub async fn create_box(
 
 /// Wake an existing box and record where it listens.
 pub async fn start_box(state: &AppState, user_id: &str, sb: &mut Sandbox) -> Result<()> {
+    make_room(state, user_id).await?;
     sb.box_url = Some(of(state)?.wake(&state.http, user_id).await?);
     sb.last_started_at = Some(now_ms());
     state.db.upsert_box(sb)?;
+    Ok(())
+}
+
+// ---- admission (§4.2) ------------------------------------------------------------------------
+
+/// The `boxd` half of `fleet::Capacity`. `resident` boxes hold memory and are capped; `present`
+/// ones hold only disk, and free disk is all that gates a new box.
+#[derive(Debug, Clone, Serialize)]
+pub struct Capacity {
+    pub max_resident: usize,
+    /// Awake and waking boxes, as the relay sees them.
+    pub resident: usize,
+    /// Boxes with a disk on the host, asleep or not, as the daemon counts them.
+    pub present: u64,
+    pub mem_available_gb: Option<f64>,
+    pub disk_free_gb: f64,
+    /// A new box may be made right now.
+    pub has_room: bool,
+}
+
+/// `None` when the provider is off, or its daemon gave no answer to count from.
+pub async fn capacity(state: &AppState) -> Option<Capacity> {
+    let boxd = state.cfg.boxd.as_ref()?;
+    let host = boxd
+        .host(&state.http)
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "boxd: no host status"))
+        .ok()?;
+    Some(Capacity {
+        max_resident: boxd.max_resident,
+        resident: resident(state, "").await,
+        present: host.present_boxes,
+        mem_available_gb: host.mem_available_gb,
+        disk_free_gb: host.disk_free_gb,
+        has_room: host.disk_free_gb >= MIN_FREE_DISK_GB,
+    })
+}
+
+/// `boxd` boxes that are awake or waking, not counting `except` (the one about to wake).
+async fn resident(state: &AppState, except: &str) -> usize {
+    let mut n = 0;
+    // Fail closed: boxes that cannot be counted leave no room.
+    let Ok(rows) = state.db.list_boxes() else {
+        return usize::MAX;
+    };
+    for b in rows {
+        if b.provider == boxes::Provider::Boxd.as_str()
+            && b.user_id != except
+            && matches!(
+                state.box_state(&b.user_id).await.0,
+                BoxState::Awake | BoxState::Waking
+            )
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The resident gate, pure: under the cap, and the host above its memory floor where the daemon
+/// can tell (it cannot off Linux).
+pub fn room_to_wake(resident: usize, max: usize, mem_gb: Option<f64>, min_mem_gb: f64) -> bool {
+    resident < max && mem_gb.is_none_or(|m| m >= min_mem_gb)
+}
+
+/// §4.2: a box that wakes on a full host does not wait in a line; the least-recently-active
+/// awake box with no turn running is put to sleep first. One out, one in.
+async fn make_room(state: &AppState, user_id: &str) -> Result<()> {
+    let boxd = of(state)?;
+    let host = boxd.host(&state.http).await?;
+    // The memory floor is the one the gVisor fleet evicts at (`ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`).
+    if room_to_wake(
+        resident(state, user_id).await,
+        boxd.max_resident,
+        host.mem_available_gb,
+        state.cfg.fleet.evict_min_available_gb,
+    ) {
+        return Ok(());
+    }
+    let now = now_ms();
+    let mut idle = crate::fleet::candidates(state, boxes::Provider::Boxd).await;
+    idle.retain(|c| c.user_id != user_id);
+    while let Some(victim) = crate::fleet::pick_eviction(&idle) {
+        match sleep_box(state, &victim, now).await {
+            Ok(()) => {
+                tracing::info!(user_id = %victim, for_user = %user_id, "boxd: host full; idle box put to sleep to make room");
+                return Ok(());
+            }
+            // agentd knows of a job or a send the relay does not: the next one.
+            Err(e) if e.to_string() == BUSY => idle.retain(|c| c.user_id != victim),
+            Err(e) => return Err(e),
+        }
+    }
+    // Owner's call: with nothing to sleep the wake is refused (and retried by the wake job)
+    // rather than let past the cap.
+    bail!(FULL)
+}
+
+/// Sleep one box, and wake it again if a client pushed a row for it since `since`: that row has
+/// no box to take it.
+async fn sleep_box(state: &AppState, user_id: &str, since: i64) -> Result<()> {
+    boxes::stop_box(state, user_id, false).await?;
+    let pushed = state.last_client_push.lock().await.get(user_id).copied();
+    if pushed.is_some_and(|t| t >= since) {
+        boxes::ensure_awake(state, user_id, "rows pending after box sleep").await;
+    }
     Ok(())
 }
 
@@ -427,15 +549,8 @@ async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String, i64>) {
         }
         // agentd has the last word on the first two conditions (a turn, a waiting send, a job):
         // the daemon asks it, and a refusal restarts this box's clock.
-        match boxes::stop_box(state, &user_id, false).await {
-            Ok(()) => {
-                tracing::info!(%user_id, "boxd: idle box put to sleep");
-                // A row a client pushed while the box was going down has no box to take it.
-                let pushed = state.last_client_push.lock().await.get(&user_id).copied();
-                if pushed.is_some_and(|t| t >= now) {
-                    boxes::ensure_awake(state, &user_id, "rows pending after box sleep").await;
-                }
-            }
+        match sleep_box(state, &user_id, now).await {
+            Ok(()) => tracing::info!(%user_id, "boxd: idle box put to sleep"),
             Err(e) if e.to_string() == BUSY => {
                 tracing::debug!(%user_id, "boxd: idle box is busy after all; not slept");
             }
@@ -526,8 +641,12 @@ mod tests {
             .fallback(answer)
             .with_state(fake.clone());
         tokio::spawn(async move { axum::serve(l, app).await });
-        let token = token.to_owned();
-        (fake, Boxd { url, token })
+        let boxd = Boxd {
+            url,
+            token: token.to_owned(),
+            max_resident: MAX_RESIDENT,
+        };
+        (fake, boxd)
     }
 
     /// A relay whose `boxd` provider points at a fake daemon, and one user with a project.
@@ -550,7 +669,7 @@ mod tests {
             "http://10.207.0.2:7788"
         );
         assert!(boxd.sleep(&http, "u_a").await.unwrap());
-        assert_eq!(boxd.disk_free_gb(&http).await.unwrap(), 900.0);
+        assert_eq!(boxd.host(&http).await.unwrap().disk_free_gb, 900.0);
         let calls = fake.calls.lock().unwrap().clone();
         assert_eq!(
             calls[0],
@@ -622,8 +741,12 @@ mod tests {
             let mut status = usual("status").1;
             status["disk_free_gb"] = disk.clone();
             fake.answer("status", 200, status);
-            assert!(boxd.disk_free_gb(&http).await.is_err(), "{disk}");
+            assert!(boxd.host(&http).await.is_err(), "{disk}");
         }
+        let mut status = usual("status").1;
+        status["mem_available_gb"] = json!(-1.0);
+        fake.answer("status", 200, status);
+        assert!(boxd.host(&http).await.is_err());
     }
 
     /// agentd refusing is not an error and not a sleep; any other refusal is an error, with the
@@ -770,7 +893,11 @@ mod tests {
         boxes::start_box(&state, &user).await.unwrap();
         let op = |p: &String| p.rsplit('/').next().unwrap().to_owned();
         let ops: Vec<String> = fake.paths().iter().map(op).collect();
-        assert_eq!(ops, ["status", "ensure", "wake", "sleep", "sleep", "wake"]);
+        // The host is asked before a create (its disk) and before every wake (its room).
+        assert_eq!(
+            ops,
+            ["status", "ensure", "status", "wake", "sleep", "sleep", "status", "wake"]
+        );
     }
 
     /// A full disk, a daemon that refuses, or no daemon configured at all: no box, and no row
@@ -800,6 +927,141 @@ mod tests {
         let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
         assert!(e.unwrap_err().to_string().contains("ARBOS_BOXD_URL"));
         assert!(state.db.user_box(&user).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_wake_has_room_under_the_cap_and_above_the_memory_floor() {
+        assert!(room_to_wake(159, 160, Some(64.0), 64.0));
+        assert!(!room_to_wake(160, 160, Some(400.0), 64.0), "the cap");
+        assert!(!room_to_wake(0, 160, Some(63.9), 64.0), "the memory floor");
+        assert!(room_to_wake(0, 160, None, 64.0), "no /proc to read");
+        assert!(!room_to_wake(usize::MAX, 160, None, 64.0), "uncounted");
+    }
+
+    /// A relay with no `boxd` provider counts what it counted before: the gVisor rows, and
+    /// nothing new in what `GET /admin/fleet` shows. With the provider on, a `boxd` box is not
+    /// one of those rows; it is counted on its own, awake or present.
+    #[tokio::test]
+    async fn capacity_without_the_provider_is_what_it_was() {
+        let (state, _fake, user) = relay().await;
+        let off = test_state(AuthMode::Github);
+        for st in [&state, &off] {
+            let mut row = Sandbox {
+                user_id: "u_gvisor".into(),
+                provider: "gvisor".into(),
+                sandbox_id: None,
+                daytona_state: None,
+                device_id: "box:g".into(),
+                box_token_hash: "h".into(),
+                mcp_token: "m".into(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            };
+            st.db.upsert_box(&row).unwrap();
+            row.device_id = "box:b".into();
+            row.user_id = user.clone();
+            row.provider = "boxd".into();
+            st.db.upsert_box(&row).unwrap();
+            st.set_box_state(&user, BoxState::Waking, None).await;
+        }
+        let cap = crate::fleet::capacity(&off).await;
+        assert_eq!((cap.resident, cap.max_boxes), (1, 80));
+        assert!(cap.boxd.is_none());
+        let shown = serde_json::to_value(&cap).unwrap();
+        let mut keys: Vec<&str> = shown.as_object().unwrap().keys().map(|k| &**k).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "disk_free_gb",
+                "has_room",
+                "max_boxes",
+                "min_free_disk_gb",
+                "resident",
+                "waitlist"
+            ]
+        );
+
+        let cap = crate::fleet::capacity(&state).await;
+        assert_eq!((cap.resident, cap.max_boxes), (1, 80));
+        let boxd = cap.boxd.expect("the provider is on");
+        assert_eq!(
+            (boxd.resident, boxd.present, boxd.max_resident),
+            (1, 1, 160)
+        );
+        assert!(boxd.has_room);
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        assert_eq!(capacity(&state).await.unwrap().resident, 0);
+    }
+
+    /// At the cap a waking box takes the place of the least recently active awake one; a box
+    /// mid-turn is never the one, and with nothing to sleep the wake is refused.
+    #[tokio::test]
+    async fn a_wake_on_a_full_host_sleeps_the_least_recently_active_idle_box() {
+        let (mut state, fake, a) = relay().await;
+        let cfg = Arc::get_mut(&mut state.cfg).expect("one holder");
+        cfg.boxd.as_mut().unwrap().max_resident = 2;
+        let (b, _) = person(&state, 9701);
+        let (c, _) = person(&state, 9702);
+        let sleeps = |user: &str| {
+            let path = format!("/v1/boxes/{user}/sleep");
+            fake.paths().iter().filter(|p| **p == path).count()
+        };
+        for user in [&a, &b] {
+            boxes::create_box(&state, user, Provider::Boxd, None)
+                .await
+                .unwrap();
+            state.set_box_state(user, BoxState::Awake, None).await;
+        }
+        assert_eq!(
+            sleeps(&a) + sleeps(&b),
+            0,
+            "two boxes fit under a cap of two"
+        );
+        // `a` was used last, so `b` is the one that goes.
+        let mut pushes = state.last_client_push.lock().await;
+        pushes.insert(a.clone(), now_ms() + 60_000);
+        drop(pushes);
+        boxes::create_box(&state, &c, Provider::Boxd, None)
+            .await
+            .unwrap();
+        assert_eq!((sleeps(&a), sleeps(&b)), (0, 1));
+        assert_eq!(state.box_state(&b).await.0, BoxState::Asleep);
+        assert_eq!(state.box_state(&a).await.0, BoxState::Awake);
+        state.set_box_state(&c, BoxState::Awake, None).await;
+
+        // `a` is the least recently active now only if its turn is not counted: it is running
+        // one, so `c` goes instead.
+        state.last_client_push.lock().await.clear();
+        let mut row = state.db.user_box(&a).unwrap().unwrap();
+        row.last_started_at = Some(1);
+        row.last_seen_at = None;
+        state.db.upsert_box(&row).unwrap();
+        state.turn_running.lock().await.insert(a.clone(), now_ms());
+        boxes::start_box(&state, &b).await.unwrap();
+        assert_eq!((sleeps(&a), sleeps(&c)), (0, 1));
+        state.set_box_state(&b, BoxState::Awake, None).await;
+
+        // Both awake boxes are busy, one by the relay's account and one by agentd's: `c` stays
+        // asleep, and the daemon is not asked to wake it.
+        fake.answer("sleep", 409, json!({ "error": "busy: a job is running" }));
+        let wakes = fake.paths().len();
+        let full = boxes::start_box(&state, &c).await.unwrap_err();
+        assert_eq!(full.to_string(), FULL);
+        assert_eq!(sleeps(&b), 2, "agentd was asked, and said busy");
+        assert!(!fake.paths()[wakes..].iter().any(|p| p.ends_with("/wake")));
+        assert_eq!(state.box_state(&b).await.0, BoxState::Awake);
+
+        // A daemon that cannot say how the host is doing wakes nothing.
+        fake.answer("status", 500, json!({ "error": "runsc list failed" }));
+        assert!(boxes::start_box(&state, &c).await.is_err());
+        assert!(!fake.paths()[wakes..].iter().any(|p| p.ends_with("/wake")));
     }
 
     /// One supervisor tick: the idle box sleeps, the one mid-turn does not and loses its clock,
