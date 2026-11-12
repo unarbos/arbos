@@ -138,6 +138,13 @@ final class SearchSettingsTests: XCTestCase {
         }
         XCTAssertFalse(index.contains { $0.item == SettingsItem.updates })
         XCTAssertTrue(targets("updates").contains(GlobalSearch.Target.setting(.page(.about))), "the iPhone's updates live on About")
+        // Connected apps stays off the Settings list (and out of search) until
+        // the feature ships ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
+        XCTAssertFalse(SettingsView.listedPages.contains(.connectedApps),
+                       "Connected apps must not appear in Settings until implemented")
+        XCTAssertFalse(index.contains { $0.item == SettingsItem.connectedApps })
+        XCTAssertTrue(targets("connected apps").isEmpty)
+        XCTAssertTrue(targets("connectors").isEmpty)
         // Not indexed on purpose: Sign out, Pause all secrets.
         XCTAssertTrue(targets("sign out").isEmpty)
         XCTAssertTrue(targets("pause").isEmpty)
