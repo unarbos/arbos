@@ -391,10 +391,12 @@ dependencies = [
  "hmac 0.12.1",
  "nix 0.29.0",
  "reqwest 0.12.28",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

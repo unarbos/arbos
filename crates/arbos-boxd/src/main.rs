@@ -8,18 +8,22 @@
 //! and `wake` again; off without `ARBOS_BOXD_S3_ENDPOINT`), and reports the host (`status`).
 //!
 //! It does what it is asked and decides nothing: when a box sleeps, is archived or is fetched
-//! ahead of a wake is the relay's (`arbos-relay/src/boxd.rs`). More than one node (mTLS) is a
-//! later phase.
+//! ahead of a wake is the relay's (`arbos-relay/src/boxd.rs`), and so is which host a box is
+//! made on.
 //!
-//! It listens on loopback only and every request carries a bearer token; see the README for
-//! the operator's steps.
+//! It listens on loopback, and every request carries a bearer token. A host whose relay is
+//! elsewhere (docs/box-scaling.md Phase 4) opens a second door with `ARBOS_BOXD_TLS_LISTEN`,
+//! which only a holder of a certificate from the operator's CA gets through ([`tls`]). See the
+//! README for the operator's steps.
 
 mod boxes;
 mod cold;
 mod http;
 mod oci;
 mod sys;
+mod tls;
 
+use std::future::IntoFuture;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -42,19 +46,31 @@ async fn main() -> Result<()> {
     let port: u16 = env("ARBOS_BOXD_PORT", "7790")
         .parse()
         .context("ARBOS_BOXD_PORT")?;
+    let subnet = env("ARBOS_BOXD_SUBNET", boxes::SUBNET);
+    let tls = tls::from_env()?;
     let cfg = boxes::Cfg {
         root: env("ARBOS_BOXD_ROOT", "/var/lib/arbos-boxd"),
         run: env("ARBOS_BOXD_RUNSC_ROOT", "/var/run/arbos-runsc"),
         platform: env("ARBOS_BOXD_PLATFORM", "systrap"),
+        subnet: boxes::parse_subnet(&subnet).with_context(|| {
+            format!("ARBOS_BOXD_SUBNET must be a private /16 like 10.208.0.0/16, not {subnet}")
+        })?,
         store: cold::Store::from_env()?.map(Arc::new),
     };
     tracing::info!(cold_tier = cfg.store.is_some(), "arbos-boxd starting");
     let boxd = Arc::new(boxes::Boxd::new(cfg, Arc::new(sys::Host::new()?)));
     boxd.init().await.context("host setup")?;
-    // Loopback, always: the relay is on this host, and a box reaches the host only over the
+    // Loopback, always: a relay on this host uses it, and a box reaches the host only over the
     // bridge.
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     tracing::info!(port, "arbos-boxd listening on loopback");
-    axum::serve(listener, http::router(boxd, &token)).await?;
+    let app = http::router(boxd, &token);
+    let plain = axum::serve(listener, app.clone()).into_future();
+    let Some(tls) = tls else {
+        return Ok(plain.await?);
+    };
+    let listener = tls.bind().await?;
+    tracing::info!(addr = %listener.local, "arbos-boxd listening for a relay with a certificate");
+    tokio::try_join!(plain, axum::serve(listener, app).into_future())?;
     Ok(())
 }

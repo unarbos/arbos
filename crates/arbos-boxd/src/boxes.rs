@@ -35,9 +35,19 @@ pub const GIB: u64 = 1 << 30;
 /// The sizes a `work.img` moves through (docs/box-scaling.md §3.3).
 pub const TIERS_GIB: [u64; 3] = [8, 32, 128];
 
-/// The bridge every box's veth joins, and its /16. The bridge is `.0.1`.
+/// The bridge every box's veth joins. It is `.0.1` of the host's /16 ([`Cfg::subnet`]).
 const BRIDGE: &str = "arbos-boxd0";
-const SUBNET: [u8; 2] = [10, 207];
+/// The /16 of a host that is not told another.
+pub const SUBNET: &str = "10.207.0.0/16";
+
+/// `10.208.0.0/16` → `[10, 208]`. A private /16 and nothing else.
+pub fn parse_subnet(s: &str) -> Option<[u8; 2]> {
+    let ip: Ipv4Addr = s.strip_suffix("/16")?.parse().ok()?;
+    let [a, b, 0, 0] = ip.octets() else {
+        return None;
+    };
+    ip.is_private().then_some([a, b])
+}
 
 /// How long a clean stop waits for agentd after SIGTERM. agentd gives its own shutdown 45 s.
 const STOP_GRACE: Duration = Duration::from_secs(50);
@@ -160,6 +170,10 @@ pub struct Cfg {
     pub run: String,
     /// runsc `--platform`. `systrap` in production; a knob because not every kernel has it.
     pub platform: String,
+    /// The first two octets of the /16 the bridge and the boxes take their addresses from. A
+    /// knob because the relay dials a box by that address: with more than one host no two may
+    /// share a subnet (docs/box-scaling.md Phase 4).
+    pub subnet: [u8; 2],
     /// The cold tier's bucket, or `None` while the tier is off.
     pub store: Option<Arc<Store>>,
 }
@@ -306,7 +320,8 @@ impl Boxd {
         std::fs::write(format!("{root}/resolv.conf"), RESOLV_CONF)?;
         std::fs::write(format!("{root}/hosts"), HOSTS)?;
         if !self.holds(&["ip", "link", "show", BRIDGE]).await? {
-            let gateway = format!("{}.{}.0.1/16", SUBNET[0], SUBNET[1]);
+            let [a, b] = self.cfg.subnet;
+            let gateway = format!("{a}.{b}.0.1/16");
             self.run(&["ip", "link", "add", BRIDGE, "type", "bridge"])
                 .await?;
             self.run(&["ip", "addr", "add", &gateway, "dev", BRIDGE])
@@ -428,8 +443,9 @@ impl Boxd {
             .filter_map(|e| std::fs::read_to_string(e.path().join("ip")).ok())
             .filter_map(|s| s.trim().parse().ok())
             .collect();
+        let [a, b] = self.cfg.subnet;
         let ip = (2..=65534u16)
-            .map(|n| Ipv4Addr::new(SUBNET[0], SUBNET[1], (n >> 8) as u8, n as u8))
+            .map(|n| Ipv4Addr::new(a, b, (n >> 8) as u8, n as u8))
             .find(|ip| !taken.contains(ip))
             .ok_or_else(|| refuse(StatusCode::INSUFFICIENT_STORAGE, "no box address is free"))?;
         Ok(write_private(&p.ip, ip.to_string().as_bytes())?)
@@ -801,7 +817,8 @@ impl Boxd {
     async fn net_up(&self, ns: &str, ip: Ipv4Addr) -> anyhow::Result<()> {
         let veth = Self::veth(ip);
         let addr = format!("{ip}/16");
-        let gateway = format!("{}.{}.0.1", SUBNET[0], SUBNET[1]);
+        let [a, b] = self.cfg.subnet;
+        let gateway = format!("{a}.{b}.0.1");
         // What a wake that died half way left behind.
         self.net_down(ns, ip).await;
         for argv in [
@@ -1129,6 +1146,7 @@ pub mod tests {
             run: format!("{root}/run"),
             platform: "systrap".into(),
             root: root.clone(),
+            subnet: parse_subnet(SUBNET).unwrap(),
             store: store.map(Arc::new),
         };
         let boxd = Arc::new(Boxd::new(cfg, fake.clone()));

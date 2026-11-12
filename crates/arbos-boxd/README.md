@@ -4,8 +4,9 @@ The root daemon on a compute host that runs each user's box as an OCI bundle dir
 `runsc` (docs/box-scaling.md §3 and §4.1). The relay calls it for boxes on its
 `boxd` provider, which is off unless the relay has `ARBOS_BOXD_URL` and `ARBOS_BOXD_TOKEN_FILE`
 (a copy of the token below that the relay's user can read, mode 0600). The cold tier is off
-unless the daemon has `ARBOS_BOXD_S3_ENDPOINT` ([below](#the-cold-tier)). Multi-node is a later
-phase.
+unless the daemon has `ARBOS_BOXD_S3_ENDPOINT` ([below](#the-cold-tier)). A daemon on a host
+other than the relay's is reached over mutual TLS ([below](#more-than-one-host)), off unless the
+relay has `ARBOS_BOXD_NODES_FILE`.
 
 ## What the host needs
 
@@ -92,6 +93,8 @@ Settings are environment variables, all optional:
 | `ARBOS_BOXD_TOKEN_FILE` | `/etc/arbos-boxd/token` |
 | `ARBOS_BOXD_PORT` | `7790` (always on `127.0.0.1`) |
 | `ARBOS_BOXD_PLATFORM` | `systrap` |
+| `ARBOS_BOXD_SUBNET` | `10.207.0.0/16`: the bridge is `.0.1` and the boxes take the rest. A private /16, set before the host's first box. |
+| `ARBOS_BOXD_TLS_LISTEN`, `_CERT_FILE`, `_KEY_FILE`, `_CLIENT_CA_FILE` | unset: loopback only ([more than one host](#more-than-one-host)) |
 | `ARBOS_BOXD_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_CREDENTIALS_FILE` | unset: no cold tier |
 
 A box's sandbox, network namespace and cgroup are all named `arbos-box-<user_id>.`, with the
@@ -171,6 +174,72 @@ encrypted by the daemon: use a private bucket and the store's own encryption at 
 
 Turning the tier off again (unsetting the endpoint) with boxes still cold leaves those boxes
 unable to wake until it is back: their wake answers 502 and says so.
+
+## More than one host
+
+docs/box-scaling.md Phase 4. The relay's own host is `node-0`, as above. Every other host runs
+the same daemon, and the relay is told of it in a file. A new box is made on the node with the
+most free resident slots (its cap less its awake boxes; none while it is under the memory
+floor), then the most free disk, then the first listed; a node under 80 GB of free disk, or one
+that does not answer, takes none. `boxes.node_id` says where a box is, and it stays there: its
+cap, its memory floor and its cold tier are that node's, and nothing moves a box between nodes.
+While a node is down its boxes fail to wake with `boxd node-1 did not answer ...`, and are not
+made anew anywhere else.
+
+**Certificates.** One private CA for the pool, kept off the hosts; from it a certificate for
+each node, naming the address the relay dials, and one for the relay:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out ca.key
+openssl req -x509 -new -key ca.key -out ca.pem -subj /CN=arbos-boxd-ca -days 3650
+for name in node-1 relay; do
+  openssl ecparam -name prime256v1 -genkey -noout -out $name.key
+  openssl req -new -key $name.key -out $name.csr -subj /CN=$name
+done
+echo 'subjectAltName=IP:10.99.0.2' > node-1.ext    # the node's WireGuard address
+openssl x509 -req -in node-1.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out node-1.pem -days 825 -extfile node-1.ext
+openssl x509 -req -in relay.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out relay.pem -days 825
+```
+
+**On the node** (`node-1`), beside everything in [What the host needs](#what-the-host-needs):
+
+| Variable | |
+| --- | --- |
+| `ARBOS_BOXD_TLS_LISTEN` | `10.99.0.2:7791`: the address the relay dials, on the private link. Setting it opens the second door; the daemon does not start if a file below is missing. Loopback stays open as well. |
+| `ARBOS_BOXD_TLS_CERT_FILE`, `ARBOS_BOXD_TLS_KEY_FILE` | `node-1.pem` and `node-1.key`. The key is a plain file of mode 0600. |
+| `ARBOS_BOXD_TLS_CLIENT_CA_FILE` | `ca.pem`. A caller without a certificate from it is cut off in the handshake; with one, it is still asked for the bearer. |
+| `ARBOS_BOXD_SUBNET` | A /16 no other node has, `10.208.0.0/16`. The relay refuses to configure two nodes on one subnet, and refuses a box whose address is outside its node's. |
+
+TLS is 1.3 only. No file may be a link or writable by anyone but its owner.
+
+**On the relay**, `ARBOS_BOXD_NODES_FILE` names a JSON file only its owner can write:
+
+```json
+[{ "id": "node-1", "url": "https://10.99.0.2:7791",
+   "token_file": "/etc/arbos-relay/node-1.token",
+   "ca_file": "/etc/arbos-relay/boxd-ca.pem",
+   "cert_file": "/etc/arbos-relay/relay.pem", "key_file": "/etc/arbos-relay/relay.key",
+   "box_subnet": "10.208.0.0/16", "max_resident": 160 }]
+```
+
+`id` is what `boxes.node_id` holds, so it is never reused for another host. `token_file` is the
+relay's copy of that node's token and `key_file` the relay's key, both mode 0600. The node's
+certificate must chain to `ca_file` and name the host in `url`; no other CA is trusted for it,
+and a node that fails the check is a node that did not answer. `max_resident` defaults to 160.
+An `http://127.0.0.1:<port>` url with no certificate files is taken too, for a second daemon on
+the relay's own host. Anything else in the file stops the relay at start.
+
+**The network between them** is the operator's (the spec's WireGuard link), and three things
+have to route over it:
+
+- the relay to the node's `ARBOS_BOXD_TLS_LISTEN` address;
+- the relay to the node's box subnet (`10.208.0.0/16` via `10.99.0.2`): the relay calls agentd
+  in a box at the box's own address, in plain HTTP, so this path must be the private link;
+- a box on the node to the relay's `ARBOS_RELAY_PUBLIC_URL`, with the node's NAT rule left off
+  for that destination or the relay's firewall open to the node.
+
+This has been tested with both ends on one machine (`cargo test -p arbos-boxd tls`,
+`cargo test -p arbos-relay boxd`), and **not yet between two real hosts**.
 
 ## Moving a Docker `runsc` box here
 
