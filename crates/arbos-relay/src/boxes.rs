@@ -663,9 +663,8 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
             crate::fleet::stop_box(&name, 30).await?;
         }
         Provider::Boxd => {
-            // The daemon has no forced stop yet: a box agentd calls busy keeps running, `force`
-            // or not, and the caller is told so.
-            crate::boxd::stop_box(state, user_id).await?;
+            // Unforced, a box agentd calls busy keeps running, and the caller is told so.
+            crate::boxd::stop_box(state, user_id, force).await?;
         }
     }
     sb.last_stopped_at = Some(now_ms());

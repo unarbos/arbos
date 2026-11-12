@@ -1508,7 +1508,14 @@ pub async fn admin_delete_user_box(
     // A row left on the retired provider loses its row here and nothing else: deleting the
     // sandbox itself is an operator step, outside the relay.
     if sb.provider != boxes::RETIRED_PROVIDER {
-        let _ = boxes::stop_box(&state, &id, true).await;
+        let stopped = boxes::stop_box(&state, &id, true).await;
+        if sb.provider == Provider::Boxd.as_str() {
+            // Only the daemon can stop this box, and it finds it by the user id in this row: a
+            // box that did not stop keeps its row. Stopped, it holds no memory, no checkpoint
+            // and no loop device; its /work image stays on the host, as a gVisor box's does.
+            stopped.map_err(|e| (StatusCode::BAD_GATEWAY, format!("box stop: {e}")))?;
+            deleted_sandbox = sb.sandbox_id.clone();
+        }
     }
     if sb.provider == "gvisor" {
         // The container goes; the user's /work image stays on disk (D89: never delete user data).

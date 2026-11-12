@@ -284,9 +284,18 @@ impl Boxd {
     }
 
     /// Stop or checkpoint the box and release its disk. `None` is agentd refusing because the
-    /// box is busy: nothing happened to it.
-    async fn sleep(&self, http: &reqwest::Client, user_id: &str) -> Result<Option<Slept>> {
-        let path = box_path(user_id, "sleep")?;
+    /// box is busy: nothing happened to it. With `force` agentd is not asked and nothing that
+    /// runs in the box is kept.
+    async fn sleep(
+        &self,
+        http: &reqwest::Client,
+        user_id: &str,
+        force: bool,
+    ) -> Result<Option<Slept>> {
+        let mut path = box_path(user_id, "sleep")?;
+        if force {
+            path.push_str("?force=true");
+        }
         // agentd gets 50 s to stop cleanly, and a checkpoint writes ~0.8 s per GB after that.
         let (status, bytes) = self
             .send(http, Method::POST, &path, None, Duration::from_secs(180))
@@ -375,9 +384,10 @@ pub async fn start_box(state: &AppState, user_id: &str, sb: &mut Sandbox) -> Res
 
 /// Put a box to sleep and keep what the daemon said of it: how it sleeps, and its storage split
 /// (§3.3: the Machine card is to be served from this without waking the box). [`BUSY`] when
-/// agentd refused: the daemon has no forced stop yet, and the box keeps running.
-pub async fn stop_box(state: &AppState, user_id: &str) -> Result<()> {
-    let Some(slept) = of(state)?.sleep(&state.http, user_id).await? else {
+/// agentd refused and the box keeps running, which `force` (the user's Stop, an operator's
+/// delete) does not let it do.
+pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()> {
+    let Some(slept) = of(state)?.sleep(&state.http, user_id, force).await? else {
         bail!(BUSY);
     };
     // The split is agentd's: there is none from a box that was not running to be asked.
@@ -650,7 +660,7 @@ mod tests {
     /// A daemon that answers what `arbos-boxd` answers (its README), unless told otherwise.
     #[derive(Default)]
     struct Fake {
-        /// Every authenticated request: path and body.
+        /// Every authenticated request: path (and query, if any) and body.
         calls: Mutex<Vec<(String, Value)>>,
         /// Replies that differ from the daemon's usual one, by the last path segment.
         replies: Mutex<HashMap<&'static str, (u16, Value)>>,
@@ -691,11 +701,12 @@ mod tests {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         let path = req.uri().path().to_owned();
+        let req_uri = req.uri().to_string();
         let bytes = axum::body::to_bytes(req.into_body(), 1 << 20)
             .await
             .unwrap();
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        fake.calls.lock().unwrap().push((path.clone(), body));
+        fake.calls.lock().unwrap().push((req_uri, body));
         let op = path.rsplit('/').next().unwrap_or_default();
         let told = fake.replies.lock().unwrap().get(op).cloned();
         let (status, body) = told.unwrap_or_else(|| usual(op));
@@ -738,7 +749,7 @@ mod tests {
             boxd.wake(&http, "u_a").await.unwrap(),
             "http://10.207.0.2:7788"
         );
-        assert!(boxd.sleep(&http, "u_a").await.unwrap().is_some());
+        assert!(boxd.sleep(&http, "u_a", false).await.unwrap().is_some());
         assert_eq!(boxd.host(&http).await.unwrap().disk_free_gb, 900.0);
         let calls = fake.calls.lock().unwrap().clone();
         assert_eq!(
@@ -776,7 +787,7 @@ mod tests {
         let long = "a".repeat(65);
         for id in ["", "a/b", "..", "a b", "a%2fb", "a.b", long.as_str()] {
             assert!(boxd.wake(&http, id).await.is_err(), "{id:?}");
-            assert!(boxd.sleep(&http, id).await.is_err(), "{id:?}");
+            assert!(boxd.sleep(&http, id, false).await.is_err(), "{id:?}");
         }
         assert!(fake.paths().is_empty());
     }
@@ -803,7 +814,7 @@ mod tests {
             assert!(boxd.wake(&http, "u_a").await.is_err(), "{wake}");
         }
         fake.answer("sleep", 200, json!({ "state": "warm" }));
-        assert!(boxd.sleep(&http, "u_a").await.is_err());
+        assert!(boxd.sleep(&http, "u_a", false).await.is_err());
         fake.answer("ensure", 200, json!({ "created": true, "size_gb": 9 }));
         let env = BTreeMap::new();
         assert!(boxd.ensure(&http, "u_a", "1.0", &env).await.is_err());
@@ -826,14 +837,18 @@ mod tests {
         let (fake, boxd) = served(TOKEN).await;
         let http = reqwest::Client::new();
         fake.answer("sleep", 409, json!({ "error": "busy: a turn is running" }));
-        assert!(boxd.sleep(&http, "u_a").await.unwrap().is_none());
+        assert!(boxd.sleep(&http, "u_a", false).await.unwrap().is_none());
         fake.answer("sleep", 404, json!({ "error": "x".repeat(5000) }));
-        let e = boxd.sleep(&http, "u_a").await.unwrap_err().to_string();
+        let e = boxd
+            .sleep(&http, "u_a", false)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("404") && e.len() < 300, "{e}");
         fake.answer("sleep", 502, json!({ "error": "agentd did not answer" }));
-        assert!(boxd.sleep(&http, "u_a").await.is_err());
+        assert!(boxd.sleep(&http, "u_a", false).await.is_err());
         fake.answer("sleep", 409, json!("busy"));
-        assert!(boxd.sleep(&http, "u_a").await.is_err());
+        assert!(boxd.sleep(&http, "u_a", false).await.is_err());
     }
 
     /// The relay does not start with a daemon that is not on loopback, or a token file others
@@ -1089,6 +1104,44 @@ mod tests {
             Some((NODE.into(), "warm".into(), Some("{}".into())))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `DELETE /admin/users/{id}/box` is the admin's alone, stops the box for good on the host
+    /// (forced: a busy box too, and no checkpoint kept) and only then drops the row. A box the
+    /// daemon did not stop keeps its row, or nothing could stop it afterwards.
+    #[tokio::test]
+    async fn an_admin_delete_stops_the_box_on_the_host_before_the_row_goes() {
+        use axum::extract::Path;
+        let (state, fake, user) = relay().await;
+        let (_, device) = person(&state, 9701);
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        let delete =
+            |who| crate::api::admin_delete_user_box(State(state.clone()), who, Path(user.clone()));
+        let before = fake.paths().len();
+
+        let refused = delete(device).await.unwrap_err();
+        assert_eq!(refused, (StatusCode::FORBIDDEN, "admin only".to_owned()));
+        assert_eq!(
+            fake.paths().len(),
+            before,
+            "nothing was asked of the daemon"
+        );
+
+        fake.answer("sleep", 500, json!({ "error": "umount failed" }));
+        let failed = delete(crate::auth::Principal::Admin).await.unwrap_err();
+        assert_eq!(failed.0, StatusCode::BAD_GATEWAY);
+        assert!(state.db.user_box(&user).unwrap().is_some(), "the row stays");
+
+        fake.replies.lock().unwrap().clear();
+        delete(crate::auth::Principal::Admin).await.unwrap();
+        assert!(state.db.user_box(&user).unwrap().is_none());
+        let forced = format!("/v1/boxes/{user}/sleep?force=true");
+        assert_eq!(fake.paths()[before..], [forced.clone(), forced]);
+        // The idle supervisor and a box making room never force.
+        assert!(!fake.paths()[..before].iter().any(|p| p.contains("force")));
     }
 
     /// A full disk, a daemon that refuses, or no daemon configured at all: no box, and no row

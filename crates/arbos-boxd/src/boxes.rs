@@ -606,16 +606,27 @@ impl Boxd {
 
     /// `POST /v1/boxes/{user_id}/sleep`: ask agentd, then stop the box clean or checkpoint it,
     /// and let go of its disk. 409 while agentd says the box is busy; nothing is stopped then.
-    pub async fn sleep(&self, user: &UserId) -> Res<Value> {
+    ///
+    /// `force` is the user's Stop and an operator's delete: agentd is not asked, a busy box is
+    /// stopped like an idle one, and no checkpoint is written or kept, so whatever ran in the
+    /// box ends. `/work` stays as it is.
+    pub async fn sleep(&self, user: &UserId, force: bool) -> Res<Value> {
         let _box = self.lock(user).await;
         let p = self.paths(user)?;
         let config = self.config(&p)?;
         let mut report = None;
         if self.running(&p.id).await? {
-            let r = self.prepare_sleep(&p, &config).await?;
+            let kind = if force {
+                Stop::Clean
+            } else {
+                let r = self.prepare_sleep(&p, &config).await?;
+                let kind = stop_kind(r.active_user_pids);
+                report = Some(r);
+                kind
+            };
             // One still on disk while the box runs was already restored.
             remove_dir_if_there(&p.ckpt)?;
-            match stop_kind(r.active_user_pids) {
+            match kind {
                 Stop::Clean => {
                     // SIGTERM is agentd's flush-and-exit.
                     self.runsc(&["kill", &p.id, "SIGTERM"], None)
@@ -638,7 +649,8 @@ impl Boxd {
                     std::fs::rename(&tmp, &p.ckpt)?;
                 }
             }
-            report = Some(r);
+        } else if force {
+            remove_dir_if_there(&p.ckpt)?;
         }
         // Also what clears the id of a sandbox that exited by itself.
         let _ = self.runsc(&["delete", "--force", &p.id], None).await;
@@ -955,7 +967,7 @@ pub mod tests {
             200,
             r#"{"active_user_pids":2,"files_bytes":0,"scratch_bytes":0,"trash_bytes":0}"#,
         );
-        b.sleep(&u).await.unwrap();
+        b.sleep(&u, false).await.unwrap();
         assert_eq!(
             status(b.ensure(&u, "1.0", &env("other")).await),
             StatusCode::CONFLICT
@@ -965,7 +977,7 @@ pub mod tests {
             200,
             r#"{"active_user_pids":0,"files_bytes":0,"scratch_bytes":0,"trash_bytes":0}"#,
         );
-        b.sleep(&u).await.unwrap();
+        b.sleep(&u, false).await.unwrap();
         b.ensure(&u, "1.0", &env("other")).await.unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1011,7 +1023,7 @@ pub mod tests {
             200,
             r#"{"ok":true,"active_user_pids":0,"files_bytes":5,"scratch_bytes":6,"trash_bytes":7,"vacuumed":[]}"#,
         );
-        let r = b.sleep(&u).await.unwrap();
+        let r = b.sleep(&u, false).await.unwrap();
         assert_eq!(r["state"], "asleep_clean");
         assert_eq!(
             (&r["files_bytes"], &r["scratch_bytes"], &r["trash_bytes"]),
@@ -1025,7 +1037,7 @@ pub mod tests {
         assert_eq!(fake.ran("ip netns del"), 2, "one before the wake, one now");
         assert!(!std::path::Path::new(&format!("{root}/boxes/{}/ckpt", u.0)).exists());
 
-        let again = b.sleep(&u).await.unwrap();
+        let again = b.sleep(&u, false).await.unwrap();
         assert_eq!(again["state"], "asleep_clean");
         assert_eq!(again["files_bytes"], Value::Null);
         assert_eq!((fake.ran("SIGTERM"), fake.ran("umount")), (1, 1));
@@ -1047,7 +1059,7 @@ pub mod tests {
                 200,
                 &format!(r#"{{"active_user_pids":{pids},"files_bytes":1,"scratch_bytes":1,"trash_bytes":1}}"#),
             );
-            let r = b.sleep(&u).await.unwrap();
+            let r = b.sleep(&u, false).await.unwrap();
             assert_eq!(r["state"], "asleep_ckpt", "pids {pids}");
             assert_eq!(fake.ran(&format!("checkpoint --image-path={ckpt}.tmp")), 1);
             assert_eq!(fake.ran("SIGTERM"), 0);
@@ -1079,7 +1091,7 @@ pub mod tests {
         let (b, fake, root, u) = awake("sleep-busy").await;
         let before = fake.log.lock().unwrap().len();
         fake.answer(409, r#"{"ok":false,"reason":"proj: a turn is running"}"#);
-        let e = b.sleep(&u).await.unwrap_err();
+        let e = b.sleep(&u, false).await.unwrap_err();
         assert_eq!(e.status, StatusCode::CONFLICT);
         assert_eq!(e.msg, "busy: proj: a turn is running");
         for (code, body) in [
@@ -1089,7 +1101,7 @@ pub mod tests {
         ] {
             fake.answer(code, body);
             assert_eq!(
-                status(b.sleep(&u).await),
+                status(b.sleep(&u, false).await),
                 StatusCode::BAD_GATEWAY,
                 "{code} {body}"
             );
@@ -1100,6 +1112,38 @@ pub mod tests {
             "{:?}",
             &log[before..]
         );
+        assert_eq!(b.wake(&u).await.unwrap()["restored"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A forced sleep stops a box agentd would call busy without asking it, writes no
+    /// checkpoint, and drops the one an earlier sleep left: the box can be ensured anew.
+    #[tokio::test]
+    async fn a_forced_sleep_stops_a_busy_box_and_keeps_no_checkpoint() {
+        let (b, fake, root, u) = awake("sleep-force").await;
+        let ckpt = format!("{root}/boxes/{}/ckpt", u.0);
+        fake.answer(409, r#"{"ok":false,"reason":"proj: a turn is running"}"#);
+        let r = b.sleep(&u, true).await.unwrap();
+        assert_eq!(r["state"], "asleep_clean");
+        assert_eq!(r["files_bytes"], Value::Null, "agentd was not asked");
+        assert_eq!((fake.ran("SIGTERM"), fake.ran("checkpoint")), (1, 0));
+        assert_eq!((fake.ran("umount"), fake.ran("losetup -d")), (1, 1));
+
+        // Asleep with a checkpoint: forced, the checkpoint goes, and nothing else is run twice.
+        b.wake(&u).await.unwrap();
+        fake.answer(
+            200,
+            r#"{"active_user_pids":3,"files_bytes":1,"scratch_bytes":1,"trash_bytes":1}"#,
+        );
+        assert_eq!(b.sleep(&u, false).await.unwrap()["state"], "asleep_ckpt");
+        assert!(std::path::Path::new(&ckpt).is_dir());
+        let r = b.sleep(&u, true).await.unwrap();
+        assert_eq!(
+            (&r["state"], &r["ckpt_bytes"]),
+            (&json!("asleep_clean"), &json!(0))
+        );
+        assert!(!std::path::Path::new(&ckpt).exists());
+        assert_eq!((fake.ran("SIGTERM"), fake.ran("checkpoint")), (1, 1));
         assert_eq!(b.wake(&u).await.unwrap()["restored"], false);
         let _ = std::fs::remove_dir_all(&root);
     }
