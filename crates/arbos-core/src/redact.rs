@@ -225,7 +225,9 @@ const KEY_PREFIXES: &[(&str, &str, &str)] = &[
 static REDACTION_PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
     // Same shapes as key_redaction: word boundaries, or a consumed nonword tail (keys ending
     // in `-` must also disappear; the delimiter is restored in the replacement).
-    let keys = KEY_PREFIXES.iter().filter_map(|(body, _, marker)| key_redaction(body, marker));
+    let keys = KEY_PREFIXES
+        .iter()
+        .filter_map(|(body, _, marker)| key_redaction(body, marker));
     // These match headers and assignments rather than a token shape in KEY_PREFIXES.
     let other = [
         (
@@ -238,7 +240,11 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         ),
     ]
     .into_iter()
-    .filter_map(|(pattern, replacement)| Regex::new(pattern).ok().map(|re| (re, replacement.to_string())));
+    .filter_map(|(pattern, replacement)| {
+        Regex::new(pattern)
+            .ok()
+            .map(|re| (re, replacement.to_string()))
+    });
     keys.chain(other).collect()
 });
 
