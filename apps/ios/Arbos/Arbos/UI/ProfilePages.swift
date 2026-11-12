@@ -161,6 +161,37 @@ enum PaneLeading {
     case glyph(String)
 }
 
+/// Apple's 30 pt icon tile, with the machine mark on its corner when one is given. Its own
+/// view so a row that lays its text out by hand still draws the one tile (`PaneRow` and the
+/// Agent access link rows, which carry a tag beside the name).
+struct PaneTile: View {
+    @Environment(\.theme) private var theme
+    let icon: String
+    var mark: StatusMark? = nil
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                .frame(width: PaneKit.tile, height: PaneKit.tile)
+                .overlay(
+                    Image(systemName: icon)
+                        .font(theme.font(15, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+            if let mark {
+                // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
+                ZStack {
+                    Circle().fill(theme.bubbleAssistant)
+                    StatusMarkView(mark: mark, size: 8)
+                }
+                .frame(width: 13, height: 13)
+                .offset(x: 3, y: 3)
+            }
+        }
+    }
+}
+
 /// The grouped card: one fill, one radius, hairlines inset under the label.
 struct PaneCard<Rows: View>: View {
     @Environment(\.theme) private var theme
@@ -287,25 +318,7 @@ struct PaneRow: View {
         case .none:
             EmptyView()
         case .tile(let icon, let mark):
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
-                    .frame(width: PaneKit.tile, height: PaneKit.tile)
-                    .overlay(
-                        Image(systemName: icon)
-                            .font(theme.font(15, weight: .semibold))
-                            .foregroundStyle(.white)
-                    )
-                if let mark {
-                    // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
-                    ZStack {
-                        Circle().fill(theme.bubbleAssistant)
-                        StatusMarkView(mark: mark, size: 8)
-                    }
-                    .frame(width: 13, height: 13)
-                    .offset(x: 3, y: 3)
-                }
-            }
+            PaneTile(icon: icon, mark: mark)
         case .avatar(let view):
             view.frame(width: PaneKit.avatar, height: PaneKit.avatar)
         case .glyph(let icon):

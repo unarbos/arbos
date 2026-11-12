@@ -1060,7 +1060,6 @@ pub(crate) fn after_use(
                     ..entry("access_on", s, &format!("agent:{project_id}"))
                 },
             );
-            spawn_remount(state.clone(), s.user_id.clone());
         }
     }
     let _ = state.db.touch_secret(&s.user_id, &s.id, project_id);
@@ -1125,96 +1124,7 @@ pub(crate) fn audit_refusal(
     );
 }
 
-// ---- Daytona mirror (D28) -----------------------------------------------------------------------
-
-/// Recompute the user's sandbox env: every secret with at least one enabled access and a known
-/// host set, as Daytona Secrets (`ENV` for one field, `ENV_FIELD` for logins); `{}` while
-/// paused. Best effort; the relay `/egress` path is the authority regardless.
-pub(crate) async fn remount_daytona(state: &AppState, user_id: &str) -> Option<String> {
-    let dt = state.daytona.as_ref()?;
-    let sb = state.db.user_box(user_id).ok().flatten()?;
-    if sb.provider != "daytona" {
-        return None;
-    }
-    let sandbox_id = sb.sandbox_id?;
-    let paused = state.db.secrets_settings(user_id).ok()?.paused;
-    let mut mounts = Vec::new();
-    if !paused {
-        let dek = user_dek(state, user_id).ok()?;
-        for mut s in state.db.list_secrets(user_id).ok()? {
-            if s.expires_at.is_some_and(|t| t < now_ms()) {
-                continue;
-            }
-            let accesses = state.db.accesses_of_target("secret", &s.id).ok()?;
-            let mut hosts = s.hosts.clone();
-            let mut any_on = false;
-            for a in accesses.iter().filter(|a| a.enabled) {
-                any_on = true;
-                hosts.extend(a.hosts.iter().cloned());
-            }
-            hosts.dedup();
-            if !any_on || hosts.is_empty() {
-                continue;
-            }
-            let Ok(plain) = plain_of(state, &dek, &s) else {
-                continue;
-            };
-            let mut ids = s.daytona_secrets.as_object().cloned().unwrap_or_default();
-            let mut changed = false;
-            for (field, value) in &plain.current {
-                if field == "url" || field == "username" {
-                    continue;
-                }
-                let secret_name = format!("arbos-{}-{}", s.id.to_lowercase(), field);
-                let outcome = match ids.get(field).and_then(Value::as_str) {
-                    Some(existing) => dt
-                        .update_secret(existing, value, &hosts)
-                        .await
-                        .map(|_| existing.to_owned()),
-                    None => dt.create_secret(&secret_name, value, &hosts).await,
-                };
-                match outcome {
-                    Ok(sid) => {
-                        if ids.get(field).and_then(Value::as_str) != Some(sid.as_str()) {
-                            ids.insert(field.clone(), Value::String(sid));
-                            changed = true;
-                        }
-                        let env = if field == "value" {
-                            s.env.clone()
-                        } else {
-                            format!("{}_{}", s.env, field.to_ascii_uppercase())
-                        };
-                        let mut m = serde_json::Map::new();
-                        m.insert(env, Value::String(secret_name));
-                        mounts.push(m);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, secret = %s.env, "daytona secret mirror failed");
-                    }
-                }
-            }
-            if changed {
-                s.daytona_secrets = Value::Object(ids);
-                let _ = state.db.update_secret(&s);
-            }
-        }
-    }
-    match dt.update_secrets(&sandbox_id, mounts).await {
-        Ok(_) => Some("mounted".into()),
-        Err(e) => {
-            tracing::warn!(error = %e, "daytona updateSecrets failed");
-            Some(format!("updateSecrets failed: {e}"))
-        }
-    }
-}
-
-pub(crate) fn spawn_remount(state: AppState, user_id: String) {
-    tokio::spawn(async move {
-        remount_daytona(&state, &user_id).await;
-    });
-}
-
-/// Tell the box about one access change and refresh the Daytona mount.
+/// Tell the box about one access change.
 fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
     push_box(
         state,
@@ -1224,7 +1134,6 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
             "env": s.env, "name": s.name, "kind": s.kind, "enabled": a.enabled, "inject_env": s.inject_env,
             "hosts": s.hosts.iter().chain(a.hosts.iter()).collect::<Vec<_>>() }),
     );
-    spawn_remount(state.clone(), s.user_id.clone());
 }
 
 /// A People row or the Others-who-ask switch changed: every agent with Access on the secret
@@ -1417,7 +1326,6 @@ pub async fn create(
         created_at: now,
         updated_at: now,
         last_used_at: None,
-        daytona_secrets: json!({}),
         // Real value in the environment is a choice the owner makes; it also turns off
         // Ask every time, which has nothing to ask once the value is just there.
         inject_env: b.inject_env.unwrap_or(false),
@@ -1758,7 +1666,7 @@ pub async fn patch(
 }
 
 /// `PUT /secrets/{id}/value` `{ value | text | fields }` → `{ secret }`: version n+1; version n
-/// keeps resolving for 24 h; Daytona mirrors refreshed; the box drops its cached placeholder env.
+/// keeps resolving for 24 h; the box drops its cached placeholder env.
 pub async fn replace_value(
     State(state): State<AppState>,
     principal: Principal,
@@ -1811,7 +1719,6 @@ pub async fn replace_value(
             json!({ "ref": placeholder(&s.env, "value"), "env": s.env }),
         );
     }
-    spawn_remount(state.clone(), user_id.clone());
     Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
@@ -2402,7 +2309,6 @@ pub async fn box_from_message(
         created_at: now,
         updated_at: now,
         last_used_at: None,
-        daytona_secrets: json!({}),
         inject_env: false,
         others_ask: "refuse".into(),
         source_kind: "chat".into(),
@@ -2547,8 +2453,7 @@ pub struct PauseBody {
     pub paused: bool,
 }
 
-/// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s; Daytona
-/// mounts within 15 s.
+/// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s.
 /// The pause `POST /machine/stop` set (D83 decision 8, `paused_by: stop_machine`) is the kill
 /// switch for the downtime, not a standing choice: `POST /machine/start` lifts it. A pause the
 /// user set themselves (`paused_by: user`) stays (#1664: every restart used to leave all
@@ -2596,7 +2501,6 @@ pub(crate) async fn set_paused(
         user_id,
         PushEventDto::SecretsPaused(SecretsPausedPayloadDto { paused }),
     );
-    remount_daytona(state, user_id).await;
     paused_dto(&settings)
 }
 
@@ -3640,7 +3544,6 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                 created_at: it.created_at,
                 updated_at: now,
                 last_used_at: it.last_used_at,
-                daytona_secrets: it.daytona_secrets.clone(),
                 inject_env: false,
                 others_ask: "refuse".into(),
                 source_kind: "settings".into(),
@@ -3920,7 +3823,6 @@ mod tests {
             created_at: FIXED_AT,
             updated_at: FIXED_AT,
             last_used_at: Some(FIXED_AT + 1_000),
-            daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
             source_kind: "settings".into(),
@@ -3959,7 +3861,6 @@ mod tests {
             created_at: FIXED_AT,
             updated_at: FIXED_AT,
             last_used_at: None,
-            daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
             source_kind: "settings".into(),

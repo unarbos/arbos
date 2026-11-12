@@ -1,0 +1,1346 @@
+{
+  "query": [
+    "SELECT head FROM room_seq WHERE room = ?1",
+    "SELECT COALESCE(MAX(created_at), 0) FROM rows WHERE room = ?1"
+  ],
+  "index": "CREATE INDEX IF NOT EXISTS rows_room_activity ON rows(room, created_at);",
+  "before_source": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "d3846f6106a079b30a74e492a72c2770727a0b338764d98420280524170cda85"
+  },
+  "after_source": {
+    "crates/arbos-relay/src/db.rs": "698e463dfb7107a693b056c2de741e20b03ce0d8fdf243008d212d5b6516f638",
+    "crates/arbos-relay/src/db_people.rs": "5935c6196dd7255a310b13d03d8d423939e5501f8fb04b4c85839cd395591cfd"
+  },
+  "driver_sha256": "354eff2886d335a3a64a96b749922f1326779bb8ebb780b5737c0667616471d0",
+  "checks": {
+    "passed": 6,
+    "checks": [
+      "missing defaults",
+      "nonmonotonic timestamp maximum",
+      "exact row preservation through schema replay",
+      "idempotent index replay",
+      "maximum deletion and negative timestamp",
+      "empty retained history with preserved head/integrity"
+    ]
+  },
+  "pairs": 31,
+  "write_pairs": 21,
+  "sqlite_seed_and_schema_replay_version": "3.53.4",
+  "experiments": [
+    {
+      "scale": 1,
+      "fixture": {
+        "experiment": "history",
+        "scale": 1,
+        "rooms": 10,
+        "rows_per_room": 100,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10,
+          "chats": 10,
+          "people_chats": 10,
+          "people_members": 50,
+          "project_members": 10,
+          "people_reads": 10,
+          "room_seq": 10,
+          "checkpoints": 10,
+          "rows": 1000
+        },
+        "database_bytes": 712704
+      },
+      "samples_ns": {
+        "before": [
+          16000,
+          13000,
+          16000,
+          12000,
+          14000,
+          13000,
+          13000,
+          12000,
+          13000,
+          12000,
+          12000,
+          13000,
+          14000,
+          13000,
+          13000,
+          12000,
+          12000,
+          13000,
+          13000,
+          13000,
+          13000,
+          12000,
+          12000,
+          14000,
+          13000,
+          13000,
+          12000,
+          12000,
+          14000,
+          14000,
+          14000
+        ],
+        "after": [
+          11000,
+          10000,
+          10000,
+          10000,
+          10000,
+          9000,
+          9000,
+          9000,
+          9000,
+          9000,
+          9000,
+          9000,
+          10000,
+          9000,
+          11000,
+          11000,
+          9000,
+          10000,
+          10000,
+          10000,
+          9000,
+          9000,
+          10000,
+          9000,
+          9000,
+          9000,
+          9000,
+          8000,
+          9000,
+          9000,
+          10000
+        ]
+      },
+      "order": [
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 31,
+          "p50_ns": 13000.0,
+          "p95_ns": 15000.0,
+          "p99_ns": 16000.0,
+          "min_ns": 12000,
+          "max_ns": 16000
+        },
+        "after": {
+          "n": 31,
+          "p50_ns": 9000.0,
+          "p95_ns": 11000.0,
+          "p99_ns": 11000.0,
+          "min_ns": 8000,
+          "max_ns": 11000
+        },
+        "median_saved_ns": 4000,
+        "paired_median_saved_95_ci_ns": [
+          3000.0,
+          4000.0
+        ],
+        "two_sided_sign_test_p": 9.313225746154785e-10,
+        "non_tied_pairs": 31
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 29000,
+          "visits": 101,
+          "vm_steps": 630,
+          "returned": 2,
+          "statements": 2
+        },
+        "after": {
+          "elapsed_ns": 13000,
+          "visits": 2,
+          "vm_steps": 33,
+          "returned": 2,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING INDEX rows_batch (room=?)"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING COVERING INDEX rows_room_activity (room=?)"
+          ]
+        ]
+      },
+      "schema_replay_seconds_python_sqlite": 0.0009185409871861339,
+      "index_extra_bytes": 28672
+    },
+    {
+      "scale": 10,
+      "fixture": {
+        "experiment": "history",
+        "scale": 10,
+        "rooms": 10,
+        "rows_per_room": 1000,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10,
+          "chats": 10,
+          "people_chats": 10,
+          "people_members": 50,
+          "project_members": 10,
+          "people_reads": 10,
+          "room_seq": 10,
+          "checkpoints": 10,
+          "rows": 10000
+        },
+        "database_bytes": 2220032
+      },
+      "samples_ns": {
+        "before": [
+          44000,
+          42000,
+          41000,
+          41000,
+          41000,
+          41000,
+          40000,
+          43000,
+          42000,
+          42000,
+          42000,
+          41000,
+          42000,
+          41000,
+          41000,
+          43000,
+          41000,
+          41000,
+          41000,
+          43000,
+          42000,
+          43000,
+          45000,
+          42000,
+          41000,
+          41000,
+          41000,
+          40000,
+          42000,
+          41000,
+          41000
+        ],
+        "after": [
+          10000,
+          10000,
+          10000,
+          10000,
+          9000,
+          10000,
+          10000,
+          10000,
+          10000,
+          11000,
+          10000,
+          10000,
+          11000,
+          10000,
+          10000,
+          11000,
+          10000,
+          10000,
+          10000,
+          12000,
+          11000,
+          12000,
+          12000,
+          13000,
+          11000,
+          10000,
+          9000,
+          10000,
+          10000,
+          10000,
+          9000
+        ]
+      },
+      "order": [
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 31,
+          "p50_ns": 41000.0,
+          "p95_ns": 43500.0,
+          "p99_ns": 44700.0,
+          "min_ns": 40000,
+          "max_ns": 45000
+        },
+        "after": {
+          "n": 31,
+          "p50_ns": 10000.0,
+          "p95_ns": 12000.0,
+          "p99_ns": 12700.0,
+          "min_ns": 9000,
+          "max_ns": 13000
+        },
+        "median_saved_ns": 31000,
+        "paired_median_saved_95_ci_ns": [
+          31000.0,
+          32000.0
+        ],
+        "two_sided_sign_test_p": 9.313225746154785e-10,
+        "non_tied_pairs": 31
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 59000,
+          "visits": 1001,
+          "vm_steps": 6030,
+          "returned": 2,
+          "statements": 2
+        },
+        "after": {
+          "elapsed_ns": 13000,
+          "visits": 2,
+          "vm_steps": 33,
+          "returned": 2,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING INDEX rows_batch (room=?)"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING COVERING INDEX rows_room_activity (room=?)"
+          ]
+        ]
+      },
+      "schema_replay_seconds_python_sqlite": 0.0024750829907134175,
+      "index_extra_bytes": 253952
+    },
+    {
+      "scale": 100,
+      "fixture": {
+        "experiment": "history",
+        "scale": 100,
+        "rooms": 10,
+        "rows_per_room": 10000,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10,
+          "chats": 10,
+          "people_chats": 10,
+          "people_members": 50,
+          "project_members": 10,
+          "people_reads": 10,
+          "room_seq": 10,
+          "checkpoints": 10,
+          "rows": 100000
+        },
+        "database_bytes": 17731584
+      },
+      "samples_ns": {
+        "before": [
+          336000,
+          330000,
+          327000,
+          323000,
+          327000,
+          325000,
+          327000,
+          321000,
+          320000,
+          322000,
+          321000,
+          321000,
+          322000,
+          321000,
+          320000,
+          322000,
+          319000,
+          324000,
+          319000,
+          320000,
+          320000,
+          321000,
+          319000,
+          320000,
+          323000,
+          323000,
+          322000,
+          321000,
+          322000,
+          320000,
+          320000
+        ],
+        "after": [
+          14000,
+          14000,
+          15000,
+          13000,
+          15000,
+          14000,
+          15000,
+          10000,
+          12000,
+          12000,
+          12000,
+          12000,
+          16000,
+          10000,
+          12000,
+          11000,
+          11000,
+          12000,
+          12000,
+          10000,
+          11000,
+          15000,
+          10000,
+          11000,
+          14000,
+          12000,
+          11000,
+          10000,
+          15000,
+          11000,
+          11000
+        ]
+      },
+      "order": [
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 31,
+          "p50_ns": 321000.0,
+          "p95_ns": 328500.0,
+          "p99_ns": 334200.0,
+          "min_ns": 319000,
+          "max_ns": 336000
+        },
+        "after": {
+          "n": 31,
+          "p50_ns": 12000.0,
+          "p95_ns": 15000.0,
+          "p99_ns": 15700.0,
+          "min_ns": 10000,
+          "max_ns": 16000
+        },
+        "median_saved_ns": 310000,
+        "paired_median_saved_95_ci_ns": [
+          309000.0,
+          311000.0
+        ],
+        "two_sided_sign_test_p": 9.313225746154785e-10,
+        "non_tied_pairs": 31
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 404000,
+          "visits": 10001,
+          "vm_steps": 60030,
+          "returned": 2,
+          "statements": 2
+        },
+        "after": {
+          "elapsed_ns": 19000,
+          "visits": 2,
+          "vm_steps": 33,
+          "returned": 2,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING INDEX rows_batch (room=?)"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING COVERING INDEX rows_room_activity (room=?)"
+          ]
+        ]
+      },
+      "schema_replay_seconds_python_sqlite": 0.02414708398282528,
+      "index_extra_bytes": 2588672
+    },
+    {
+      "scale": 1000,
+      "fixture": {
+        "experiment": "history",
+        "scale": 1000,
+        "rooms": 10,
+        "rows_per_room": 100000,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10,
+          "chats": 10,
+          "people_chats": 10,
+          "people_members": 50,
+          "project_members": 10,
+          "people_reads": 10,
+          "room_seq": 10,
+          "checkpoints": 10,
+          "rows": 1000000
+        },
+        "database_bytes": 177668096
+      },
+      "samples_ns": {
+        "before": [
+          5489000,
+          5734000,
+          5590000,
+          5562000,
+          5660000,
+          5528000,
+          5468000,
+          5515000,
+          5383000,
+          5465000,
+          5542000,
+          5453000,
+          5466000,
+          5514000,
+          5503000,
+          5515000,
+          5611000,
+          5718000,
+          5807000,
+          5433000,
+          5428000,
+          5508000,
+          5551000,
+          5379000,
+          5394000,
+          5405000,
+          5405000,
+          5502000,
+          5449000,
+          11006000,
+          5453000
+        ],
+        "after": [
+          12000,
+          63000,
+          17000,
+          44000,
+          42000,
+          41000,
+          41000,
+          13000,
+          68000,
+          41000,
+          43000,
+          40000,
+          62000,
+          46000,
+          39000,
+          13000,
+          44000,
+          55000,
+          19000,
+          42000,
+          39000,
+          41000,
+          13000,
+          50000,
+          40000,
+          42000,
+          13000,
+          42000,
+          37000,
+          64000,
+          44000
+        ]
+      },
+      "order": [
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 31,
+          "p50_ns": 5503000.0,
+          "p95_ns": 5770500.0,
+          "p99_ns": 9446299.999999996,
+          "min_ns": 5379000,
+          "max_ns": 11006000
+        },
+        "after": {
+          "n": 31,
+          "p50_ns": 41000.0,
+          "p95_ns": 63500.0,
+          "p99_ns": 66800.0,
+          "min_ns": 12000,
+          "max_ns": 68000
+        },
+        "median_saved_ns": 5467000,
+        "paired_median_saved_95_ci_ns": [
+          5413000.0,
+          5502000.0
+        ],
+        "two_sided_sign_test_p": 9.313225746154785e-10,
+        "non_tied_pairs": 31
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 5644000,
+          "visits": 100001,
+          "vm_steps": 600030,
+          "returned": 2,
+          "statements": 2
+        },
+        "after": {
+          "elapsed_ns": 61000,
+          "visits": 2,
+          "vm_steps": 33,
+          "returned": 2,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING INDEX rows_batch (room=?)"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+          ],
+          [
+            "SEARCH rows USING COVERING INDEX rows_room_activity (room=?)"
+          ]
+        ]
+      },
+      "schema_replay_seconds_python_sqlite": 0.280011416063644,
+      "index_extra_bytes": 27045888
+    }
+  ],
+  "write_cost": {
+    "fixture": {
+      "experiment": "history",
+      "scale": 1000,
+      "rooms": 10,
+      "rows_per_room": 100000,
+      "counts": {
+        "users": 7,
+        "devices": 7,
+        "projects": 10,
+        "chats": 10,
+        "people_chats": 10,
+        "people_members": 50,
+        "project_members": 10,
+        "people_reads": 10,
+        "room_seq": 10,
+        "checkpoints": 10,
+        "rows": 1000000
+      },
+      "database_bytes": 177668096
+    },
+    "samples_ns": {
+      "before": [
+        33446.666,
+        25088.25,
+        45309.168,
+        26364.832,
+        24430.166,
+        26157.5,
+        24275.082,
+        26577.0,
+        30940.334,
+        24361.416,
+        25446.834,
+        25700.5,
+        26987.334,
+        26826.166,
+        24661.832,
+        24861.168,
+        28133.166,
+        25293.75,
+        27669.332,
+        27344.0,
+        23918.918
+      ],
+      "after": [
+        39571.0,
+        57388.082,
+        45929.75,
+        58097.582,
+        36697.166,
+        30617.084,
+        35430.166,
+        45989.082,
+        32428.25,
+        31401.666,
+        36889.918,
+        34626.666,
+        32402.418,
+        36578.166,
+        33773.834,
+        34084.416,
+        30995.666,
+        36201.668,
+        32241.5,
+        30997.666,
+        31655.082
+      ]
+    },
+    "order": [
+      [
+        "before",
+        "after"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ],
+      [
+        "before",
+        "after"
+      ]
+    ],
+    "summary": {
+      "before": {
+        "n": 21,
+        "p50_ns": 26157.5,
+        "p95_ns": 33446.666,
+        "p99_ns": 42936.66760000001,
+        "min_ns": 23918.918,
+        "max_ns": 45309.168
+      },
+      "after": {
+        "n": 21,
+        "p50_ns": 34626.666,
+        "p95_ns": 57388.082,
+        "p99_ns": 57955.682,
+        "min_ns": 30617.084,
+        "max_ns": 58097.582
+      },
+      "median_saved_ns": -8926.165999999997,
+      "paired_median_saved_95_ci_ns": [
+        -10907.917999999998,
+        -5415.084000000003
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07,
+      "non_tied_pairs": 21
+    },
+    "engine": {
+      "sqlite_version": "3.46.0",
+      "libsqlite3_sys": "0.30.1",
+      "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+      "compile_flags": [
+        "cc",
+        "-O2",
+        "-fPIC",
+        "-dynamiclib",
+        "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_THREADSAFE=1",
+        "-I",
+        "-o"
+      ],
+      "library_bytes": 1341688,
+      "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+    },
+    "sql": "BEGIN IMMEDIATE; UPDATE room_seq SET head=head+1 WHERE room='people/c_00001'; INSERT INTO rows(room,seq,device,batch_id,bytes,created_at) SELECT room,head,'d_0','extra_'||head,zeroblob(65),head FROM room_seq WHERE room='people/c_00001'; COMMIT;",
+    "scope": "Approximate SQL append transaction cost:500one-rowWAL/NORMAL/secure_delete transactions per pair arm; Python dispatch+SQLprepare included. Not real Db.append/Loro/HTTP/application latency."
+  },
+  "limits": "SQL-only warm instrumented root-lock SQLite3.46; real NVISIT and plans, no Rust/HTTP/Loro/network/UI claim. Every path is newly generated, no DSN accepted. Write cost is approximate SQL, not native append. One-time schema replay/index growth is measured separately with Python SQLite."
+}

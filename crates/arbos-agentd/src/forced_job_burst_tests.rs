@@ -398,14 +398,11 @@ async fn an_empty_quick_reply_queues_silently_and_strands_no_place() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The selector that routes a result past the relay turn, read off the ask in the doc.
-///
-/// `run_subagent` asks this question of every finished job, and `hook_start_job` asks it of the
-/// ask it is starting a job for, so a message cannot be forced on one path and not the other. The
-/// test is here because the branch it decides needs a live worker to reach, and the question it
-/// turns on does not.
+/// The forced-job signal on the ask, read the same way `hook_start_job` / `start_job` read it for
+/// the start receipt. Result delivery no longer branches on this (#2964): every `JobSpec` posts
+/// through `write_job_result`. The selector still decides whether an ask gets a start receipt.
 #[tokio::test]
-async fn the_result_routing_reads_the_forced_signal_off_the_ask() {
+async fn the_forced_signal_is_read_off_the_ask() {
     let (agent, root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00005";
     let host = agent.sync.open_room(chat).await.unwrap();
@@ -421,13 +418,97 @@ async fn the_result_routing_reads_the_forced_signal_off_the_ask() {
     assert!(agent.ask_forced_a_job(&host, &counted).await);
     assert!(
         !agent.ask_forced_a_job(&host, &plain).await,
-        "a job the model chose off its own judgement keeps the main session's result turn"
+        "a job the model chose off its own judgement is not a forced ask"
     );
     assert!(
         !agent
             .ask_forced_a_job(&host, "01NOSUCHMESSAGEINTHISDOC01")
             .await,
         "a message that is gone forces nothing"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #2964 / feedback AG5fMKSEGcm19R9A3FU1oKw: act→job research ("Find me the best sushi in la")
+/// is not a forced ask, so it used to take `run_result_turn`. A silent relay left the findings
+/// only on the hidden worker. Every job now posts through `write_job_result`, so the user's
+/// visible reply is the summary — even while the chat's turn lock is held.
+#[tokio::test]
+async fn a_research_jobs_findings_land_as_a_visible_reply() {
+    use crate::status::tests::{RESEARCH_JOB_RESULT_ANSWER, RESEARCH_JOB_RESULT_ASK};
+
+    let (agent, root) = test_agent().await;
+    let chat = "01TESTCHATBURSTJOBACK00007";
+    let host = agent.sync.open_room(chat).await.unwrap();
+    let _busy = agent.test_hold_turn(chat).await;
+
+    let (ask, _) = send_cmd(&host, RESEARCH_JOB_RESULT_ASK);
+    assert!(
+        !agent.ask_forced_a_job(&host, &ask).await,
+        "premise: the sushi ask is not forced wording"
+    );
+
+    // A wordless Done result row, as the act→job main turn leaves when nothing was posted.
+    {
+        let h = host.lock().await;
+        let empty = ulid();
+        h.doc
+            .start_assistant_message(&empty, &ask, &agent.cfg.device_id);
+        h.doc
+            .finish_message(&empty, arbos_core::doc::MessageStatus::Done);
+    }
+    assert!(
+        visible_replies(&host, &ask).is_empty(),
+        "premise: only a wordless Done so far"
+    );
+
+    let notes = "\
+## Best sushi in LA
+| Place | Why |
+| --- | --- |
+| [Sushi Gen](https://example.com/sushigen) | Consistently top-rated omakase downtown |
+| [n/naka](https://example.com/nnaka) | Reservation-only; critics' pick for kaiseki-style sushi |
+| [Kato](https://example.com/kato) | Strong value omakase westside |
+
+Sources checked: Yelp top-rated, Eater LA map. Caveat: waitlists move weekly.";
+
+    let t0 = Instant::now();
+    agent
+        .write_job_result(
+            chat,
+            &host,
+            &ask,
+            "job-finding-sushi-ab12",
+            "done",
+            notes,
+            None,
+        )
+        .await
+        .expect("the research findings are written");
+    assert!(
+        t0.elapsed() < Duration::from_secs(40),
+        "the findings waited for the chat to go quiet: {:?}",
+        t0.elapsed()
+    );
+
+    let rows = visible_replies(&host, &ask);
+    assert_eq!(
+        rows.len(),
+        1,
+        "one visible summary under the ask: {:?}",
+        rows.iter().map(|m| m.text()).collect::<Vec<_>>()
+    );
+    let prose = rows[0].text();
+    assert_eq!(
+        prose.trim(),
+        RESEARCH_JOB_RESULT_ANSWER,
+        "the talking-model summary is the bubble — not the hidden worker row, not silence"
+    );
+    assert_eq!(
+        rows[0].rest.get("decision").and_then(Value::as_str),
+        Some("job"),
+        "posted as a job result row"
     );
 
     let _ = std::fs::remove_dir_all(&root);

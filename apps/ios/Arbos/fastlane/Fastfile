@@ -27,6 +27,8 @@
 # console shows the `error:` lines and the verdict. Nothing is cut with
 # `tail`: a hidden compile error cost a TestFlight build once.
 
+require "shellwords"
+
 default_platform(:ios)
 
 PROJECT = "Arbos.xcodeproj"
@@ -155,10 +157,20 @@ platform :ios do
   desc "Run ArbosTests on the iOS simulator (no signing); requires packages/ArbosFFI"
   lane :test do
     require_xcframework!
-    xcodebuild_logged("test",
-      "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
+    xcodebuild_logged("test-build",
+      "cd .. && xcodebuild build-for-testing -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=#{sim_name}' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
+    plans = Dir.glob("#{out_dir}/dd/Build/Products/*.xctestrun")
+    UI.user_error!("Expected one generated xctestrun, found #{plans.length}; tests were not launched") unless plans.length == 1
+    helper = File.expand_path("../../../../scripts/ci/xctestrun-env.py", __dir__)
+    command = "python3 #{helper.shellescape} --all-targets"
+    values = "#{plans.first.shellescape} ARBOS_RELAY_URL=http://127.0.0.1:1"
+    sh("#{command} #{values}")
+    sh("#{command} --verify #{values}")
+    xcodebuild_logged("test",
+      "cd .. && xcodebuild test-without-building -xctestrun #{plans.first.shellescape} " \
+      "-destination 'platform=iOS Simulator,name=#{sim_name}' CODE_SIGNING_ALLOWED=NO")
   end
 
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"

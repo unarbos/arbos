@@ -62,7 +62,8 @@ pub struct FleetCfg {
     pub runtime: String,
     /// Registry path the agent image is pulled from; the tag is the version in the relay's
     /// default snapshot name (`arbos-agent-0.1.55` → `<repo>:0.1.55`), so the CD image roll that
-    /// switches `ARBOS_DAYTONA_SNAPSHOT` drives host sandboxes too.
+    /// switches the snapshot setting (`ARBOS_DAYTONA_SNAPSHOT`, which keeps its name) drives
+    /// host sandboxes too.
     pub image_repo: String,
 }
 
@@ -339,7 +340,7 @@ pub async fn try_admit(state: &AppState, user_id: &str) -> Result<bool> {
 
 // ---- the sandbox itself ----------------------------------------------------------------------
 
-fn container_name(user_id: &str) -> String {
+pub(crate) fn container_name(user_id: &str) -> String {
     let safe: String = user_id
         .chars()
         .map(|c| {
@@ -378,7 +379,7 @@ pub fn run_args(
         format!("--runtime={}", cfg.runtime),
         "--network".into(),
         cfg.box_network.clone(),
-        // The image's entrypoint runs as root in Daytona too; in gVisor that root is the Sentry's.
+        // The image's entrypoint runs as root; in gVisor that root is the Sentry's, not the host's.
         "-u".into(),
         "0".into(),
         "--read-only".into(),

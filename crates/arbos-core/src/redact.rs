@@ -4,6 +4,9 @@
 //! debugging reader (`GET /projects/{id}/inspect`), so a secret that reached a relay table never
 //! reaches a bot's context window.
 
+use std::sync::LazyLock;
+
+use regex_lite::Regex;
 use serde_json::Value;
 
 /// Known key shapes, `Authorization: Bearer …` and `KEY=value` lines for well-known secret names.
@@ -12,26 +15,8 @@ use serde_json::Value;
 /// the tokens `find_key_like` can name, no more and no less.
 pub fn redact_patterns(text: &str) -> String {
     let mut out = text.to_owned();
-    for (body, _, marker) in KEY_PREFIXES {
-        if let Ok(re) = regex_lite::Regex::new(&format!(r"\b{body}\b")) {
-            out = re.replace_all(&out, *marker).into_owned();
-        }
-    }
-    // Not token shapes, so not in the table: a header whose value is any bearer token, and a
-    // `NAME=value` line whose name says it holds a secret.
-    for (pat, rep) in [
-        (
-            r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+",
-            "${1}[REDACTED:bearer]",
-        ),
-        (
-            r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*)\S+",
-            "${1}[REDACTED:env]",
-        ),
-    ] {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, rep).into_owned();
-        }
+    for (re, replacement) in REDACTION_PATTERNS.iter() {
+        out = re.replace_all(&out, *replacement).into_owned();
     }
     out
 }
@@ -40,15 +25,8 @@ pub fn redact_patterns(text: &str) -> String {
 /// (`arbos-secret://…`, `op://…`, `$ARBOS_SECRET_*`): never useful to a reader, always scrubbed.
 pub fn redact_placeholders(text: &str) -> String {
     let mut out = text.to_owned();
-    let patterns: [(&str, &str); 3] = [
-        (r"arbos-secret://[^\s\x22'`<>]+", "[secret placeholder]"),
-        (r"\bop://[^\s\x22'`<>]+", "[vault reference]"),
-        (r"\$\{?ARBOS_SECRET_[A-Z0-9_]+\}?", "[secret env]"),
-    ];
-    for (pat, rep) in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, rep).into_owned();
-        }
+    for (re, replacement) in PLACEHOLDER_PATTERNS.iter() {
+        out = re.replace_all(&out, *replacement).into_owned();
     }
     out
 }
@@ -236,6 +214,46 @@ const KEY_PREFIXES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    let keys = KEY_PREFIXES.iter().filter_map(|(body, _, marker)| {
+        Regex::new(&format!(r"\b{body}\b"))
+            .ok()
+            .map(|re| (re, *marker))
+    });
+    // These match headers and assignments rather than a token shape in KEY_PREFIXES.
+    let other = [
+        (
+            r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+",
+            "${1}[REDACTED:bearer]",
+        ),
+        (
+            r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*)\S+",
+            "${1}[REDACTED:env]",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(pattern, replacement)| Regex::new(pattern).ok().map(|re| (re, replacement)));
+    keys.chain(other).collect()
+});
+
+static PLACEHOLDER_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    [
+        (r"arbos-secret://[^\s\x22'`<>]+", "[secret placeholder]"),
+        (r"\bop://[^\s\x22'`<>]+", "[vault reference]"),
+        (r"\$\{?ARBOS_SECRET_[A-Z0-9_]+\}?", "[secret env]"),
+    ]
+    .into_iter()
+    .filter_map(|(pattern, replacement)| Regex::new(pattern).ok().map(|re| (re, replacement)))
+    .collect()
+});
+
+static KEY_CLASSIFIERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    KEY_PREFIXES
+        .iter()
+        .filter_map(|(body, name, _)| Regex::new(&format!("^{body}$")).ok().map(|re| (re, *name)))
+        .collect()
+});
+
 /// Characters a credential token may contain. A token is a maximal run of these.
 fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+' | '=')
@@ -246,14 +264,6 @@ fn is_token_char(c: char) -> bool {
 /// spaces) that is not a URL or a path. Shared by the relay (the read-once "save this" path)
 /// and the box (the offer card): both must agree on what a key looks like.
 pub fn find_key_like(text: &str) -> Vec<KeyLike> {
-    let compiled: Vec<(regex_lite::Regex, &'static str)> = KEY_PREFIXES
-        .iter()
-        .filter_map(|(body, name, _)| {
-            regex_lite::Regex::new(&format!("^{body}$"))
-                .ok()
-                .map(|r| (r, *name))
-        })
-        .collect();
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     let punct = |c: char| matches!(c, '.' | ',' | ':' | ';' | '=');
@@ -266,7 +276,7 @@ pub fn find_key_like(text: &str) -> Vec<KeyLike> {
         }
         let s = s + lead;
         let e = s + tok.len();
-        if let Some((_, name)) = compiled.iter().find(|(r, _)| r.is_match(tok)) {
+        if let Some((_, name)) = KEY_CLASSIFIERS.iter().find(|(r, _)| r.is_match(tok)) {
             out.push(KeyLike {
                 start: s,
                 end: e,
@@ -680,5 +690,33 @@ mod tests {
         assert_eq!(v["a"][0], "[REDACTED:token]");
         assert_eq!(v["a"][1]["b"], "[vault reference]");
         assert_eq!(v["n"], 1);
+    }
+
+    #[test]
+    fn concurrent_readers_preserve_token_ranges_and_nested_values() {
+        let sample = format!("ghp_{}", "ab12".repeat(6));
+        let text = format!("λ ({sample}). op://Synthetic/item");
+        let start = text.find(&sample).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..32 {
+                        let found = find_key_like(&text);
+                        assert_eq!(found.len(), 1);
+                        assert_eq!(found[0].start, start);
+                        assert_eq!(found[0].end, start + sample.len());
+                        assert_eq!(found[0].value(&text), sample);
+                        assert_eq!(found[0].suggested_name, "GITHUB_TOKEN");
+                        assert!(found[0].confident);
+                        let clean = "λ ([REDACTED:token]). [vault reference]";
+                        assert_eq!(scrub(&text), clean);
+
+                        let mut nested = json!({ "op://key/is/unchanged": [text, { "v": text }], "n": 7, "flag": true });
+                        scrub_value(&mut nested);
+                        assert_eq!(nested, json!({ "op://key/is/unchanged": [clean, { "v": clean }], "n": 7, "flag": true }));
+                    }
+                });
+            }
+        });
     }
 }

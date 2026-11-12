@@ -1,0 +1,6387 @@
+{
+  "seed": 61118,
+  "pairs_per_case": 21,
+  "scope": "Actual immutable production selected upload/fetch/serial-send tranche; HTTP-only reqwest loopback fixture with fixed12ms per GET/PUT and generated G payload. Rust dev profile opt0/debug0, global allocator meter includes local HTTP collaborators. No app/device/Internet latency inference. Source+binaries unchanged; serial Copy remains1 HTTP job.",
+  "seconds": 18.48075141699519,
+  "cases": [
+    {
+      "case": "one-small",
+      "attachments": 1,
+      "bytes_each": 65536,
+      "pairs": 21,
+      "milliseconds": {
+        "before_median": 31.525790999999998,
+        "after_median": 31.551083000000002,
+        "paired_median_saving": -0.012957999999997583,
+        "paired_bootstrap_median_95ci": [
+          -0.11195799999999778,
+          0.02791700000000219
+        ],
+        "two_sided_sign_test_p": 0.6636238098144531,
+        "before_min_max": [
+          30.335708,
+          31.944750000000003
+        ],
+        "after_min_max": [
+          29.586833,
+          32.056708
+        ]
+      },
+      "heap_peak_delta_bytes": {
+        "before_median": 308201,
+        "after_median": 308201,
+        "paired_median_saving": 0,
+        "paired_bootstrap_median_95ci": [
+          0,
+          0
+        ],
+        "two_sided_sign_test_p": 1.0,
+        "before_min_max": [
+          308201,
+          308201
+        ],
+        "after_min_max": [
+          308201,
+          308201
+        ]
+      },
+      "observable_receipt_sha256": "5b89687ebda967e7e752937578794f30551854b4731693c0bd3c271d627ebd87"
+    },
+    {
+      "case": "four-small",
+      "attachments": 4,
+      "bytes_each": 65536,
+      "pairs": 21,
+      "milliseconds": {
+        "before_median": 125.35,
+        "after_median": 125.402041,
+        "paired_median_saving": -0.08000100000000998,
+        "paired_bootstrap_median_95ci": [
+          -0.8828329999999909,
+          0.9816259999999772
+        ],
+        "two_sided_sign_test_p": 1.0,
+        "before_min_max": [
+          122.05075,
+          127.15433300000001
+        ],
+        "after_min_max": [
+          123.59020799999999,
+          126.316542
+        ]
+      },
+      "heap_peak_delta_bytes": {
+        "before_median": 506748,
+        "after_median": 506748,
+        "paired_median_saving": 0,
+        "paired_bootstrap_median_95ci": [
+          0,
+          0
+        ],
+        "two_sided_sign_test_p": 1.0,
+        "before_min_max": [
+          506748,
+          506748
+        ],
+        "after_min_max": [
+          506748,
+          506748
+        ]
+      },
+      "observable_receipt_sha256": "e0816a1dd30003b411a382c88ac9120b18e8c684a738cd321b5910854492262c"
+    },
+    {
+      "case": "one-medium",
+      "attachments": 1,
+      "bytes_each": 4194304,
+      "pairs": 21,
+      "milliseconds": {
+        "before_median": 44.881125000000004,
+        "after_median": 44.523083,
+        "paired_median_saving": 0.32454299999999847,
+        "paired_bootstrap_median_95ci": [
+          -0.07258299999999451,
+          0.5000420000000076
+        ],
+        "two_sided_sign_test_p": 0.18924713134765625,
+        "before_min_max": [
+          43.486583,
+          46.666959
+        ],
+        "after_min_max": [
+          43.750542,
+          45.601583
+        ]
+      },
+      "heap_peak_delta_bytes": {
+        "before_median": 8472869,
+        "after_median": 8472849,
+        "paired_median_saving": 20,
+        "paired_bootstrap_median_95ci": [
+          20,
+          20
+        ],
+        "two_sided_sign_test_p": 9.5367431640625e-07,
+        "before_min_max": [
+          8472869,
+          8890701
+        ],
+        "after_min_max": [
+          8472849,
+          8472849
+        ]
+      },
+      "observable_receipt_sha256": "02a234a2b3bf0478e9c7accd1eeda16f61fdd6d76a7b31fa4fff6a7732f63ccd"
+    },
+    {
+      "case": "one-large",
+      "attachments": 1,
+      "bytes_each": 16777216,
+      "pairs": 21,
+      "milliseconds": {
+        "before_median": 85.584209,
+        "after_median": 83.659667,
+        "paired_median_saving": 2.138707999999994,
+        "paired_bootstrap_median_95ci": [
+          1.2811260000000004,
+          3.5329169999999976
+        ],
+        "two_sided_sign_test_p": 2.09808349609375e-05,
+        "before_min_max": [
+          83.992875,
+          88.963667
+        ],
+        "after_min_max": [
+          82.897042,
+          85.593334
+        ]
+      },
+      "heap_peak_delta_bytes": {
+        "before_median": 33592277,
+        "after_median": 33592257,
+        "paired_median_saving": 20,
+        "paired_bootstrap_median_95ci": [
+          20,
+          20
+        ],
+        "two_sided_sign_test_p": 2.09808349609375e-05,
+        "before_min_max": [
+          33592277,
+          33592277
+        ],
+        "after_min_max": [
+          33592257,
+          34010089
+        ]
+      },
+      "observable_receipt_sha256": "69216962c58824f79fb8e8b541090549a8b9ac399e363bd9a40aa9cca582e77b"
+    }
+  ],
+  "sources": {
+    "before": {
+      "source": {
+        "relay_sha256": "a8c95f914e9036e5ff8f4cfb4a2f694cfd2665497769c453b276e8ce0d66dc7a",
+        "actual_upload_tranche_sha256": "64c7c68bcb8e0e387f9e0fac1cda3e23013f74a3e7c23454153a30c4664b9cdb",
+        "actual_functions": {
+          "pub(crate) struct RelayError {": "6988ba27fa4fa25f629112727efc42cc8cfd53382fc6dbb89b44ac4561ec4864",
+          "impl RelayError {": "f5ef40ac03dc78ccb672beb3af623fc09e691999bb09f482b6d6abc411e3dcc3",
+          "impl std::fmt::Display for RelayError {": "4ca54ba8c775b78dbe8200beba94904dc5dd98ca9f5609d2d7b9db64868f94a5",
+          "impl std::error::Error for RelayError {}": "cfd61db95ee055f376b96e4de04f42667c03464e9722e3942814b0e6e121492b",
+          "pub(crate) fn mime_for(": "0030eb51a3b65eb2da54921482d0fc292db96623066deab7942dbee3def347aa",
+          "fn blob_request_url(": "e90fd55ce40be95dcf5abf91f7458513dfac3ff4f6aaa000e94a4c5dd384fe10",
+          "async fn fetch_blob_bytes(": "739f8060f0f366848db57d4f674909baf2d44d113b0fa8842ded6b88a8977a68",
+          "fn safe_name(": "d0e35e731ac6aac5421e0bb4cf5d53f98b3debd8ceefe352eaeb58aad867c008",
+          "fn attachment_kind_str(": "7c024aada69ea2a2f697a7fc086f9f0928d0bcd924667433885ffa6c968703bf",
+          "fn user_attachment_from_part(": "d278820d1f78a9831b702bf01b4ae171de602511502b9c445d48d8d8fba957da",
+          "async fn upload_outgoing(": "38d15ff6557f51201f5eb17dc82b4d977fc61553053f9698e4c0aec8e9b9d921",
+          "fn forwarded_chart_parts(": "c44ab19d052b685383e6fd365ee0223289cb84655aa23d6893a9c984e132e43a",
+          "async fn upload_voice_memo(": "4f51921620c4caaa715ed992feffea450c6d4b0ad73326fc5a9e2889993be29d"
+        },
+        "actual_rs_sha256": "feae5360b0d3fb8e10c232e94c58ae971d0f683783bebc8b320aadd246afd83b",
+        "fixture_rs_sha256": "1d6b9c00fa834fc1a1f5784683a728885d89f2b82a7bc349663ec69ac6ee06d5",
+        "driver_sha256": "58d8e322abe660c694d30dd44b64a333b730bbbe8666a761ebce70cd68ab8a45",
+        "scope": "Actual selected production bodies plus actual error classifier and ChatSendQueue; fresh local HTTP/files and account/DTO collaborators; no GPUI, SDK, CRDT or real credentials. HTTP-only reqwest build, no TLS claims."
+      },
+      "binary_sha256": "0cf5cf88af5f7fda5cf547678382187c31a6f9008fa37e53a9fdc990417acea5"
+    },
+    "after": {
+      "source": {
+        "relay_sha256": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+        "actual_upload_tranche_sha256": "64c7c68bcb8e0e387f9e0fac1cda3e23013f74a3e7c23454153a30c4664b9cdb",
+        "actual_functions": {
+          "pub(crate) struct RelayError {": "6988ba27fa4fa25f629112727efc42cc8cfd53382fc6dbb89b44ac4561ec4864",
+          "impl RelayError {": "f5ef40ac03dc78ccb672beb3af623fc09e691999bb09f482b6d6abc411e3dcc3",
+          "impl std::fmt::Display for RelayError {": "4ca54ba8c775b78dbe8200beba94904dc5dd98ca9f5609d2d7b9db64868f94a5",
+          "impl std::error::Error for RelayError {}": "cfd61db95ee055f376b96e4de04f42667c03464e9722e3942814b0e6e121492b",
+          "pub(crate) fn mime_for(": "0030eb51a3b65eb2da54921482d0fc292db96623066deab7942dbee3def347aa",
+          "fn blob_request_url(": "e90fd55ce40be95dcf5abf91f7458513dfac3ff4f6aaa000e94a4c5dd384fe10",
+          "async fn fetch_blob_bytes(": "e4b71a08b31594d32760fa748a30414bd29c09c9077a1b1dea5aa1c23863cc9d",
+          "fn safe_name(": "d0e35e731ac6aac5421e0bb4cf5d53f98b3debd8ceefe352eaeb58aad867c008",
+          "fn attachment_kind_str(": "7c024aada69ea2a2f697a7fc086f9f0928d0bcd924667433885ffa6c968703bf",
+          "fn user_attachment_from_part(": "d278820d1f78a9831b702bf01b4ae171de602511502b9c445d48d8d8fba957da",
+          "async fn upload_outgoing(": "d4de49f19361752c0704f5336ad620f7c7facbba06c57c1ab68325271c1a6b7e",
+          "fn forwarded_chart_parts(": "c44ab19d052b685383e6fd365ee0223289cb84655aa23d6893a9c984e132e43a",
+          "async fn upload_voice_memo(": "c6529b3b9c58f1d45eb478ca00c45bcd0a83c492bb8fa05738c6d3960393e57e"
+        },
+        "actual_rs_sha256": "1766dc831ec6e985361f2fddc7b53ef6046723aa6525f5238c33092330318380",
+        "fixture_rs_sha256": "1d6b9c00fa834fc1a1f5784683a728885d89f2b82a7bc349663ec69ac6ee06d5",
+        "driver_sha256": "58d8e322abe660c694d30dd44b64a333b730bbbe8666a761ebce70cd68ab8a45",
+        "scope": "Actual selected production bodies plus actual error classifier and ChatSendQueue; fresh local HTTP/files and account/DTO collaborators; no GPUI, SDK, CRDT or real credentials. HTTP-only reqwest build, no TLS claims."
+      },
+      "binary_sha256": "e0da06abab6cd8c6f2ebc4dbf012f1a11388b0ac0661cfc2f5587aefa837abd1"
+    }
+  },
+  "raw_pairs": [
+    {
+      "pair": 0,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.457084,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.35,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 0,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.65225,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.526666000000002,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 0,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.9795,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.529375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 0,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 86.864708,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.258083,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.393957999999998,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.401375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.830584,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.506041,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.375875,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.77574999999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.94904100000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.907417,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.086208,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.23979200000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.557,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.861833,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.323542,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 127.15433300000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.678875,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.525790999999998,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 123.59020799999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.911833,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 87.627625,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.570375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.47225,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.459292,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.444417,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8951996,
+        "heap_peak_delta_bytes": 8890701,
+        "kind": "copy",
+        "milliseconds": 43.932709,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.561583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.881125000000004,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.30316599999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.68891700000002,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.314583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.584209,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.494417,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.469167,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.889834,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 43.785208,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.768583000000003,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.5435,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 88.963667,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.846875,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.322458,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.52491699999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "case": "four-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 123.135334,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 123.597875,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.944750000000003,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 32.056708,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 88.310625,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 84.583084,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 45.601583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.529,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.659667,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.798375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.607625,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.579707999999997,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.369708,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 45.21775,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.90416600000002,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.885792,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.548582999999997,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 30.357917,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 88.463875,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.249166,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.999667,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.535790999999996,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.90283299999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.6955,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.158,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 83.992875,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.523083,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 43.975792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.448833000000004,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.44675,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.402041,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 122.05075,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 46.666959,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.292291999999996,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 84.889709,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.608583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.614499999999996,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.631082999999997,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.27625,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.37733300000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 84.717,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 84.720834,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.596458000000002,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.657040999999996,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.97037499999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 123.862708,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.491917,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.876625000000004,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 86.609875,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.96270799999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.013334,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.348959,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "case": "four-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.30783400000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.490542,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.494959,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 30.335708,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.110333,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 83.245917,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.294541,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.867791999999994,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.440083,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.486333,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.30749999999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.406125,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 123.813584,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.930333,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.791792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.551083000000002,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 84.776792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 85.593334,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.85775,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.144792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.994084,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.91408299999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 87.593667,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 84.06075,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.490417,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.460625,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.234375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 44.913959000000006,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "case": "four-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.43370900000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 126.316542,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 84.2185,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.143833,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.50675,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 29.586833,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 43.486583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.458167,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.97191699999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.58316599999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "case": "one-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.877708,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.689375,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.723082999999995,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.223125,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 34071422,
+        "heap_peak_delta_bytes": 34010089,
+        "kind": "copy",
+        "milliseconds": 84.592,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.320583,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.244874999999997,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.563417000000005,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "case": "one-medium",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 44.102083,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.165334,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.92283400000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 124.971416,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 82.897042,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.37879199999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "case": "one-large",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 86.47120799999999,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 82.902334,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "case": "four-small",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.990542,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.26391600000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 30.337792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.675124999999998,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.447165999999996,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 43.750542,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "case": "four-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61383,
+        "heap_peak_bytes": 568131,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.99445800000001,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 4,
+        "heap_baseline_bytes": 61421,
+        "heap_peak_bytes": 568169,
+        "heap_peak_delta_bytes": 506748,
+        "kind": "copy",
+        "milliseconds": 125.821708,
+        "mode": "bench",
+        "names": [
+          "file-0.png",
+          "file-1.png",
+          "file-2.png",
+          "file-3.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          },
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "case": "one-large",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "milliseconds": 84.212792,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "milliseconds": 85.236292,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "case": "one-small",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61292,
+        "heap_peak_bytes": 369493,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.630125000000003,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 65536,
+        "count": 1,
+        "heap_baseline_bytes": 61330,
+        "heap_peak_bytes": 369531,
+        "heap_peak_delta_bytes": 308201,
+        "kind": "copy",
+        "milliseconds": 31.721249999999998,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 65536,
+            "hash": 9483533214537425701,
+            "length": 65536,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "case": "one-medium",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 8534164,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "milliseconds": 45.830791000000005,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 8534182,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "milliseconds": 45.384958000000005,
+        "mode": "bench",
+        "names": [
+          "file-0.png"
+        ],
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    }
+  ],
+  "observables": {
+    "four-small": {
+      "kind": "copy",
+      "count": 4,
+      "bytes_each": 65536,
+      "names": [
+        "file-0.png",
+        "file-1.png",
+        "file-2.png",
+        "file-3.png"
+      ],
+      "saved": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "put_receipts": [
+        {
+          "bytes": 65536,
+          "hash": 9483533214537425701,
+          "length": 65536,
+          "mime": "image/png"
+        },
+        {
+          "bytes": 65536,
+          "hash": 9483533214537425701,
+          "length": 65536,
+          "mime": "image/png"
+        },
+        {
+          "bytes": 65536,
+          "hash": 9483533214537425701,
+          "length": 65536,
+          "mime": "image/png"
+        },
+        {
+          "bytes": 65536,
+          "hash": 9483533214537425701,
+          "length": 65536,
+          "mime": "image/png"
+        }
+      ]
+    },
+    "one-small": {
+      "kind": "copy",
+      "count": 1,
+      "bytes_each": 65536,
+      "names": [
+        "file-0.png"
+      ],
+      "saved": [
+        true
+      ],
+      "put_receipts": [
+        {
+          "bytes": 65536,
+          "hash": 9483533214537425701,
+          "length": 65536,
+          "mime": "image/png"
+        }
+      ]
+    },
+    "one-medium": {
+      "kind": "copy",
+      "count": 1,
+      "bytes_each": 4194304,
+      "names": [
+        "file-0.png"
+      ],
+      "saved": [
+        true
+      ],
+      "put_receipts": [
+        {
+          "bytes": 4194304,
+          "hash": 5147388838966076197,
+          "length": 4194304,
+          "mime": "image/png"
+        }
+      ]
+    },
+    "one-large": {
+      "kind": "copy",
+      "count": 1,
+      "bytes_each": 16777216,
+      "names": [
+        "file-0.png"
+      ],
+      "saved": [
+        true
+      ],
+      "put_receipts": [
+        {
+          "bytes": 16777216,
+          "hash": 13456884142631428901,
+          "length": 16777216,
+          "mime": "image/png"
+        }
+      ]
+    }
+  },
+  "environment": "macOS sandbox loopback-only, synthetic clean HOME; root/Rust/clients asked to hold local builds/tests; no remote runner inference"
+}
