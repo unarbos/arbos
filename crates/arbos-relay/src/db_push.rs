@@ -282,7 +282,7 @@ impl Db {
         sender_user: &str,
         since_ms: i64,
     ) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COUNT(*) FROM chat_events WHERE chat_id = ?1 AND sender_user = ?2 AND created_at >= ?3",
                 params![chat_id, sender_user, since_ms],

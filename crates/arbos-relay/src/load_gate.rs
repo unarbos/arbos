@@ -751,6 +751,7 @@ async fn the_thousand_user_load_gate() {
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await });
     boxes::spawn_wake_runner(state.clone()).await;
+    crate::boxd::spawn_headroom(&state);
     crate::rooms::spawn_sweeper(state.clone()).await;
 
     // The people: a user, a project, a chat, and two or three devices each on the chat's room.
@@ -988,6 +989,7 @@ async fn the_thousand_user_load_gate() {
     });
 
     let (cpu_before, _) = cpu_and_rss();
+    crate::db::held::take();
     let slept_before: u64 = fakes.iter().map(|f| f.sleeps.load(Ordering::Relaxed)).sum();
     let mut arrivals = tokio::time::interval(Duration::from_secs_f64(60.0 / k.wakes_per_min));
     let mut asked = 0u64;
@@ -1026,6 +1028,7 @@ async fn the_thousand_user_load_gate() {
     tokio::time::sleep(Duration::from_millis(k.think_ms + 5_000)).await;
     let wall = started.elapsed().as_secs_f64();
     let (cpu_after, rss_mb) = cpu_and_rss();
+    let held = crate::db::held::take();
     let fds = open_files();
     let live = sockets.live.load(Ordering::Relaxed);
     run.over.store(true, Ordering::Relaxed);
@@ -1086,6 +1089,13 @@ async fn the_thousand_user_load_gate() {
         pct(&mut lock_ms, 99.0),
         pct(&mut lock_ms, 100.0)
     );
+    for (site, (n, ms, longest)) in held.iter().take(8) {
+        println!(
+            "      held by {site}: {n} times, {:.1} ms a second, {:.3} ms each, {longest:.2} ms at most",
+            ms / wall,
+            ms / *n as f64
+        );
+    }
     println!(
         "    sockets open {live} of {}, socket errors {errors}, descriptors {fds}",
         k.sockets

@@ -966,8 +966,11 @@ impl Db {
         Ok(())
     }
 
+    #[track_caller]
     pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let c = self.0.lock().expect("db lock");
+        #[cfg(test)]
+        let _held = held::Held::by(std::panic::Location::caller());
         Ok(f(&c)?)
     }
 
@@ -1128,7 +1131,7 @@ impl Db {
     /// match and otherwise returns the most recently active project with that name; callers that
     /// know the user should use `project_of_user_by_name`.
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 &format!(
                     "SELECT {} FROM projects WHERE (id = ?1 OR name = ?1) AND deleted_at IS NULL ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
@@ -1654,7 +1657,7 @@ impl Db {
 
     /// The user's box, if one was created.
     pub fn user_box(&self, user_id: &str) -> Result<Option<Sandbox>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 &format!("SELECT {} FROM boxes WHERE user_id = ?1", Self::BOX_COLS),
                 params![user_id],
@@ -1665,7 +1668,7 @@ impl Db {
     }
 
     pub fn list_boxes(&self) -> Result<Vec<Sandbox>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(&format!("SELECT {} FROM boxes", Self::BOX_COLS))?;
             let rows = st.query_map([], Self::row_to_box)?;
             rows.collect()
@@ -4357,5 +4360,52 @@ mod avatar_migration_tests {
             before
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Who holds the writer's lock and for how long, by the line that asked for it. Tests only: the
+/// load gate prints the heaviest.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::collections::HashMap;
+    use std::panic::Location;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// Times held, milliseconds in all, the longest.
+    type Hold = (u64, f64, f64);
+    /// By call site.
+    static BY_SITE: Mutex<Option<HashMap<String, Hold>>> = Mutex::new(None);
+
+    pub(crate) struct Held(&'static Location<'static>, Instant);
+
+    impl Held {
+        pub(crate) fn by(site: &'static Location<'static>) -> Self {
+            Self(site, Instant::now())
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let ms = self.1.elapsed().as_secs_f64() * 1e3;
+            let site = format!("{}:{}", self.0.file(), self.0.line());
+            let mut by_site = BY_SITE.lock().unwrap();
+            let e = by_site.get_or_insert_with(HashMap::new).entry(site);
+            let e = e.or_insert((0, 0.0, 0.0));
+            *e = (e.0 + 1, e.1 + ms, e.2.max(ms));
+        }
+    }
+
+    /// Forget what was held so far, or take it, the most milliseconds in all first.
+    pub(crate) fn take() -> Vec<(String, Hold)> {
+        let mut all: Vec<_> = BY_SITE
+            .lock()
+            .unwrap()
+            .take()
+            .into_iter()
+            .flatten()
+            .collect();
+        all.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+        all
     }
 }
