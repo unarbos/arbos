@@ -169,6 +169,16 @@ fn read_receipts_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("read_receipts.json")
 }
 
+/// One file per signed-in account, so two accounts on this Mac keep their own
+/// answer. The id is slugged the way `credentials::file_path` slugs a relay URL.
+fn notification_sound_path(account_id: &str) -> PathBuf {
+    let slug: String = account_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    crate::sync::credentials::config_dir().join(format!("notification_sound-{slug}.json"))
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -210,6 +220,25 @@ fn save_read_receipts(enabled: bool) {
     let dir = crate::sync::credentials::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
+}
+
+/// Settings → Notifications "Sound" (default on: banners have rung since D49).
+/// Saved on this Mac only — the relay has no field for it — so the answer does
+/// not follow the account to another device.
+fn load_notification_sound(account_id: &str) -> bool {
+    std::fs::read_to_string(notification_sound_path(account_id))
+        .ok()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+fn save_notification_sound(account_id: &str, enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        notification_sound_path(account_id),
+        if enabled { "true" } else { "false" },
+    );
 }
 
 fn link_previews_path() -> std::path::PathBuf {
@@ -951,6 +980,9 @@ pub struct AppState {
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
     /// (`<config>/read_receipts.json`, default on).
     pub read_receipts: bool,
+    /// Settings → Notifications: banners ring (`<config>/notification_sound.json`,
+    /// default on). Off posts them silently; it has no effect while Notifications is off.
+    pub notification_sound: bool,
     /// Settings → Chat → Link previews (this Mac).
     pub link_previews: bool,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
@@ -1381,6 +1413,9 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
+            // Per account, so it waits for `/me` (`SyncEvent::Account`); banners ring
+            // until then, as they always have.
+            notification_sound: true,
             link_previews: {
                 let on = load_link_previews();
                 crate::ui::link_card::set_enabled(on);
@@ -1921,9 +1956,13 @@ impl AppState {
             }
             SyncEvent::Account(account) => {
                 self.account = account;
-                if self.account.is_some() {
+                if let Some(id) = self.account.as_ref().map(|a| a.id.clone()) {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
+                    // Settings → Notifications "Sound" is saved per account on this
+                    // Mac, so it can only be read once we know who signed in.
+                    self.notification_sound = load_notification_sound(&id);
+                    crate::ui::notify::set_sound(self.notification_sound);
                     // Align the sync source with the saved Settings → Notifications
                     // preference (Shared defaults to on); no PUT on every launch.
                     let enabled = self.read_receipts;
@@ -9284,6 +9323,19 @@ impl AppState {
 
     pub fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.notifier.enabled = enabled;
+        cx.notify();
+    }
+
+    /// Settings → Notifications "Sound": banners ring, or post silently.
+    pub fn set_notification_sound(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.notification_sound == enabled {
+            return;
+        }
+        self.notification_sound = enabled;
+        crate::ui::notify::set_sound(enabled);
+        if let Some(id) = self.account.as_ref().map(|a| a.id.as_str()) {
+            save_notification_sound(id, enabled);
+        }
         cx.notify();
     }
 
