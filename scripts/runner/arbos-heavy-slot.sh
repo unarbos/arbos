@@ -236,6 +236,31 @@ live_slots() {
   echo "$n"
 }
 
+# reclaim_pass: the five-minute sweep (sh.arbos.heavy-slot-reclaim.plist). It named no holder — "reclaim pass
+# — 2 live slot(s)" told a reader how many slots survived and nothing about what went, so a slot that vanished
+# between two passes could not be tied to a job without the acquire's own log. It now reads the slot table
+# before the sweep and names every entry live_slots dropped, for any of its reasons (dead owner, rig lease,
+# idle simulator). A holder that released itself during the pass reads as reclaimed; the sweep is every 300 s,
+# so that is a one-in-a-pass race and the line still names the job that let the slot go.
+reclaim_pass() {
+  local d i n held=0 gone=0 went=""
+  local -a base=() holder=() holder_pid=()
+  for d in "$SLOTS_DIR"/*.slot; do
+    [[ -d "$d" ]] || continue
+    base[held]=$(basename "$d"); holder[held]=$(cat "$d/name" 2>/dev/null); holder_pid[held]=$(cat "$d/pid" 2>/dev/null)
+    held=$((held + 1))
+  done
+  n=$(live_slots)
+  for (( i = 0; i < held; i++ )); do
+    [[ -d "$SLOTS_DIR/${base[i]}" ]] && continue
+    gone=$((gone + 1))
+    went="$went ${holder[i]:-?}(pid ${holder_pid[i]:-?}, slot ${base[i]})"
+  done
+  (( gone )) || { echo "$(ts) heavy-slot: reclaim pass — nothing to reclaim; $n live slot(s)"; return 0; }
+  echo "$(ts) heavy-slot: reclaim pass — reclaimed $gone of $held slot(s):$went; $n live slot(s) left"
+  logger -t arbos-heavy-slot "reclaim pass took $gone slot(s):$went" 2>/dev/null || true
+}
+
 # sim_state <udid>: Booted | Shutdown | missing | unknown (any user's device set; simctl lists only the caller's,
 # so ask the slot owner's user when it is not ours).
 sim_state() {
@@ -444,7 +469,7 @@ case "${1:-}" in
   acquire) shift; acquire "${1:?name}" "${@:2}" ;;
   release) release "${2:-}" ;;
   bind)    bind "${2:-}" "${3:-}" ;;
-  reclaim) ensure_dir; n=$(live_slots); echo "$(ts) heavy-slot: reclaim pass — $n live slot(s)" ;;
+  reclaim) ensure_dir; reclaim_pass ;;
   status)  ensure_dir; echo "heavy slots: $(live_slots)/$MAX_SLOTS (+$PRIORITY_EXTRA priority; rig lease cap ${RIG_LEASE_MAX_S}s$(gate_waiting && echo '; gate half queued')$(rel=$(release_held) && echo "; $rel holds the Mac — rigs refused")) — $(status_line)" ;;
   *) echo "usage: $0 acquire <name> [--priority] [--pid <owner>] [--no-wait | --wait-max <s>] | release <slot> | bind <slot> <udid> | reclaim | status" >&2; exit 2 ;;
 esac
