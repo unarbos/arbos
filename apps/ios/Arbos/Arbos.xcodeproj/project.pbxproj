@@ -59,6 +59,7 @@
 		A1A1400000000000000000D2 /* AgentLinksStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1400000000000000000D1 /* AgentLinksStoreTests.swift */; };
 		A1DA6B00000000000000B004 /* ChatSwipeTrackingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
+		A1NAV0000000000000000012 /* HomeNavPushUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1NAV0000000000000000011 /* HomeNavPushUITests.swift */; };
 		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
 		A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */; };
@@ -189,6 +190,8 @@
 		A1C4A2700000000000000004 /* ChartCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000003 /* ChartCardTests.swift */; };
 		A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C5440000000000000003 /* ShellApprovalCardTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
+		A1NAV0000000000000000002 /* HomeNavPushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1NAV0000000000000000001 /* HomeNavPushTests.swift */; };
+		A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
 		A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000003 /* BlockedStateTests.swift */; };
 		A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE9C000000000000000003 /* DevicesVisibleTests.swift */; };
@@ -204,7 +207,6 @@
 		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
-		A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */; };
 		A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B080 /* PillGlassTests.swift */; };
 		A1CF0000000000000000B091 /* HomePreviewWhoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */; };
 		A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C10500000000000000A0 /* ViewerChromeTests.swift */; };
@@ -333,6 +335,7 @@
 		A1DA6B00000000000000B001 /* BackDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackDragTests.swift; sourceTree = "<group>"; };
 		A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSwipeTrackingUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
+		A1NAV0000000000000000011 /* HomeNavPushUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNavPushUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeChatListNoFilterUITests.swift; sourceTree = "<group>"; };
@@ -464,6 +467,8 @@
 		A1C4A2700000000000000003 /* ChartCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartCardTests.swift; sourceTree = "<group>"; };
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
+		A1NAV0000000000000000001 /* HomeNavPushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNavPushTests.swift; sourceTree = "<group>"; };
+		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000003 /* BlockedStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedStateTests.swift; sourceTree = "<group>"; };
 		A1DE9C000000000000000003 /* DevicesVisibleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesVisibleTests.swift; sourceTree = "<group>"; };
@@ -480,7 +485,6 @@
 		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
-		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B080 /* PillGlassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PillGlassTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePreviewWhoTests.swift; sourceTree = "<group>"; };
 		A1D0C10500000000000000A0 /* ViewerChromeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerChromeTests.swift; sourceTree = "<group>"; };
@@ -787,6 +791,7 @@
 				A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */,
 				A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
+				A1NAV0000000000000000001 /* HomeNavPushTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
 				EC6500000000000000000001 /* RowStorageTests.swift */,
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
@@ -840,6 +845,7 @@
 			isa = PBXGroup;
 			children = (
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
+				A1NAV0000000000000000011 /* HomeNavPushUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
 				A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */,
@@ -1199,6 +1205,7 @@
 				A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */,
 				A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
+				A1NAV0000000000000000002 /* HomeNavPushTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
 				EC6500000000000000000002 /* RowStorageTests.swift in Sources */,
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
@@ -1252,6 +1259,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
+				A1NAV0000000000000000012 /* HomeNavPushUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */,

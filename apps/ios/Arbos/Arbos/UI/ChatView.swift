@@ -253,7 +253,6 @@ struct ChatSession: View {
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
     @State private var rigViewerForward = false
-    @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
     @State private var sentOnce = false
@@ -1468,9 +1467,6 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model).environment(\.theme, theme)
-        }
         .sheet(isPresented: $showGroupCallPicker) {
             if let people {
                 GroupCallPickerSheet(people: people, meId: model.user?.id) { ring in
@@ -1805,7 +1801,7 @@ struct ChatSession: View {
     private func handleDebugShowHook(_ show: String) {
         switch show {
                     case "keyboard": composerFocused = true
-                    case "settings": showSettings = true
+                    case "settings": model.showOwnProfile()
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
@@ -2007,9 +2003,10 @@ struct ChatSession: View {
         case "model": showModelPicker = true
         case "attach": showAttach = true
         case "voice": startCall(.voice)
-        case "settings": showSettings = true
+        case "settings": model.showOwnProfile()
         default: break
         }
+        // Settings is a pushed page and the tour's last step: nothing takes it down again.
         guard step != "settings" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
             switch step {

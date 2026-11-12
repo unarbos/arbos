@@ -13,9 +13,6 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @State private var showNewChat = false
-    /// Settings is a sheet from the account circle (as before the 2026-10-23 tab bar).
-    @State private var showSettings = false
     /// The bottom bar's text; the results replace the list while it is focused or filled.
     @State private var query = ""
     @State private var slowConnect = false
@@ -109,6 +106,18 @@ struct HomeView: View {
                     ProfilePage(target: target)
                         .id(target.id)
                         .backSwipeToPop()
+                case .ownProfile(let landing):
+                    // My own pane comes in from the right like the other profile items
+                    // (Jacob 2026-11-04), so it carries the same `backSwipeToPop` — it
+                    // draws its own `ProfileTopBar` instead of the system bar.
+                    SettingsView(landing: landing ?? DebugHooks.settingsPage)
+                        .backSwipeToPop()
+                        .onAppear { PerfSignpost.endAfterCommit(.settingsPage) }
+                case .newMessage:
+                    // Home's "+" — New Message — pushes in from the right like a chat
+                    // ([feedback iphone-compose-nav-push-2026-11-10]).
+                    NewChatSheet()
+                        .backSwipeToPop()
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
@@ -124,18 +133,6 @@ struct HomeView: View {
                 GoalDetailPage(goalId: openGoalId ?? "")
                     .environmentObject(model)
                     .environment(\.theme, theme)
-            }
-            .sheet(isPresented: $showNewChat) {
-                NewChatSheet().environmentObject(model).environment(\.theme, theme)
-            }
-            .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
-                SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
-                    .environmentObject(model).environment(\.theme, theme)
-                    .onAppear { PerfSignpost.endAfterCommit(.settingsSheet) }
-            }
-            // A Settings row picked in search: the sheet opens straight on that page.
-            .onChange(of: model.pendingSettingsLanding) { _, landing in
-                if landing != nil, !showSettings { showSettings = true }
             }
         }
         .task {
@@ -156,17 +153,17 @@ struct HomeView: View {
         }
         .task { await model.refreshGoals() }
         .onAppear {
-            // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
+            // Rig: New Message (pushed), which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
             if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { model.showNewMessage() }
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
             }
             if DebugHooks.show == "settings", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showSettings = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { model.showOwnProfile() }
             }
             // Rig: `ARBOS_SEARCH=<text>` opens the bottom search with that query
             // (`ARBOS_SEARCH=-` focuses the empty bar).
@@ -726,8 +723,9 @@ struct HomeView: View {
     private var topBarRow: some View {
         HStack(spacing: 10) {
             Button {
-                PerfSignpost.begin(.settingsSheet)
-                showSettings = true
+                // [feedback iphone-settings-nav-push-2026-11-10]
+                PerfSignpost.begin(.settingsPage)
+                model.showOwnProfile()
             } label: {
                 // My picture with the machine mark through the one presence badge (in
                 // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
@@ -751,7 +749,7 @@ struct HomeView: View {
                             .accessibilityIdentifier("offline-hint")
                     }
                 }
-            Button { showNewChat = true } label: {
+            Button { model.showNewMessage() } label: {
                 // The chat header's real glass (not the 0.85 legacy tint), beside the clear
                 // search capsule ([feedback iphone-composer-glass-2026-10-28]).
                 GlassCircle(material: ChatHeaderGlass.material(surface: theme.surface)) {

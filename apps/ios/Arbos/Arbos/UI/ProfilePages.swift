@@ -87,6 +87,8 @@ struct ProfileTopBar<Trailing: View>: View {
     /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
     /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
     var screen: ListTopFade.Screen = .agentPage
+    /// Optional XCTest id for the back chevron (New Message uses `new-message-back`).
+    var backIdentifier: String? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -98,16 +100,22 @@ struct ProfileTopBar<Trailing: View>: View {
 
     private var bar: some View {
         HStack {
-            Button { (onBack ?? { dismiss() })() } label: {
-                GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
+            backButton
             Spacer()
             trailing()
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
+    }
+
+    private var backButton: some View {
+        Button { (onBack ?? { dismiss() })() } label: {
+            GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        // Empty string when unset keeps the label-only lookup (`buttons["Back"]`) unchanged.
+        .accessibilityIdentifier(backIdentifier ?? "")
     }
 }
 

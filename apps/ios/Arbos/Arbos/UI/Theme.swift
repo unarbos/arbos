@@ -1052,11 +1052,11 @@ struct ListTopFade: View {
     /// stays opaque; `band` is the Mac-family gradient after it (the Mac's `FADE_BAND` = bar + 6:
     /// rows gone at the edge, full where the content starts at rest).
     enum Screen: String, CaseIterable {
-        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library
+        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library, newMessage
         /// The bar's top gap: pane pages keep `ProfileTopBar`'s 16, the rest `Controls.top`.
         var barTop: CGFloat {
             switch self {
-            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 16
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 16
             case .home, .homeSearch, .hiddenChats, .serverChannels, .chat: return Controls.top
             }
         }
@@ -1064,7 +1064,7 @@ struct ListTopFade: View {
         /// ([feedback chat-list-no-filter-ios-2026-11-10]); pane pages pin hero + tabs themselves.
         var chrome: CGFloat {
             switch self {
-            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 0
             }
         }
         /// Opaque past the status bar. Home and its search: a hair (`HomeChrome.topSolid`), then the
@@ -1076,7 +1076,7 @@ struct ListTopFade: View {
             switch self {
             case .home, .homeSearch: return HomeChrome.topSolid
             case .chat: return 20
-            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage: return 0
             }
         }
         /// The gradient after `solid`, ending where the content starts at rest.
@@ -1084,7 +1084,7 @@ struct ListTopFade: View {
             switch self {
             case .home, .homeSearch: return HomeChrome.barOnlyListTop - solid
             case .chat: return Controls.top + Controls.diameter + 6 - solid
-            case .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .hiddenChats, .serverChannels, .newMessage: return HomeChrome.barOnlyListTop
             case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
             }
         }
@@ -1096,7 +1096,7 @@ struct ListTopFade: View {
             switch self {
             case .home, .homeSearch:
                 return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash)]
-            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library:
+            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library, .newMessage:
                 return []
             }
         }
