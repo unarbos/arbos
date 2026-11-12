@@ -219,8 +219,9 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                 }
                 let message_id = content["life.arbos.id"].as_str().unwrap_or(event_id);
                 let badge = unread_total(state, &user_id).await;
+                let sealed = (ev["type"] == "m.room.encrypted").then_some((room_id, &ev));
                 crate::notify::alert_device(
-                    state, chat, &sender, message_id, text, badge, device_id,
+                    state, chat, &sender, message_id, text, badge, device_id, sealed,
                 )
                 .await;
             }

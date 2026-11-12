@@ -160,6 +160,25 @@ pub fn message_alert(
     v
 }
 
+/// The most an alert weighs with an encrypted event in it: APNs refuses a payload over 4096
+/// bytes, and nothing is worth losing the alert for.
+const SEALED_ALERT_MAX: usize = 3600;
+
+/// `alert` with the encrypted event it announces (`matrix: {room_id, event}`), as the
+/// homeserver holds it: the relay cannot read it, the device that is alerted can, and shows
+/// the words in place of "New message" (phase 5). Left out when the alert would be too large.
+pub fn with_sealed(alert: Value, room_id: &str, ev: &Value) -> Value {
+    let mut sealed = alert.clone();
+    sealed["matrix"] = json!({ "room_id": room_id, "event": {
+        "type": ev["type"], "event_id": ev["event_id"], "sender": ev["sender"],
+        "origin_server_ts": ev["origin_server_ts"], "content": ev["content"] } });
+    if sealed.to_string().len() <= SEALED_ALERT_MAX {
+        sealed
+    } else {
+        alert
+    }
+}
+
 /// Badge only: the lock screen shows nothing new, the app icon count changes.
 pub fn badge_only(total: i64) -> Value {
     json!({ "aps": { "badge": total } })
@@ -214,6 +233,24 @@ mod tests {
             avatar_color_index: None,
             disc_color: None,
         }
+    }
+
+    #[test]
+    fn an_encrypted_event_rides_its_alert_unless_that_makes_it_too_large() {
+        let chat = ChatRef::people("chat-1");
+        let alert = message_alert(&chat, &sender(), "$e", "New message", 1, &ChatMeta::dm());
+        let event = |ciphertext: String| {
+            json!({ "type": "m.room.encrypted", "event_id": "$e", "sender": "@u1:hs", "origin_server_ts": 7,
+                    "room_id": "!r:hs", "unsigned": { "age": 1 },
+                    "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": ciphertext } })
+        };
+        let p = with_sealed(alert.clone(), "!r:hs", &event("AwgA".into()));
+        assert_eq!(p["matrix"]["room_id"], "!r:hs");
+        assert_eq!(p["matrix"]["event"]["content"]["ciphertext"], "AwgA");
+        assert!(p["matrix"]["event"].get("unsigned").is_none());
+        assert_eq!(p["aps"], alert["aps"]);
+        let big = with_sealed(alert.clone(), "!r:hs", &event("A".repeat(4000)));
+        assert_eq!(big, alert);
     }
 
     #[test]
