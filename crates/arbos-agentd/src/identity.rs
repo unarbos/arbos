@@ -183,7 +183,7 @@ pub fn project_section(
         )
     };
     format!(
-        "\n\n## This project\n\n{identity}{former_line} Your project id is `{project_id}`. Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`.\n"
+        "\n\n## This project\n\n{identity}{former_line} Your project id is `{project_id}`. Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`: that is this project's live model setting, and it is the only true answer to \"what model are you?\" — give that id exactly. Your own sense of which model you are comes from your training data and not from this box, so it is not evidence; neither is the name of whatever gateway routes the request, nor any model named in a file you can read. Name one model and no alternatives, never guess, and do not change the answer because someone doubts it — repeat the id and say it is the project's model setting.\n"
     )
 }
 
@@ -317,7 +317,7 @@ mod tests {
         assert!(s.contains("your name now is \"GigChadAgent\""));
         assert!(s.contains("Your project id is `01M5862G`"));
         assert!(!s.contains("You are Home"));
-        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`."));
+        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`:"));
         // Never renamed: no former-name line at all.
         let plain = Identity {
             name: "Doug".into(),
@@ -340,6 +340,30 @@ mod tests {
         let s = project_section(&arbos, "p", "/work/p", "m");
         assert!(s.contains("You are this user's agent in Arbos."));
         assert!(!s.contains("never say \"in Arbos\""));
+    }
+
+    /// Jacob, 2026-11-04: asked what model it was running, the agent first said "haiku-5.5",
+    /// then "opus-5.5 via OpenRouter, though project settings say Haiku". Naming the id was
+    /// never enough on its own — the model also weighs its own sense of itself, the gateway's
+    /// name, and whatever a file on the box says, and it gives ground the moment it is
+    /// doubted. The line has to rule those out and say the setting is the answer.
+    #[test]
+    fn the_prompt_makes_the_configured_model_the_only_answer() {
+        let id = Identity {
+            name: "Test3".into(),
+            renames: vec![],
+        };
+        let s = project_section(&id, "p", "/work/p", "anthropic/claude-haiku-5.5");
+        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`:"));
+        assert!(s.contains("this project's live model setting"));
+        assert!(s.contains("the only true answer to \"what model are you?\""));
+        // The three sources that produced the wrong answer.
+        assert!(s.contains("comes from your training data and not from this box"));
+        assert!(s.contains("neither is the name of whatever gateway routes the request"));
+        assert!(s.contains("nor any model named in a file you can read"));
+        // One answer, and it survives being challenged.
+        assert!(s.contains("Name one model and no alternatives"));
+        assert!(s.contains("do not change the answer because someone doubts it"));
     }
 
     /// Hezbola 2026-10-26: one owner, by id, current name, former names named as the same person.

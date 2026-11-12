@@ -631,7 +631,7 @@ impl Agent {
     /// restarts the session at the next turn boundary once the change has settled
     /// (`schedule_prompt_refresh`, #2007) — never under a running or starting turn.
     pub async fn refresh_session_prompt(self: &Arc<Self>, why: &str) {
-        if let Err(e) = self.write_system_prompt() {
+        if let Err(e) = self.write_system_prompt().await {
             tracing::warn!(error = %e, why, "system prompt rewrite");
             return;
         }
@@ -692,7 +692,7 @@ impl Agent {
         }
         // The router prompt names the talking model under "This project"; rewrite
         // so a picker change is what the agent reports on the next turn.
-        if let Err(e) = self.write_system_prompt() {
+        if let Err(e) = self.write_system_prompt().await {
             tracing::warn!(error = %e, "rewrite system prompt after model change");
         }
         tracing::info!(
