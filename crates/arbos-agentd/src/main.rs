@@ -5,6 +5,7 @@ mod agent;
 mod agent_messages;
 mod app;
 mod approval;
+mod approval_authority;
 mod attachments;
 mod budget;
 #[cfg(test)]
