@@ -170,6 +170,7 @@
 		A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F900000000000000000001 /* PictureReplyQuoteTests.swift */; };
 		A1S100000000000000000002 /* SoloAgentReplyQuoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */; };
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
+		A1CA29740000000000000002 /* CurrentActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CA29740000000000000001 /* CurrentActivityTests.swift */; };
 		B1A9C0000000000000000002 /* BlankTranscriptGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */; };
 		A1E100000000000000000032 /* JobTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000031 /* JobTabsTests.swift */; };
 		A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000041 /* ComposerMetricsTests.swift */; };
@@ -443,6 +444,7 @@
 		A1F900000000000000000001 /* PictureReplyQuoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureReplyQuoteTests.swift; sourceTree = "<group>"; };
 		A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoloAgentReplyQuoteTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
+		A1CA29740000000000000001 /* CurrentActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentActivityTests.swift; sourceTree = "<group>"; };
 		B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlankTranscriptGuardTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000031 /* JobTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobTabsTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000041 /* ComposerMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetricsTests.swift; sourceTree = "<group>"; };
@@ -803,6 +805,7 @@
 				A1F900000000000000000001 /* PictureReplyQuoteTests.swift */,
 				A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */,
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
+				A1CA29740000000000000001 /* CurrentActivityTests.swift */,
 				B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */,
 				A1E100000000000000000031 /* JobTabsTests.swift */,
 				A1E100000000000000000041 /* ComposerMetricsTests.swift */,
@@ -1213,6 +1216,7 @@
 				A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */,
 				A1S100000000000000000002 /* SoloAgentReplyQuoteTests.swift in Sources */,
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
+				A1CA29740000000000000002 /* CurrentActivityTests.swift in Sources */,
 				B1A9C0000000000000000002 /* BlankTranscriptGuardTests.swift in Sources */,
 				A1E100000000000000000032 /* JobTabsTests.swift in Sources */,
 				A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */,

@@ -187,6 +187,9 @@ pub const NOT_RISKY_TOOLS: &[&str] = &[
     "routines_create",
     "routines_update",
     "routines_delete",
+    // Discovery + run of app-control commands; destructive cmds raise their own card inside
+    // agentd (`app::call_tool`), so the tool name itself must not match `tool-send`.
+    "arbos_app",
 ];
 
 /// Shell tools whose `command` argument is checked against the destructive patterns.
@@ -1323,6 +1326,10 @@ mod tests {
             ),
             ("publish_site", json!({ "app": "pura-vida-surf" })),
             ("unpublish_site", json!({ "app": "pura-vida-surf" })),
+            (
+                "arbos_app",
+                json!({ "action": "run", "cmd": "create_group", "args": { "agents": ["Bob"] } }),
+            ),
         ] {
             assert_eq!(
                 classify_tool(tool, &args),
