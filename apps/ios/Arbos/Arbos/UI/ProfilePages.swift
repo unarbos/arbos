@@ -55,7 +55,7 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     case user(ProfilePerson)
     case group(chatId: String, projectId: String?)
     case agent(projectId: String)
-    /// D88: a server's details (Channels | Members; admin rows for owner/admin).
+    /// D88: a server's overview (Channels · Members · Settings rows; admin Edit).
     case server(serverId: String)
     /// D88 (#1317): a channel's own page — what the `# general` pill opens.
     case channel(channelId: String)
@@ -87,6 +87,8 @@ struct ProfileTopBar<Trailing: View>: View {
     /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
     /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
     var screen: ListTopFade.Screen = .agentPage
+    /// Optional XCTest id for the back chevron (New Message uses `new-message-back`).
+    var backIdentifier: String? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -98,16 +100,22 @@ struct ProfileTopBar<Trailing: View>: View {
 
     private var bar: some View {
         HStack {
-            Button { (onBack ?? { dismiss() })() } label: {
-                GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
+            backButton
             Spacer()
             trailing()
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
+    }
+
+    private var backButton: some View {
+        Button { (onBack ?? { dismiss() })() } label: {
+            GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        // Empty string when unset keeps the label-only lookup (`buttons["Back"]`) unchanged.
+        .accessibilityIdentifier(backIdentifier ?? "")
     }
 }
 
@@ -159,6 +167,37 @@ enum PaneLeading {
     case avatar(AnyView)
     /// A 36 pt box with a glyph in it (Add members, files).
     case glyph(String)
+}
+
+/// Apple's 30 pt icon tile, with the machine mark on its corner when one is given. Its own
+/// view so a row that lays its text out by hand still draws the one tile (`PaneRow` and the
+/// Agent access link rows, which carry a tag beside the name).
+struct PaneTile: View {
+    @Environment(\.theme) private var theme
+    let icon: String
+    var mark: StatusMark? = nil
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                .frame(width: PaneKit.tile, height: PaneKit.tile)
+                .overlay(
+                    Image(systemName: icon)
+                        .font(theme.font(15, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+            if let mark {
+                // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
+                ZStack {
+                    Circle().fill(theme.bubbleAssistant)
+                    StatusMarkView(mark: mark, size: 8)
+                }
+                .frame(width: 13, height: 13)
+                .offset(x: 3, y: 3)
+            }
+        }
+    }
 }
 
 /// The grouped card: one fill, one radius, hairlines inset under the label.
@@ -287,25 +326,7 @@ struct PaneRow: View {
         case .none:
             EmptyView()
         case .tile(let icon, let mark):
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
-                    .frame(width: PaneKit.tile, height: PaneKit.tile)
-                    .overlay(
-                        Image(systemName: icon)
-                            .font(theme.font(15, weight: .semibold))
-                            .foregroundStyle(.white)
-                    )
-                if let mark {
-                    // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
-                    ZStack {
-                        Circle().fill(theme.bubbleAssistant)
-                        StatusMarkView(mark: mark, size: 8)
-                    }
-                    .frame(width: 13, height: 13)
-                    .offset(x: 3, y: 3)
-                }
-            }
+            PaneTile(icon: icon, mark: mark)
         case .avatar(let view):
             view.frame(width: PaneKit.avatar, height: PaneKit.avatar)
         case .glyph(let icon):
@@ -371,20 +392,18 @@ enum PaneTabsMetrics {
     /// Between two capsules; half of it is hit area on either side so the row tiles.
     static let gap: CGFloat = 4
     /// Hit band above and below the capsule when the caller gives none: the whole tab is
-    /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
+    /// Apple's 44 pt tall.
     static let hitBand: CGFloat = 6
     static var hitHeight: CGFloat { pill + 2 * hitBand }
 }
 
-/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
-/// All | Agents | People | Servers).
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
 ///
 /// Every tab takes a tap over its WHOLE area — capsule, the band above and below it and half
-/// the gap to its neighbours — not only over the glyphs of its label. Jacob, 2026-10-28
-/// (TestFlight 202610281148575584): "can't click All". A `.plain` Button hit-tests only what
-/// its label draws: an unselected tab's capsule is `.clear`, so its hit area was the text's
-/// own box (≈ 22 × 20 pt for "All"); the selected one reached its 32 pt capsule. Now the
-/// label carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
+/// the gap to its neighbours — not only over the glyphs of its label. A `.plain` Button
+/// hit-tests only what its label draws: an unselected tab's capsule is `.clear`, so its hit
+/// area was the text's own box; the selected one reached its 32 pt capsule. Now the label
+/// carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
 struct PaneTabs: View {
     @Environment(\.theme) private var theme
     let tabs: [String]
@@ -480,7 +499,10 @@ struct PaneHeader<Avatar: View>: View {
                 Button(action: subtitleAction) { subtitleText }
                     .buttonStyle(.plain)
                     .accessibilityHint("Edits the label")
-            } else {
+            } else if !subtitle.isEmpty {
+                // Grok-style overview heroes (avatar · name · Edit) carry no subtitle —
+                // skip the empty line so the Edit pill sits tight under the name
+                // ([feedback iphone-entity-profile-edit-2026-11-10]).
                 subtitleText
             }
             if let subtitleBelow {
@@ -1131,6 +1153,11 @@ private func presentShareSheet(items: [Any]) {
 
 // MARK: - Group page
 
+/// A people group's (or shared project chat's) profile — Grok Bot's overview
+/// hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]): large avatar,
+/// name, Edit pill (owner/admin), then grouped rows (Members · Library ·
+/// Activity) that push further right. Edit pushes `GroupEditView`; Add members
+/// and avatar are further pushes. No tab pills; no bottom sheets on this path.
 struct GroupProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1140,13 +1167,27 @@ struct GroupProfileView: View {
     let chatId: String
     /// nil for people groups; the project for a shared project chat.
     let projectId: String?
-    @State private var tab = "Members"
+
+    /// Which sub-page is pushed from the overview (nil = overview itself).
+    enum Subpage: String, Identifiable, Hashable {
+        case members, library, activity
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .members: return "Members"
+            case .library: return "Library"
+            case .activity: return "Activity"
+            }
+        }
+    }
+
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
-    /// Rig only: the avatar picker opened straight from the pane (users go through Edit group).
-    @State private var showAvatarPicker: AvatarPickerTab? = nil
-    @State private var showActivity = false
+    @State private var subpage: Subpage? = nil
+    /// Rig only: avatar picker tab when Edit opens straight onto the picker.
+    @State private var avatarTab: AvatarPickerTab = .bot
+    @State private var openAvatarOnEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
     /// Ban confirm (remove and block rejoin), same shape as server member ban.
@@ -1157,8 +1198,6 @@ struct GroupProfileView: View {
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    /// Mute notifications for 1 hour / 8 hours / until unmuted.
-    @State private var showMuteOptions = false
     /// People-group invite links (create / copy / share / revoke), same shape as server invites.
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
@@ -1265,34 +1304,28 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
-    /// Mute / Unmute above Leave — people groups only (relay `me.muted` + local duration).
-    private var muteFooter: [PaneSection] {
+    /// Notifications card on the overview — people groups only (relay `me.muted` + local duration).
+    private var notificationsSection: [PaneSection] {
         guard people?.isGroup == true, projectId == nil else { return [] }
-        let muted = model.isPeopleChatMuted(chatId)
-        let row = AnyView(Button {
-            if muted { model.unmutePeopleChat(chatId) }
-            else { showMuteOptions = true }
-        } label: {
-            PaneRow(
-                leading: .tile(muted ? "bell" : "bell.slash"),
-                title: muted ? "Unmute notifications" : "Mute notifications",
-                subtitle: model.peopleMuteSubtitle(chatId)
-            )
-        }
-        .buttonStyle(.plain)
-        // A menu of durations on its own row: anchored to the control, so it stays a dialog.
-        .confirmationDialog("Mute notifications", isPresented: $showMuteOptions, titleVisibility: .visible) { // confirm: anchored
-            ForEach(ChatMuteDuration.allCases) { duration in
-                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+        let notified = Binding<Bool>(
+            get: { !model.isPeopleChatMuted(chatId) },
+            set: { on in
+                if on { model.unmutePeopleChat(chatId) }
+                else { model.mutePeopleChat(chatId, for: .untilTurnedOn) }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("No banners from this group for the time you pick.")
-        })
-        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+        )
+        let caption = model.isPeopleChatMuted(chatId)
+            ? model.peopleMuteSubtitle(chatId)
+            : "Get notified when someone posts in this group"
+        return [
+            .card([AnyView(
+                PaneToggleRow(title: "Notifications", subtitle: caption, isOn: notified)
+                    .accessibilityIdentifier("group-notifications")
+            )]),
+        ]
     }
 
-    /// Footer on every tab for a people group: Leave group chat for members,
+    /// Footer on the overview for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
         guard let people, people.isGroup else { return [] }
@@ -1306,15 +1339,35 @@ struct GroupProfileView: View {
         })])]
     }
 
-    /// Split from `body` so the type checker finishes (swift-core-check / Xcode 26).
-    private var paneBodySections: [PaneSection] {
-        tab == "Members" ? membersSections + groupInviteSections : librarySections
-    }
-
-    private var paneFooterSections: [PaneSection] { muteFooter + leaveFooter }
-
     private var memberSubtitle: String {
         "\(memberCount) member\(memberCount == 1 ? "" : "s")"
+    }
+
+    var body: some View {
+        withDialogs(mainStack)
+            .navigationDestination(isPresented: $showEdit) {
+                GroupEditView(chatId: chatId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+                    .onDisappear { openAvatarOnEdit = false }
+            }
+            .navigationDestination(item: $subpage) { page in
+                groupSubpage(page)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showAdd) {
+                addMembersPage
+                    .backSwipeToPop()
+            }
+            .task {
+                if let projectId { projectMembers = await model.projectMembers(projectId) }
+                if projectId == nil, people?.kind == "group" {
+                    groupInvites = await model.groupInvites(chatId)
+                }
+            }
+            .onAppear(perform: applyDebugHooks)
+            .accessibilityIdentifier("group-profile")
     }
 
     @ViewBuilder private var mainStack: some View {
@@ -1323,20 +1376,10 @@ struct GroupProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: PaneKit.pageTop)
-                    // The shared pane (D93): picture (crayon when a people group — it
-                    // opens the edit sheet), name, member count, Members | Library.
-                    // Leave / Delete group chat in the footer (same rule as the chat
-                    // list: members leave, owners delete).
-                    ProfilePane(
-                        hero: PaneHero(
-                            picture: .image(AnyView(heroPicture)),
-                            name: title,
-                            subtitle: memberSubtitle
-                        ),
-                        tabs: PaneKinds.group,
-                        selected: $tab,
-                        body: paneBodySections,
-                        footer: paneFooterSections
+                    ProfileOverview(
+                        hero: overviewHero,
+                        sections: overviewSections,
+                        footer: leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -1345,13 +1388,86 @@ struct GroupProfileView: View {
         }
     }
 
-    var body: some View {
-        // Modifiers live in a helper so `body` itself stays a small expression.
-        withSheets(withDialogs(mainStack))
+    private var overviewHero: PaneHero {
+        PaneHero(
+            picture: .image(AnyView(heroPicture)),
+            name: title,
+            // Edit pill under the name for owners/admins; members keep the count line.
+            subtitle: canEditGroupSettings ? "" : memberSubtitle,
+            action: canEditGroupSettings ? OverviewEdit.action { showEdit = true } : nil
+        )
     }
 
-    /// The confirms, centred alerts (`Confirm.swift`). The two menus — mute durations, a
-    /// member's actions — sit on their own rows (`muteFooter`, `memberRow`), anchored.
+    private var overviewSections: [PaneSection] {
+        var rows: [AnyView] = [
+            AnyView(overviewRow(icon: "person.2", title: "Members", value: "\(memberCount)", page: .members)),
+            AnyView(overviewRow(icon: "books.vertical", title: "Library", value: nil, page: .library)),
+        ]
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            rows.append(AnyView(overviewRow(icon: "list.bullet.rectangle", title: "Activity", value: nil, page: .activity)))
+        }
+        return [
+            .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
+        ] + notificationsSection
+    }
+
+    private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
+        Button { subpage = page } label: {
+            PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("group-overview-\(page.rawValue)")
+    }
+
+    @ViewBuilder
+    private func groupSubpage(_ page: Subpage) -> some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .glyph(page == .library ? "books.vertical" : (page == .activity ? "list.bullet.rectangle" : "person.2")),
+                            name: page.title,
+                            subtitle: title
+                        ),
+                        tabs: [],
+                        selected: .constant(""),
+                        body: subpageSections(page)
+                    )
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .groupPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityIdentifier("group-subpage-\(page.rawValue)")
+    }
+
+    private func subpageSections(_ page: Subpage) -> [PaneSection] {
+        switch page {
+        case .members: return membersSections + groupInviteSections
+        case .library: return librarySections
+        case .activity: return [.custom(AnyView(GroupActivityEmbedded(chatId: chatId)))]
+        }
+    }
+
+    @ViewBuilder private var addMembersPage: some View {
+        if let project {
+            ProjectMembersSheet(project: project)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .toolbar(.hidden, for: .navigationBar)
+        } else {
+            NewGroupView(onDone: { showAdd = false }, addTo: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    /// The confirms, centred alerts (`Confirm.swift`). Member actions stay on their row.
     private func withDialogs<Content: View>(_ content: Content) -> some View {
         content
             .confirm(ConfirmSpec(
@@ -1395,65 +1511,60 @@ struct GroupProfileView: View {
             }
     }
 
-    private func withSheets<Content: View>(_ content: Content) -> some View {
-        content
-            .sheet(isPresented: $showAdd) {
-                if let project {
-                    ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
-                } else {
-                    // The New group picker aimed at this group: its members show as
-                    // already in, Add puts the picks into it (not into a new group).
-                    // A sheet over the profile sheet, like GroupEditSheet: no
-                    // presentation / colour-scheme modifiers here — they unseat
-                    // the presenting sheet.
-                    NavigationStack {
-                        NewGroupView(onDone: { showAdd = false }, addTo: chatId)
-                    }
-                    .tint(theme.text)
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
-                }
+    private func applyDebugHooks() {
+        // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
+        if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                pendingRemoveId = r.person.id
+                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
             }
-            .sheet(isPresented: $showEdit) {
-                GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+        }
+        // Rig: former tab names open the matching pushed sub-page.
+        if let t = DebugHooks.panelTab {
+            switch t {
+            case "Members": subpage = .members
+            case "Library": subpage = .library
+            default: break
             }
-            .sheet(isPresented: $showActivity) {
-                // Admin-only activity log (joined / removed / left / deleted messages).
-                // A sheet over the profile sheet — no presentation modifiers here.
-                GroupActivityView(chatId: chatId)
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
+        }
+        // Rig: `ARBOS_SHOW=addmembers` lands on Members → Add members push.
+        if DebugHooks.show == "addmembers", project == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                subpage = .members
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAdd = true }
             }
-            .task {
-                if let projectId { projectMembers = await model.projectMembers(projectId) }
-                if projectId == nil, people?.kind == "group" {
-                    groupInvites = await model.groupInvites(chatId)
-                }
+        }
+        // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens Edit → avatar picker.
+        if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
+            avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+            openAvatarOnEdit = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showEdit = true }
+        }
+    }
+
+    /// The hero picture: the agent's disc for a shared project; the group's
+    /// cluster or picked image for a people group. Overview has no crayon —
+    /// Edit owns the pencil badge. Tap opens Edit for owners/admins; everyone
+    /// else gets the full-size view when there is a picture.
+    @ViewBuilder private var heroPicture: some View {
+        if let project {
+            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
             }
-            .onAppear {
-                // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
-                if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        pendingRemoveId = r.person.id
-                        pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
-                    }
-                }
-                // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
-                // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
-                if DebugHooks.show == "addmembers", project == nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
-                }
-                // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
-                if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
-                    }
-                }
-                if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
-            .sheet(item: $showAvatarPicker) { initial in
-                AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
+        } else {
+            Button { showEdit = true } label: {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit group")
+        }
     }
 
     /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.
@@ -1532,34 +1643,9 @@ struct GroupProfileView: View {
         ]
     }
 
-    /// The hero picture: the agent's disc for a shared project; the group's
-    /// cluster or picked image for a people group — tap → the edit sheet for the
-    /// owner and admins, full-size view (when there is a picture) for everyone else.
-    @ViewBuilder private var heroPicture: some View {
-        if let project {
-            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
-            }
-        } else if !canEditGroupSettings {
-            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
-                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-            }
-        } else {
-            Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
-                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-                    .paneCrayon()
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit group name, description and picture")
-        }
-    }
-
-    /// Members: Add members, Share invite link (people groups), Activity for
-    /// owners/admins, then every person (name, @handle) and agent as kit rows.
-    /// Banned people (owner/admin) sit under Banned with Unban.
+    /// Members sub-page: Add members, Share invite link (people groups), then
+    /// every person (name, @handle) and agent as kit rows. Banned people
+    /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -1567,7 +1653,7 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // People groups: description lives in Edit (pushed) for
         // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
@@ -1602,14 +1688,6 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)
             .disabled(sharingInvite)
             .accessibilityLabel("Share invite link")))
-        }
-        // People groups only: the activity log is built from this chat's system lines.
-        if projectId == nil, people?.isGroup == true, canManageMembers {
-            list.append(AnyView(Button { showActivity = true } label: {
-                PaneRow(leading: .glyph("list.bullet.rectangle"), title: "Activity", chevron: true)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Group activity")))
         }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
@@ -1920,7 +1998,43 @@ struct GroupProfileView: View {
     private var librarySections: [PaneSection] {
         LibraryList.sections(items: items, empty: "Nothing shared here yet.")
     }
+}
 
+/// Activity list without its own SettingsPage chrome — drawn inside the group
+/// Activity sub-page's ProfilePane body.
+private struct GroupActivityEmbedded: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let chatId: String
+
+    private var events: [GroupActivity.Event] {
+        GroupActivity.events(from: model.messages(of: chatId))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if events.isEmpty {
+                Text("Joins, removals, leaves and deleted messages will show up here.")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PaneKit.inset)
+            } else {
+                ForEach(GroupActivity.Kind.allCases, id: \.self) { kind in
+                    let filtered = events.filter { $0.kind == kind }
+                    if !filtered.isEmpty {
+                        PaneSectionTitle(kind.title)
+                        PaneCard {
+                            ForEach(filtered) { event in
+                                GroupActivityRow(event: event)
+                            }
+                        }
+                        .padding(.horizontal, PaneKit.inset)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Group activity (admins)
@@ -2074,11 +2188,13 @@ private struct GroupActivityRow: View {
 
 // MARK: - Server page (D88)
 
-/// A server's details on the shared pane kit (rule 5): disc, name, member
-/// count, Channels | Members, the invite link (rule 6), then the one action at
-/// the end. Owners and admins get the admin rows (rename, add / rename /
-/// delete a channel, "Admins only post", roles, remove, ban, reset link);
-/// members see the same page read-only with Leave.
+/// A server's profile — Grok Bot's overview hierarchy ([feedback
+/// iphone-entity-profile-edit-2026-11-10]): large avatar, name, Edit pill
+/// (admin), then grouped rows (Channels · Members · Settings) that push further
+/// right. Edit pushes `ServerEditView`; New channel / Add members / avatar are
+/// further pushes. No tab pills; no bottom sheets on this path. Owners and
+/// admins still get the admin rows on the pushed pages; members see the same
+/// overview read-only with Leave.
 struct ServerProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -2086,11 +2202,23 @@ struct ServerProfileView: View {
     /// A member row pushes onto whichever stack this page is on.
     @Environment(\.profileHost) private var profileHost
     let serverId: String
-    @State private var tab = "Channels"
-    @State private var showRename = false
-    @State private var renameDraft = ""
-    @State private var showAvatarPicker = false
-    @State private var avatarPickerTab: AvatarPickerTab = .bot
+
+    enum Subpage: String, Identifiable, Hashable {
+        case channels, members, settings
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .channels: return "Channels"
+            case .members: return "Members"
+            case .settings: return "Settings"
+            }
+        }
+    }
+
+    @State private var showEdit = false
+    @State private var subpage: Subpage? = nil
+    @State private var openAvatarOnEdit = false
+    @State private var avatarTab: AvatarPickerTab = .bot
     @State private var showNewChannel = false
     @State private var renamingChannel: ServerChannel?
     @State private var channelDraft = ""
@@ -2099,7 +2227,6 @@ struct ServerProfileView: View {
     @State private var banningMember: ServerMember?
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    @State private var confirmReset = false
     @State private var copied = false
     @State private var loadedMembers = false
     @State private var showAddMembers = false
@@ -2114,28 +2241,46 @@ struct ServerProfileView: View {
 
     var body: some View {
         serverDialogs(memberDialogs(channelDialogs(frame)))
-            .sheet(isPresented: $showNewChannel) {
-                NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
+            .navigationDestination(isPresented: $showEdit) {
+                ServerEditView(serverId: serverId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+                    .onDisappear { openAvatarOnEdit = false }
             }
-            .sheet(isPresented: $showAddMembers) {
-                // The groups' picker, people only; a sheet over the profile sheet (no
-                // presentation modifiers here — they unseat the presenting sheet).
-                NavigationStack {
-                    NewGroupView(onDone: { showAddMembers = false }, addToServer: serverId)
-                }
-                .tint(theme.text)
-                .environmentObject(model)
-                .environment(\.theme, theme)
+            .navigationDestination(item: $subpage) { page in
+                serverSubpage(page)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showNewChannel) {
+                NewChannelPage(serverId: serverId)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showAddMembers) {
+                NewGroupView(onDone: { showAddMembers = false }, addToServer: serverId)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .backSwipeToPop()
             }
             .task {
-                if let t = DebugHooks.panelTab { tab = t }
+                if let t = DebugHooks.panelTab {
+                    switch t {
+                    case "Channels": subpage = .channels
+                    case "Members": subpage = .members
+                    case "Settings": subpage = .settings
+                    default: break
+                    }
+                }
                 await model.refreshServer(serverId)
                 loadedMembers = true
             }
+            .accessibilityIdentifier("server-profile")
     }
 
     /// The page without its dialogs: split out so the compiler type-checks each part alone.
-    /// Shared profile pane (D93): hero, Channels | Members | Settings, Leave / Delete in the footer.
     private var frame: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -2143,13 +2288,9 @@ struct ServerProfileView: View {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: PaneKit.pageTop)
                     if let server {
-                        ProfilePane(
-                            hero: hero(server),
-                            tabs: PaneKinds.server,
-                            selected: $tab,
-                            body: tab == "Channels" ? channelSections(server)
-                                : tab == "Members" ? memberSections(server)
-                                : settingsSections(server),
+                        ProfileOverview(
+                            hero: overviewHero(server),
+                            sections: overviewSections(server),
                             footer: [.card([AnyView(actions(server))])]
                         )
                     } else {
@@ -2164,37 +2305,89 @@ struct ServerProfileView: View {
         }
     }
 
-    private func hero(_ server: Server) -> PaneHero {
+    private func overviewHero(_ server: Server) -> PaneHero {
         let channels = server.liveChannels.count
+        let countLine = "\(memberCount) member\(memberCount == 1 ? "" : "s") · \(channels) channel\(channels == 1 ? "" : "s")"
         return PaneHero(
             picture: .image(AnyView(heroPicture(server))),
             name: server.name,
-            subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s") · \(channels) channel\(channels == 1 ? "" : "s")"
+            subtitle: isAdmin ? "" : countLine,
+            action: isAdmin ? OverviewEdit.action { showEdit = true } : nil
         )
+    }
+
+    private func overviewSections(_ server: Server) -> [PaneSection] {
+        var rows: [AnyView] = [
+            AnyView(overviewRow(icon: "number", title: "Channels", value: "\(server.liveChannels.count)", page: .channels)),
+            AnyView(overviewRow(icon: "person.2", title: "Members", value: "\(memberCount)", page: .members)),
+        ]
+        if isAdmin {
+            rows.append(AnyView(overviewRow(icon: "gearshape", title: "Settings", value: nil, page: .settings)))
+        }
+        return [.card(rows, separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
+    private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
+        Button { subpage = page } label: {
+            PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("server-overview-\(page.rawValue)")
+    }
+
+    @ViewBuilder
+    private func serverSubpage(_ page: Subpage) -> some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    if let server {
+                        ProfilePane(
+                            hero: PaneHero(
+                                picture: .glyph(page == .channels ? "number" : (page == .members ? "person.2" : "gearshape")),
+                                name: page.title,
+                                subtitle: server.name
+                            ),
+                            tabs: [],
+                            selected: .constant(""),
+                            body: subpageSections(page, server)
+                        )
+                    }
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .serverPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityIdentifier("server-subpage-\(page.rawValue)")
+    }
+
+    private func subpageSections(_ page: Subpage, _ server: Server) -> [PaneSection] {
+        switch page {
+        case .channels: return channelSections(server)
+        case .members: return memberSections(server)
+        case .settings: return settingsSections(server)
+        }
     }
 
     @ViewBuilder
     private func heroPicture(_ server: Server) -> some View {
-        Group {
-            if isAdmin {
-                // D92 amendment: the avatar picker (Bot | Generate | Upload) for the server's
-                // picture; Rename lives on the Settings tab.
-                Button { showAvatarPicker = true } label: {
-                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
-                        .paneCrayon()
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Change server picture")
-            } else {
-                ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
-                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
-                }
+        if isAdmin {
+            Button { showEdit = true } label: {
+                ServerAvatar(server: server, size: PaneKit.heroAvatar)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit server")
+        } else {
+            ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
+                ServerAvatar(server: server, size: PaneKit.heroAvatar)
             }
         }
     }
 
-    /// Footer (every tab): Leave server — or Delete server for the owner.
+    /// Footer (overview): Leave server — or Delete server for the owner.
     @ViewBuilder
     private func actions(_ server: Server) -> some View {
         if isOwner {
@@ -2204,16 +2397,11 @@ struct ServerProfileView: View {
         }
     }
 
-    /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (invite link).
-    /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (the
-    /// owner's invite links — demoted to a fallback on 2026-10-22; admins see none).
+    /// Settings sub-page: behaviour (Open server) → relations (invite links).
+    /// Rename / avatar live on Edit.
     private func settingsSections(_ server: Server) -> [PaneSection] {
         guard isAdmin else { return [.empty("Nothing to set up here yet.")] }
         var out: [PaneSection] = [
-            .card([AnyView(ProfileLinkRow(title: "Rename server") {
-                renameDraft = server.name
-                showRename = true
-            })]),
             .custom(AnyView(openCard(server))),
         ]
         if isOwner {
@@ -2286,26 +2474,19 @@ struct ServerProfileView: View {
             .title("Invite links"),
             .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
             .card(options),
-            .footnote("A fallback for people who are not on Arbos yet: the link opens Arbos and joins them. Add people who already have an account from the Members tab."),
+            .footnote("A fallback for people who are not on Arbos yet: the link opens Arbos and joins them. Add people who already have an account from Members."),
         ]
     }
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
         v
-            .sheet(isPresented: $showAvatarPicker) {
-                AvatarPickerSheet(target: .server(serverId), initialTab: avatarPickerTab).environmentObject(model).environment(\.theme, theme)
-            }
             .onAppear {
-                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens the avatar picker on that tab.
+                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens Edit → avatar picker.
                 if let show = DebugHooks.show, show.hasPrefix("serveravatar") {
-                    avatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = true }
+                    avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                    openAvatarOnEdit = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showEdit = true }
                 }
-            }
-            .alert("Rename server", isPresented: $showRename) {
-                TextField("Server name", text: $renameDraft)
-                Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }
-                Button("Cancel", role: .cancel) { }
             }
             .alert("Rename channel", isPresented: Binding(
                 get: { renamingChannel != nil },
@@ -2354,10 +2535,6 @@ struct ServerProfileView: View {
             .confirm(ConfirmSpec(title: "Delete \(server?.name ?? "this server")?", message: "Every channel and message goes, for everyone.",
                                  action: "Delete server"), isPresented: $confirmDelete) {
                 Task { _ = await model.deleteServer(serverId) }
-            }
-            .confirm(ConfirmSpec(title: "Reset the invite link?", message: "The old link stops working. People already in stay.",
-                                 action: "Reset link"), isPresented: $confirmReset) {
-                Task { await model.resetServerInvite(serverId) }
             }
     }
 
@@ -2531,7 +2708,6 @@ struct ServerProfileView: View {
         }
         .padding(.horizontal, PaneKit.inset)
     }
-
 }
 
 /// Finds the SwiftUI-hosted `UITextField` and makes a double-tap select the
@@ -2603,15 +2779,19 @@ private struct SelectAllOnDoubleTap: UIViewRepresentable {
 }
 
 /// Name the group, set an optional description, and optionally pick a picture.
-/// Saves with `PATCH /chats/{id}`.
-struct GroupEditSheet: View {
+/// Pushed from the group overview's Edit pill — Grok Bot Edit hierarchy
+/// ([feedback iphone-entity-profile-edit-2026-11-10]). Saves with `PATCH /chats/{id}`.
+struct GroupEditView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
+    var openAvatarOnAppear: Bool = false
+    var initialAvatarTab: AvatarPickerTab = .bot
+
     @State private var name = ""
     @State private var descriptionText = ""
-    @State private var showAvatarPicker = false
+    @State private var showAvatar = false
     @State private var saving = false
     @FocusState private var nameFocused: Bool
 
@@ -2629,70 +2809,102 @@ struct GroupEditSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 22) {
-                    // The picture: the avatar picker sheet (D92 amendment — Bot = the group's
-                    // colour, Upload = a photo; changes apply on Set avatar).
-                    Button { showAvatarPicker = true } label: {
-                        ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
-                                .frame(width: 112, height: 112)
-                            GlassCircle(size: 36) { // control-size: exception rowIconTiles
-                                Image(systemName: "camera.fill")
-                                    .font(theme.font(14, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                            }
-                            .offset(x: 4, y: 4)
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "Edit Group",
+                    doneTitle: saving ? "Saving…" : "Done",
+                    doneEnabled: !saving,
+                    onDone: { Task { await save() } }
+                )
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        EntityEditHero(onAvatar: { showAvatar = true }) {
+                            AvatarCluster(
+                                members: clusterMembers,
+                                size: 72,
+                                imageUrl: existingImageURL,
+                                discColor: people.flatMap { p in
+                                    p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil
+                                }
+                            )
                         }
+                        .padding(.top, 12)
+                        .id(people?.imageKey ?? people?.avatarDiscColor.map(String.init) ?? "auto")
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Name")
+                            PaneCard {
+                                EntityNameField(
+                                    text: $name,
+                                    placeholder: "Name this group",
+                                    focused: $nameFocused
+                                )
+                                .background(SelectAllOnDoubleTap())
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Description")
+                            PaneCard {
+                                TextField(
+                                    "",
+                                    text: $descriptionText,
+                                    prompt: Text("What this group is for").foregroundStyle(theme.placeholder),
+                                    axis: .vertical
+                                )
+                                .font(theme.font(Theme.body))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(3...6)
+                                .padding(.horizontal, PaneKit.inset)
+                                .padding(.vertical, 12)
+                                .onChange(of: descriptionText) { _, v in
+                                    if v.count > 200 { descriptionText = String(v.prefix(200)) }
+                                }
+                                .accessibilityIdentifier("group-description-field")
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Appearance")
+                            PaneCard {
+                                Button { showAvatar = true } label: {
+                                    PaneRow(title: "Avatar", chevron: true)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("edit-avatar-row")
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 28)
+
+                        Color.clear.frame(height: 40)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Change group picture")
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Group name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        TextField("", text: $name, prompt: Text("Name this group").foregroundStyle(theme.placeholder))
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                            .autocorrectionDisabled()
-                            .focused($nameFocused)
-                            .background(SelectAllOnDoubleTap())
-                            .controlField()
-                    }
-                    .padding(.horizontal, 16)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(3...6)
-                            .controlFieldGrowing()
-                    }
-                    .padding(.horizontal, 16)
-
-                    Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.muted)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 28)
-
-                    Color.clear.frame(height: 24)
                 }
-                .padding(.top, 28)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .background(theme.bg)
-            .sheetHeader(title: "Edit group", onLeading: { dismiss() },
-                         action: saving ? "Saving…" : "Save", actionEnabled: !saving,
-                         onAction: { Task { await save() } })
-            .onAppear {
-                name = people?.title ?? ""
-                descriptionText = people?.description ?? ""
-                nameFocused = true
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("group-edit")
+        .onAppear {
+            name = people?.title ?? ""
+            descriptionText = people?.description ?? ""
+            if openAvatarOnAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAvatar = true }
             }
-            .sheet(isPresented: $showAvatarPicker) {
-                AvatarPickerSheet(target: .group(chatId)).environmentObject(model).environment(\.theme, theme)
-            }
+        }
+        .navigationDestination(isPresented: $showAvatar) {
+            AvatarPickerPage(target: .group(chatId), initialTab: initialAvatarTab)
+                .backSwipeToPop()
         }
     }
 
@@ -2705,6 +2917,193 @@ struct GroupEditSheet: View {
         if ok { dismiss() }
     }
 }
+
+/// Server Edit page — name + avatar (pencil → AvatarPickerPage), matching
+/// `AgentEditView` / `GroupEditView` ([feedback iphone-entity-profile-edit-2026-11-10]).
+struct ServerEditView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let serverId: String
+    var openAvatarOnAppear: Bool = false
+    var initialAvatarTab: AvatarPickerTab = .bot
+
+    @State private var name = ""
+    @State private var showAvatar = false
+    @State private var saving = false
+    @FocusState private var nameFocused: Bool
+
+    private var server: Server? { model.server(serverId) }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "Edit Server",
+                    doneTitle: saving ? "Saving…" : "Done",
+                    doneEnabled: !saving,
+                    onDone: { Task { await save() } }
+                )
+                ScrollView(showsIndicators: false) {
+                    if let server {
+                        VStack(alignment: .leading, spacing: 22) {
+                            EntityEditHero(onAvatar: { showAvatar = true }) {
+                                ServerAvatar(server: server, size: PaneKit.heroAvatar)
+                            }
+                            .padding(.top, 12)
+                            .id(server.imageKey ?? server.avatarColorIndex.map(String.init) ?? "auto")
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Name")
+                                PaneCard {
+                                    EntityNameField(
+                                        text: $name,
+                                        placeholder: "Server name",
+                                        focused: $nameFocused
+                                    )
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Appearance")
+                                PaneCard {
+                                    Button { showAvatar = true } label: {
+                                        PaneRow(title: "Avatar", chevron: true)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("edit-avatar-row")
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                            }
+
+                            Color.clear.frame(height: 40)
+                        }
+                    } else {
+                        Text("This server is no longer available.")
+                            .foregroundStyle(theme.muted)
+                            .padding(.top, 120)
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("server-edit")
+        .onAppear {
+            name = server?.name ?? ""
+            if openAvatarOnAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAvatar = true }
+            }
+        }
+        .navigationDestination(isPresented: $showAvatar) {
+            AvatarPickerPage(target: .server(serverId), initialTab: initialAvatarTab)
+                .backSwipeToPop()
+        }
+    }
+
+    private func save() async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { dismiss(); return }
+        if trimmed == server?.name { dismiss(); return }
+        saving = true
+        let ok = await model.renameServer(serverId, name: trimmed)
+        saving = false
+        if ok { dismiss() }
+    }
+}
+
+/// New channel as a pushed page from the server Channels sub-page (same fields
+/// as `NewChannelSheet`, without sheet detents).
+struct NewChannelPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let serverId: String
+    @State private var name = ""
+    @State private var restricted = false
+    @State private var creating = false
+    @FocusState private var focused: Bool
+
+    private var slug: String { AppModel.channelSlug(name) }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "New Channel",
+                    doneTitle: creating ? "Creating…" : "Create",
+                    doneEnabled: !slug.isEmpty && !creating,
+                    onDone: create
+                )
+                ScrollView {
+                    VStack(spacing: 22) {
+                        SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                            .padding(.horizontal, 16)
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Channel name")
+                            PaneCard {
+                                HStack(spacing: 6) {
+                                    Text("#").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.muted)
+                                    TextField("", text: $name, prompt: Text("announcements").foregroundStyle(theme.placeholder))
+                                        .font(theme.font(Theme.body))
+                                        .foregroundStyle(theme.text)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .focused($focused)
+                                        .submitLabel(.done)
+                                        .onSubmit { create() }
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                                .frame(minHeight: PaneKit.rowHeight)
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                            if !name.isEmpty, slug != name {
+                                Text(slug.isEmpty ? "Use letters, digits and dashes." : "Will be #\(slug)")
+                                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                                    .padding(.horizontal, PaneKit.inset * 2)
+                            }
+                        }
+                        .padding(.top, 12)
+
+                        PaneCard {
+                            PaneRow(
+                                title: "Admins only post",
+                                subtitle: restricted ? "Members read" : "Everyone posts",
+                                trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary))
+                            )
+                        }
+                        .padding(.horizontal, PaneKit.inset)
+
+                        Color.clear.frame(height: 40)
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("new-channel-page")
+        .onAppear { focused = true }
+        .claimFailures("new-channel", ["create the channel"])
+    }
+
+    private func create() {
+        guard !slug.isEmpty, !creating else { return }
+        creating = true
+        Task {
+            if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
+                dismiss()
+                model.open(channel: c)
+            }
+            creating = false
+        }
+    }
+}
+
 
 // MARK: - Shared profile pane (D93) — one component for every entity
 // (docs/group-chat-redesign.md § "Shared profile pane"; the Mac twin is profiles::pane).
@@ -2763,23 +3162,32 @@ enum PaneBlock: Equatable {
     case footer
 }
 
-/// The tab set of every kind, the same labels and order as the Mac page of
-/// that kind (`profiles/*.rs` `TABS`; the Mac's `pane::tests` holds the twin).
-/// Agent: Grok Bot's Details · Library · Computer (Jacob 2026-10-24, the Mac's #1679;
-/// iPhone [feedback iphone-agent-pane-tabs-2026-10-25]).
+/// Labels for every profile kind. Person / own / channel still use these as
+/// tab pills. Agent / group / server use them as **overview row** names under
+/// the Grok hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]) —
+/// Coding · Routines · Library · Computer for a native agent (tabs superseded;
+/// earlier [feedback iphone-agent-pane-tabs-2026-10-25]).
 enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
-    static let agent = ["Details", "Library", "Computer"]
-    /// A connected (outside) agent has no Arbos machine (#2142).
-    static let outsideAgent = ["Details", "Library"]
+    /// Overview rows on a native agent (Grok Bot profile).
+    static let agent = ["Coding", "Routines", "Library", "Computer"]
+    /// Overview rows on a connected (outside) agent — no Computer (#2142).
+    static let outsideAgent = ["Library", "Connection"]
+    /// Overview row labels (tabs superseded).
     static let group = ["Members", "Library"]
+    /// Overview row labels (tabs superseded).
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
-    static let all: [(String, [String])] = [
-        ("person", person), ("own profile", ownProfile), ("agent", agent),
-        ("group", group), ("server", server), ("channel", channel),
+    /// Kinds that still draw a tab pill on the profile landing.
+    static let tabbed: [(String, [String])] = [
+        ("person", person), ("own profile", ownProfile), ("channel", channel),
     ]
+    /// Kinds whose landing is the overview (no pill); rows push further right.
+    static let overview: [(String, [String])] = [
+        ("agent", agent), ("group", group), ("server", server),
+    ]
+    static let all: [(String, [String])] = tabbed + overview
 }
 
 struct ProfilePane: View {

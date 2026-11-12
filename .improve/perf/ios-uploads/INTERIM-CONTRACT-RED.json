@@ -1,0 +1,22 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "31de5774ecd84e4a1171c1924b1bee1e4f5bd1967e364be71c0e65f2be9c75c2",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "08de5d1f705b7cc82b308f7b44894119b226de5c52fdcc946619f60cd128ca72",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "fddafc43c26dd83863f0be246cd14ec31190d1aa9cc9dc840c373b295d7c1580",
+  "exit_code": 1,
+  "results": {
+    "cases": {
+      "already-cancelled-no-key-or-request-admission": false,
+      "cancel-pending-bounded-no-result-or-active-leak": true,
+      "empty-batch-no-requests": true,
+      "individual-cancellation-error-preserves-other-items": true
+    },
+    "failed": 1,
+    "passed": 3,
+    "total": 4
+  },
+  "seconds": 1.7774237090488896
+}

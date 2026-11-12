@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-description = "The one service outside the boxes: registry, pairing, sync rooms, blobs, model proxy, Daytona, push queue"
+description = "The one service outside the boxes: registry, pairing, sync rooms, blobs, model proxy, box fleet, push queue"
 
 [dependencies]
 arbos-core.workspace = true

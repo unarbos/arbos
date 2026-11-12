@@ -449,29 +449,39 @@ pub struct SendBody {
 }
 
 /// `POST /chats/{id}/messages {text, reply_to?}` — post one message to a people chat as the
-/// calling device, without a Loro client: the relay appends the row the apps would write
+/// calling user, without a Loro client: the relay appends the row the apps would write
 /// (`sender: user:<id>`, handle, name), stores and broadcasts it, and announces it (push,
 /// agents, Matrix mirror) exactly as `POST /chats/{id}/notify` does after an app's own push.
-/// Member devices only; readers are refused by the route gate.
+/// Member devices and the owner's box (act-as-user) may call it; readers are refused.
 pub async fn send_message(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     body: Option<Json<SendBody>>,
 ) -> Response {
-    let Principal::Device {
-        id: device_id,
-        user_id,
-        ..
-    } = &principal
-    else {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "a signed-in device is required",
-        );
+    let (device_id, user_id) = match &principal {
+        Principal::Device {
+            id: device_id,
+            user_id,
+            ..
+        } => (device_id.clone(), user_id.clone()),
+        Principal::Box { user_id } => (format!("box:{user_id}"), user_id.clone()),
+        Principal::Admin => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "a signed-in device is required",
+            );
+        }
     };
-    if !state.allows(&principal, &format!("{PEOPLE_ACL_PREFIX}{id}")) {
+    // Human membership (same as the apps), not only agent-in-chat room access.
+    if state
+        .db
+        .membership(&id, &format!("user:{user_id}"))
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return api_error(StatusCode::FORBIDDEN, "not_member", "not in this chat");
     }
     // The same gates as a room push (#2012): a blocked or silenced person writes nothing.
@@ -495,7 +505,7 @@ pub async fn send_message(
     }
     // The card's handle is never empty: a legacy device-token account gets its device-name
     // slug, so the row is attributable even without a GitHub login (#1580).
-    let me = state.db.user_card(user_id).ok().flatten();
+    let me = state.db.user_card(&user_id).ok().flatten();
     let mentions = people::resolve_mentions(&state, &cm, &text, &format!("user:{user_id}"));
     let opts = UserMessageOpts {
         reply_to: b.reply_to.filter(|r| !r.trim().is_empty()),
@@ -524,8 +534,8 @@ pub async fn send_message(
     // §6.2). A message without the command is history to the agent, never work: until #2120
     // this route wrote the row alone and no agent ever answered a message posted through it.
     let written = doc.transact(|d| {
-        d.append_user_message(&message_id, &text, device_id, &opts)?;
-        d.push_command("send", json!({ "messageId": message_id }), device_id);
+        d.append_user_message(&message_id, &text, &device_id, &opts)?;
+        d.push_command("send", json!({ "messageId": message_id }), &device_id);
         Ok::<(), arbos_core::doc::CoreError>(())
     });
     if let Err(e) = written {
@@ -535,7 +545,7 @@ pub async fn send_message(
     let batch_id = ulid();
     let seq = match state
         .db
-        .append_row(&room_name, device_id, &batch_id, &bytes)
+        .append_row(&room_name, &device_id, &batch_id, &bytes)
     {
         Ok((seq, _)) => seq,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -556,10 +566,10 @@ pub async fn send_message(
     // What the socket path does after a person's row (rooms.rs): the sender's own cursor moves
     // past it, the Matrix safety net is armed, and every agent's box is woken — or, with no
     // socket on this room, told to open it (#2120: this route never woke a box).
-    let _ = state.db.advance_user_cursor(user_id, &id, seq);
+    let _ = state.db.advance_user_cursor(&user_id, &id, seq);
     state.matrix.touch_rows(&state, &id, None);
     boxes::after_person_row(&state, &room, &chat, &people::serving_agents(&state, &cm)).await;
-    let sender = notify::Sender::user(&state, user_id);
+    let sender = notify::Sender::user(&state, &user_id);
     let event_id =
         notify::announce_with(&state, &chat, &sender, &message_id, &text, None, &mentions).await;
     (

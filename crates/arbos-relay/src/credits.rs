@@ -1,6 +1,6 @@
 //! Credits and metering for self-serve Arbos. Every user has one ledger (`credit_ledger`):
-//! grants in, debits out for inference (what the upstream charged us) and machine time (our
-//! Daytona cost, zero margin). Every spend source lands in it — main model calls, decision
+//! grants in, debits out for inference (what the upstream charged us) and machine time (our own
+//! cost, zero margin). Every spend source lands in it — main model calls, decision
 //! calls, memory write passes, the tree builder, subagents, images and voice — each row tagged
 //! with its `kind`, so the account has one limit and still shows what spent it.
 //!
@@ -328,9 +328,15 @@ pub fn charge_call(
     }
 }
 
-/// Machine metering: once a minute each user box is charged for the time since its last tick —
-/// the running rate while awake or waking, the stopped-disk rate otherwise (Daytona only; local
-/// process/docker boxes cost nothing). A box whose user ran out of credits is stopped.
+/// Machine metering: once a minute each metered user box is charged for the time since its last
+/// tick — the running rate while awake or waking, the stopped-disk rate otherwise. A box whose
+/// user ran out of credits is stopped.
+///
+/// Only the retired Daytona provider was ever metered: its sandboxes were billed per sandbox and
+/// per hour. A local process or Docker box costs nothing, and a gVisor box runs on the relay's own
+/// host, whose cost is flat and not per box, so none of them is charged here. The loop stays as it
+/// is (rates, alert, ledger kind) and matches nothing while every box is on the host; pricing host
+/// boxes is a separate decision with its own rate.
 pub async fn spawn_meter(state: AppState) {
     if !metered(&state) {
         return;
@@ -354,7 +360,7 @@ async fn meter_once(state: &AppState) {
     };
     let now = now_ms();
     for sb in boxes {
-        if sb.provider != "daytona" {
+        if sb.provider != crate::boxes::RETIRED_PROVIDER {
             continue;
         }
         let (bs, _) = state.box_state(&sb.user_id).await;
@@ -385,18 +391,10 @@ async fn meter_once(state: &AppState) {
         {
             tracing::warn!(error = %e, user = %sb.user_id, "machine cost");
         }
-        // Only the kill switch stops a running machine (always-on): machine time never gates.
-        if running {
-            if let Err(r) = check_read_only(state) {
-                tracing::warn!(user = %sb.user_id, %r, "stopping the box: relay is read-only");
-                if let Err(e) = crate::boxes::stop_box(state, &sb.user_id, false).await {
-                    tracing::warn!(error = %e, user = %sb.user_id, "meter stop");
-                }
-                state
-                    .set_box_state(&sb.user_id, BoxState::Asleep, Some(&r.to_string()))
-                    .await;
-            }
-        }
+        // The kill switch used to stop a metered box from here. Every row this loop sees is on the
+        // retired provider, and the relay neither starts nor stops those: the sandbox is left as
+        // it is for the operator step that deletes it, and claiming it asleep would be a guess.
+        // `check_read_only` still refuses every wake, every turn and every create.
     }
     machine_alert(state);
 }
@@ -427,14 +425,15 @@ fn machine_alert(state: &AppState) {
     }
 }
 
-/// Expected always-on machine cost per day at the current box count.
+/// Expected always-on machine cost per day at the current count of metered boxes (see
+/// [`spawn_meter`]: only the retired provider's sandboxes are priced per box).
 pub fn machine_baseline_usd_per_day(state: &AppState) -> (usize, f64) {
     let boxes = state
         .db
         .list_boxes()
         .unwrap_or_default()
         .into_iter()
-        .filter(|b| b.provider == "daytona")
+        .filter(|b| b.provider == crate::boxes::RETIRED_PROVIDER)
         .count();
     (boxes, boxes as f64 * 24.0 * state.cfg.machine_usd_per_hour)
 }
@@ -630,7 +629,7 @@ mod tests {
         assert_eq!(user, same_user, "the same GitHub account is the same user");
         let make = |sandbox: &str| Sandbox {
             user_id: user.clone(),
-            provider: "daytona".into(),
+            provider: "gvisor".into(),
             sandbox_id: Some(sandbox.to_owned()),
             daytona_state: None,
             device_id: format!("box:{sandbox}"),

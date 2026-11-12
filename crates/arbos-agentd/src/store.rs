@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
   delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0, steers TEXT NOT NULL DEFAULT '[]'
 );
+CREATE INDEX IF NOT EXISTS jobs_subagent_created ON jobs(subagent_id, created_at DESC);
 
 -- Every worker a job has ever been given, not only the one it is on now (bug AO). `jobs.subagent_id`
 -- is overwritten by each fresh worker, and the processes the replaced worker left behind are

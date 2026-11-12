@@ -14,8 +14,6 @@ enum DebugHooks {
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
     /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
     static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
-    /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
-    static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
@@ -46,7 +44,7 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
-    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
+    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers among the home chats.
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
     /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
     static var fixtureGroupRole: String? {
@@ -156,7 +154,9 @@ enum DebugHooks {
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
-    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture;
+    /// `agent-links` opens Agent access link, `agent-links-copy` lands with the copy sheet up and
+    /// `agent-links-copied` with its Copy already pressed.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
@@ -193,6 +193,9 @@ enum DebugHooks {
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `ARBOS_TIME_REVEAL=1`: the open chat holds the iMessage time peek fully drawn out, for
+    /// screenshot rigs (`simctl` cannot drag the transcript).
+    static var timeReveal: Bool { value("ARBOS_TIME_REVEAL") == "1" }
     /// `system | light | dark`: the theme for one launch, over the saved choice and the
     /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }

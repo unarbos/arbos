@@ -1,0 +1,100 @@
+{
+  "before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "room_activity_reads",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 101,
+    "seconds": 30.12091729103122,
+    "counts": [
+      [
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "9787352846589910ed78cf887f4d34b3818b27953f3db060e1d4cf9b297f7dd0",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "after": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "batch_tests::",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 0,
+    "seconds": 28.349360666936263,
+    "counts": [
+      [
+        "10",
+        "0",
+        "0"
+      ]
+    ],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "5935c6196dd7255a310b13d03d8d423939e5501f8fb04b4c85839cd395591cfd",
+      "db.rs": "698e463dfb7107a693b056c2de741e20b03ce0d8fdf243008d212d5b6516f638",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 16.249473874922842,
+    "counts": [],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "5935c6196dd7255a310b13d03d8d423939e5501f8fb04b4c85839cd395591cfd",
+      "db.rs": "698e463dfb7107a693b056c2de741e20b03ce0d8fdf243008d212d5b6516f638",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  }
+}

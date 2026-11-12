@@ -1,0 +1,63 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "1297da581b5b552affecbad4b580e15545aea3873d70ba8e465fb9843894148a",
+    ".improve/perf/ios-uploads/serial-main.swift": "59a3f9f64bbe76d7f754b7f73bb1be435ab4217852562dfa48eb88913763f52c"
+  },
+  "fixture_sha256": "7064167425ffda765f0f4ea2bc5b21cc145fad74bcbfd07ef7914ce08204435a",
+  "compile_exit": 0,
+  "scope": "performance",
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 11,
+    "results": [
+      {
+        "name": "people-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "people-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "project-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "people-bounded-out-of-order-single-commit",
+        "pass": true
+      },
+      {
+        "name": "people-multiple-failures-original-row-policy",
+        "pass": true
+      },
+      {
+        "name": "people-all-failures-still-one-original-commit",
+        "pass": true
+      },
+      {
+        "name": "project-bounded-out-of-order-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-multiple-failures-original-row-policy",
+        "pass": true
+      },
+      {
+        "name": "project-all-failures-still-one-original-commit",
+        "pass": true
+      },
+      {
+        "name": "project-fixture-no-network-control",
+        "pass": true
+      }
+    ],
+    "total": 11
+  },
+  "seconds": 1.0149214590201154
+}

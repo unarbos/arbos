@@ -8,13 +8,14 @@
 # named: runs `cloudflared tunnel run --token $ARBOS_TUNNEL_TOKEN` beside the relay. The token comes
 #        from the env or from 1Password (`op read op://Arbos/<item>/credential`); the hostname the
 #        tunnel serves is ARBOS_TUNNEL_HOSTNAME (default relay.arbos.life). The URL never changes, so
-#        Daytona boxes created earlier keep dialing back after a restart.
+#        boxes created earlier keep dialing back after a restart.
 # quick: runs `cloudflared tunnel --url`, reads the generated URL, exports it. Existing boxes get the
 #        new URL pushed at their next wake (relay-url file), but a stable URL is the right fix.
 # none:  you already have a reverse proxy or a reachable IP; ARBOS_RELAY_PUBLIC_URL is required.
 #
-# Provider keys are read from the env (OPENROUTER_API_KEY, DAYTONA_API_KEY) or, when `op` is on the
-# PATH and ARBOS_OP_KEYS=1, from the Arbos vault. Everything else is the relay's normal env (README).
+# Model provider keys are read from the env (OPENROUTER_API_KEY, OPENAI_API_KEY) or, when `op` is on
+# the PATH and ARBOS_OP_KEYS=1, from the Arbos vault. Everything else is the relay's normal env
+# (README).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,11 +78,10 @@ esac
 
 if [[ "${ARBOS_OP_KEYS:-0}" == "1" ]] && command -v op >/dev/null 2>&1; then
   export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(op read "op://Arbos/${ARBOS_OP_OPENROUTER_ITEM:?set ARBOS_OP_OPENROUTER_ITEM}/credential")}"
-  export DAYTONA_API_KEY="${DAYTONA_API_KEY:-$(op read "op://Arbos/${ARBOS_OP_DAYTONA_ITEM:?set ARBOS_OP_DAYTONA_ITEM}/credential")}"
 fi
 
 # Stale exports from earlier sessions must not leak into boxes (snapshot and harness overrides).
-unset ARBOS_DEFAULT_HARNESS ARBOS_DAYTONA_DOCKERFILE ARBOS_BOOTSTRAP_DIR
+unset ARBOS_DEFAULT_HARNESS ARBOS_BOOTSTRAP_DIR
 export ARBOS_RELAY_LISTEN="$LISTEN"
 echo "==> relay on $LISTEN, public $ARBOS_RELAY_PUBLIC_URL, snapshot ${ARBOS_DAYTONA_SNAPSHOT:-<relay default>}"
 exec "$RELAY_BIN"

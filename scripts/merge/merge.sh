@@ -3,14 +3,22 @@
 # Runs a fresh GO and, only on GO, merges <pr> as a merge commit pinned to <pinned-head-sha>.
 # Refuses if main's head moves between the GO check and the merge call, and names each commit that landed.
 # The PAT lives in one shell variable of this process (sent to curl over stdin, never argv or a file)
-# and is unset as soon as the merge call returns.
+# and is unset as soon as the merge outcome is known (after a sync merge returns, or after merge-async
+# polling reaches a terminal state).
 # Run from the repo checkout. MERGE_KIT (default /tmp/k) holds this session's files: merge-allow (the PR numbers
 # the coordinator cleared, `#` starts a comment), watch-solo (merge-window.sh) and op-last.err.
+#
+# Native GitHub stacked PRs cannot use PUT .../merge (HTTP 403). They use PUT .../merge-async with
+# X-GitHub-Api-Version: 2026-03-10, then poll GET .../merge-async/{uuid}. Merging a stacked PR also
+# merges every open PR below it in the stack, so those downstack PRs must themselves be on the
+# allow-list and gated before the call — one merge must never land an unvetted PR.
 #
 # EXIT CODES, and why there are four of them rather than three.
 #   2  REFUSED  — a policy answer about this pull request. The kit read the coordinator's list and the PR's
 #                 state, and the answer is no.
-#   3  NOT MERGED — a verdict answer. The window check said NO-GO, or main moved out from under the GO.
+#   3  NOT MERGED — a verdict answer. The window check said NO-GO, main moved out from under the GO, or
+#                 the merge call / merge-async poll did not produce a real merge. Print MERGED <sha> only
+#                 when a merge actually landed; any other merge-call result is exit 3, never 0.
 #   4  credential refusal — 1Password was reached and did not serve the read.
 #   5  SETUP — the kit or its tools are not installed on this host. NOTHING WAS JUDGED. This code exists
 #                 because the other three were being used for it: a missing /tmp/k reported as "no merge list"
@@ -91,12 +99,79 @@ main_refuse() {
   main_moved "$1" "$2"
   echo "  Run merge.sh again for a fresh GO."
 }
+# stacked_sync_forbidden <body>: 0 when the sync merge endpoint refused because the PR is stacked.
+stacked_sync_forbidden() {
+  case "$1" in *"Merging stacked PRs via this endpoint is not supported"*) return 0 ;; *) return 1 ;; esac
+}
+# stack_open_downstack <pr> <pull_requests-json-array>: open PR numbers strictly below <pr> in the
+# stack (bottom → top order). Empty when <pr> is the bottom or absent. One number per line.
+stack_open_downstack() {
+  jq -r --argjson pr "$1" '
+    (map(.number) | index($pr)) as $i
+    | if $i == null then empty
+      else .[:$i][] | select(.state == "open") | .number end' <<< "$2"
+}
+# async_merge_sha <body>: prints the merge commit sha when status is merged, else nothing.
+async_merge_sha() {
+  jq -r 'if .status == "merged" then (.details.sha // empty) else empty end' <<< "$1" 2>/dev/null
+}
 [ ${#SHA} -eq 40 ] || { echo "REFUSED: pin the full 40-char head sha"; exit 2; }
 
 head=$(gh pr view "$PR" -R $R --json headRefOid --jq .headRefOid)
 [ "$head" = "$SHA" ] || { echo "REFUSED: #$PR head is $head, not the pinned $SHA"; exit 2; }
 base=$(gh pr view "$PR" -R $R --json baseRefName --jq .baseRefName)
-[ "$base" = main ] || { echo "REFUSED: #$PR targets '$base', not main (a stacked PR is retargeted only after its parent lands)"; exit 2; }
+# Native stack membership (nullable). A stacked PR's own baseRefName may be its parent branch while
+# the stack still lands on main; the sync merge endpoint cannot merge it (403 → merge-async).
+STACKED=0; STACK_NUM=""; STACK_POS=""
+stack_json=$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/$R/pulls/$PR" --jq 'if .stack == null then empty else .stack end' 2>/dev/null) || stack_json=""
+if [ -n "$stack_json" ]; then
+  STACKED=1
+  STACK_NUM=$(jq -r '.number // empty' <<< "$stack_json")
+  STACK_POS=$(jq -r '.position // empty' <<< "$stack_json")
+  stack_base=$(jq -r '.base.ref // empty' <<< "$stack_json")
+  [ "$stack_base" = main ] || { echo "REFUSED: #$PR's stack targets '$stack_base', not main"; exit 2; }
+  echo "    #$PR is in native stack #${STACK_NUM} at position ${STACK_POS} (stack base main)"
+else
+  [ "$base" = main ] || { echo "REFUSED: #$PR targets '$base', not main (a stacked PR is retargeted only after its parent lands)"; exit 2; }
+fi
+# refuse_unvetted_downstack: merge-async of a stacked PR also merges every open PR below it. Each of
+# those must be on the allow-list and pass require_gates, or this call would land an unvetted PR.
+refuse_unvetted_downstack() {
+  local members below n dhead dfiles grc
+  [ -n "$STACK_NUM" ] || {
+    STACK_NUM=$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/$R/pulls/$PR" --jq '.stack.number // empty' 2>/dev/null) || STACK_NUM=""
+    [ -n "$STACK_NUM" ] || { echo "REFUSED: sync merge said #$PR is stacked, but no stack object is readable for it"; exit 2; }
+  }
+  members=$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/$R/stacks/$STACK_NUM" --jq '.pull_requests' 2>&1) \
+    || { echo "REFUSED: cannot read stack #$STACK_NUM to vet downstack PRs: ${members:0:160}"; exit 2; }
+  below=$(stack_open_downstack "$PR" "$members")
+  [ -n "$below" ] || return 0
+  while read -r n; do
+    [ -n "$n" ] || continue
+    case " $ALLOW " in
+      *" $n "*) ;;
+      *) echo "REFUSED: merging #$PR would also merge #$n (open below it in stack #$STACK_NUM), which is not in the coordinator's merge list ($ALLOW)."
+         echo "  One merge-async call must never land an unvetted PR. Clear #$n first, or merge a lower stack position."
+         exit 2 ;;
+    esac
+    dhead=$(gh api "repos/$R/pulls/$n" --jq '.head.sha' 2>&1) \
+      || { echo "REFUSED: cannot read #$n's head to gate the downstack of #$PR: ${dhead:0:160}"; exit 2; }
+    [ ${#dhead} -eq 40 ] || { echo "REFUSED: #$n's head is not a full sha ($dhead), so it cannot be gated"; exit 2; }
+    dfiles=$(pr_files "$n") || { echo "REFUSED: cannot read #$n's changed files to gate the downstack of #$PR: ${dfiles#BLOCKED:}"; exit 2; }
+    [ -n "$dfiles" ] || { echo "REFUSED: #$n reports no changed files, so it cannot be gated before merging #$PR"; exit 2; }
+    require_gates "$dhead" "$dfiles"; grc=$?
+    case $grc in
+      0) echo "    downstack #$n on ${dhead:0:9}: gated (allow-listed and require_gates clear)" ;;
+      1) echo "REFUSED: merging #$PR would also merge #$n, which has a required check with no successful run on ${dhead:0:9}."; exit 2 ;;
+      2) echo "REFUSED: merging #$PR would also merge #$n, whose required checks could not be read."; exit 2 ;;
+      3) echo "REFUSED: merging #$PR would also merge #$n, which still has a required check running on ${dhead:0:9}."; exit 2 ;;
+      *) echo "REFUSED: merging #$PR would also merge #$n, and require_gates returned unrecognised code $grc."; exit 2 ;;
+    esac
+  done <<< "$below"
+}
+if [ "$STACKED" -eq 1 ]; then
+  refuse_unvetted_downstack
+fi
 # Every check must be terminal: a running Swift/xcframework lane cannot be inferred from mergeStateStatus.
 # accept-pending=<run-id>[,<run-id>]: a coordinator ruling for ONE merge. Each pending check must be named by its run id;
 # any other pending check, or one that cannot be traced to a run, still refuses.
@@ -181,21 +256,107 @@ rl1=$(oprl)
 echo "PAT read $(date -u +%FT%TZ): served by 1Password with the cache off. The client cannot see its cost in account requests; the account counter (shared by every lane) went from $rl0 to $rl1 across the read."
 echo "    That delta is an UPPER BOUND on this read, not its cost: it also holds any other lane's requests in the same window, and the two ratelimit probes that produced the two numbers may themselves be counted (see oprl in opread.sh)."
 body=$(printf '{"sha":"%s","merge_method":"merge"}' "$SHA")
+async_body=$(printf '{"sha":"%s","merge_method":"merge","merge_action":"direct_merge"}' "$SHA")
 hdr=$(mktemp); chmod 600 "$hdr"
+# curl_github <api-version> <curl args...>: PAT on stdin config only (never argv or a file). Writes
+# response headers to $hdr and the body to stdout. Caller still holds TOKEN.
+curl_github() {
+  local ver=$1; shift
+  printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: %s"\nheader = "Content-Type: application/json"\n' "$TOKEN" "$ver" \
+    | curl -sS -K - -D "$hdr" "$@"
+}
+http_status() { head -1 "$hdr" | tr -d '\r' | awk '{print $2}'; }
 # The PR merge API pins the PR head but not main, so this last read is the narrowest window this tool can give.
 main2=$(main_head)
 [ "$main2" = "$main0" ] || { unset TOKEN; rm -f "$hdr"; [ ${#main2} -eq 40 ] || { echo "NOT MERGED: cannot re-read main's head before the merge call: ${main2:-empty answer}"; exit 3; }; main_refuse "$main0" "$main2" "during the PAT read"; exit 3; }
 echo "    main re-read just before the merge call: ${main2:0:9}, unchanged since before GO"
-resp=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' "$TOKEN" \
-  | curl -sS -K - -D "$hdr" -X PUT --max-time 60 -d "$body" "https://api.github.com/repos/$R/pulls/$PR/merge")
-unset TOKEN
-echo "merge call $(date -u +%FT%TZ): $(head -1 "$hdr" | tr -d '\r')"
-grep -i '^x-oauth-scopes:' "$hdr" | tr -d '\r' || echo "x-oauth-scopes: (header absent — fine-grained token)"
-rm -f "$hdr"
-echo "$resp" | jq -c '{merged, sha, message}' 2>/dev/null || echo "$resp"
-msha=$(echo "$resp" | jq -r 'select(.merged == true) | .sha' 2>/dev/null)
-if [ -n "$msha" ]; then
-  p1=$(gh api "repos/$R/commits/$msha" --jq '.parents[0].sha' 2>&1)
-  if [ "$p1" = "$main0" ]; then echo "    merge commit ${msha:0:9} sits directly on ${main0:0:9}, the main GO judged"
-  else echo "WARNING: merge commit ${msha:0:9} has first parent ${p1:0:40}, not ${main0:0:9}, the main GO judged. Landed in between:"; main_moved "$main0" "$p1"; fi
+
+msha=""
+use_async=0
+[ "$STACKED" -eq 1 ] && use_async=1
+
+if [ "$use_async" -eq 0 ]; then
+  resp=$(curl_github 2022-11-28 -X PUT --max-time 60 -d "$body" "https://api.github.com/repos/$R/pulls/$PR/merge")
+  st=$(http_status)
+  echo "merge call $(date -u +%FT%TZ): $(head -1 "$hdr" | tr -d '\r')"
+  grep -i '^x-oauth-scopes:' "$hdr" | tr -d '\r' || echo "x-oauth-scopes: (header absent — fine-grained token)"
+  echo "$resp" | jq -c '{merged, sha, message}' 2>/dev/null || echo "$resp"
+  if [ "$st" = "403" ] && stacked_sync_forbidden "$resp"; then
+    echo "    sync merge returned 403 for a stacked PR — falling back to merge-async"
+    STACKED=1
+    # Scrub the PAT around the policy check so an exit 2 cannot leave it in the shell; restore
+    # only if the downstack is clear and the async merge still needs it.
+    _tok=$TOKEN; unset TOKEN
+    refuse_unvetted_downstack
+    TOKEN=$_tok; unset _tok
+    use_async=1
+  else
+    msha=$(jq -r 'select(.merged == true) | .sha // empty' <<< "$resp" 2>/dev/null)
+    if [ -z "$msha" ]; then
+      unset TOKEN; rm -f "$hdr"
+      echo "NOT MERGED: merge call did not merge (HTTP ${st:-unknown}): $(jq -c '{merged, message, sha}' <<< "$resp" 2>/dev/null || echo "$resp")"
+      exit 3
+    fi
+  fi
 fi
+
+if [ "$use_async" -eq 1 ]; then
+  resp=$(curl_github 2026-03-10 -X PUT --max-time 60 -d "$async_body" "https://api.github.com/repos/$R/pulls/$PR/merge-async")
+  st=$(http_status)
+  echo "merge-async call $(date -u +%FT%TZ): $(head -1 "$hdr" | tr -d '\r')"
+  grep -i '^x-oauth-scopes:' "$hdr" | tr -d '\r' || echo "x-oauth-scopes: (header absent — fine-grained token)"
+  echo "$resp" | jq -c '{status, details}' 2>/dev/null || echo "$resp"
+  msha=$(async_merge_sha "$resp")
+  uuid=$(jq -r '.details.uuid // empty' <<< "$resp" 2>/dev/null)
+  if [ -z "$msha" ] && [ -n "$uuid" ]; then
+    if [ "$st" = "409" ]; then
+      expected=$(jq -r '.details.expected_head_sha // empty' <<< "$resp" 2>/dev/null)
+      if [ -n "$expected" ] && [ "$expected" != "$SHA" ]; then
+        unset TOKEN; rm -f "$hdr"
+        echo "NOT MERGED: a merge-async is already pending for #$PR at $expected, not the pinned $SHA"
+        exit 3
+      fi
+    fi
+    # Poll until merged / failed / enqueued / timeout. MERGED is printed only for status=merged.
+    tries=0
+    while [ $tries -lt 150 ]; do
+      sleep 2
+      resp=$(curl_github 2026-03-10 --max-time 60 "https://api.github.com/repos/$R/pulls/$PR/merge-async/$uuid")
+      st=$(http_status)
+      status=$(jq -r '.status // empty' <<< "$resp" 2>/dev/null)
+      echo "    merge-async poll $(date -u +%FT%TZ): HTTP ${st:-?} status=${status:-unknown}"
+      case "$status" in
+        pending|"") tries=$((tries + 1)); continue ;;
+        merged) msha=$(async_merge_sha "$resp"); break ;;
+        failed)
+          unset TOKEN; rm -f "$hdr"
+          echo "NOT MERGED: merge-async failed: $(jq -r '.details.message // empty' <<< "$resp" 2>/dev/null)"
+          exit 3 ;;
+        enqueued)
+          unset TOKEN; rm -f "$hdr"
+          echo "NOT MERGED: merge-async enqueued into a merge queue rather than merging"
+          exit 3 ;;
+        *)
+          unset TOKEN; rm -f "$hdr"
+          echo "NOT MERGED: merge-async returned unrecognised status '$status': $(jq -c . <<< "$resp" 2>/dev/null || echo "$resp")"
+          exit 3 ;;
+      esac
+    done
+    if [ -z "$msha" ]; then
+      unset TOKEN; rm -f "$hdr"
+      echo "NOT MERGED: merge-async still pending after polling (uuid $uuid)"
+      exit 3
+    fi
+  elif [ -z "$msha" ]; then
+    unset TOKEN; rm -f "$hdr"
+    echo "NOT MERGED: merge-async did not merge (HTTP ${st:-unknown}): $(jq -c '{status, details}' <<< "$resp" 2>/dev/null || echo "$resp")"
+    exit 3
+  fi
+fi
+
+unset TOKEN
+rm -f "$hdr"
+echo "MERGED $msha"
+p1=$(gh api "repos/$R/commits/$msha" --jq '.parents[0].sha' 2>&1)
+if [ "$p1" = "$main0" ]; then echo "    merge commit ${msha:0:9} sits directly on ${main0:0:9}, the main GO judged"
+else echo "WARNING: merge commit ${msha:0:9} has first parent ${p1:0:40}, not ${main0:0:9}, the main GO judged. Landed in between:"; main_moved "$main0" "$p1"; fi

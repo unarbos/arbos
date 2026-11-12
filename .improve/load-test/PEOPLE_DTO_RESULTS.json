@@ -1,0 +1,3683 @@
+{
+  "scope": "Whole actual native handler+JSON profile of P7b96ef1f90 (batching plus live-device user-id index), before any subsequent room-activity index; not a whole-app measurement.",
+  "raw": {
+    "schema": 1,
+    "seed": 73011,
+    "pairs": 21,
+    "profiles": [
+      {
+        "scale": 1,
+        "before": {
+          "fullscan_steps": 717,
+          "latency_ns": 2510625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": -1,
+          "scale": 1,
+          "statements": 96,
+          "vm_steps": 5320
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 2936625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": -1,
+          "scale": 1,
+          "statements": 13,
+          "vm_steps": 2816
+        }
+      },
+      {
+        "scale": 10,
+        "before": {
+          "fullscan_steps": 7170,
+          "latency_ns": 7007834,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": -1,
+          "scale": 10,
+          "statements": 942,
+          "vm_steps": 52914
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3814375,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": -1,
+          "scale": 10,
+          "statements": 85,
+          "vm_steps": 16246
+        }
+      },
+      {
+        "scale": 100,
+        "before": {
+          "fullscan_steps": 589720,
+          "latency_ns": 78473958,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": -1,
+          "scale": 100,
+          "statements": 9382,
+          "vm_steps": 2096510
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 33248583,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": -1,
+          "scale": 100,
+          "statements": 805,
+          "vm_steps": 159487
+        }
+      },
+      {
+        "scale": 1000,
+        "before": {
+          "fullscan_steps": 57813000,
+          "latency_ns": 1942131458,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": -1,
+          "scale": 1000,
+          "statements": 93822,
+          "vm_steps": 178152076
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 342395083,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": -1,
+          "scale": 1000,
+          "statements": 8005,
+          "vm_steps": 1591976
+        }
+      }
+    ],
+    "samples": [
+      {
+        "pair": 0,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 73688625,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 0,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 33282250,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 0,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 0,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6759709,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 0,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3943583,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 0,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 0,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 1121084,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 0,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1364250,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 0,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 0,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 326488959,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 0,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1846758250,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 0,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 1,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 73657291,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 1,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 33042250,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 1,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 1,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 679917,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 1,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 944542,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 1,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 1,
+        "scale": 1000,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1841992333,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 1,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 325136084,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 1,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 1,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6409792,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 1,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3758875,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 1,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 2,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 320782292,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 2,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1857109917,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 2,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 2,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72195125,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 2,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31957000,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 2,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 2,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6329250,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 2,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3662875,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 2,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 2,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 684375,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 2,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1018250,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 2,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 3,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3541000,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 3,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6262375,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 3,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 3,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31804167,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 3,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 71573875,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 3,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 3,
+        "scale": 1000,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1832479083,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 3,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 332062750,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 3,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 3,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1062166,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 3,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 866334,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 3,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 4,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 79447625,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 4,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 35587167,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 4,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 4,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 973917,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 4,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 780584,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 4,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 4,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 7074666,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 4,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3848250,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 4,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 4,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 324201542,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 4,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1821703917,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 4,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 5,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 71655917,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 5,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31879125,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 5,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 5,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3587000,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 5,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6145208,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 5,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 5,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 836833,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 5,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 741750,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 5,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 5,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 316970917,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 5,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1844720416,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 5,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 6,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6362625,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 6,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3691292,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 6,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 6,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72145291,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 6,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31870375,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 6,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 6,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 916125,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 6,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 758000,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 6,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 6,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 321528291,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 6,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1834133875,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 6,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 7,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 820125,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 7,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 946000,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 7,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 7,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 321833500,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 7,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1872407333,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 7,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 7,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 32825000,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 7,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72428042,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 7,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 7,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3686333,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 7,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6413708,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 7,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 8,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 913208,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 8,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 763291,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 8,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 8,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3331292,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 8,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6149125,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 8,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 8,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 325590833,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 8,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1827699375,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 8,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 8,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31953833,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 8,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72530625,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 8,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 9,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 73089166,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 9,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31910459,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 9,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 9,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 749167,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 9,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 826583,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 9,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 9,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 320705708,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 9,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1829136958,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 9,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 9,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6211750,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 9,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3644666,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 9,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 10,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3534541,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 10,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6288042,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 10,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 10,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72368292,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 10,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31977500,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 10,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 10,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 321822125,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 10,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1833992625,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 10,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 10,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 802208,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 10,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 946875,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 10,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 11,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 74677666,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 11,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 35776958,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 11,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 11,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6821750,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 11,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3866083,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 11,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 11,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 664958,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 11,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 953084,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 11,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 11,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 323908667,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 11,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1825073875,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 11,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 12,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 73052333,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 12,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 32143875,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 12,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 12,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 733625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 12,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 922334,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 12,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 12,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6262167,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 12,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3593750,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 12,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 12,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 317796667,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 12,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1791734750,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 12,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 13,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 76595083,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 13,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 33281083,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 13,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 13,
+        "scale": 1000,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1870441417,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 13,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 328835833,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 13,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 13,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 745166,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 13,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 975959,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 13,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 13,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3601542,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 13,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6470333,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 13,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 14,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 873500,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 14,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 934625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 14,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 14,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 317249042,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 14,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1808276584,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 14,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 14,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 32047125,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 14,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 78046250,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 14,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 14,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6433792,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 14,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3874458,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 14,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 15,
+        "scale": 1,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1003542,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 15,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 722625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 15,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 15,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 75011000,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 15,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31730250,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 15,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 15,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6451166,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 15,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3557084,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 15,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 15,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 316509667,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 15,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1826046542,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 15,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 16,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 809625,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 16,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 971042,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 16,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 16,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 32271125,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 16,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72336500,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 16,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 16,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 322226792,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 16,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1816450417,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 16,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 16,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6363083,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 16,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3707167,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 16,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 17,
+        "scale": 1000,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1830196375,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 17,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 319892584,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 17,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 17,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6359542,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 17,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3613125,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 17,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 17,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 72008167,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 17,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31956709,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 17,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 17,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 743708,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 17,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 886209,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 17,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 18,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 582833,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 18,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 795542,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 18,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 18,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 71663875,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 18,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31820458,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 18,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 18,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 316171583,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 18,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1828221792,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 18,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 18,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6318167,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 18,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3665667,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 18,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 19,
+        "scale": 100,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 73052833,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 19,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 32037959,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 19,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 19,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 738750,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 19,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 885750,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 19,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 19,
+        "scale": 10,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6208625,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 19,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3427500,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 19,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 19,
+        "scale": 1000,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 317450125,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 19,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1841841667,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 19,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 20,
+        "scale": 1,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 807875,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 20,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 922167,
+          "output_bytes": 9295,
+          "output_sha256": "d1319bbc9b5d52af482f6def2135189ce20e482a62babe2c108aa45de8df7815",
+          "sample": 20,
+          "scale": 1,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 20,
+        "scale": 10,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 3574750,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 20,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 6257083,
+          "output_bytes": 92957,
+          "output_sha256": "58495b544d6fadfc89d8af74ec80adc7af53ac9970305bce132837c1df4e58ec",
+          "sample": 20,
+          "scale": 10,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 20,
+        "scale": 100,
+        "order": [
+          "after",
+          "before"
+        ],
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 31668375,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 20,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 71735541,
+          "output_bytes": 936707,
+          "output_sha256": "41850f6601a9de9c759f460713c06f8588b03841992234d7dbc543c8a5aa0a83",
+          "sample": 20,
+          "scale": 100,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      },
+      {
+        "pair": 20,
+        "scale": 1000,
+        "order": [
+          "before",
+          "after"
+        ],
+        "before": {
+          "fullscan_steps": 0,
+          "latency_ns": 1839619584,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 20,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        },
+        "after": {
+          "fullscan_steps": 0,
+          "latency_ns": 316630041,
+          "output_bytes": 9456327,
+          "output_sha256": "b8d6af8b7006fb4a324c0b2da177ca761e13d57aea7cc112d3cafa02557bece2",
+          "sample": 20,
+          "scale": 1000,
+          "statements": 0,
+          "vm_steps": 0
+        }
+      }
+    ],
+    "scope": "Actual Rust handler+JSON body; generated local relational SQLite, no HTTP transport/UI/network. Workspace opt0/dependencies opt2, warm persistent workers, trace disabled for timings."
+  },
+  "summary": [
+    {
+      "scale": 1,
+      "before": {
+        "n": 21,
+        "p50_ns": 944542.0,
+        "p95_ns": 1062166.0,
+        "p99_ns": 1303833.2000000002,
+        "min_ns": 795542,
+        "max_ns": 1364250
+      },
+      "after": {
+        "n": 21,
+        "p50_ns": 749167.0,
+        "p95_ns": 873500.0,
+        "p99_ns": 1071567.2000000002,
+        "min_ns": 582833,
+        "max_ns": 1121084
+      },
+      "median_saved_ns": 161417,
+      "paired_median_saved_95_ci_ns": [
+        144667.0,
+        212709.0
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07,
+      "non_tied_pairs": 21
+    },
+    {
+      "scale": 10,
+      "before": {
+        "n": 21,
+        "p50_ns": 6359542.0,
+        "p95_ns": 6821750.0,
+        "p99_ns": 7024082.8,
+        "min_ns": 6145208,
+        "max_ns": 7074666
+      },
+      "after": {
+        "n": 21,
+        "p50_ns": 3644666.0,
+        "p95_ns": 3874458.0,
+        "p99_ns": 3929758.0,
+        "min_ns": 3331292,
+        "max_ns": 3943583
+      },
+      "median_saved_ns": 2721375,
+      "paired_median_saved_95_ci_ns": [
+        2666375.0,
+        2781125.0
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07,
+      "non_tied_pairs": 21
+    },
+    {
+      "scale": 100,
+      "before": {
+        "n": 21,
+        "p50_ns": 72530625.0,
+        "p95_ns": 78046250.0,
+        "p99_ns": 79167350.0,
+        "min_ns": 71573875,
+        "max_ns": 79447625
+      },
+      "after": {
+        "n": 21,
+        "p50_ns": 31977500.0,
+        "p95_ns": 35587167.0,
+        "p99_ns": 35738999.8,
+        "min_ns": 31668375,
+        "max_ns": 35776958
+      },
+      "median_saved_ns": 40390792,
+      "paired_median_saved_95_ci_ns": [
+        40065375.0,
+        40908458.0
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07,
+      "non_tied_pairs": 21
+    },
+    {
+      "scale": 1000,
+      "before": {
+        "n": 21,
+        "p50_ns": 1832479083.0,
+        "p95_ns": 1870441417.0,
+        "p99_ns": 1872014149.8,
+        "min_ns": 1791734750,
+        "max_ns": 1872407333
+      },
+      "after": {
+        "n": 21,
+        "p50_ns": 321528291.0,
+        "p95_ns": 328835833.0,
+        "p99_ns": 331417366.6,
+        "min_ns": 316171583,
+        "max_ns": 332062750
+      },
+      "median_saved_ns": 1512050209,
+      "paired_median_saved_95_ci_ns": [
+        1502108542.0,
+        1520269291.0
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07,
+      "non_tied_pairs": 21
+    }
+  ],
+  "sql": [
+    {
+      "scale": 1,
+      "before": {
+        "counters": {
+          "elapsed_ns": 4388000,
+          "visits": 868,
+          "vm_steps": 5385,
+          "returned": 120,
+          "statements": 96
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects WHERE (id = ?value OR name = ?value) AND deleted_at IS NULL ORDER BY (id = ?value) DESC, last_active_at DESC LIMIT ?number",
+            "plan": [
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?value",
+            "plan": [
+              "SEARCH users USING INDEX sqlite_autoindex_users_1 (id=?)"
+            ]
+          },
+          {
+            "query": "SELECT name FROM devices WHERE user_id = ?value AND revoked_at IS NULL\n                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number",
+            "plan": [
+              "SCAN devices",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT MAX(last_seen_at) FROM devices WHERE user_id = ?value AND revoked_at IS NULL",
+            "plan": [
+              "SEARCH devices"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM blocks WHERE blocker = ?value AND blocked = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=? AND blocked=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "8b06d121cb603fec9a265ef2eec24be9dd4074e2d935f37c81329f9075a49876",
+        "fixture_sha256": "e3ce924b85a9fb355177701d0a01edf77586c0c692dac8cd168a08b26502690e",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      },
+      "after": {
+        "counters": {
+          "elapsed_ns": 3192000,
+          "visits": 195,
+          "vm_steps": 2908,
+          "returned": 62,
+          "statements": 13
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,\n                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,\n                        p.avatar_leaf_color, p.image_key, p.avatar_version\n                 FROM json_each(?value) wanted JOIN projects p ON p.id = COALESCE(\n                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),\n                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL\n                     ORDER BY last_active_at DESC LIMIT ?number)\n                 )",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH p USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH projects USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,\n                   CASE WHEN COALESCE(u.login, ?value) = ?value THEN (\n                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL\n                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number\n                   ) END,\n                   (SELECT MAX(last_seen_at) FROM devices\n                    WHERE user_id = wanted.value AND revoked_at IS NULL)\n                 FROM json_each(?value) wanted LEFT JOIN users u ON u.id = wanted.value",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH u USING INDEX sqlite_autoindex_users_1 (id=?) LEFT-JOIN",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT blocked FROM blocks JOIN json_each(?value) wanted ON wanted.value = blocked\n                 WHERE blocker = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)",
+              "SCAN wanted VIRTUAL TABLE INDEX 1:"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "d38dbdb7aae5ebaa47d98f278d5743ed7e56c4fd07a18f8b7090bb631488b2e9",
+        "fixture_sha256": "bfbd00ee09f49f96dd9dba086d18694aacf404c86907445cda10993fa89c070a",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      }
+    },
+    {
+      "scale": 10,
+      "before": {
+        "counters": {
+          "elapsed_ns": 9777000,
+          "visits": 8672,
+          "vm_steps": 53538,
+          "returned": 1192,
+          "statements": 942
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects WHERE (id = ?value OR name = ?value) AND deleted_at IS NULL ORDER BY (id = ?value) DESC, last_active_at DESC LIMIT ?number",
+            "plan": [
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?value",
+            "plan": [
+              "SEARCH users USING INDEX sqlite_autoindex_users_1 (id=?)"
+            ]
+          },
+          {
+            "query": "SELECT name FROM devices WHERE user_id = ?value AND revoked_at IS NULL\n                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number",
+            "plan": [
+              "SCAN devices",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT MAX(last_seen_at) FROM devices WHERE user_id = ?value AND revoked_at IS NULL",
+            "plan": [
+              "SEARCH devices"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM blocks WHERE blocker = ?value AND blocked = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=? AND blocked=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "c7b8d67f16a5da9756a1b742597c1d6766e595310684153e53db996b5ecc1dfc",
+        "fixture_sha256": "f42694e448ff1588f4073131ac8d8b8c68fc79c31150b10e3fcd719be30c1d05",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      },
+      "after": {
+        "counters": {
+          "elapsed_ns": 4294000,
+          "visits": 970,
+          "vm_steps": 16312,
+          "returned": 360,
+          "statements": 85
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,\n                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,\n                        p.avatar_leaf_color, p.image_key, p.avatar_version\n                 FROM json_each(?value) wanted JOIN projects p ON p.id = COALESCE(\n                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),\n                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL\n                     ORDER BY last_active_at DESC LIMIT ?number)\n                 )",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH p USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH projects USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,\n                   CASE WHEN COALESCE(u.login, ?value) = ?value THEN (\n                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL\n                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number\n                   ) END,\n                   (SELECT MAX(last_seen_at) FROM devices\n                    WHERE user_id = wanted.value AND revoked_at IS NULL)\n                 FROM json_each(?value) wanted LEFT JOIN users u ON u.id = wanted.value",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH u USING INDEX sqlite_autoindex_users_1 (id=?) LEFT-JOIN",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT blocked FROM blocks JOIN json_each(?value) wanted ON wanted.value = blocked\n                 WHERE blocker = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)",
+              "SCAN wanted VIRTUAL TABLE INDEX 1:"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "71d14ad8aad7406319de50e781afbb0eec0ac208840ace3aaae6a98d1d3e0cac",
+        "fixture_sha256": "a8add00710c65e95f76df15b99148278f51424fe4460984019251fa1d7d0e31a",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      }
+    },
+    {
+      "scale": 100,
+      "before": {
+        "counters": {
+          "elapsed_ns": 71812000,
+          "visits": 604715,
+          "vm_steps": 2102627,
+          "returned": 11885,
+          "statements": 9382
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects WHERE (id = ?value OR name = ?value) AND deleted_at IS NULL ORDER BY (id = ?value) DESC, last_active_at DESC LIMIT ?number",
+            "plan": [
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?value",
+            "plan": [
+              "SEARCH users USING INDEX sqlite_autoindex_users_1 (id=?)"
+            ]
+          },
+          {
+            "query": "SELECT name FROM devices WHERE user_id = ?value AND revoked_at IS NULL\n                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number",
+            "plan": [
+              "SCAN devices",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT MAX(last_seen_at) FROM devices WHERE user_id = ?value AND revoked_at IS NULL",
+            "plan": [
+              "SEARCH devices"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM blocks WHERE blocker = ?value AND blocked = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=? AND blocked=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "643ea740b15e6800f79001fdacea9ae23b9d00436ffbe653af412160a86ef2c6",
+        "fixture_sha256": "e89243872250a997247d3384462055f24535fa83333f5ffe6b8f0a93d40cedb3",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      },
+      "after": {
+        "counters": {
+          "elapsed_ns": 12543000,
+          "visits": 9498,
+          "vm_steps": 159938,
+          "returned": 3541,
+          "statements": 805
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,\n                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,\n                        p.avatar_leaf_color, p.image_key, p.avatar_version\n                 FROM json_each(?value) wanted JOIN projects p ON p.id = COALESCE(\n                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),\n                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL\n                     ORDER BY last_active_at DESC LIMIT ?number)\n                 )",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH p USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH projects USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,\n                   CASE WHEN COALESCE(u.login, ?value) = ?value THEN (\n                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL\n                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number\n                   ) END,\n                   (SELECT MAX(last_seen_at) FROM devices\n                    WHERE user_id = wanted.value AND revoked_at IS NULL)\n                 FROM json_each(?value) wanted LEFT JOIN users u ON u.id = wanted.value",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH u USING INDEX sqlite_autoindex_users_1 (id=?) LEFT-JOIN",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT blocked FROM blocks JOIN json_each(?value) wanted ON wanted.value = blocked\n                 WHERE blocker = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)",
+              "SCAN wanted VIRTUAL TABLE INDEX 1:"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "4e8f0d6fefbd786cd92ab71614d1eb18a46354cec0b1f7c2ab84a8708a17d8cd",
+        "fixture_sha256": "09b34d2a598517361cd16938c438b9b853761e1753e4386846e7b4c4125c79ec",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      }
+    },
+    {
+      "scale": 1000,
+      "before": {
+        "counters": {
+          "elapsed_ns": 1792866000,
+          "visits": 57962963,
+          "vm_steps": 178213221,
+          "returned": 118823,
+          "statements": 93822
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects WHERE (id = ?value OR name = ?value) AND deleted_at IS NULL ORDER BY (id = ?value) DESC, last_active_at DESC LIMIT ?number",
+            "plan": [
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?value",
+            "plan": [
+              "SEARCH users USING INDEX sqlite_autoindex_users_1 (id=?)"
+            ]
+          },
+          {
+            "query": "SELECT name FROM devices WHERE user_id = ?value AND revoked_at IS NULL\n                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number",
+            "plan": [
+              "SCAN devices",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT MAX(last_seen_at) FROM devices WHERE user_id = ?value AND revoked_at IS NULL",
+            "plan": [
+              "SEARCH devices"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM blocks WHERE blocker = ?value AND blocked = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=? AND blocked=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "5a4c7c25c270eed6dc5c1af9d8608d377051f35db1a85be500fca4dd76c24759",
+        "fixture_sha256": "617078fd10bcc421fef97b26d628e8e400a0766de42ce57cd9957a2bb71f310e",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      },
+      "after": {
+        "counters": {
+          "elapsed_ns": 105145000,
+          "visits": 94778,
+          "vm_steps": 1596287,
+          "returned": 35349,
+          "statements": 8005
+        },
+        "plans": [
+          {
+            "query": "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+            "plan": [
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?value AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE ?value THEN ?number ELSE ?number END, member",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "LIST SUBQUERY 1",
+              "SEARCH m USING INDEX people_members_member (member=?)",
+              "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+              "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT seq, hidden FROM people_reads WHERE chat_id = ?value AND device_id = ?value",
+            "plan": [
+              "SEARCH people_reads USING INDEX sqlite_autoindex_people_reads_1 (chat_id=? AND device_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE chat_id = ?value AND banned_at IS NOT NULL ORDER BY banned_at DESC",
+            "plan": [
+              "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,\n                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,\n                        p.avatar_leaf_color, p.image_key, p.avatar_version\n                 FROM json_each(?value) wanted JOIN projects p ON p.id = COALESCE(\n                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),\n                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL\n                     ORDER BY last_active_at DESC LIMIT ?number)\n                 )",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH p USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH projects USING INDEX sqlite_autoindex_projects_1 (id=?)",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SCAN projects",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ]
+          },
+          {
+            "query": "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,\n                   CASE WHEN COALESCE(u.login, ?value) = ?value THEN (\n                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL\n                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?number\n                   ) END,\n                   (SELECT MAX(last_seen_at) FROM devices\n                    WHERE user_id = wanted.value AND revoked_at IS NULL)\n                 FROM json_each(?value) wanted LEFT JOIN users u ON u.id = wanted.value",
+            "plan": [
+              "SCAN wanted VIRTUAL TABLE INDEX 1:",
+              "SEARCH u USING INDEX sqlite_autoindex_users_1 (id=?) LEFT-JOIN",
+              "CORRELATED SCALAR SUBQUERY 1",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "CORRELATED SCALAR SUBQUERY 2",
+              "SEARCH devices USING INDEX devices_user_live (user_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT blocked FROM blocks JOIN json_each(?value) wanted ON wanted.value = blocked\n                 WHERE blocker = ?value",
+            "plan": [
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)",
+              "SCAN wanted VIRTUAL TABLE INDEX 1:"
+            ]
+          },
+          {
+            "query": "SELECT head FROM room_seq WHERE room = ?value",
+            "plan": [
+              "SEARCH room_seq USING INDEX sqlite_autoindex_room_seq_1 (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT COALESCE(MAX(created_at), ?number) FROM rows WHERE room = ?value",
+            "plan": [
+              "SEARCH rows USING INDEX rows_batch (room=?)"
+            ]
+          },
+          {
+            "query": "SELECT seq FROM chat_user_cursor WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_cursor USING INDEX sqlite_autoindex_chat_user_cursor_1 (user_id=? AND chat_id=?)"
+            ]
+          },
+          {
+            "query": "SELECT COUNT(*) FROM chat_events e\n                 WHERE e.chat_id = ?value\n                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?value AND r.chat_id = ?value), ?number)\n                   AND (e.sender_user IS NULL OR e.sender_user != ?value)\n                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?value))",
+            "plan": [
+              "SEARCH e USING INDEX chat_events_chat (chat_id=? AND id>?)",
+              "SCALAR SUBQUERY 1",
+              "SEARCH r USING INDEX sqlite_autoindex_chat_user_reads_1 (user_id=? AND chat_id=?)",
+              "LIST SUBQUERY 2",
+              "SEARCH blocks USING COVERING INDEX sqlite_autoindex_blocks_1 (blocker=?)"
+            ]
+          },
+          {
+            "query": "SELECT archived_at FROM chat_user_archive WHERE user_id = ?value AND chat_id = ?value",
+            "plan": [
+              "SEARCH chat_user_archive USING INDEX sqlite_autoindex_chat_user_archive_1 (user_id=? AND chat_id=?)"
+            ]
+          }
+        ],
+        "queries_sha256": "1bbd6af7afcbfd9b27cf9ab12a65dfe4ec6ed8b4a26c5805e636efffa11515e5",
+        "fixture_sha256": "c48807f7b150a442a08da894be02774da1f555722eceeef91c9142827dc5f465",
+        "engine": {
+          "sqlite_version": "3.46.0",
+          "libsqlite3_sys": "0.30.1",
+          "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+          "compile_flags": [
+            "cc",
+            "-O2",
+            "-fPIC",
+            "-dynamiclib",
+            "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_THREADSAFE=1",
+            "-I",
+            "-o"
+          ],
+          "library_bytes": 1341688,
+          "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+        }
+      }
+    }
+  ],
+  "builds": {
+    "before": {
+      "commit": "d499090b71f01795e1f2f99ee1ffe56db0aaa23f",
+      "sources": {
+        "crates/arbos-relay/src/people.rs": "f29ffdaa13f1eaa096793c0f6333e66885ecc3c7bda67ce705647abfcb7cd780",
+        "crates/arbos-relay/src/db_people.rs": "b71d0e2cd597c036e329b6f0c86d357c7fd25f61d0daa272ff363222948d432f",
+        "crates/arbos-relay/src/db_accounts.rs": "df846578540b10222ed5a07e9593a27e689e4949b4b68501b8ef1f928077d436",
+        "crates/arbos-relay/src/api.rs": "50f5eec7b4567808b65f1f568aca8a9af9ca051b3d35685df8941dd426bd7cbb",
+        "crates/arbos-relay/src/notify.rs": "e919075df420898a20a6345497adaf0f954669e27753f702901dd67b85ee4164",
+        "crates/arbos-relay/src/avatar.rs": "826bced145fbbc8caa3d19f7e637f3088e27b0630fca67d0c0faba4d55c4f143"
+      },
+      "compiled_sources": {
+        "crates/arbos-relay/src/people.rs": "e55ace6e792007d1f243b619da7b9b7c1d3a1db7aa756ffacd639bfcec210a28",
+        "crates/arbos-relay/src/db_people.rs": "b71d0e2cd597c036e329b6f0c86d357c7fd25f61d0daa272ff363222948d432f",
+        "crates/arbos-relay/src/db_accounts.rs": "df846578540b10222ed5a07e9593a27e689e4949b4b68501b8ef1f928077d436",
+        "crates/arbos-relay/src/api.rs": "50f5eec7b4567808b65f1f568aca8a9af9ca051b3d35685df8941dd426bd7cbb",
+        "crates/arbos-relay/src/notify.rs": "e919075df420898a20a6345497adaf0f954669e27753f702901dd67b85ee4164",
+        "crates/arbos-relay/src/avatar.rs": "826bced145fbbc8caa3d19f7e637f3088e27b0630fca67d0c0faba4d55c4f143"
+      },
+      "fragment_sha256": "ed3324006fb16fbae47a78c61833b877192571f3fd1c0ec58057923bce53412b",
+      "lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "workspace_packages_cleaned": 12,
+      "build": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "arbos-relay",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "exit_code": 0,
+        "seconds": 38.02490704192314
+      },
+      "source_unchanged": true,
+      "binary_sha256": "ec7ca8cfbeb50c9093b4919860030f7ff5ef427619cf3b87fe7c2fc4797a27fd"
+    },
+    "after": {
+      "commit": "b96ef1f90d93382d97bb6cf33ec19e6c0ea35837",
+      "sources": {
+        "crates/arbos-relay/src/people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+        "crates/arbos-relay/src/db_people.rs": "d3846f6106a079b30a74e492a72c2770727a0b338764d98420280524170cda85",
+        "crates/arbos-relay/src/db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+        "crates/arbos-relay/src/api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+        "crates/arbos-relay/src/notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+        "crates/arbos-relay/src/avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+      },
+      "compiled_sources": {
+        "crates/arbos-relay/src/people.rs": "278e2caf643777dc148d780aa0f44d113b9ee5fc29cdd7ad894b15d02dbeea19",
+        "crates/arbos-relay/src/db_people.rs": "d3846f6106a079b30a74e492a72c2770727a0b338764d98420280524170cda85",
+        "crates/arbos-relay/src/db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+        "crates/arbos-relay/src/api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+        "crates/arbos-relay/src/notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+        "crates/arbos-relay/src/avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+      },
+      "fragment_sha256": "ed3324006fb16fbae47a78c61833b877192571f3fd1c0ec58057923bce53412b",
+      "lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "workspace_packages_cleaned": 12,
+      "build": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "arbos-relay",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "exit_code": 0,
+        "seconds": 35.66992912511341
+      },
+      "source_unchanged": true,
+      "binary_sha256": "b1d17d83ae30cb943a0210a0a4f1fd3903f2656932a435b3b5f82a03f7714924"
+    }
+  },
+  "default_pairs": 21,
+  "portable_suite_exit": 0,
+  "limits": [
+    "No HTTP transport, rendering, real service/account or production data.",
+    "Workspace opt0/dependencies opt2, warm workers, no CPU affinity or exclusive-host claim.",
+    "Native timed calls have tracing disabled; SQL NVISIT/plans run separately with instrumented root-lock SQLite3.46.",
+    "A separate candidate room-activity index is measured independently, not included in these timings."
+  ]
+}

@@ -132,19 +132,6 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
     }
 }
 
-/// Fade the child's primitives near its left/right edges over `band` px (a
-/// horizontally scrolling row).
-pub fn edge_faded_sides(band: f32, child: impl IntoElement) -> EdgeFaded {
-    EdgeFaded {
-        band,
-        top: false,
-        bottom: false,
-        left: true,
-        right: true,
-        child: child.into_any_element(),
-    }
-}
-
 impl IntoElement for EdgeFaded {
     type Element = Self;
     fn into_element(self) -> Self::Element {

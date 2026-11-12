@@ -2,7 +2,7 @@ import SwiftUI
 import XCTest
 @testable import Arbos
 
-/// The presence row over the composer (typing-indicator-left-2026-10-23): one
+/// The presence row over the composer ([feedback typing-indicator-left-2026-10-23]): one
 /// line of text whatever the count, and one typing mark per handle per chat.
 final class PresenceRowTests: XCTestCase {
     func testOneLineWhateverTheCount() {

@@ -118,6 +118,30 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
+      # Every ask Jacob has made is a row in docs/product/jacob-asks.md naming the test that
+      # fails when the app stops doing it. A visual ask with no test is the one that regresses
+      # on an unrelated rebase and turns up in a screenshot weeks later, so an ask without a
+      # guard, or a guard that has been deleted or switched off, fails here. Reading sources,
+      # so it answers in seconds on Linux rather than spending an hour of the macOS job.
+      - name: Jacob's asks each have a test
+        run: python3 scripts/ci/jacob-asks-check.py
+
+      # Taking a guard off is a decision about whether Jacob still gets what he asked for.
+      # This one compares the branch with its base and wants that decision written down. Only
+      # on a pull request, which is the only place both a base and a description exist.
+      # Runs even when the step above failed: "an ask has no guard" and "this branch removes a
+      # guard" are different questions, and the first must not hide the second.
+      - name: No guard comes off without saying why
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          printenv PR_BODY > /tmp/pr-body.txt || : # an empty description signs nothing off
+          python3 scripts/ci/jacob-guard-gate.py --base-ref FETCH_HEAD --body-file /tmp/pr-body.txt
+
   rust:
     name: rust (fmt, clippy, test)
     runs-on: ubuntu-24.04

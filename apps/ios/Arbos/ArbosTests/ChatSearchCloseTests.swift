@@ -34,6 +34,7 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertNotNil(closeButton, "the ✕ button calls closeSearch")
     }
 
+    /// The rule the Mac bar adopted too ([feedback search-toggle-click-outside-mac-2026-10-27]).
     func testTapOutsideClosesAndSwipeClosesOnlyWithoutAKeyword() {
         XCTAssertTrue(ChatSearchClose.tapOutsideCloses(open: true))
         XCTAssertFalse(ChatSearchClose.tapOutsideCloses(open: false))
@@ -43,6 +44,7 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertFalse(ChatSearchClose.scrollCloses(open: false, query: ""))
     }
 
+    /// Tapping a result jumps to that message ([feedback iphone-search-result-jump-2026-10-29]).
     func testATapOnAResultClosesThenReveals() {
         XCTAssertTrue(ChatSearchClose.resultTapReveals(open: true, query: "canvas"))
         XCTAssertFalse(ChatSearchClose.resultTapReveals(open: true, query: ""), "no keyword, no results to tap")
@@ -59,6 +61,12 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertTrue(src.contains("if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }"), "swipe closes")
         XCTAssertTrue(src.contains("SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row))"), "result rows take the tap")
         XCTAssertTrue(src.contains("closeSearch(scrollToTail: false)\n        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }"), "a result closes, then reveals")
+        // The centred jump chips sit on top of lower result rows; leaving them up while search
+        // is open lets a result tap land on the chip instead (43133707619), so both are gated.
+        XCTAssertTrue(src.contains("if newBelowCount > 0, !showSearch {"),
+                      "the new-messages pill hides while search is open")
+        XCTAssertTrue(src.contains("if newBelowCount == 0, awayFromBottom, !showSearch {"),
+                      "the scroll-to-bottom chevron hides while search is open")
         // closeSearch: bar, query, keyboard, window.
         guard let start = src.range(of: "private func closeSearch(scrollToTail: Bool = true) {"),
               let end = src.range(of: "private func openSearchResult", range: start.upperBound..<src.endIndex) else {

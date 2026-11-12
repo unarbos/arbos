@@ -253,7 +253,6 @@ struct ChatSession: View {
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
     @State private var rigViewerForward = false
-    @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
     @State private var sentOnce = false
@@ -1049,7 +1048,10 @@ struct ChatSession: View {
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        let multiParty = isChannel || (people?.isGroup ?? false)
+        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+        // `names_senders`, and the solo-1:1 quote-header hide depends on it
+        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
@@ -1274,8 +1276,14 @@ struct ChatSession: View {
         // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01) — placed
         // from the composer's measured frame, since that inset is wrong on some hardware.
         .overlay(alignment: .bottom) { ChatBarFade(bar: chatBarHeight, composer: composerEdge, keyboard: composerFocused) }
+        // Both jump chips sit centred just above the chat bar. While Search-in-chat is open
+        // they overlay the lower result rows: a tap aimed at a hit there lands on the chip
+        // instead, `jumpToLatest` re-pins the filtered list to its end, and the bar stays
+        // open — the reveal never runs. Gate run 43133707619 is that miss on `long-265` at
+        // y457 (24 pt above the bar, dead centre of the chevron's 44 pt hit). Hide them for
+        // the life of the bar; they return the moment it closes.
         .overlay(alignment: .bottom) {
-            if newBelowCount > 0 {
+            if newBelowCount > 0, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     newMessagesPill.padding(.bottom, bar + 10)
                 }
@@ -1289,7 +1297,7 @@ struct ChatSession: View {
         // straight through — so the hit target is the disc and not a full-width bar, and a
         // UIKit tap inside it still works while the transcript decelerates.
         .overlay(alignment: .bottom) {
-            if newBelowCount == 0, awayFromBottom {
+            if newBelowCount == 0, awayFromBottom, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     scrollToBottomButton
                         .padding(.bottom, bar + 10)
@@ -1459,9 +1467,6 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model).environment(\.theme, theme)
-        }
         .sheet(isPresented: $showGroupCallPicker) {
             if let people {
                 GroupCallPickerSheet(people: people, meId: model.user?.id) { ring in
@@ -1594,6 +1599,11 @@ struct ChatSession: View {
             }
             demoQueue = ["model", "threads", "attach", "voice", "settings"]
             demoPresentNext()
+        }
+        .task {
+            guard DebugHooks.timeReveal else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            timeReveal = RowView.timeRevealWidth(theme)
         }
         .task {
             guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
@@ -1791,7 +1801,7 @@ struct ChatSession: View {
     private func handleDebugShowHook(_ show: String) {
         switch show {
                     case "keyboard": composerFocused = true
-                    case "settings": showSettings = true
+                    case "settings": model.showOwnProfile()
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
@@ -1993,9 +2003,10 @@ struct ChatSession: View {
         case "model": showModelPicker = true
         case "attach": showAttach = true
         case "voice": startCall(.voice)
-        case "settings": showSettings = true
+        case "settings": model.showOwnProfile()
         default: break
         }
+        // Settings is a pushed page and the tour's last step: nothing takes it down again.
         guard step != "settings" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
             switch step {
@@ -2345,7 +2356,7 @@ struct ChatSession: View {
             // iMessage feel: 1:1 up to the reveal width, then rubber-band
             // (a fifth of the excess, at most 24 pt) instead of a hard stop.
             let raw = max(0, -dx)
-            let w = RowView.timeRevealWidth
+            let w = RowView.timeRevealWidth(theme)
             let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
@@ -3323,7 +3334,8 @@ struct ChatSession: View {
                 }
             }()
             HStack(spacing: 6) {
-                if let mark { StatusMarkView(mark: mark, size: 9) }
+                // Floats over the transcript, so it keeps turning while the reader scrolls.
+                if let mark { StatusMarkView(mark: mark, size: 9, whileScrolling: true) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -3434,35 +3446,67 @@ struct ChatSession: View {
     /// Its appearing and disappearing changes the transcript's height by the same
     /// 26 pt it used to add to the bar, and at the end rather than in the reader's
     /// view, so a turn starting while the reader is up in history moves nothing.
+    ///
+    /// When the awaiting cheat expires and no assistant row ever landed, the same
+    /// tick draws the stock "didn't answer" bubble here — Transcript only writes
+    /// that line under an empty finished assistant row, so a turn that never
+    /// opened one used to leave a dead transcript ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let participants = presenceParticipants
-            if !participants.isEmpty {
-                // The tasks chip rides on the row while the agent has background jobs
-                // open in this chat (duplex §2.4); a tap opens the sheet.
-                let jobs = model.openJobs(chatId)
-                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
-                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
-                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
-                PresenceRow(participants: participants,
-                            detail: model.currentActivity(chatId),
-                            queued: false,
-                            taskCount: jobs.count,
-                            onTasks: openTasks,
-                            onWords: openNewest,
-                            onPicture: { model.toggleProfile($0) },
-                            pictureShowing: { model.profileShows($0) })
-                    // Grok: 42 px from the last bubble to the picture's top ([feedback
-                    // status-row-gap-ios-2026-10-26]). The transcript's stack already
-                    // carries the bubbles' 16 pt side inset.
-                    .padding(.top, Theme.presenceTopGap)
-                    // Grok: 68 px from the picture's bottom to the composer's top. The row
-                    // is the transcript's last child, so it settles down into the tail the
-                    // tail already reserves rather than stacking on top of it.
-                    .padding(.bottom, -Theme.presenceSettle)
+            VStack(alignment: .leading, spacing: 0) {
+                if model.missedReply(chatId) {
+                    missedReplyBubble
+                }
+                let participants = presenceParticipants
+                if !participants.isEmpty {
+                    // The tasks chip rides on the row while the agent has background jobs
+                    // open in this chat (duplex §2.4); a tap opens the sheet.
+                    let jobs = model.openJobs(chatId)
+                    let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                    // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                    let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
+                    PresenceRow(participants: participants,
+                                detail: model.currentActivity(chatId),
+                                queued: model.machineWaiting(for: chatId),
+                                taskCount: jobs.count,
+                                onTasks: openTasks,
+                                onWords: openNewest,
+                                onPicture: { model.toggleProfile($0) },
+                                pictureShowing: { model.profileShows($0) })
+                        // Grok: 42 px from the last bubble to the picture's top ([feedback
+                        // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                        // carries the bubbles' 16 pt side inset.
+                        .padding(.top, Theme.presenceTopGap)
+                        // Grok: 68 px from the picture's bottom to the composer's top. The row
+                        // is the transcript's last child, so it settles down into the tail the
+                        // tail already reserves rather than stacking on top of it.
+                        .padding(.bottom, -Theme.presenceSettle)
+                }
             }
         }
+    }
+
+    /// Same words Transcript uses for an empty finished assistant row, drawn when
+    /// no such row exists so the chat never goes silent after a send.
+    private var missedReplyBubble: some View {
+        let who = name.trimmingCharacters(in: .whitespaces)
+        let line = "\(who.isEmpty ? "The agent" : who) didn't answer. Ask again."
+        return HStack {
+            Text(line)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .fill(theme.bubbleAssistant)
+                )
+                .frame(maxWidth: 560, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Theme.presenceTopGap)
+        .accessibilityIdentifier("missed-reply")
     }
 
     /// Steer a job (contract: no command of its own): the composer becomes a reply to
@@ -3779,32 +3823,47 @@ struct ChatSession: View {
                 }
             },
             onMicEnd: { value in
+                // A pure tap can deliver onEnded with no onChanged
+                // (`DragGesture(minimumDistance: 0)` on current iOS). Decide
+                // here so a click is never a no-op ([feedback
+                // app-01M69J94RZRMZXKGMC6XDGWBFH]).
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                let action = MemoMicRelease.decide(
+                    holdActive: memoHoldActive,
+                    recording: recorder.recording,
+                    ignoreRelease: memoIgnoreRelease,
+                    cancelArmed: memoCancelArmed,
+                    translationWidth: value.translation.width,
+                    heldSeconds: held,
+                    cancelDistance: Self.memoCancelDistance)
                 memoHoldActive = false
                 memoPressStartedAt = nil
                 memoDragX = 0
                 memoCancelArmed = false
-                if memoIgnoreRelease {
-                    memoIgnoreRelease = false
-                    return
-                }
-                // Slide-left discard: drop the memo instead of sending.
-                if cancel {
+                memoIgnoreRelease = false
+                switch action {
+                case .toggleTap:
                     memoFinishWhenPermission = false
-                    if recorder.recording { recorder.cancel() }
-                    return
-                }
-                // Hold-to-talk: release after the threshold sends.
-                if held >= 0.25 {
                     if recorder.recording {
                         finishMemoHold()
                     } else {
-                        // Permission still pending; finish when it starts.
-                        memoFinishWhenPermission = true
+                        Haptics.recordStart()
+                        recorder.start()
                     }
+                case .ignore:
+                    break
+                case .cancel:
+                    memoFinishWhenPermission = false
+                    if recorder.recording { recorder.cancel() }
+                case .finishHold:
+                    finishMemoHold()
+                case .waitForPermission:
+                    // Permission still pending; finish when it starts.
+                    memoFinishWhenPermission = true
+                case .keepRecording:
+                    // Short tap after hold tracked: leave recording on (click-to-toggle).
+                    break
                 }
-                // Short tap: leave recording on (click-to-toggle).
             },
             onPrimary: {
                 if recorder.recording {
@@ -4327,6 +4386,9 @@ struct ModelPickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents —
+    /// the parent page owns the chrome ([feedback iphone-entity-nav-push-2026-11-10]).
+    var pushed: Bool = false
     @State private var query = ""
     @State private var effort: Effort = .low
 
@@ -4341,79 +4403,89 @@ struct ModelPickerView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(15, weight: .medium))
-                            .foregroundStyle(theme.muted)
-                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                        if !query.isEmpty {
-                            Button { query = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
+        Group {
+            if pushed {
+                list.onAppear { effort = current.effort }
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Model")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                         }
-                    }
-                    .listRowBackground(theme.card)
+                        .onAppear { effort = current.effort }
                 }
-                Section("Reasoning") {
-                    Picker("Effort", selection: $effort) {
-                        ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: effort) { _, new in
-                        model.setModel(projectId: project.id, model: current.model, effort: new)
-                    }
-                }
-                Section("Model") {
-                    if model.models.isEmpty {
-                        Text("Loading models from the relay…").foregroundStyle(theme.muted)
-                    }
-                    ForEach(ids, id: \.self) { id in
-                        Button {
-                            model.setModel(projectId: project.id, model: id, effort: effort)
-                            dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(Project.shortModel(id)).foregroundStyle(theme.text)
-                                    Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if id == current.model {
-                                    Image(systemName: "checkmark").foregroundStyle(theme.text)
-                                }
-                            }
-                            .contentShape(Rectangle())
+                .presentationDetents([.medium, .large])
+            }
+        }
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(15, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                    TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(theme.card)
-                        .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
-                        .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
                     }
                 }
-                if !current.modelNote.isEmpty {
-                    Section {
-                        Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
-                    }
+                .listRowBackground(theme.card)
+            }
+            Section("Reasoning") {
+                Picker("Effort", selection: $effort) {
+                    ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: effort) { _, new in
+                    model.setModel(projectId: project.id, model: current.model, effort: new)
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Model")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            Section("Model") {
+                if model.models.isEmpty {
+                    Text("Loading models from the relay…").foregroundStyle(theme.muted)
+                }
+                ForEach(ids, id: \.self) { id in
+                    Button {
+                        model.setModel(projectId: project.id, model: id, effort: effort)
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Project.shortModel(id)).foregroundStyle(theme.text)
+                                Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            }
+                            Spacer()
+                            if id == current.model {
+                                Image(systemName: "checkmark").foregroundStyle(theme.text)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.card)
+                    .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
+                    .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
+                }
             }
-            .onAppear { effort = current.effort }
+            if !current.modelNote.isEmpty {
+                Section {
+                    Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
+                }
+            }
         }
-        .presentationDetents([.medium, .large])
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }
 
@@ -4438,6 +4510,7 @@ extension ChatSession {
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
                     isMessage: reply,
@@ -4927,6 +5000,44 @@ final class ComposerDraft: ObservableObject {
     #endif
 }
 
+/// What a mic press/release should do. Pure so a tap that never sees
+/// `onChanged` still starts recording ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+enum MemoMicRelease: Equatable {
+    /// `onEnded` arrived with no `onChanged` — toggle start/finish.
+    case toggleTap
+    /// Second press already finished the memo; ignore this release.
+    case ignore
+    /// Slide-left discard (or cancel armed).
+    case cancel
+    /// Hold past the send threshold; recording is live — finish and send.
+    case finishHold
+    /// Hold past the send threshold; permission still pending — finish once it starts.
+    case waitForPermission
+    /// Short tap after hold was tracked: leave recording on (click-to-toggle).
+    case keepRecording
+
+    static func decide(
+        holdActive: Bool,
+        recording: Bool,
+        ignoreRelease: Bool,
+        cancelArmed: Bool,
+        translationWidth: CGFloat,
+        heldSeconds: TimeInterval,
+        cancelDistance: CGFloat,
+        holdSendThreshold: TimeInterval = 0.25
+    ) -> MemoMicRelease {
+        // Ended-only tap: `DragGesture(minimumDistance: 0)` can skip onChanged.
+        if !holdActive { return .toggleTap }
+        if ignoreRelease { return .ignore }
+        let cancel = cancelArmed || translationWidth < -cancelDistance
+        if cancel { return .cancel }
+        if heldSeconds >= holdSendThreshold {
+            return recording ? .finishHold : .waitForPermission
+        }
+        return .keepRecording
+    }
+}
+
 /// Which of the composer's trailing controls the field's state calls for. The
 /// mic and the round pill are decided apart, because a recording wants both:
 /// the mic so a hold-to-talk release lands somewhere, the arrow so a tap can
@@ -5197,13 +5308,17 @@ private struct ComposerField<Leading: View>: View {
         } else {
             // The field with mention chips (#1596): one to eight lines, the
             // chips as attachments; `draft.text` stays the plain `@handle` text.
+            // Beside the `+` the HStack's 8 pt is the only gap; the full-width
+            // 17 pt inset is for channels and the stacked text row above the
+            // controls ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
             MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                             placeholder: prompt(draft.text), theme: theme,
                             agentProject: { model.agent(member: $0, chatId: chatId) },
                             onPasteMedia: onPasteMedia,
                             onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                             onPasteImage: onPasteImage,
-                            onLines: { lines = $0 })
+                            onLines: { lines = $0 },
+                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : Theme.composerTextInsetBesidePlus)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -5296,7 +5411,9 @@ private struct ComposerField<Leading: View>: View {
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
-        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Rim is paint only: a hit-testing stroke over the trailing edge would
+        // swallow taps on the mic ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint).allowsHitTesting(false))
         // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
         .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
