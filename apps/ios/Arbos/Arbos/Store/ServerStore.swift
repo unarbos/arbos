@@ -1007,7 +1007,7 @@ extension AppModel {
                 if nativeRooms[channelId] == nil || visibleChatId == channelId {
                     try? await client.markRead(roomId: roomId)
                 }
-                if nativeRooms[channelId] != nil { await carryHistory(channelId, client: client, roomId: roomId) }
+                if nativeRooms[channelId] != nil { await carryHistory(channelId, client: client, roomId: roomId, owner: owner) }
             } catch {
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 matrixLog.notice("open room failed: \(error.localizedDescription, privacy: .public)")
@@ -1023,20 +1023,23 @@ extension AppModel {
     /// sends them, and the relay is told which events they became. Stops at the first thing
     /// that fails (the next launch, or another member's device, takes it up there) and when
     /// another device is at it.
-    private func carryHistory(_ chatId: Id, client: ArbosFFI.MatrixClient, roomId: String) async {
-        guard historyAsked.insert(chatId).inserted else { return }
+    private func carryHistory(_ chatId: Id, client: ArbosFFI.MatrixClient, roomId: String,
+                              owner: MatrixLifetime.Ticket) async {
+        guard acceptsMatrix(owner), !Task.isCancelled, let work = accountWork(expectedOwner: owner.account),
+              historyAsked.insert(chatId).inserted else { return }
         while true {
-            guard let page = try? await relay.matrixHistoryPage(chatId),
+            guard let page = try? await work.api.matrixHistoryPage(chatId), acceptsMatrix(owner), !Task.isCancelled,
                   let said = (try? JSONSerialization.jsonObject(with: Data(page.utf8))) as? [String: Any],
                   let rows = said["rows"] as? [Any], !rows.isEmpty else { return }
             do {
                 let report = try await client.carryHistory(roomId: roomId, pageJson: page)
-                try await relay.matrixHistoryCarried(chatId, report: JSONSerialization.jsonObject(with: Data(report.utf8)))
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                try await work.api.matrixHistoryCarried(chatId, report: JSONSerialization.jsonObject(with: Data(report.utf8)))
             } catch {
                 matrixLog.notice("history not carried: \(error.localizedDescription, privacy: .public)")
                 return
             }
-            guard said["more"] as? NSNumber === kCFBooleanTrue else { return }
+            guard acceptsMatrix(owner), !Task.isCancelled, said["more"] as? NSNumber === kCFBooleanTrue else { return }
         }
     }
 
@@ -1221,7 +1224,8 @@ extension AppModel {
     /// carries back to the Loro room still finds them.
     func sendNativePeople(chatId: Id, text: String, replyTo: Id?, attachments: [PendingAttachment] = []) {
         guard let client = matrixClient, let room = nativeRoom(chatId),
-              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else {
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
+              let work = accountWork(expectedOwner: owner.account) else {
             setSendError(chatId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
             return
         }
@@ -1255,7 +1259,8 @@ extension AppModel {
                 } else {
                     var parts: [String] = []
                     for a in attachments {
-                        let key = try await uploadBlob(slot: "\(peopleSlot):\(chatId)", name: a.name, mime: a.mime, data: a.data)
+                        let key = try await uploadBlob(slot: "\(peopleSlot):\(chatId)", name: a.name, mime: a.mime, data: a.data, work: work)
+                        guard acceptsMatrix(owner), !Task.isCancelled else { return }
                         parts.append(try Self.attachmentPart(Attachment(
                             name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name))))
                     }
