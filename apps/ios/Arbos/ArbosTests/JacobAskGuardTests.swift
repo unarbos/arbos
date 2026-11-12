@@ -219,4 +219,24 @@ final class JacobAskGuardTests: XCTestCase {
         XCTAssertFalse(AgentPane.agentDetailsShowCodingRoutines,
                        "Jacob asked for these two cards gone; flipping this back must be deliberate")
     }
+
+    /// [feedback closed-app-call-ring-2026-11-11] — VoIP/APNs tokens re-upload on a forced
+    /// foreground pass even when the hex is unchanged, so a relay that dropped a dead token
+    /// can ring the closed app again (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995).
+    func testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged() {
+        XCTAssertTrue(pushTokenNeedsUpload(force: true, token: "abc", registered: "abc"),
+                      "force must re-POST after the relay may have deleted the token")
+        XCTAssertFalse(pushTokenNeedsUpload(force: false, token: "abc", registered: "abc"),
+                       "without force, an unchanged hex stays quiet")
+        XCTAssertTrue(pushTokenNeedsUpload(force: false, token: "abc", registered: nil),
+                      "a never-uploaded token must upload")
+        XCTAssertTrue(pushTokenNeedsUpload(force: false, token: "new", registered: "old"),
+                      "a changed hex must upload")
+
+        let app = source("App/ArbosApp.swift")
+        XCTAssertTrue(app.contains("sendTokenIfNeeded(force: true)"),
+                      "foreground must force the APNs token back onto the relay")
+        XCTAssertTrue(app.contains("sendVoipTokenIfNeeded(force: true)"),
+                      "foreground must force the VoIP token back onto the relay")
+    }
 }

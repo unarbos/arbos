@@ -39,7 +39,6 @@ pub(crate) fn healthz_dto(state: &AppState) -> HealthDto {
         ok: true,
         proto: i64::from(arbos_core::PROTO_VERSION),
         devices,
-        daytona: state.daytona.is_some(),
         auth_mode: Some(state.cfg.auth_mode.as_str().to_owned()),
         auth: None,
         providers: HealthProvidersDto {
@@ -53,7 +52,7 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
     // The typeshared HealthDto is what the apps decode; the operational extras ride alongside as plain
     // JSON keys (Swift ignores unknown keys): `uptime_s` (a restart storm shows as a short uptime — four
     // restarts in 95 min put "Reconnecting…" banners in every chat on 2026-10-22), `rooms` (open sync rooms
-    // with live websocket sessions) and `snapshot` (the Daytona snapshot new boxes are made from right now).
+    // with live websocket sessions) and `snapshot` (the snapshot new boxes are made from right now).
     let mut v = serde_json::to_value(healthz_dto(&state))
         .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
     if let Some(obj) = v.as_object_mut() {
@@ -230,7 +229,7 @@ pub struct CreateProjectBody {
     pub instructions: Option<String>,
     #[serde(default)]
     pub models: Option<Value>,
-    /// `daytona` (default when a key exists), `process`, or `docker`.
+    /// `gvisor` (the default on the arbos.life host), `process`, or `docker`.
     #[serde(default)]
     pub provider: Option<String>,
     /// Tree avatar slug; default = the deterministic pick for the new id.
@@ -303,7 +302,7 @@ pub async fn create_project(
     let provider = match b.provider.as_deref() {
         Some(p) => Provider::parse(p).ok_or((
             StatusCode::BAD_REQUEST,
-            "provider must be daytona|process|docker|gvisor".to_owned(),
+            format!("provider must be {}", Provider::NAMES),
         ))?,
         None => boxes::default_provider(&state),
     };
@@ -1142,6 +1141,14 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
 pub(crate) fn project_owner_dto(state: &AppState, user_id: &str) -> ProjectOwnerDto {
     let s = crate::notify::Sender::user(state, user_id);
     let seen = state.db.user_last_seen(user_id).ok().flatten();
+    project_owner_from_sender(user_id, s, seen)
+}
+
+pub(crate) fn project_owner_from_sender(
+    user_id: &str,
+    s: crate::notify::Sender,
+    seen: Option<i64>,
+) -> ProjectOwnerDto {
     ProjectOwnerDto {
         kind: s.kind.to_owned(),
         id: s.id,
@@ -1263,7 +1270,7 @@ pub async fn project_status(
     let p = project_for(&state, &principal, &id)?;
     let (bs, since) = state.box_state(&p.user_id).await;
     let mut provider = boxes::provider_status(&state, &p.user_id).await;
-    // Laptops cannot reach a Daytona preview URL without its token: hand them the relay's proxy instead.
+    // A box's own URL is not reachable from a laptop: hand them the relay's proxy instead.
     if let Some(tok) = principal.raw_token() {
         let ws = state
             .cfg
@@ -1300,25 +1307,17 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .and_then(|s| s.snapshot.clone())
         .or(state.db.user_snapshot(&user_id).map_err(internal)?)
         .unwrap_or_else(|| state.default_snapshot());
-    // Class from the snapshot when Daytona answers; the known default otherwise. A host sandbox
-    // (D89) reports the fleet caps.
+    // A host sandbox (D89) reports the fleet caps; a local box reports the class every box used to
+    // have. Nothing asks a provider for the figures any more — Daytona's snapshot endpoint was the
+    // only one that answered.
     let gvisor = sb.as_ref().is_some_and(|s| s.provider == "gvisor")
         || (sb.is_none() && boxes::default_provider(&state) == Provider::Gvisor);
-    let (mut cpu, mut mem, mut disk) = if gvisor {
+    let (cpu, mem, disk) = if gvisor {
         let f = &state.cfg.fleet;
         (f.box_cpus as i64, f.box_mem_gb as i64, f.box_work_gb as i64)
     } else {
         (4_i64, 8_i64, 10_i64)
     };
-    if !gvisor {
-        if let Some(dt) = &state.daytona {
-            if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
-                cpu = snap.cpu.unwrap_or(cpu);
-                mem = snap.mem.unwrap_or(mem);
-                disk = snap.disk.unwrap_or(disk);
-            }
-        }
-    }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
     let workspaces: Vec<MachineWorkspaceDto> = projects
         .iter()
@@ -1506,17 +1505,9 @@ pub async fn admin_delete_user_box(
         return Err((StatusCode::NOT_FOUND, "no box for that user".into()));
     };
     let mut deleted_sandbox = None;
-    if let (Some(dt), Some(sid)) = (&state.daytona, &sb.sandbox_id) {
-        if sb.provider == "daytona" {
-            let _ = dt.stop(sid, true).await;
-            match dt.delete(sid).await {
-                Ok(_) => deleted_sandbox = Some(sid.clone()),
-                Err(e) if e.to_string().contains("404") => deleted_sandbox = Some(sid.clone()),
-                Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("delete sandbox: {e}"))),
-            }
-        }
-    }
-    if sb.provider != "daytona" {
+    // A row left on the retired provider loses its row here and nothing else: deleting the
+    // sandbox itself is an operator step, outside the relay.
+    if sb.provider != boxes::RETIRED_PROVIDER {
         let _ = boxes::stop_box(&state, &id, true).await;
     }
     if sb.provider == "gvisor" {
@@ -1578,37 +1569,10 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
         .into_response())
 }
 
-/// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the
-/// user box (D70). Idempotent; old sandboxes are stopped and marked, never deleted.
-pub async fn machine_migrate(
-    State(state): State<AppState>,
-    principal: Principal,
-    Query(q): Query<MigrateQuery>,
-) -> ApiResult {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
-        Principal::Admin => crate::auth::LEGACY_USER.to_owned(),
-        Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
-    };
-    let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(Json(crate::migrate::report_json(&user_id, &reports)).into_response())
-}
-
-#[derive(Deserialize)]
-pub struct MigrateQuery {
-    /// Only this project (id).
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Copy again even when the legacy sandbox is already marked migrated.
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: daytona|process|docker|gvisor|null}`:
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|null}`:
 /// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
-/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it.
+/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it. The
+/// retired provider is refused here, so no box can be sent back to it by hand.
 pub async fn admin_set_user_box(
     State(state): State<AppState>,
     principal: Principal,
@@ -1633,7 +1597,7 @@ pub async fn admin_set_user_box(
             Value::Null => None,
             Value::String(s) => Some(Provider::parse(s).ok_or((
                 StatusCode::BAD_REQUEST,
-                "provider must be daytona|process|docker|gvisor or null".to_owned(),
+                format!("provider must be {} or null", Provider::NAMES),
             ))?),
             _ => {
                 return Err((
@@ -1983,9 +1947,9 @@ pub async fn box_hello(
     boxes::box_seen_http(&state, user_id).await;
     if let Some(url) = &b.url {
         if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
-            // Only a process box's own URL is reachable from the relay. Daytona boxes have a
-            // preview URL, container boxes (docker, gvisor) a published host port; the URL a
-            // container reports is its in-namespace address.
+            // Only a process box's own URL is reachable from the relay. Container boxes (docker,
+            // gvisor) have a published host port; the URL a container reports is its
+            // in-namespace address.
             if sb.provider == "process" {
                 sb.box_url = Some(url.clone());
                 let _ = state.db.upsert_box(&sb);

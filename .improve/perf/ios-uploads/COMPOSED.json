@@ -1,0 +1,87 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "0ae1e7f9943b9dd82bcc4ef91a3b3e195b6090b2c6efaaedeccd3a9a91c60b71",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "08de5d1f705b7cc82b308f7b44894119b226de5c52fdcc946619f60cd128ca72",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "f61e6f425993bd536b1fe558ae4029312d94a2347128d83c64d7bc689ca1d93f",
+  "compile_exit": 0,
+  "scope": "composition",
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 17,
+    "results": [
+      {
+        "name": "people-queued-A-never-uses-B",
+        "pass": true
+      },
+      {
+        "name": "people-stale-success-no-commit",
+        "pass": true
+      },
+      {
+        "name": "people-stale-error-no-paint",
+        "pass": true
+      },
+      {
+        "name": "people-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "people-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-queued-A-never-uses-B",
+        "pass": true
+      },
+      {
+        "name": "project-stale-success-no-commit",
+        "pass": true
+      },
+      {
+        "name": "project-stale-error-no-paint",
+        "pass": true
+      },
+      {
+        "name": "project-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "project-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "people-bounded-out-of-order-single-commit",
+        "pass": true
+      },
+      {
+        "name": "people-multiple-failures-original-row-policy",
+        "pass": true
+      },
+      {
+        "name": "people-all-failures-still-one-original-commit",
+        "pass": true
+      },
+      {
+        "name": "project-bounded-out-of-order-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-multiple-failures-original-row-policy",
+        "pass": true
+      },
+      {
+        "name": "project-all-failures-still-one-original-commit",
+        "pass": true
+      },
+      {
+        "name": "project-fixture-no-network-control",
+        "pass": true
+      }
+    ],
+    "total": 17
+  },
+  "seconds": 0.9724998750025406
+}

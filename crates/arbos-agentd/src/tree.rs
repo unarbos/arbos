@@ -18,7 +18,7 @@
 //! construction. Group and people chats see only their own subtree.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -33,6 +33,12 @@ use crate::config::Config;
 use crate::llm::Llm;
 use crate::settings::{LiveModels, ModelRole};
 use crate::store::{Store, T3Row};
+
+static CARD_HEADING: LazyLock<Option<regex_lite::Regex>> =
+    LazyLock::new(|| regex_lite::Regex::new(r#""heading"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok());
+
+static CARD_SUMMARY: LazyLock<Option<regex_lite::Regex>> =
+    LazyLock::new(|| regex_lite::Regex::new(r#""summary"\s*:\s*"((?:[^"\\]|\\.)*)"#).ok());
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tree_nodes (
@@ -429,8 +435,8 @@ fn parse_card(text: &str) -> Option<(String, String, Vec<String>)> {
             ));
         }
     }
-    let re_h = regex_lite::Regex::new(r#""heading"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok()?;
-    let re_s = regex_lite::Regex::new(r#""summary"\s*:\s*"((?:[^"\\]|\\.)*)"#).ok()?;
+    let re_h = CARD_HEADING.as_ref()?;
+    let re_s = CARD_SUMMARY.as_ref()?;
     let h = re_h.captures(text)?.get(1)?.as_str().replace("\\\"", "\"");
     let s = re_s
         .captures(text)

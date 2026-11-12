@@ -429,15 +429,15 @@ impl Agent {
                     break;
                 }
                 if !running {
-                    // Turn gone, no final bubble yet (a subagent / job delivers later): give it
-                    // the bounded wait, but stop early once nothing new lands for 3 s after an
-                    // ack-only or progress-only turn that was never going to add more.
+                    // Turn gone, no final bubble yet (a subagent / job delivers later): stop
+                    // early once nothing new lands for 3 s after an ack-only or progress-only
+                    // hand-off. The job's outcome reaches the live call through the relay
+                    // VoiceInbox (same wake as any chat bubble), not by holding this tool call
+                    // open for up to SUBAGENT_WAIT — that left the person waiting on the call
+                    // with only "I'll report back" and no spoken follow-up when the inbox path
+                    // was the one that had to speak.
                     let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
-                    if since.elapsed() > std::time::Duration::from_secs(3)
-                        && replies.iter().any(|m| {
-                            m.rest.get("turnRole").and_then(Value::as_str) == Some("progress")
-                        })
-                    {
+                    if since.elapsed() > std::time::Duration::from_secs(3) && !replies.is_empty() {
                         break;
                     }
                 } else {
@@ -712,7 +712,9 @@ mod reply_tests {
             reply_text(&rows),
             "Checking.\n\nThree places deliver tonight."
         );
-        // An ack-only turn (work handed off) reads back the ack, and is not settled.
+        // An ack-only turn (work handed off) reads back the ack, and is not settled —
+        // voice_request returns that ack after a short quiet wait; the job's outcome
+        // reaches the live call through VoiceInbox, which must speak the follow-up.
         let ack = vec![row("a", "ack", "done", "I'll run that in the background.")];
         assert!(!reply_settled(&ack));
         assert_eq!(reply_text(&ack), "I'll run that in the background.");

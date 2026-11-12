@@ -752,6 +752,9 @@ impl Agent {
         // #1479: Task mid-turn arrivals (and every canned "Still on it" fallback) never post a
         // chat bubble — the apps already show one quiet working indicator. Queue for the main
         // session; do not mark this wait as noted so a later status question can still answer.
+        // The working row is the acknowledgement (Jacob, 2026-10-23): "Queued: <ask>…" so a new
+        // ask while a job or turn is already running does not keep showing the old step
+        // ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
         if kind == SideKind::Task {
             let _ = self.store.t3_append(
                 chat_id,
@@ -770,11 +773,15 @@ impl Agent {
                     "steerable": snap.steerable, "silent": true,
                 })),
             );
+            let gist: String = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let gist: String = gist.chars().take(40).collect();
+            self.set_working_row(host, chat_id, format!("Queued: {gist}…"))
+                .await;
             tracing::info!(
                 chat_id,
                 ms = t0.elapsed().as_millis() as i64,
                 model_call = used_model,
-                "quick reply silent queue; no ack bubble"
+                "quick reply silent queue; working row only"
             );
             return QuickOutcome::Queued;
         }
@@ -813,21 +820,12 @@ impl Agent {
             self.mark_quick_noted(chat_id, turn_started);
         }
         if kind != SideKind::Status {
-            // Queued or steered: the working row carries it; nothing in the transcript until
-            // the real answer. The presence line names what was taken, briefly.
+            // Steered (Task returned above): the working row carries it; nothing in the
+            // transcript until the real answer. The presence line names what was taken, briefly.
             let gist: String = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
             let gist: String = gist.chars().take(40).collect();
-            self.post_activity(
-                chat_id,
-                Some(format!(
-                    "{}: {gist}…",
-                    if kind == SideKind::Guide {
-                        "Steering"
-                    } else {
-                        "Queued"
-                    }
-                )),
-            );
+            self.set_working_row(host, chat_id, format!("Steering: {gist}…"))
+                .await;
             tracing::info!(
                 chat_id,
                 kind = kind.as_str(),
@@ -1163,6 +1161,28 @@ pub(crate) mod tests {
     /// 01M6PJABNVZ84YXHHFY9HV3FAK (bug AC, `job_handoff_leak_tests.rs`).
     pub(crate) const EMPTY_JOB_RESULT_ASK: &str = "what came out of the empty job one?";
 
+    /// #2964: a research ask that is not forced wording. The stub's job-result answer is the
+    /// summary the talking model would write from the worker's notes — what the user must see.
+    pub(crate) const RESEARCH_JOB_RESULT_ASK: &str = "Find me the best sushi in la";
+
+    /// Visible summary for [`RESEARCH_JOB_RESULT_ASK`].
+    pub(crate) const RESEARCH_JOB_RESULT_ANSWER: &str = "The three strongest picks in LA are Sushi Gen (downtown omakase), n/naka (reservation kaiseki-style), and Kato (strong value westside). Waitlists move weekly.";
+
+    /// Busy-reply smoke on 0.1.204: "what is going on now?" while a long turn runs. The quick
+    /// model returned a long `[status]` that `settle_quick` could not keep as a status line
+    /// (`quick reply could not stand as a status line; silent queue`), #2986 then put only a
+    /// Queued working row, and the ask became an `ask-…` job whose result must still show words
+    /// (#2964 / #2985). Unique phrasing so the stub does not collide with the clean status ask.
+    pub(crate) const LONG_STATUS_QUICK_ASK: &str = "what is going on now with the long status one?";
+
+    /// A 151-shaped `[status]` cut mid-sentence by the token cap — `finish_cleanly` returns
+    /// `None`, so the lane silent-queues rather than posting a fragment.
+    pub(crate) const LONG_STATUS_QUICK_FRAGMENT: &str = "[status]\nI'm still on the sleep you started — bash has been running for about ninety seconds with no output yet and the turn is waiting on that tool call to finish before I can say more about";
+
+    /// What `write_job_result` must post for [`LONG_STATUS_QUICK_ASK`] once the ask runs as a job.
+    pub(crate) const LONG_STATUS_JOB_ANSWER: &str =
+        "The sleep is still running — about a minute in. Nothing else is open in this chat.";
+
     /// The ask that makes the stub answer a job-result call with round 14's r14notes draft: an
     /// opening sentence in the register `ProseFilter::strip_leading_thought_paragraphs` judges
     /// thought-shaped, a GFM table **glued** to it with no blank line, and a closing line in its
@@ -1250,6 +1270,16 @@ It ran as a real background job, not inline.";
             ("[status]\n", "stop")
         } else if user.contains(EMPTY_JOB_RESULT_ASK) {
             ("", "stop")
+        } else if user.contains(RESEARCH_JOB_RESULT_ASK) {
+            (RESEARCH_JOB_RESULT_ANSWER, "stop")
+        } else if user.contains(LONG_STATUS_QUICK_ASK) {
+            // Job-result calls carry the ask under "The user's message:" plus worker notes;
+            // the quick lane carries the snapshot. Same ask string, two answers.
+            if user.contains("Notes from the work") {
+                (LONG_STATUS_JOB_ANSWER, "stop")
+            } else {
+                (LONG_STATUS_QUICK_FRAGMENT, "length")
+            }
         } else if user.contains(GLUED_TABLE_JOB_RESULT_ASK) {
             (GLUED_TABLE_DRAFT, "stop")
         } else if user.contains("stop at 20, not 40") {
@@ -1618,6 +1648,98 @@ It ran as a real background job, not inline.";
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Busy-reply smoke on image 0.1.204 (`c4de532cf` / #2985+#2986): a same-chat "what is
+    /// going on now?" while a long turn runs. The quick model returned a long `[status]` that
+    /// could not stand as a status line → silent queue + Queued working row only → ask ran as
+    /// `ask-what-is-going-on` → `job result written` logged, but the client saw a wordless Done
+    /// because the result waited on send order behind the busy turn. #2964: never look like no
+    /// reply. Path under test: long quick reply → job → result row with text, within the gate,
+    /// even while the busy ask still holds the head of the chat's send order.
+    #[tokio::test]
+    async fn a_long_status_quick_reply_falls_to_a_job_result_with_visible_text() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000204";
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        // The long turn's ask is ahead in send order and still owed an answer — production's
+        // shape when the sleep is mid-flight. Without the ask-job exception, `write_job_result`
+        // would wait up to `SEND_ORDER_WAIT` (120 s) here.
+        let (busy_msg, _) = send_cmd(
+            &host,
+            "Use bash to run sleep 90 && echo finished. Wait for it yourself.",
+        );
+        let _busy_place = agent
+            .send_order
+            .join(chat, &busy_msg)
+            .expect("busy ask takes the head of the send order");
+        let _busy = agent.test_hold_turn_for(chat, &busy_msg).await;
+
+        // Premise: the quick fragment cannot stand as a status line (same decision as the
+        // production warn `quick reply could not stand as a status line; silent queue`).
+        let tagged = LONG_STATUS_QUICK_FRAGMENT;
+        let (kind, body) = parse_tagged_reply(tagged);
+        assert_eq!(kind, SideKind::Status);
+        assert_eq!(
+            settle_quick(kind, &body, true),
+            (SideKind::Task, None),
+            "a truncated mid-sentence status is demoted — no fragment bubble"
+        );
+
+        // `settle_quick` → Task is what #2986's silent queue reads; the ask then runs as a job
+        // (`start_job_for_send`). Drive `write_job_result` directly so this case does not race
+        // the shared ACTIVITY_LOG with other Queued-ack tests.
+        let (ask, _cmd) = send_cmd(&host, LONG_STATUS_QUICK_ASK);
+        let _ask_place = agent
+            .send_order
+            .join(chat, &ask)
+            .expect("the ask keeps its place until the job result posts");
+        assert_eq!(
+            agent.send_order.ahead(chat, &ask),
+            1,
+            "the busy turn is still ahead — the regression waited here"
+        );
+
+        let t0 = Instant::now();
+        agent
+            .write_job_result(
+                chat,
+                &host,
+                &ask,
+                "ask-what-is-going-on",
+                "done",
+                "Worker notes: bash sleep is still running; no other tools; nothing failed.",
+                None,
+            )
+            .await
+            .expect("the ask-job result posts");
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "ask-job result must not wait behind the busy turn: {elapsed:?}"
+        );
+
+        let rows: Vec<_> = reply_rows(&host, &ask)
+            .into_iter()
+            .filter(|m| {
+                m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+                    && !m.text().trim().is_empty()
+            })
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one visible result with words: {:?}",
+            rows.iter().map(|m| m.text()).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].text().trim(), LONG_STATUS_JOB_ANSWER);
+        assert_eq!(
+            rows[0].rest.get("decision").and_then(Value::as_str),
+            Some("job")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): the quick
     /// call sends `reasoning {enabled: false}`, and the Opus 5.5 endpoint answers HTTP 400
     /// "Reasoning is mandatory for this endpoint and cannot be disabled". Every side-session
@@ -1752,7 +1874,9 @@ It ran as a real background job, not inline.";
 
     /// Jacob's rule (2026-10-23): a new ask while busy is queued silently — status on the
     /// working row, no acknowledgement bubble, no "Still on it…" placeholder; the real answer
-    /// is the only row the message ever gets.
+    /// is the only row the message ever gets. The working row must name the new ask
+    /// ("Queued: …"), not keep showing the step of the work that was already running
+    /// ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
     #[tokio::test]
     async fn busy_agent_queues_a_new_task_without_a_placeholder_row() {
         let (agent, root) = test_agent().await;
@@ -1760,6 +1884,13 @@ It ran as a real background job, not inline.";
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.activity = Some("Finding sock stores in LA".into());
+            agent.test_open_row(&host, t).await;
+        }
+        ACTIVITY_LOG.lock().unwrap().clear();
         let (msg_id, cmd) = send_cmd(&host, "also add a plot of the results when you are done");
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
@@ -1786,9 +1917,105 @@ It ran as a real background job, not inline.";
             agent.take_side_notes(chat).is_none(),
             "a task is not a side note"
         );
+        // The presence line names the new ask, not the step that was already running.
+        // Match this ask's gist — ACTIVITY_LOG is process-wide and parallel Queued-ack
+        // cases can post other "Queued: …" lines into the same vec.
+        let seen = loop {
+            if let Some(a) = ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.starts_with("Queued: also add a plot of the results"))
+                .cloned()
+            {
+                break a;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+                "no Queued activity on the working row"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let row_id = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref()
+                .map(|a| a.starts_with("Queued:")),
+            Some(true),
+            "the live turn's activity is the Queued line the apps read"
+        );
+        // iOS `AppModel.currentActivity` reads the streaming message's `activity` field —
+        // not the relay POST alone — so the doc must carry the Queued line too.
+        assert!(
+            host.lock()
+                .await
+                .doc
+                .message(&row_id)
+                .as_ref()
+                .and_then(|m| m.rest.get("activity"))
+                .and_then(Value::as_str)
+                .is_some_and(|a| a.starts_with("Queued: also add a plot of the results")),
+            "the streaming row's activity is what the presence line shows"
+        );
+        // A later tool step of the socks work must not put the old label back while the new
+        // ask is still waiting for the lock.
+        assert!(
+            agent.sends_waiting() > 0,
+            "the new ask is still waiting — the pin applies"
+        );
+        assert!(Agent::should_keep_queued_ack(
+            Some(seen.as_str()),
+            Some("Finding sock stores in LA"),
+            agent.sends_waiting(),
+        ));
         waiting.abort();
         drop(busy);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pin that keeps "Queued: …" visible: while a send waits, a tool step of the work
+    /// already running must not reclaim the working row ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
+    #[test]
+    fn queued_ack_holds_while_a_send_waits() {
+        assert!(Agent::should_keep_queued_ack(
+            Some("Queued: Find me the best sushi in la…"),
+            Some("Finding sock stores in LA"),
+            1,
+        ));
+        assert!(
+            !Agent::should_keep_queued_ack(
+                Some("Queued: Find me the best sushi in la…"),
+                Some("Finding sock stores in LA"),
+                0,
+            ),
+            "once the ask takes the lock, steps may move the row again"
+        );
+        assert!(
+            !Agent::should_keep_queued_ack(
+                Some("Queued: Find me the best sushi in la…"),
+                Some("Queued: something else…"),
+                1,
+            ),
+            "a newer Queued line may replace the older one"
+        );
+        assert!(!Agent::should_keep_queued_ack(
+            Some("Finding sock stores in LA"),
+            Some("Reading a menu"),
+            1,
+        ));
     }
 
     /// Jacob's screenshot (TestAgent, 2026-10-23 23:58 UTC): "On it." as a bubble above the
@@ -3286,6 +3513,53 @@ It ran as a real background job, not inline.";
             result_row.rest.get("turnRole").and_then(Value::as_str),
             Some("ack")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2964: a finished hidden job worker is not a bubble. Trimming the empty result when that
+    /// is the only sibling leaves the ask with neither an answer nor the stock "didn't answer"
+    /// line — the same blank chat Jacob saw for "Find me the best sushi in la".
+    #[tokio::test]
+    async fn a_sole_empty_result_stays_when_only_a_hidden_job_spoke() {
+        use crate::agent::trim_wordless_result_row;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY0002964";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let empty = {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+            t.assistant_msg_id.clone()
+        };
+        {
+            let h = host.lock().await;
+            let job_row = arbos_core::ids::ulid();
+            let part = h
+                .doc
+                .start_assistant_message(&job_row, "m-busy", &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                &job_row,
+                &[
+                    (
+                        "job",
+                        json!({ "id": "01JOBSUSHI000000000000000", "title": "Finding sushi", "kind": "research" }),
+                    ),
+                    ("hidden", json!(true)),
+                    ("worker", json!(true)),
+                ],
+            );
+            h.doc.append_text(&job_row, &part, "Done.");
+            h.doc.finish_message(&job_row, MessageStatus::Done);
+            h.doc.finish_message(&empty, MessageStatus::Done);
+            assert_eq!(
+                trim_wordless_result_row(&h.doc, &empty),
+                "kept",
+                "a hidden job is not a visible answer; keep the empty result for the stock line"
+            );
+            let m = h.doc.message(&empty).expect("empty result stays");
+            assert_ne!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
