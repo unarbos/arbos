@@ -745,6 +745,11 @@ extension AppModel {
             }
             matrixListener = listener
             matrixClient = client
+            MatrixMediaProtocol.serve { [weak self] chat, reference in
+                guard let (client, room) = await self?.nativeTarget(chat) else { throw URLError(.resourceUnavailable) }
+                let media = try await client.media(roomId: room, reference: reference)
+                return (media.mime, media.bytes)
+            }
             matrixConnected = true
             peopleNative = creds.peopleNative
             // Switched off (the rollback): every people chat is its Loro room again from the
@@ -971,7 +976,7 @@ extension AppModel {
 
     /// What a native chat answers to a verb the homeserver path does not carry yet (the Mac's
     /// words).
-    static let nativeTextOnly = "This chat can only send text for now"
+    static let nativeTextOnly = "This chat can only send text and files for now"
 
     /// `GET /me/matrix/people` as the relay writes it, `{rooms: {<chat_id>: <room_id>}}` and
     /// nothing else, or nil when the answer is not that (what was known is kept). Kept: the
@@ -996,6 +1001,12 @@ extension AppModel {
     /// The homeserver room of a native chat (`confirmedRoom`).
     func nativeRoom(_ chatId: Id) -> String? {
         Self.confirmedRoom(relay: nativeRooms, homeserver: matrixSnapshot.people, chatId: chatId)
+    }
+
+    /// The client and room a native chat is read through, once both exist.
+    func nativeTarget(_ chatId: Id) -> (ArbosFFI.MatrixClient, String)? {
+        guard let client = matrixClient, let room = nativeRoom(chatId) else { return nil }
+        return (client, room)
     }
 
     /// The homeserver's row for a native chat: its unread count and whether it is encrypted.
@@ -1058,30 +1069,66 @@ extension AppModel {
         (try? await client.openRoom(roomId: room))?.first { $0.id == messageId && !$0.pending }?.eventId
     }
 
-    /// Text into a native chat; `replyTo` is a row id of this chat. The row shows through the
-    /// timeline (`pending`) before the homeserver has it and leaves again if the send fails.
-    /// The client encrypts it in an encrypted room or does not send it.
-    func sendNativePeople(chatId: Id, text: String, replyTo: Id?) {
+    /// A message into a native chat; `replyTo` is a row id of this chat. The row shows through
+    /// the timeline (`pending`) before the homeserver has it and leaves again if the send
+    /// fails. The client encrypts it in an encrypted room or does not send it.
+    ///
+    /// Files go where the chat's messages are readable from (the Mac's rule, `native_send`).
+    /// In an end-to-end encrypted chat each is encrypted on this phone and its ciphertext kept
+    /// on the homeserver, the key inside the message; the relay sees none of it. In any other
+    /// native chat they are the relay's blobs, like a Loro room's, so the row the relay
+    /// carries back to the Loro room still finds them.
+    func sendNativePeople(chatId: Id, text: String, replyTo: Id?, attachments: [PendingAttachment] = []) {
         guard let client = matrixClient, let room = nativeRoom(chatId) else {
             setSendError(chatId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
             return
         }
         let messageId = newId()
+        // Not knowing counts as encrypted, as it does for the client.
+        let encrypted = nativePeopleRow(chatId)?.encrypted ?? true
         Task {
             do {
+                var answers: String?
                 if let replyTo {
-                    guard let event = await nativeEventId(client, room: room, messageId: replyTo) else {
+                    answers = await nativeEventId(client, room: room, messageId: replyTo)
+                    guard answers != nil else {
                         failRefused("send your message", "That message is no longer here.")
                         return
                     }
-                    _ = try await client.sendReply(roomId: room, text: text, replyTo: event, localId: messageId)
+                }
+                if attachments.isEmpty {
+                    if let answers {
+                        _ = try await client.sendReply(roomId: room, text: text, replyTo: answers, localId: messageId)
+                    } else {
+                        _ = try await client.sendText(roomId: room, text: text, localId: messageId)
+                    }
+                } else if encrypted {
+                    let files = attachments.map {
+                        ArbosFFI.MatrixUpload(name: $0.name, mime: $0.mime,
+                                              kind: Self.attachmentKind(mime: $0.mime, name: $0.name), bytes: $0.data)
+                    }
+                    _ = try await client.sendFiles(roomId: room, text: text, files: files, replyTo: answers, localId: messageId)
                 } else {
-                    _ = try await client.sendText(roomId: room, text: text, localId: messageId)
+                    var parts: [String] = []
+                    for a in attachments {
+                        let key = try await uploadBlob(slot: "\(peopleSlot):\(chatId)", name: a.name, mime: a.mime, data: a.data)
+                        parts.append(try Self.attachmentPart(Attachment(
+                            name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name))))
+                    }
+                    _ = try await client.sendParts(roomId: room, text: text, partsJson: parts, replyTo: answers, localId: messageId)
                 }
             } catch {
                 fail("send your message", error)
             }
         }
+    }
+
+    /// The `attachment` part of a row for a file already on the relay, as the chat doc writes
+    /// it (crdt-sync §6.2), as JSON.
+    static func attachmentPart(_ attachment: Attachment) throws -> String {
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(attachment))
+        let part: [String: Any] = ["id": newId(), "kind": "attachment", "attachment": body]
+        return String(decoding: try JSONSerialization.data(withJSONObject: part), as: UTF8.self)
     }
 
     /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
@@ -1117,4 +1164,70 @@ extension AppModel {
             }
         }
     }
+}
+
+/// Files of a native chat kept on the homeserver (an attachment whose `ref` is
+/// `mx:<event>/<part>`), for everything that loads an attachment by URL: `AppModel.blobURL`
+/// answers such a ref with a URL of this scheme, and this answers the URL with what the
+/// Matrix client decrypts. Nothing leaves the phone under it and the URL cache keeps none of
+/// it. Ceiling: `URLSession.shared` only, which is what every attachment loader here uses.
+final class MatrixMediaProtocol: URLProtocol, @unchecked Sendable {
+    static let scheme = "arbos-mx"
+    /// What an attachment's `ref` starts with when its file is on the homeserver
+    /// (`arbos_matrix::rows::MEDIA_REF`).
+    static let refPrefix = "mx:"
+
+    typealias Fetch = @Sendable (_ chatId: Id, _ reference: String) async throws -> (mime: String, bytes: Data)
+    private static let lock = NSLock()
+    private static var fetch: Fetch?
+
+    /// Answer this scheme with `fetch` from now on.
+    static func serve(_ fetch: @escaping Fetch) {
+        lock.withLock {
+            if self.fetch == nil { URLProtocol.registerClass(MatrixMediaProtocol.self) }
+            self.fetch = fetch
+        }
+    }
+
+    /// The URL of the file `key` names in the people chat whose blob slot is `slot`, or nil
+    /// when `key` is a relay blob's.
+    static func url(slot: String, key: String) -> URL? {
+        guard key.hasPrefix(refPrefix), slot.hasPrefix("\(peopleSlot):") else { return nil }
+        var comps = URLComponents()
+        comps.scheme = scheme
+        comps.host = "media"
+        comps.path = "/" + slot.dropFirst(peopleSlot.count + 1)
+        comps.queryItems = [URLQueryItem(name: "ref", value: String(key.dropFirst(refPrefix.count)))]
+        return comps.url
+    }
+
+    private var loading: Task<Void, Never>?
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.scheme == scheme }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let reference = comps.queryItems?.first(where: { $0.name == "ref" })?.value,
+              let fetch = Self.lock.withLock({ Self.fetch }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let chat = String(comps.path.dropFirst())
+        loading = Task {
+            do {
+                let (mime, bytes) = try await fetch(chat, reference)
+                guard !Task.isCancelled,
+                      let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                     headerFields: ["Content-Type": mime]) else { return }
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: bytes)
+                client?.urlProtocolDidFinishLoading(self)
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+            }
+        }
+    }
+
+    override func stopLoading() { loading?.cancel() }
 }
