@@ -1,0 +1,21 @@
+{
+  "comparison": "Phase 8 fixed uncached policy versus Phase 6 cache plus Phase 8 fixed policy",
+  "phase8_commit": "e978f28d145d8674cbd5de5b1ecb02f3cc2f5d2d",
+  "phase6_commit": "373c94b021e70ca0d1ae5049cd0e720b98aa103a",
+  "fixed_uncached_source_sha256": "51053e0dd677a570466b66431d8863519dbd9628175f8556cfd0589db4e8117c",
+  "fixed_cached_source_sha256": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da",
+  "same_exact_output_bytes": true,
+  "outputs_sha256": "289dc0cc6387f7a1db7538dee6390611d4fe8b110c47ea3941f104f65eb8b6e5",
+  "corpus_cases": 130,
+  "original_phase6_cases": 109,
+  "new_minimum_tail_cases": 21,
+  "driver_sha256": "ba4876f6da5150f012d81ad0d6cfc214edbf551bca44e8a21fada39b7e140a16",
+  "runner_sha256": "62c80b5b1d51c714f7350ec323888dc5633c27ef7b51178aa4d50ec22d03f35b",
+  "build_profile": "release opt-level=3; debug=0; incremental=false; jobs=2; locked/offline; no new dependencies",
+  "source_inputs": "Generate ignored fixed-uncached.rs from the pinned Phase 8 git object; generate ignored fixed-cached.rs from the pinned Phase 6 git object plus the reviewed integration patch. Neither implementation is embedded in the public driver.",
+  "build_commands": [
+    "cargo build --manifest-path uncached/Cargo.toml --release --locked --offline --jobs 2 --bin redact-bench",
+    "cargo build --manifest-path cached/Cargo.toml --release --locked --offline --jobs 2 --bin redact-bench"
+  ],
+  "cpu_window": "Other team agents held all CPU gates during the 13.821-second run; no claim about unrelated OS activity."
+}

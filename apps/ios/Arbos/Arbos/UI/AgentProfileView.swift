@@ -204,17 +204,16 @@ struct AgentEditSheet: View {
 }
 
 
-// MARK: - The agent pane: Details · Library · Computer
+// MARK: - The agent pane: overview · Edit · pushed sub-pages
 
-/// The agent's pane on the shared profile pane (D93) — Grok Bot's content model, the same
-/// as the Mac's `profiles/agent.rs` (#1679; iPhone [feedback iphone-agent-pane-tabs-2026-10-25]):
-/// hero with the description as the label ("Add a label" for the owner, tap edits it in
-/// place; a tap on the name renames), then **Details** (Settings — Coding and Routines ahead
-/// of it while `AgentPane.agentDetailsShowCodingRoutines` is on), **Library** (images ·
-/// files · voice · links) and **Computer** (Machine · Resources · Running now from
-/// `GET /machine/debug`). No Delete footer: the home row's menu deletes, at once. "Who may
-/// message", "Permissions" and "Profile" left Details on 2026-10-25 ([feedback
-/// agent-details-remove-sections-ios-2026-10-25]).
+/// The agent's profile — Grok Bot's overview hierarchy ([feedback
+/// iphone-entity-profile-edit-2026-11-10]): large avatar, name, Edit pill, then
+/// grouped rows (Coding · Routines · Library · Computer for a native agent;
+/// Library · Connection for an outside one). Edit pushes `AgentEditView`; each
+/// row pushes its page further right. No bottom sheets on this path. Former
+/// Details / Library / Computer **tabs** are the overview rows (supersedes
+/// [feedback iphone-agent-pane-tabs-2026-10-25]); Coding and Routines return as
+/// overview rows (supersedes [feedback agent-details-remove-sections-ios-2026-10-25]).
 struct AgentProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -224,25 +223,27 @@ struct AgentProfileView: View {
     let projectId: Id
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
-    @State private var tab = "Details"
-    /// The hero's label (= the description) being edited in place.
-    @State private var editingLabel = false
-    @State private var labelDraft = ""
-    @FocusState private var labelFocused: Bool
-    /// The rename alert, from a tap on the hero's name (the owner only).
-    @State private var showRename = false
-    @State private var renameDraft = ""
-    /// The avatar picker sheet (D92 amendment), from the hero's crayon; the rig's
-    /// `ARBOS_SHOW=avatarpicker[-generate|-upload]` opens it on that tab.
-    @State private var showAvatarPicker: AvatarPickerTab? = nil
-    @State private var showModel = false
-    @State private var showReasoning = false
-    /// The call-voice picker (#1316's `VoicePickerView`) from the Settings card's Voice row.
-    @State private var showVoice = false
+
+    /// Which sub-page is pushed from the overview (nil = overview itself).
+    enum Subpage: String, Identifiable, Hashable {
+        case coding, routines, library, computer, connection
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .coding: return "Coding"
+            case .routines: return "Routines"
+            case .library: return "Library"
+            case .computer: return "Computer"
+            case .connection: return "Connection"
+            }
+        }
+    }
+
+    @State private var showEdit = false
+    @State private var subpage: Subpage? = nil
     /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
     @State private var rotated: ConnectReveal?
-    /// Wake URL form ([feedback outside-agents-wake-ios-2026-10-28]): the two drafts, what is in
-    /// flight ("saving" | "sending"), the last outcome line, and which agent the drafts were filled for.
+    /// Wake URL form ([feedback outside-agents-wake-ios-2026-10-28]).
     @State private var wakeURLDraft = ""
     @State private var wakeAuthDraft = ""
     @State private var wakeBusy: String?
@@ -252,7 +253,7 @@ struct AgentProfileView: View {
     @State private var showLog = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
-    /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
+    /// A connected (outside) agent: no Computer row; Connection + Key under Connection (#2142).
     private var outside: OutsideAgentInfo? { model.outsideInfo[projectId] }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
     private var items: [ChatItem] {
@@ -270,12 +271,7 @@ struct AgentProfileView: View {
                     if let project {
                         VStack(spacing: 18) {
                             Color.clear.frame(height: PaneKit.pageTop)
-                            ProfilePane(
-                                hero: hero(project),
-                                tabs: outside != nil ? PaneKinds.outsideAgent : PaneKinds.agent,
-                                selected: $tab,
-                                body: sections(project)
-                            )
+                            ProfileOverview(hero: hero(project), sections: overviewSections(project))
                             Color.clear.frame(height: 40).id("pane-end")
                         }
                     } else {
@@ -284,131 +280,100 @@ struct AgentProfileView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onAppear {
-                    // Rig: `ARBOS_PANE_SCROLL=<anchor>` scrolls to a `pane-<anchor>` id
-                    // (`end` is the pane's foot).
                     guard let anchor = DebugHooks.paneScroll else { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         withAnimation(nil) { reader.scrollTo(anchor == "end" ? "pane-end" : "pane-\(anchor)", anchor: .top) }
                     }
                 }
             }
-            ProfileTopBar(screen: .agentPage) {
-                if editingLabel {
-                    Button("Done") { commitLabel() }
-                        .font(theme.font(Theme.body, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                }
-            }
+            ProfileTopBar(screen: .agentPage) { EmptyView() }
         }
+        .accessibilityIdentifier("agent-profile")
         .task { await model.loadVoices() }
         .task(id: projectId) {
-            // Outside agents (#2142): the connection for the Details pane; a native agent leaves no entry.
             guard isMine else { return }
             await model.refreshOutsideInfo(projectId)
-            if outside != nil, tab == "Computer" { tab = "Details" }
         }
         .task(id: isMine) {
             guard isMine else { return }
             await model.refreshRoutines(projectId)
             await model.refreshBoxReport()
         }
+        .navigationDestination(isPresented: $showEdit) {
+            AgentEditView(projectId: projectId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .backSwipeToPop()
+        }
+        .navigationDestination(item: $subpage) { page in
+            agentSubpage(page)
+                .backSwipeToPop()
+        }
         .navigationDestination(isPresented: Binding(get: { rotated != nil }, set: { if !$0 { rotated = nil } })) {
             if let rotated {
                 ConnectRevealView(reveal: rotated, onDone: { self.rotated = nil })
+                    .backSwipeToPop()
             }
         }
         .navigationDestination(isPresented: $showLog) {
-            SessionLogView(projectId: projectId)
+            SessionLogView(projectId: projectId).backSwipeToPop()
         }
-        .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
-            // The Coding row's elapsed time and the Computer tab's jobs move: poll while
-            // something is running or the Computer tab is up (fetched again on each pick).
+        .task(id: "\(subpage?.rawValue ?? "overview")-\(model.isStreaming(project: projectId))") {
             guard isMine else { return }
-            if tab == "Computer" { await model.refreshBoxReport() }
-            while !Task.isCancelled, tab == "Computer" || model.isStreaming(project: projectId) {
+            if subpage == .computer || subpage == .coding { await model.refreshBoxReport() }
+            while !Task.isCancelled, subpage == .computer || subpage == .coding || model.isStreaming(project: projectId) {
                 try? await Task.sleep(nanoseconds: Self.livePollSeconds * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 await model.refreshBoxReport()
             }
         }
-        .onChange(of: labelFocused) { _, focused in
-            if !focused, editingLabel { commitLabel() }
-        }
-        .sheet(isPresented: $showModel) {
-            if let project = model.project(projectId) { ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-        }
-        .sheet(item: $showAvatarPicker) { initial in
-            AvatarPickerSheet(target: .agent(projectId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
-        }
         .onAppear {
-            if isMine, let show = DebugHooks.show, show.hasPrefix("avatarpicker") {
-                let tab: AvatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = tab }
-            }
-            // Rig: `ARBOS_PANEL_TAB=Computer|Library` lands on a tab; `ARBOS_SHOW=agentvoice`
-            // also opens the Voice row's picker; `ARBOS_SHOW=agentlabel` edits the label;
-            // `ARBOS_SHOW=agentrename` opens the rename alert.
-            if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
-            if isMine, DebugHooks.show == "agentvoice" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
-            }
-            // A search result for the agent's Model / Reasoning / Voice row
-            // ([feedback search-settings-ios-2026-10-26]): the pane opens with that picker up.
-            if isMine, let setting = model.pendingAgentSetting {
-                model.pendingAgentSetting = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    switch setting {
-                    case .model: showModel = true
-                    case .reasoning: showReasoning = true
-                    case .voice: showVoice = true
-                    }
+            // Rig: former tab names open the matching pushed sub-page; avatar / voice /
+            // label / rename land on Edit (and its sub-pushes).
+            if let t = DebugHooks.panelTab {
+                switch t {
+                case "Library": subpage = .library
+                case "Computer": subpage = .computer
+                case "Details" where outside != nil: subpage = .connection
+                case "Details": showEdit = true
+                default: break
                 }
             }
-            if isMine, DebugHooks.show == "agentlabel" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startLabelEdit() }
+            if isMine, let show = DebugHooks.show, show.hasPrefix("avatarpicker")
+                || show == "agentvoice" || show == "agentlabel" || show == "agentrename" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showEdit = true }
             }
-            if isMine, DebugHooks.show == "agentrename" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startRename() }
+            if isMine, model.pendingAgentSetting != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showEdit = true }
             }
         }
-        .sheet(isPresented: $showReasoning) {
-            if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-        }
-        .sheet(isPresented: $showVoice) {
-            if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-        }
-        .alert("Name", isPresented: $showRename) {
-            TextField("Agent name", text: $renameDraft)
-            Button("Save") { commitRename() }
-            Button("Cancel", role: .cancel) { }
-        } message: { Text("What people and their agents call it; the @handle follows the name.") }
     }
 
-    // MARK: Hero — picture, name, the label
+    // MARK: Hero — picture, name, Edit
 
     private func hero(_ project: Project) -> PaneHero {
         let hasLabel = !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
-        // Someone else's agent: "Run by …" is a link to the owner's page (Jacob 2026-10-25).
         let owner = AgentPane.ownerLink(mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
-        // The owner's page is pushed over this one — onto the root stack, or onto the
-        // sheet's own stack when this page is inside the sheet (`ProfileSheet`,
-        // `ProfileTarget.pushesPeople`); its top-bar chevron pops back here either way.
         let openOwner: (() -> Void)? = owner.map { link in { model.showProfile(.user(ownerPerson(project, handle: link.handle)), in: profileHost) } }
+        // Overview: no subtitle for mine (label lives on Edit); foreign agents keep "Run by …".
+        let subtitle: String = {
+            if isMine { return "" }
+            if hasLabel { return project.description }
+            return owner?.label ?? AgentPane.subtitle(description: "", mine: false, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        }()
         return PaneHero(
             picture: .image(AnyView(heroPicture(project))),
             name: project.name,
-            nameAction: isMine ? { startRename() } : nil,
             subtitle: subtitle,
-            subtitleTint: hasLabel || !isMine ? nil : theme.placeholder,
-            subtitleAction: isMine ? { startLabelEdit() } : (hasLabel ? nil : openOwner),
+            subtitleTint: nil,
+            subtitleAction: (!isMine && !hasLabel) ? openOwner : nil,
             subtitleLink: !isMine && !hasLabel && owner != nil,
-            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil,
             subtitleBelow: (hasLabel && owner != nil) ? AnyView(
                 Button(action: { openOwner?() }) { Text(owner!.label).lineLimit(1) }
                     .buttonStyle(ChipLinkStyle())
                     .accessibilityHint("Opens their profile")
-            ) : nil
+            ) : nil,
+            action: isMine ? OverviewEdit.action { showEdit = true } : nil
         )
     }
 
@@ -423,82 +388,118 @@ struct AgentProfileView: View {
         )
     }
 
-    /// The name is renamed through an alert (a second inline editor would stack on the
-    /// label's); since the Profile card left, the hero's name is the one way in.
-    private func startRename() {
-        guard isMine, let project else { return }
-        renameDraft = project.name
-        showRename = true
-    }
-
-    /// The label field under the name while the label is being edited: Return or Done
-    /// commits, leaving the field commits too (the Mac's `label_editor`).
-    private var labelEditor: some View {
-        TextField("", text: $labelDraft, prompt: Text(AgentPane.labelPlaceholder).foregroundStyle(theme.placeholder))
-            .font(theme.font(Theme.small))
-            .foregroundStyle(theme.text)
-            .multilineTextAlignment(.center)
-            .focused($labelFocused)
-            .submitLabel(.done)
-            .onSubmit(commitLabel)
-            .onChange(of: labelDraft) { _, v in if v.count > 500 { labelDraft = String(v.prefix(500)) } }
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field)) // control-size: exception inlineChips
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
-            .padding(.horizontal, 56)
-    }
-
-    private func startLabelEdit() {
-        guard isMine, let project else { return }
-        labelDraft = project.description
-        editingLabel = true
-        labelFocused = true
-    }
-
-    private func commitLabel() {
-        guard editingLabel else { return }
-        let clean = labelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        editingLabel = false
-        labelFocused = false
-        guard let project, clean != project.description else { return }
-        model.updateProject(projectId, description: clean)
-    }
-
-    private func commitRename() {
-        let clean = renameDraft.trimmingCharacters(in: .whitespaces)
-        guard let project, !clean.isEmpty, clean != project.name else { return }
-        model.updateProject(projectId, name: clean)
-    }
-
-    /// The hero picture: the disc / photo, with the crayon → avatar picker for my own agent.
+    /// The hero picture: disc / photo. Edit owns the crayon → avatar push.
     @ViewBuilder
     private func heroPicture(_ project: Project) -> some View {
         if isMine {
-            Button { showAvatarPicker = .bot } label: {
+            Button { showEdit = true } label: {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
-                    .paneCrayon()
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Change avatar")
+            .accessibilityLabel("Edit agent")
         } else {
-            // Someone else's agent: its picture opens full-size in the media viewer (a disc opens nothing).
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
             }
         }
     }
 
-    // MARK: Tabs
+    // MARK: Overview rows (Grok Bot profile)
 
-    private func sections(_ project: Project) -> [PaneSection] {
-        switch tab {
-        case "Library": return librarySections(project)
-        case "Computer" where outside == nil: return computerSections(project)
-        default:
+    private func overviewSections(_ project: Project) -> [PaneSection] {
+        if let outside {
+            return [
+                .card([
+                    AnyView(overviewRow(icon: "books.vertical", title: "Library", value: nil, page: .library)),
+                    AnyView(overviewRow(icon: "link", title: "Connection", value: outside.statusLine(), page: .connection)),
+                ], separatorInset: PaneKit.separatorInset(.tile(""))),
+            ]
+        }
+        let routines = model.routines[project.id] ?? []
+        let onCount = routines.filter(\.enabled).count
+        let routinesValue = routines.isEmpty ? nil : "\(onCount) on"
+        let codingStatus = codingSecondary(project)
+        let computerStatus = computerSecondary(project)
+        return [
+            .card([
+                AnyView(overviewRow(icon: "chevron.left.forwardslash.chevron.right", title: "Coding", value: codingStatus, page: .coding)),
+                AnyView(overviewRow(icon: "clock", title: "Routines", value: routinesValue, page: .routines)),
+                AnyView(overviewRow(icon: "books.vertical", title: "Library", value: nil, page: .library)),
+                AnyView(overviewRow(icon: "desktopcomputer", title: "Computer", value: computerStatus, page: .computer)),
+            ], separatorInset: PaneKit.separatorInset(.tile(""))),
+        ]
+    }
+
+    private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
+        Button { subpage = page } label: {
+            PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("agent-overview-\(page.rawValue)")
+    }
+
+    private func codingSecondary(_ project: Project) -> String {
+        let workspace = model.boxReport?.workspace(project.id)
+        let streaming = model.isStreaming(project: project.id)
+        return AgentPane.codingStatus(streaming: streaming, workspace: workspace, machine: model.machine.state, alwaysOn: model.machine.alwaysOn)
+    }
+
+    private func computerSecondary(_ project: Project) -> String {
+        let workspace = model.machine.workspaces[project.id] ?? project.workspace
+        switch workspace {
+        case .active: return "Running"
+        case .idle: return "Idle"
+        case .error: return "Error"
+        case .unknown: return model.machine.reported ? "Not set up yet" : "—"
+        }
+    }
+
+    @ViewBuilder
+    private func agentSubpage(_ page: Subpage) -> some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    if let project {
+                        ProfilePane(
+                            hero: PaneHero(picture: .glyph(page == .library ? "books.vertical" : "desktopcomputer"),
+                                           name: page.title, subtitle: project.name),
+                            tabs: [],
+                            selected: .constant(""),
+                            body: subpageSections(page, project)
+                        )
+                    }
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .agentPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityIdentifier("agent-subpage-\(page.rawValue)")
+    }
+
+    private func subpageSections(_ page: Subpage, _ project: Project) -> [PaneSection] {
+        switch page {
+        case .coding:
+            return [
+                .title("Coding"),
+                .card([AnyView(codingRow(project))], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))),
+            ]
+        case .routines:
+            let list = model.routines[project.id] ?? []
+            let rows: [AnyView] = list.isEmpty
+                ? [AnyView(PaneRow(title: "No routines yet", subtitle: "Ask \(project.name) to schedule one", titleTint: theme.muted))]
+                : list.map { r in AnyView(routineRow(project, r)) }
+            return [.title("Routines"), .card(rows)]
+        case .library:
+            return librarySections(project)
+        case .computer:
+            return computerSections(project)
+        case .connection:
             if let outside { return outsideSections(project, outside) }
-            return detailsSections(project)
+            return [.empty("Not a connected agent")]
         }
     }
 
@@ -716,38 +717,14 @@ struct AgentProfileView: View {
         }
     }
 
-    // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
-
-    private func detailsSections(_ project: Project) -> [PaneSection] {
-        var out: [PaneSection] = []
-        for block in AgentPane.detailsOrder(mine: isMine) {
-            switch block {
-            case .coding:
-                out.append(.title("Coding"))
-                out.append(.card([AnyView(codingRow(project))], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))))
-            case .routines:
-                out.append(.title("Routines"))
-                let list = model.routines[project.id] ?? []
-                let rows: [AnyView] = list.isEmpty
-                    ? [AnyView(PaneRow(title: "No routines yet", subtitle: "Ask \(project.name) to schedule one", titleTint: theme.muted))]
-                    : list.map { r in AnyView(routineRow(project, r)) }
-                out.append(.card(rows))
-            case .settings:
-                out.append(.title("Settings"))
-                out.append(.card(settingsRows(project)))
-            }
-        }
-        return out
-    }
-
     /// "Coding": the agent's workspace — a spinner while a turn runs, the status under the
-    /// name; a tap opens the Computer tab.
+    /// name; a tap opens the Computer sub-page.
     private func codingRow(_ project: Project) -> some View {
         let workspace = model.boxReport?.workspace(project.id)
         let streaming = model.isStreaming(project: project.id)
         let working = streaming || workspace?.running == true
         let status = AgentPane.codingStatus(streaming: streaming, workspace: workspace, machine: model.machine.state, alwaysOn: model.machine.alwaysOn)
-        return Button { withAnimation(.snappy(duration: 0.2)) { tab = "Computer" } } label: {
+        return Button { subpage = .computer } label: {
             PaneRow(leading: .avatar(AnyView(activityLeading(working))), title: project.name, subtitle: status, chevron: true)
         }
         .buttonStyle(.plain)
@@ -777,33 +754,6 @@ struct AgentProfileView: View {
         return PaneRow(title: r.name, subtitle: AgentPane.routineStatus(r, now: nowMs()), trailing: AnyView(
             Toggle("", isOn: isOn).labelsHidden().tint(theme.online)
         ))
-    }
-
-    /// Model · Reasoning · Voice (Model alone on someone else's agent).
-    private func settingsRows(_ project: Project) -> [AnyView] {
-        var rows: [AnyView] = [
-            AnyView(
-                Button { if isMine { showModel = true } } label: {
-                    PaneRow(title: "Model", value: project.shortModel, chevron: isMine)
-                }
-                .buttonStyle(.plain)
-                .disabled(!isMine)
-            ),
-        ]
-        guard isMine else { return rows }
-        rows.append(AnyView(
-            Button { showReasoning = true } label: {
-                PaneRow(title: "Reasoning", value: project.effort.label, chevron: true)
-            }
-            .buttonStyle(.plain)
-        ))
-        rows.append(AnyView(
-            Button { showVoice = true } label: {
-                PaneRow(title: "Voice", value: voiceLine(project), chevron: true)
-            }
-            .buttonStyle(.plain)
-        ))
-        return rows
     }
 
     // MARK: Library — everything the agent's chats hold
@@ -903,12 +853,6 @@ struct AgentProfileView: View {
         }
     }
 
-    /// The Voice row's value — the chosen voice's name, or "Default" (the Mac's
-    /// `voicepicker::current_label`); the raw id until the catalog arrives.
-    private func voiceLine(_ p: Project) -> String {
-        guard let id = p.voice else { return "Default" }
-        return model.voiceCatalog?.voices.first { $0.id == id }?.name ?? id.capitalized
-    }
 }
 
 // MARK: - Reasoning picker (the Mac's Reasoning dropdown)
@@ -920,42 +864,54 @@ struct ReasoningPickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents.
+    var pushed: Bool = false
     private var current: Project { model.project(project.id) ?? project }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(Effort.allCases) { e in
-                        Button {
-                            model.setModel(projectId: project.id, model: current.model, effort: e)
-                        } label: {
-                            HStack {
-                                Text(e.label).foregroundStyle(theme.text)
-                                Spacer()
-                                if current.effort == e {
-                                    Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
-                                }
-                            }
-                            .contentShape(Rectangle())
+        Group {
+            if pushed {
+                list
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Reasoning")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                         }
-                        .buttonStyle(.plain)
-                        .listRowBackground(theme.card)
-                    }
-                } footer: {
-                    Text("How hard \(current.name) thinks before it answers.")
-                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
-            }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Reasoning")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                .presentationDetents([.medium])
             }
         }
-        .presentationDetents([.medium])
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                ForEach(Effort.allCases) { e in
+                    Button {
+                        model.setModel(projectId: project.id, model: current.model, effort: e)
+                    } label: {
+                        HStack {
+                            Text(e.label).foregroundStyle(theme.text)
+                            Spacer()
+                            if current.effort == e {
+                                Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.card)
+                }
+            } footer: {
+                Text("How hard \(current.name) thinks before it answers.")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }
 

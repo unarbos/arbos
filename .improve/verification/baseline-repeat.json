@@ -1,0 +1,542 @@
+{
+  "clients": [
+    {
+      "gate": "harness-typecheck",
+      "command": [
+        "pnpm",
+        "-r",
+        "typecheck"
+      ],
+      "cwd": "harness",
+      "exit_code": 0,
+      "seconds": 3.12547
+    },
+    {
+      "gate": "harness-build",
+      "command": [
+        "pnpm",
+        "-r",
+        "build"
+      ],
+      "cwd": "harness",
+      "exit_code": 0,
+      "seconds": 2.378799
+    },
+    {
+      "gate": "harness-test",
+      "command": [
+        "pnpm",
+        "-r",
+        "test"
+      ],
+      "cwd": "harness",
+      "exit_code": 0,
+      "seconds": 0.509187,
+      "counts": {
+        "tests": 14,
+        "pass": 14,
+        "fail": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "gate": "avatar-lint",
+      "command": [
+        "bash",
+        "scripts/avatar-lint.sh"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.120135
+    },
+    {
+      "gate": "glass-lint",
+      "command": [
+        "bash",
+        "scripts/glass-lint.sh"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 2.956986
+    },
+    {
+      "gate": "control-size-lint",
+      "command": [
+        "bash",
+        "apps/ios/scripts/control-size-lint.sh"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.06771
+    },
+    {
+      "gate": "python-ast",
+      "command": [
+        "python3",
+        "ast.parse over tracked original .py inventory"
+      ],
+      "files": 78,
+      "counts": {
+        "pass": 78,
+        "fail": 0,
+        "skip": 0
+      },
+      "seconds": 0.144761,
+      "errors": []
+    },
+    {
+      "gate": "js-1",
+      "command": [
+        "node",
+        "--check",
+        "site/main.js"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.02652
+    },
+    {
+      "gate": "js-2",
+      "command": [
+        "node",
+        "--check",
+        "site/welcome/welcome.js"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.022852
+    },
+    {
+      "gate": "js-3",
+      "command": [
+        "node",
+        "--check",
+        "edge/sites-worker/src/index.js"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.02111
+    },
+    {
+      "gate": "swift-parse",
+      "command": [
+        "xcrun",
+        "swiftc",
+        "-frontend",
+        "-parse",
+        "apps/ios/Arbos/Arbos/App/ArbosApp.swift",
+        "apps/ios/Arbos/Arbos/App/DebugHooks.swift",
+        "apps/ios/Arbos/Arbos/App/FirstOpenWarmup.swift",
+        "apps/ios/Arbos/Arbos/Model/AgentIdentity.swift",
+        "apps/ios/Arbos/Arbos/Model/AgentPane.swift",
+        "apps/ios/Arbos/Arbos/Model/Call.swift",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift",
+        "apps/ios/Arbos/Arbos/Model/GlobalSearch.swift",
+        "apps/ios/Arbos/Arbos/Model/HomeSearch.swift",
+        "apps/ios/Arbos/Arbos/Model/MachineMetrics.swift",
+        "apps/ios/Arbos/Arbos/Model/Model.swift",
+        "apps/ios/Arbos/Arbos/Model/People.swift",
+        "apps/ios/Arbos/Arbos/Model/ProfileToggle.swift",
+        "apps/ios/Arbos/Arbos/Model/SearchIndex.swift",
+        "apps/ios/Arbos/Arbos/Model/Secrets.swift",
+        "apps/ios/Arbos/Arbos/Model/Servers.swift",
+        "apps/ios/Arbos/Arbos/Model/ShellGrants.swift",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+        "apps/ios/Arbos/Arbos/Store/CallManager.swift",
+        "apps/ios/Arbos/Arbos/Store/DeviceStore.swift",
+        "apps/ios/Arbos/Arbos/Store/DevicesStore.swift",
+        "apps/ios/Arbos/Arbos/Store/Feedback.swift",
+        "apps/ios/Arbos/Arbos/Store/FirstLogin.swift",
+        "apps/ios/Arbos/Arbos/Store/Fixture.swift",
+        "apps/ios/Arbos/Arbos/Store/LaunchClock.swift",
+        "apps/ios/Arbos/Arbos/Store/PerfDiagnostics.swift",
+        "apps/ios/Arbos/Arbos/Store/PerfLog.swift",
+        "apps/ios/Arbos/Arbos/Store/PerfProbe.swift",
+        "apps/ios/Arbos/Arbos/Store/PushManager.swift",
+        "apps/ios/Arbos/Arbos/Store/SearchStore.swift",
+        "apps/ios/Arbos/Arbos/Store/SecretsStore.swift",
+        "apps/ios/Arbos/Arbos/Store/SendTrace.swift",
+        "apps/ios/Arbos/Arbos/Store/ServerStore.swift",
+        "apps/ios/Arbos/Arbos/Sync/Auth.swift",
+        "apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift",
+        "apps/ios/Arbos/Arbos/Sync/Keychain.swift",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift",
+        "apps/ios/Arbos/Arbos/Sync/SecretsAPI.swift",
+        "apps/ios/Arbos/Arbos/Sync/SessionRoom.swift",
+        "apps/ios/Arbos/Arbos/Sync/UserError.swift",
+        "apps/ios/Arbos/Arbos/UI/AgentPicker.swift",
+        "apps/ios/Arbos/Arbos/UI/AgentProfileView.swift",
+        "apps/ios/Arbos/Arbos/UI/Avatar.swift",
+        "apps/ios/Arbos/Arbos/UI/AvatarPickerSheet.swift",
+        "apps/ios/Arbos/Arbos/UI/BackSwipe.swift",
+        "apps/ios/Arbos/Arbos/UI/BlockedState.swift",
+        "apps/ios/Arbos/Arbos/UI/CallView.swift",
+        "apps/ios/Arbos/Arbos/UI/ChartCard.swift",
+        "apps/ios/Arbos/Arbos/UI/ChatImageCache.swift",
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift",
+        "apps/ios/Arbos/Arbos/UI/CodeHighlight.swift",
+        "apps/ios/Arbos/Arbos/UI/Confirm.swift",
+        "apps/ios/Arbos/Arbos/UI/DiscAvatar.swift",
+        "apps/ios/Arbos/Arbos/UI/ErrorNote.swift",
+        "apps/ios/Arbos/Arbos/UI/FeedbackSheet.swift",
+        "apps/ios/Arbos/Arbos/UI/FirstLoginView.swift",
+        "apps/ios/Arbos/Arbos/UI/FunPicker.swift",
+        "apps/ios/Arbos/Arbos/UI/GlobalSearchView.swift",
+        "apps/ios/Arbos/Arbos/UI/HomeView.swift",
+        "apps/ios/Arbos/Arbos/UI/InCallOverlay.swift",
+        "apps/ios/Arbos/Arbos/UI/LibraryList.swift",
+        "apps/ios/Arbos/Arbos/UI/LinkIcons.swift",
+        "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift",
+        "apps/ios/Arbos/Arbos/UI/LinkTile.swift",
+        "apps/ios/Arbos/Arbos/UI/MathText.swift",
+        "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+        "apps/ios/Arbos/Arbos/UI/MentionChips.swift",
+        "apps/ios/Arbos/Arbos/UI/MentionComposer.swift",
+        "apps/ios/Arbos/Arbos/UI/MessageActions.swift",
+        "apps/ios/Arbos/Arbos/UI/MessageActionsLayout.swift",
+        "apps/ios/Arbos/Arbos/UI/MessageMenu.swift",
+        "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift",
+        "apps/ios/Arbos/Arbos/UI/NotificationsPrimerView.swift",
+        "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift",
+        "apps/ios/Arbos/Arbos/UI/PresenceRow.swift",
+        "apps/ios/Arbos/Arbos/UI/ProfilePages.swift",
+        "apps/ios/Arbos/Arbos/UI/QuestionCard.swift",
+        "apps/ios/Arbos/Arbos/UI/Recorder.swift",
+        "apps/ios/Arbos/Arbos/UI/SecretsViews.swift",
+        "apps/ios/Arbos/Arbos/UI/ServerChannelsView.swift",
+        "apps/ios/Arbos/Arbos/UI/SettingsView.swift",
+        "apps/ios/Arbos/Arbos/UI/SheetHeader.swift",
+        "apps/ios/Arbos/Arbos/UI/SignInView.swift",
+        "apps/ios/Arbos/Arbos/UI/StatusMarks.swift",
+        "apps/ios/Arbos/Arbos/UI/Theme.swift",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift",
+        "apps/ios/Arbos/Arbos/UI/VoicePickerView.swift",
+        "apps/ios/Arbos/Arbos/UI/WorkingSpinner.swift",
+        "apps/ios/Arbos/ArbosNotificationService/NotificationService.swift",
+        "apps/ios/Arbos/ArbosTests/AddMembersActionTests.swift",
+        "apps/ios/Arbos/ArbosTests/AddMembersPlanTests.swift",
+        "apps/ios/Arbos/ArbosTests/AgentAvatarFlipTests.swift",
+        "apps/ios/Arbos/ArbosTests/AgentIdentityTests.swift",
+        "apps/ios/Arbos/ArbosTests/AgentPickerTests.swift",
+        "apps/ios/Arbos/ArbosTests/AvatarGenerateErrorStateTests.swift",
+        "apps/ios/Arbos/ArbosTests/AvatarPickerTabsTests.swift",
+        "apps/ios/Arbos/ArbosTests/BackDragTests.swift",
+        "apps/ios/Arbos/ArbosTests/BackSwipeTests.swift",
+        "apps/ios/Arbos/ArbosTests/BlankTranscriptGuardTests.swift",
+        "apps/ios/Arbos/ArbosTests/BlockedStateTests.swift",
+        "apps/ios/Arbos/ArbosTests/BottomBarFadeTests.swift",
+        "apps/ios/Arbos/ArbosTests/BottomSearchBarTests.swift",
+        "apps/ios/Arbos/ArbosTests/ChartCardTests.swift",
+        "apps/ios/Arbos/ArbosTests/ChatDensityMetricsTests.swift",
+        "apps/ios/Arbos/ArbosTests/ChatMarkdownTests.swift",
+        "apps/ios/Arbos/ArbosTests/ChatSearchCloseTests.swift",
+        "apps/ios/Arbos/ArbosTests/ChatSearchShortcutTests.swift",
+        "apps/ios/Arbos/ArbosTests/CodeHighlightTests.swift",
+        "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift",
+        "apps/ios/Arbos/ArbosTests/ConfirmFormTests.swift",
+        "apps/ios/Arbos/ArbosTests/ControlMetricsTests.swift",
+        "apps/ios/Arbos/ArbosTests/ControlTokenLintTests.swift",
+        "apps/ios/Arbos/ArbosTests/CoreFixturesTests.swift",
+        "apps/ios/Arbos/ArbosTests/DeliveryStateTests.swift",
+        "apps/ios/Arbos/ArbosTests/DevicesVisibleTests.swift",
+        "apps/ios/Arbos/ArbosTests/ErrorUILintTests.swift",
+        "apps/ios/Arbos/ArbosTests/GroupTitlePushTests.swift",
+        "apps/ios/Arbos/ArbosTests/GroupedMessagesTests.swift",
+        "apps/ios/Arbos/ArbosTests/HeaderGlassStructureTests.swift",
+        "apps/ios/Arbos/ArbosTests/HiddenJobRowAttachmentTests.swift",
+        "apps/ios/Arbos/ArbosTests/HiddenWorkerRowTests.swift",
+        "apps/ios/Arbos/ArbosTests/HomeBarFadeTests.swift",
+        "apps/ios/Arbos/ArbosTests/HomePreviewWhoTests.swift",
+        "apps/ios/Arbos/ArbosTests/HomeSearchTests.swift",
+        "apps/ios/Arbos/ArbosTests/ImageCaptionBubbleTests.swift",
+        "apps/ios/Arbos/ArbosTests/JobTabsTests.swift",
+        "apps/ios/Arbos/ArbosTests/JumpToLatestWindowTests.swift",
+        "apps/ios/Arbos/ArbosTests/LibraryListTests.swift",
+        "apps/ios/Arbos/ArbosTests/LinkIconTests.swift",
+        "apps/ios/Arbos/ArbosTests/LinkPreviewCardTests.swift",
+        "apps/ios/Arbos/ArbosTests/LinkTileTests.swift",
+        "apps/ios/Arbos/ArbosTests/ListTopFadeTests.swift",
+        "apps/ios/Arbos/ArbosTests/LongTranscriptPerfTests.swift",
+        "apps/ios/Arbos/ArbosTests/MachineMetricsTests.swift",
+        "apps/ios/Arbos/ArbosTests/MarkdownTableTests.swift",
+        "apps/ios/Arbos/ArbosTests/MathTextTests.swift",
+        "apps/ios/Arbos/ArbosTests/MentionChipSnapshotTests.swift",
+        "apps/ios/Arbos/ArbosTests/MentionDraftTests.swift",
+        "apps/ios/Arbos/ArbosTests/MessageActionsHitAreaTests.swift",
+        "apps/ios/Arbos/ArbosTests/MessageActionsLayoutTests.swift",
+        "apps/ios/Arbos/ArbosTests/MessageDeleteRuleTests.swift",
+        "apps/ios/Arbos/ArbosTests/MessageMenuTests.swift",
+        "apps/ios/Arbos/ArbosTests/MessagePasteboardTests.swift",
+        "apps/ios/Arbos/ArbosTests/NewMessageSheetTests.swift",
+        "apps/ios/Arbos/ArbosTests/NoAnswerLineTests.swift",
+        "apps/ios/Arbos/ArbosTests/OptimisticNoticeTests.swift",
+        "apps/ios/Arbos/ArbosTests/OptimisticSendTests.swift",
+        "apps/ios/Arbos/ArbosTests/PaneCardGlassTests.swift",
+        "apps/ios/Arbos/ArbosTests/PictureReplyQuoteTests.swift",
+        "apps/ios/Arbos/ArbosTests/PillGlassTests.swift",
+        "apps/ios/Arbos/ArbosTests/PresenceRowTests.swift",
+        "apps/ios/Arbos/ArbosTests/ProfilePaneStructureTests.swift",
+        "apps/ios/Arbos/ArbosTests/ProfilePictureViewTests.swift",
+        "apps/ios/Arbos/ArbosTests/ProfileToggleTests.swift",
+        "apps/ios/Arbos/ArbosTests/ReactionCapsuleTests.swift",
+        "apps/ios/Arbos/ArbosTests/ReactionChipAnchorTests.swift",
+        "apps/ios/Arbos/ArbosTests/ReactionPickTests.swift",
+        "apps/ios/Arbos/ArbosTests/ReactionToggleTests.swift",
+        "apps/ios/Arbos/ArbosTests/ReplyInDMTests.swift",
+        "apps/ios/Arbos/ArbosTests/RowStorageTests.swift",
+        "apps/ios/Arbos/ArbosTests/SearchIndexTests.swift",
+        "apps/ios/Arbos/ArbosTests/SearchSettingsTests.swift",
+        "apps/ios/Arbos/ArbosTests/SecretHandoffTests.swift",
+        "apps/ios/Arbos/ArbosTests/SenderNameRowTests.swift",
+        "apps/ios/Arbos/ArbosTests/ServerChannelSenderTests.swift",
+        "apps/ios/Arbos/ArbosTests/SessionRoomTests.swift",
+        "apps/ios/Arbos/ArbosTests/SheetHeaderLayoutTests.swift",
+        "apps/ios/Arbos/ArbosTests/ShellApprovalCardTests.swift",
+        "apps/ios/Arbos/ArbosTests/StatusDotLintTests.swift",
+        "apps/ios/Arbos/ArbosTests/TimeDividerTests.swift",
+        "apps/ios/Arbos/ArbosTests/ToastStackTests.swift",
+        "apps/ios/Arbos/ArbosTests/UserErrorTests.swift",
+        "apps/ios/Arbos/ArbosTests/ViewerChromeTests.swift",
+        "apps/ios/Arbos/ArbosTests/WorkingSpinnerTests.swift",
+        "apps/ios/Arbos/ArbosUITests/AvatarBackSwipeUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/BackSwipeUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/CaptureRigUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ChatSearchCloseUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ChatSearchResultJumpUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ChatSearchRevealLandingUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ChatSwipeTrackingUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/HomeFilterTabsUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/MentionListOverlayUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/PerfBaselineUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ReactionPickerUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/ScrollPerfUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/TranscriptFirstFrameUITests.swift",
+        "apps/ios/Arbos/ArbosUITests/TranscriptSpacingUITests.swift",
+        "apps/ios/Arbos/Shared/AvatarImage.swift",
+        "apps/ios/Arbos/Shared/AvatarPalette.swift",
+        "apps/ios/Arbos/Shared/MessageNotification.swift",
+        "packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "seconds": 0.368963,
+      "files": 192,
+      "pass_files": 192,
+      "note": "Parse only, not typecheck/build/tests"
+    },
+    {
+      "gate": "voice-collection",
+      "command": [
+        "python3",
+        "-m",
+        "pytest",
+        "--collect-only",
+        "tests/test_updates.py",
+        "tests/test_usage_loop.py",
+        "-q"
+      ],
+      "cwd": "voice",
+      "exit_code": 2,
+      "seconds": 1.290701,
+      "counts": {
+        "tests_run": 0,
+        "collection_errors": 2
+      },
+      "missing_modules": [
+        "aiohttp",
+        "pytest_asyncio"
+      ]
+    }
+  ],
+  "ops": {
+    "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "bash": "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)",
+    "scope": "Only inspected local mocks/scratch-git and worker selftest; busy-reply uses fake localhost relay and fake arbosctl. No external services or application credentials accessed.",
+    "gates": [
+      {
+        "name": "merge-selftest",
+        "command": [
+          "bash",
+          "scripts/merge/selftest.sh"
+        ],
+        "exit_code": 2,
+        "duration_seconds": 0.306,
+        "ok_markers": 57,
+        "fail_markers": 0,
+        "terminal_selftest_ok": false,
+        "unittest_count": null,
+        "unittest_reported_seconds": null,
+        "marker_limit": "Printed markers only; worker terminal marker is not an internal assertion count.",
+        "source_sha256": "5be19b3c63622967775d1ba7f4aa98f7891599a225cecfbf10e58ac3606e2321",
+        "status": "platform-blocked, partial execution",
+        "cause": "Apple Bash3.2.57 fails parsing command-substitution function/case at selftest.sh:350 after57ok markers; exit2, not a passing suite.",
+        "source": "scripts/merge/selftest.sh:350",
+        "script_unchanged_from_base": true
+      },
+      {
+        "name": "rebase-preserved-selftest",
+        "command": [
+          "bash",
+          "scripts/merge/rebase-preserved-selftest.sh"
+        ],
+        "exit_code": 1,
+        "duration_seconds": 2.912,
+        "ok_markers": 10,
+        "fail_markers": 4,
+        "terminal_selftest_ok": false,
+        "unittest_count": null,
+        "unittest_reported_seconds": null,
+        "marker_limit": "Printed markers only; worker terminal marker is not an internal assertion count.",
+        "source_sha256": "82b4c3e004614fa77171d9a64091c7beab91380b3a0ef1aeeca554e40f71eb8d",
+        "status": "platform-blocked, assertions executed",
+        "cause": "GNU stat -c %Y in rebase-preserved.sh:142 fails on macOS BSDstat; four declared-resolution checks get SETUP rc5 instead of expected0/2.",
+        "source": "scripts/merge/rebase-preserved.sh:142",
+        "script_unchanged_from_base": true
+      },
+      {
+        "name": "verify-cache-selftest",
+        "command": [
+          "bash",
+          "scripts/merge/verify-cache-selftest.sh"
+        ],
+        "exit_code": 1,
+        "duration_seconds": 20.793,
+        "ok_markers": 76,
+        "fail_markers": 26,
+        "terminal_selftest_ok": false,
+        "unittest_count": null,
+        "unittest_reported_seconds": null,
+        "marker_limit": "Printed markers only; worker terminal marker is not an internal assertion count.",
+        "source_sha256": "567e57144c04d1be909a642059c4df674d5d4581a708b95683af520edaf4241f",
+        "status": "platform-blocked, assertions executed",
+        "cause": "BSDstat rejects GNU stat -c %s at verify-cache-selftest.sh:258, leaving fixture size empty; asset metadata fields shift, check3.sh:67 reads a timestamp as URL, fakecurl rejects unmatched URL with rc7 and downstream expecteddownload/cache assertions fail. check3.sh:77 also uses GNUstat.",
+        "source": "scripts/merge/verify-cache-selftest.sh:258; scripts/merge/check3.sh:67,77",
+        "script_unchanged_from_base": true
+      },
+      {
+        "name": "deploy-worker-selftest",
+        "command": [
+          "bash",
+          "scripts/deploy/arbos-deploy-worker",
+          "selftest"
+        ],
+        "exit_code": 0,
+        "duration_seconds": 1.139,
+        "ok_markers": 0,
+        "fail_markers": 0,
+        "terminal_selftest_ok": true,
+        "unittest_count": null,
+        "unittest_reported_seconds": null,
+        "marker_limit": "Printed markers only; worker terminal marker is not an internal assertion count.",
+        "source_sha256": "d0fc83f991deb3afa0153ce350cf934e154dfa3b8baac5cdd43353f4299b6205",
+        "status": "PASS",
+        "cause": "Terminal selftestok; many internal assertions, no individual printedcasecount. Scratchgit/state and Docker stubs only. deploy.env absent, confirmed before invoking.",
+        "source": "scripts/deploy/arbos-deploy-worker:1576",
+        "script_unchanged_from_base": true
+      },
+      {
+        "name": "busy-reply-unittest",
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "scripts/deploy/test_busy_reply_smoke.py"
+        ],
+        "exit_code": 0,
+        "duration_seconds": 29.112,
+        "ok_markers": 0,
+        "fail_markers": 0,
+        "terminal_selftest_ok": false,
+        "unittest_count": 2,
+        "unittest_reported_seconds": 29.047,
+        "marker_limit": "Printed markers only; worker terminal marker is not an internal assertion count.",
+        "source_sha256": "c1dc394a57efe7dea1652397815fa38add9cb538f57df571abb281577244438e",
+        "status": "PASS",
+        "cause": "2/2unittest cases pass; fake localhostrelay and fakearbosctl. SIGTERM cleanup/verdict behavior tested; no real agent or remote latency measurement.",
+        "source": "scripts/deploy/test_busy_reply_smoke.py",
+        "script_unchanged_from_base": true
+      }
+    ]
+  },
+  "rust": [
+    {
+      "gate": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 2.606
+    },
+    {
+      "gate": "metadata",
+      "command": [
+        "cargo",
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "seconds": 0.014,
+      "workspace_crates": 12
+    },
+    {
+      "gate": "resolution",
+      "command": [
+        "cargo",
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "seconds": 1.122
+    }
+  ],
+  "ci": [
+    {
+      "gate": "ci-actionlint",
+      "command": [
+        ".improve/evidence/tools/actionlint/actionlint",
+        "-shellcheck=",
+        ".github/workflows/ci.yml"
+      ],
+      "exit_code": 0,
+      "seconds": 0.031672,
+      "diagnostic_lines": 0
+    },
+    {
+      "gate": "all-actionlint",
+      "command": [
+        ".improve/evidence/tools/actionlint/actionlint",
+        "-shellcheck="
+      ],
+      "exit_code": 0,
+      "seconds": 0.00907,
+      "diagnostic_lines": 0
+    },
+    {
+      "gate": "diff",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 0.045548,
+      "diagnostic_lines": 0
+    }
+  ],
+  "ci_semantics": {
+    "checks_pass": "original triggers/job identities/other steps unchanged; one fmt immediately after toolchain; only duplicate build alias invocation removed; image push condition unchanged and needs removed",
+    "before_sha256": "32d5cb8e2bfd04fafd483771d308dc4c6a9fa9e72e99e7cee51c6597bc6f605a",
+    "after_sha256": "eeb7c860d8cf5603e3b901e6f2b67cd9ee24c09e4818c2e576e17624a48cd191"
+  },
+  "scope": "Independent finish branch baseline repeat, plus new local actionlint. Native full workspace gates remain unmeasured; semantic/pure gates are separate."
+}

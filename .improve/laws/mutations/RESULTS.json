@@ -1,0 +1,45 @@
+{
+  "source_sha256": {
+    "crates/arbos-core/src/redact.rs": "51053e0dd677a570466b66431d8863519dbd9628175f8556cfd0589db4e8117c",
+    "crates/arbos-mac/src/ui/urlwrap.rs": "270528323de247de120709b6c7521764cc3c5abb00b3cc1f87a0a55bcc42259f"
+  },
+  "isolation": "Only temporary source copies mutated; original product and law files unchanged.",
+  "mutants": [
+    {
+      "law": "confident-token-removal",
+      "control": "Passed",
+      "mutant": "Falsified",
+      "shrinks": 1,
+      "replay": "Falsified",
+      "name": "redaction-identity",
+      "seconds": 4.294
+    },
+    {
+      "law": "url-visible-text-roundtrip",
+      "control": "Passed",
+      "mutant": "Falsified",
+      "shrinks": 1,
+      "replay": "Falsified",
+      "name": "url-drop-visible-character",
+      "seconds": 1.006
+    },
+    {
+      "law": "json-scrub-compositionality",
+      "control": "Passed",
+      "mutant": "Falsified",
+      "shrinks": 1,
+      "replay": "Falsified",
+      "name": "json-empty-strings",
+      "seconds": 1.331
+    },
+    {
+      "law": "nonsecret-text-preservation",
+      "control": "Passed",
+      "mutant": "Falsified",
+      "shrinks": 0,
+      "replay": "Falsified",
+      "name": "redaction-empty-output",
+      "seconds": 1.106
+    }
+  ]
+}

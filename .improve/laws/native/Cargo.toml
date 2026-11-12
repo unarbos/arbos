@@ -1,0 +1,34 @@
+[package]
+name = "arbos-laws-native"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+name = "laws_redact"
+path = "../../../crates/arbos-core/src/redact.rs"
+doctest = false
+
+[[bin]]
+name = "laws-bridge"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+regex-lite = "=0.1.9"
+serde_json = "=1.0.154"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false

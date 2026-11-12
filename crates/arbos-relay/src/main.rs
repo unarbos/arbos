@@ -662,6 +662,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/chats/dm", post(people::dm_create))
         .route("/chats/join", post(people::group_join))
+        .route("/chats/search/messages", get(people::messages_search))
         .route(
             "/chats/{id}",
             get(people::chat_get)
@@ -725,6 +726,10 @@ async fn main() -> anyhow::Result<()> {
         // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
         // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
         .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/landed",
+            post(agent_messages::landed),
+        )
         .route(
             "/projects/{id}/agent-messages/{mid}/reply",
             post(agent_messages::reply),

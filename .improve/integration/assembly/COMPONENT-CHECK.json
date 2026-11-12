@@ -1,0 +1,132 @@
+{
+  "scope": "Independent exact file components only; no full all-phase index/materialization",
+  "guarded_carried": {
+    "crates/arbos-mac/src/app.rs": {
+      "phase3_sha256": "f0b787d6d8da1cdcae6808b183f5d4cb26403ea47c357b41e78c769896888684",
+      "phase4_sha256": "23711ea2b97caa5a6291410822eb8a1cbce977e3e4b2d3a29dc3145a95ebb498",
+      "diff_sha256": "28fc60669a6e396eba154ecbd12bcd22a3fbbe81f8f21ec41b586155e55deecc",
+      "passed": true
+    },
+    "crates/arbos-mac/src/main.rs": {
+      "phase3_sha256": "f7bb57884c06975917d31e6d5743aeaa39b18a69c0fea494d38e5ff14f55e81d",
+      "phase4_sha256": "24c038985e09450aded8230bf49567506b8d155e56a41cdc0cffb7e3f433fee4",
+      "diff_sha256": "838f3ab2bf56314d3faa5c62addd00c583dfd740fb376e4c5df8af9e4621c776",
+      "passed": true
+    },
+    "crates/arbos-mac/src/sync/fixture.rs": {
+      "phase3_sha256": "4ca1118796b0d3fde9fb1d9dd017c8a42b46904abe44d78c1d5f398e0853c84e",
+      "phase4_sha256": "0e1a5bad836a0040a84b7b02858b546f4e97e363fcdf68b9b8962d3bb47fea9f",
+      "diff_sha256": "2bc07d453f77fc902d5af171d9e6fc3585e066444be9761692cf3b02c348c405",
+      "passed": true
+    },
+    "crates/arbos-mac/src/sync/mod.rs": {
+      "phase3_sha256": "4977c90543461379fe83195232adb5f29055ef387a68ecd56dd0005ef96c9a0a",
+      "phase4_sha256": "5bf67a00e819a80415b20f06b293a07533d275d57ac6cce3618b72c912e8a392",
+      "diff_sha256": "cdd9dd8664faf89babce11bfe5ec24e81f141d0f5399a9e2a5c55ad2a4e156db",
+      "passed": true
+    },
+    "crates/arbos-mac/src/sync/relay.rs": {
+      "phase3_sha256": "b25140cdcb45d8370f5983e192d8220cf5f17d03265133c9a3119c60438387ba",
+      "phase4_sha256": "4d5b0658245f0d4380eee7965de377ca479ce4ab60900a093f41125251add2eb",
+      "diff_sha256": "081ef43cd4d317efe7774273e11e2986fd0482e6823870f7bb9d9a75427302ee",
+      "passed": true
+    },
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": {
+      "phase3_sha256": "f221b41a48363a7f5248bd484350fbf2f57b87fe41461577bcaaaa41cc7244f1",
+      "phase4_sha256": "cc2932a3f6cbf10b1408eb3c6cf3c6640e4620bb358262f793ee256b2590098e",
+      "diff_sha256": "7d6512196932df3bf842a378d560619600f2eabcb61c65bf36e04ba0f5b467a3",
+      "passed": true
+    },
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": {
+      "phase3_sha256": "2c30e3e7d6cce52eee092af50926b080d997ce817805d16311ee27e4d21a3744",
+      "phase4_sha256": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+      "diff_sha256": "5f1c0a704af9fbbec08ef43f5dcaef95c12dc2f190bd16bddd332ba2f1f8933b",
+      "passed": true
+    },
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": {
+      "phase3_sha256": "5f80688e067eb288761319c5bb18e54258ebf32529af4d9a5b11f0dda9b74210",
+      "phase4_sha256": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+      "diff_sha256": "84cca30321503f1fc5a4e1f6ba3861ad38bdec5387887901acadb155c9bd328d",
+      "passed": true
+    },
+    "apps/ios/Arbos/Arbos/UI/LibraryList.swift": {
+      "phase3_sha256": "7d812ce5fa12c9f06297a1ea0a240ecbf4a6047bceec1f3d4d49f72f1fdc1ec1",
+      "phase4_sha256": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe",
+      "diff_sha256": "f9a7b24957e9110f0cd76153fc4889a7de3f9448f9ea8fb7f3cd4c3058bccc9a",
+      "passed": true
+    },
+    ".improve/finish-checks/source-consumers/check.py": {
+      "phase3_sha256": "0cc470e167726074cecd252480cacaee3366d2ce67cc9fcab5432b16853ff38f",
+      "phase4_sha256": "5d5a4f7011b24a06f148245831b2bb589d0431d09df9b8f43eb28fa229c91dcb",
+      "diff_sha256": "628ba226eadc8c841237032d27d2fa3ea4b6211bc4ee0e5216e2fb0c069618be",
+      "passed": true
+    },
+    ".improve/finish-checks/source-consumers/README.md": {
+      "phase3_sha256": "249c1abef82ae86cc0c083aacb7bf919a26c82a82b5a41a61a54e3452acbe008",
+      "phase4_sha256": "c06ff9cb36db41db7d50ef15e6224495521c2b96dd05ee62fe8241c8080df461",
+      "diff_sha256": "244911ef5cfde916ac4ff4c9c4dd8232fe922d42cd7c861280a86b81d01043ed",
+      "passed": true
+    },
+    ".github/workflows/ci.yml": {
+      "phase3_sha256": "d7782e97fd50dffc35e051308eef4dab6f64a9b5422d161293128b114d61e943",
+      "phase4_sha256": "22b57d56ca6e3231b4d5f79264d2b1d2217cec2744f5902f80e01fd1ed678f6e",
+      "diff_sha256": "05c5e572de9b31646bae29ae5eada84e12dbc963d725f74370bfa7336e231f50",
+      "passed": true
+    }
+  },
+  "components": {
+    "relay": {
+      "path": "crates/arbos-mac/src/sync/relay.rs",
+      "preimage_sha256": "4d5b0658245f0d4380eee7965de377ca479ce4ab60900a093f41125251add2eb",
+      "patch_sha256": "2c55024507f0ff077c9ef71ed947936d9c6b0ba408add9d8f7ca9589ec64f967",
+      "output_sha256": "781cdd41b95811d2d7063cef3debf535ba636263e00eb7abb0ceed336666f0e9",
+      "mode": "100644",
+      "passed": true
+    },
+    "uploads": {
+      "path": "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+      "preimage_sha256": "cc2932a3f6cbf10b1408eb3c6cf3c6640e4620bb358262f793ee256b2590098e",
+      "patch_sha256": "3e7f3e3a23a8cb25c208fa7f93531e4592815a42e3b9f1067369c4f502ff2734",
+      "output_sha256": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7",
+      "mode": "100644",
+      "passed": true
+    },
+    "api": {
+      "path": "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift",
+      "preimage_sha256": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+      "patch_sha256": "db4877ddcc7114dd79af1c5e3b5de6ad915a802709cd14629d82393deb0eb57a",
+      "output_sha256": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+      "mode": "100644",
+      "passed": true
+    },
+    "people": {
+      "path": "crates/arbos-relay/src/people.rs",
+      "preimage_sha256": "1e09faf9d34fed7abc953712c7cfffb48d661d6427381e5e2eb1e6eaf93c9ee5",
+      "patch_sha256": "166c43ed245f64cae2edaeba048d67626c6c6a139f05818bdc9d2de528c79ae2",
+      "output_sha256": "39855dcf42e5d5098673a8594a5fc70f2ce949b3545ae3e3bddef17d42833d3b",
+      "mode": "100644",
+      "passed": true,
+      "preimage_reason": "P3 structural/privacy delta survives P4/P6, which do not change this path from BASE."
+    },
+    "ci": {
+      "path": ".github/workflows/ci.yml",
+      "preimage_sha256": "22b57d56ca6e3231b4d5f79264d2b1d2217cec2744f5902f80e01fd1ed678f6e",
+      "patch_sha256": "818af79e19c8110e5baac2fe7f855fa2795fef2ebba2beae1b59d5d4f3a8eaf7",
+      "output_sha256": "8a2faa25352f0d9ae7a8df37644ebc03d0eaa9eb5976a7b401cda62cb95a689a",
+      "mode": "100644",
+      "passed": true
+    },
+    "redaction": {
+      "path": "crates/arbos-core/src/redact.rs",
+      "preimage_sha256": "aeebd4d52c2cec5fc7cd32f23e5cf51a371e011caf735b8462282aa98f48b568",
+      "patch_sha256": "a138335631889a984955e26ddf190e86b5ec6932cc9d67e782f05340471cb413",
+      "output_sha256": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da",
+      "mode": "100644",
+      "passed": true
+    }
+  },
+  "script_sha256": "80f96bc0928bb14fd95820a739e1f69a2ca412b1a7bd2b875ace88bddf3eb987",
+  "Root_preserved": true,
+  "seconds": 0.7164758750004694,
+  "all_phase_assembly_executed": false
+}

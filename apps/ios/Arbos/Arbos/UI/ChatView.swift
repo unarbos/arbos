@@ -317,7 +317,6 @@ struct ChatSession: View {
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
     @State private var rigViewerForward = false
-    @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
     @State private var sentOnce = false
@@ -1129,7 +1128,10 @@ struct ChatSession: View {
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        let multiParty = isChannel || (people?.isGroup ?? false)
+        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+        // `names_senders`, and the solo-1:1 quote-header hide depends on it
+        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
@@ -1548,9 +1550,6 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model).environment(\.theme, theme)
-        }
         .sheet(isPresented: $showGroupCallPicker) {
             if let people {
                 GroupCallPickerSheet(people: people, meId: model.user?.id) { ring in
@@ -1900,7 +1899,7 @@ struct ChatSession: View {
         guard account.accepts(model) else { return }
         switch show {
                     case "keyboard": composerFocused = true
-                    case "settings": showSettings = true
+                    case "settings": model.showOwnProfile()
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
@@ -2103,9 +2102,10 @@ struct ChatSession: View {
         case "model": showModelPicker = true
         case "attach": showAttach = true
         case "voice": startCall(.voice)
-        case "settings": showSettings = true
+        case "settings": model.showOwnProfile()
         default: break
         }
+        // Settings is a pushed page and the tour's last step: nothing takes it down again.
         guard step != "settings" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + hold) { guard account.accepts(model) else { return };
             switch step {
@@ -3566,35 +3566,67 @@ struct ChatSession: View {
     /// Its appearing and disappearing changes the transcript's height by the same
     /// 26 pt it used to add to the bar, and at the end rather than in the reader's
     /// view, so a turn starting while the reader is up in history moves nothing.
+    ///
+    /// When the awaiting cheat expires and no assistant row ever landed, the same
+    /// tick draws the stock "didn't answer" bubble here — Transcript only writes
+    /// that line under an empty finished assistant row, so a turn that never
+    /// opened one used to leave a dead transcript ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let participants = presenceParticipants
-            if !participants.isEmpty {
-                // The tasks chip rides on the row while the agent has background jobs
-                // open in this chat (duplex §2.4); a tap opens the sheet.
-                let jobs = model.openJobs(chatId)
-                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
-                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
-                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { guard account.accepts(model) else { return }; model.openNewestJobTab(from: chatId) }
-                PresenceRow(participants: participants,
-                            detail: model.currentActivity(chatId),
-                            queued: false,
-                            taskCount: jobs.count,
-                            onTasks: openTasks,
-                            onWords: openNewest,
-                            onPicture: { guard account.accepts(model) else { return }; model.toggleProfile($0) },
-                            pictureShowing: { model.profileShows($0) })
-                    // Grok: 42 px from the last bubble to the picture's top ([feedback
-                    // status-row-gap-ios-2026-10-26]). The transcript's stack already
-                    // carries the bubbles' 16 pt side inset.
-                    .padding(.top, Theme.presenceTopGap)
-                    // Grok: 68 px from the picture's bottom to the composer's top. The row
-                    // is the transcript's last child, so it settles down into the tail the
-                    // tail already reserves rather than stacking on top of it.
-                    .padding(.bottom, -Theme.presenceSettle)
+            VStack(alignment: .leading, spacing: 0) {
+                if model.missedReply(chatId) {
+                    missedReplyBubble
+                }
+                let participants = presenceParticipants
+                if !participants.isEmpty {
+                    // The tasks chip rides on the row while the agent has background jobs
+                    // open in this chat (duplex §2.4); a tap opens the sheet.
+                    let jobs = model.openJobs(chatId)
+                    let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                    // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                    let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { guard account.accepts(model) else { return }; model.openNewestJobTab(from: chatId) }
+                    PresenceRow(participants: participants,
+                                detail: model.currentActivity(chatId),
+                                queued: model.machineWaiting(for: chatId),
+                                taskCount: jobs.count,
+                                onTasks: openTasks,
+                                onWords: openNewest,
+                                onPicture: { guard account.accepts(model) else { return }; model.toggleProfile($0) },
+                                pictureShowing: { model.profileShows($0) })
+                        // Grok: 42 px from the last bubble to the picture's top ([feedback
+                        // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                        // carries the bubbles' 16 pt side inset.
+                        .padding(.top, Theme.presenceTopGap)
+                        // Grok: 68 px from the picture's bottom to the composer's top. The row
+                        // is the transcript's last child, so it settles down into the tail the
+                        // tail already reserves rather than stacking on top of it.
+                        .padding(.bottom, -Theme.presenceSettle)
+                }
             }
         }
+    }
+
+    /// Same words Transcript uses for an empty finished assistant row, drawn when
+    /// no such row exists so the chat never goes silent after a send.
+    private var missedReplyBubble: some View {
+        let who = name.trimmingCharacters(in: .whitespaces)
+        let line = "\(who.isEmpty ? "The agent" : who) didn't answer. Ask again."
+        return HStack {
+            Text(line)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .fill(theme.bubbleAssistant)
+                )
+                .frame(maxWidth: 560, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Theme.presenceTopGap)
+        .accessibilityIdentifier("missed-reply")
     }
 
     /// Steer a job (contract: no command of its own): the composer becomes a reply to
@@ -4506,6 +4538,9 @@ struct ModelPickerView: View {
     @Environment(\.dismiss) private var dismiss
     let project: Project
     var account: ChatAccountContext? = nil
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents —
+    /// the parent page owns the chrome ([feedback iphone-entity-nav-push-2026-11-10]).
+    var pushed: Bool = false
     @State private var query = ""
     @State private var effort: Effort = .low
 
@@ -4521,81 +4556,92 @@ struct ModelPickerView: View {
 
     var body: some View {
         let account = self.account ?? ChatAccountContext(model)
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(15, weight: .medium))
-                            .foregroundStyle(theme.muted)
-                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                        if !query.isEmpty {
-                            Button { query = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
+        Group {
+            if pushed {
+                list.onAppear { guard account.accepts(model) else { return }; effort = current.effort }
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Model")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { guard account.accepts(model) else { return }; dismiss() } }
                         }
-                    }
-                    .listRowBackground(theme.card)
+                        .onAppear { guard account.accepts(model) else { return }; effort = current.effort }
                 }
-                Section("Reasoning") {
-                    Picker("Effort", selection: $effort) {
-                        ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: effort) { _, new in
-                        guard account.accepts(model) else { return }
-                        model.setModel(projectId: project.id, model: current.model, effort: new)
-                    }
-                }
-                Section("Model") {
-                    if model.models.isEmpty {
-                        Text("Loading models from the relay…").foregroundStyle(theme.muted)
-                    }
-                    ForEach(ids, id: \.self) { id in
-                        Button {
-                            guard account.accepts(model) else { return }
-                            model.setModel(projectId: project.id, model: id, effort: effort)
-                            dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(Project.shortModel(id)).foregroundStyle(theme.text)
-                                    Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if id == current.model {
-                                    Image(systemName: "checkmark").foregroundStyle(theme.text)
-                                }
-                            }
-                            .contentShape(Rectangle())
+                .presentationDetents([.medium, .large])
+            }
+        }
+    }
+
+    private var list: some View {
+        let account = self.account ?? ChatAccountContext(model)
+        return List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(15, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                    TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(theme.card)
-                        .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
-                        .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
                     }
                 }
-                if !current.modelNote.isEmpty {
-                    Section {
-                        Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
-                    }
+                .listRowBackground(theme.card)
+            }
+            Section("Reasoning") {
+                Picker("Effort", selection: $effort) {
+                    ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: effort) { _, new in
+                    guard account.accepts(model) else { return }
+                    model.setModel(projectId: project.id, model: current.model, effort: new)
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Model")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { guard account.accepts(model) else { return }; dismiss() } }
+            Section("Model") {
+                if model.models.isEmpty {
+                    Text("Loading models from the relay…").foregroundStyle(theme.muted)
+                }
+                ForEach(ids, id: \.self) { id in
+                    Button {
+                        guard account.accepts(model) else { return }
+                        model.setModel(projectId: project.id, model: id, effort: effort)
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Project.shortModel(id)).foregroundStyle(theme.text)
+                                Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            }
+                            Spacer()
+                            if id == current.model {
+                                Image(systemName: "checkmark").foregroundStyle(theme.text)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.card)
+                    .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
+                    .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
+                }
             }
-            .onAppear { guard account.accepts(model) else { return }; effort = current.effort }
+            if !current.modelNote.isEmpty {
+                Section {
+                    Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
+                }
+            }
         }
-        .presentationDetents([.medium, .large])
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }
 
@@ -4620,6 +4666,7 @@ extension ChatSession {
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
                     isMessage: reply,

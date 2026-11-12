@@ -239,7 +239,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         let gone = NSPredicate(format: "exists == false")
         let left = XCTNSPredicateExpectation(predicate: gone, object: back(app))
         XCTAssertEqual(XCTWaiter().wait(for: [left], timeout: settle), .completed, "the chat went back")
-        XCTAssertTrue(app.buttons["Agents"].waitForExistence(timeout: settle), "Home is underneath")
+        XCTAssertTrue(app.buttons["home-account"].waitForExistence(timeout: settle), "Home is underneath")
 
         // The drag that commits tracks the finger as well, and this is the only case that can
         // say so: the two above stop short of the line that pops, so neither of them exercises
@@ -247,7 +247,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // chat, so it is still here to be read after the chat has gone.
         assertTrackedUnderTheFinger(trace(app), endingWith: "finish", reaching: oneToOne(app, distance))
 
-        // Home opens on the All tab, which lists the group (`HomeFilterTabsUITests`).
+        // Home's one linear list still shows the group (`HomeChatListNoFilterUITests`).
         let row = app.descendants(matching: .any)["home-row:\(chatId)"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
         // By coordinate, as `TranscriptFirstFrameUITests` already does, because `row.tap()`

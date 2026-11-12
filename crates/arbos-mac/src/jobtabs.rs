@@ -91,6 +91,7 @@ fn base(chat: &str, id: String, role: Role, status: MessageStatus, at: u64) -> M
         job: None,
         hidden: false,
         agent_reply_to: None,
+        agent_message: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,

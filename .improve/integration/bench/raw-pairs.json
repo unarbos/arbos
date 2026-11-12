@@ -1,0 +1,1493 @@
+[
+  {
+    "pair": 0,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 573958,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24612250,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2092375,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3743750,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56221583,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 607041,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126304250,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 61736125,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11621583,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 289785750,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 1,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 190041,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24561208,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2122834,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3809334,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 54717125,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 192500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 125182833,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 61390750,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11539333,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 269302667,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 2,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 195500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 125074084,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 59906500,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11278250,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 274879375,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 186500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24119041,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2137875,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3804750,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55805125,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 3,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 185709,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126622625,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 60931042,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11332708,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 278841500,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 187875,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24467083,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2123791,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3785625,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56458250,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 4,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 25125792,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2173250,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3796208,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55979041,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 208583,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 125487500,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62660125,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11369167,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 275426917,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 5,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 204167,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 128516416,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62967292,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11932792,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 277378625,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 187666,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24995292,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2151833,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3749750,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55299167,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 6,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193125,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 125820666,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62071958,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11518000,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 272053333,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 189500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24570208,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2244833,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3910750,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56095667,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 7,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 186875,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 25157042,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2205417,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3901125,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55509834,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 198000,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127408500,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 63484167,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11821958,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 272252000,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 8,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 186125,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24781375,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2231542,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3863417,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55767125,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193583,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127643250,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 63060792,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11911250,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 278839250,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 9,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 214667,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127409000,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62320375,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11626917,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 273238084,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 207500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24549334,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2226167,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3867500,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56065459,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 10,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 211250,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 25023875,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2131458,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3924084,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56251125,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 199000,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 128071583,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 63527167,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11852416,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 276793875,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 11,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 168500,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 25048250,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2183792,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3792542,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55558375,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 191750,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127291958,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62739916,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11708000,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 276433292,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 12,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 207167,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126788917,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62827208,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 12062542,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 272950875,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 165959,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 23746208,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2111166,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3800583,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 54512667,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 13,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 164958,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 23803708,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2061292,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3700708,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 53512750,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 180875,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127381833,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 61901041,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11479667,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 274202292,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 14,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193875,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126193208,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62660334,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11839166,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 275471166,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 183875,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24567625,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2175708,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3746500,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 54409542,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 15,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 197791,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24916958,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2172917,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3700375,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56057417,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 195209,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 127362625,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62316250,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11827750,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 277444584,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 16,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 190416,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126034375,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 60350541,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11658083,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 276733208,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 184083,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 25332584,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2186875,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3782250,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 56751041,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 17,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193000,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126447125,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62655875,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11728584,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 276578125,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 176125,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24645541,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2170792,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3727541,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55359916,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 18,
+    "order": [
+      "cached",
+      "uncached"
+    ],
+    "observations": {
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 176291,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24246042,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2125000,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3779792,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 53735125,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 203208,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 122322292,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 61147875,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11410084,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 273926250,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 19,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 193958,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 128224083,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62728750,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11711250,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 276222916,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 207750,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24903250,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2242375,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3767791,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55234083,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "pair": 20,
+    "order": [
+      "uncached",
+      "cached"
+    ],
+    "observations": {
+      "uncached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 187625,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 126354042,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 62634084,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 11533667,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 277766875,
+            "workload": "scrub_value"
+          }
+        ]
+      },
+      "cached": {
+        "corpus_cases": 130,
+        "fingerprint": "8068b373b0f24b7e",
+        "first_scrub_and_classify_ns": 168791,
+        "samples": [
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 24383500,
+            "workload": "redact_patterns"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 2149875,
+            "workload": "find_key_like"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 3876875,
+            "workload": "redact_placeholders"
+          },
+          {
+            "iterations": 2000,
+            "round": 0,
+            "total_ns": 55780667,
+            "workload": "scrub_value"
+          }
+        ]
+      }
+    }
+  }
+]

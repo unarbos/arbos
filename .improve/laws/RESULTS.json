@@ -1,0 +1,86 @@
+[
+  {
+    "law": "redaction-idempotence",
+    "seed": 81001,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.337898667,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "confident-token-removal",
+    "seed": 81002,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.314904291,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "utf8-key-byte-ranges",
+    "seed": 81003,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.29879824999999993,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "json-scrub-compositionality",
+    "seed": 81004,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.3046822910000001,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "url-visible-text-roundtrip",
+    "seed": 81005,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.01181291599999986,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "confident-token-nonword-ending-removal",
+    "seed": 81006,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.08235237499999994,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "nonsecret-text-preservation",
+    "seed": 81007,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.077084292,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  }
+]

@@ -1,0 +1,31 @@
+[package]
+name = "redact-perf"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[workspace]
+
+[lib]
+path = "../fixed-uncached.rs"
+
+[[bin]]
+name = "redact-bench"
+path = "../driver.rs"
+
+[dependencies]
+regex-lite = "=0.1.9"
+serde_json = "=1.0.154"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false

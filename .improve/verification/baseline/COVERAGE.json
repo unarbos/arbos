@@ -1,0 +1,106 @@
+{
+  "scope": "Derived original Phase0 gate closure: unchanged-source reuse and final corrected control-size/native results distinguished; no aggregate all-new-helper syntax or full-final-UI claim.",
+  "baseline_source": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "entries": [
+    {
+      "gate": "avatar-lint + glass-lint",
+      "disposition": "PASS actual final CI Layout",
+      "execution": "Source419d run42833942969 Layout success; set-e Workflow and shell lint step invokes both scripts. Not a new local repeat and no per-script duration invented.",
+      "source_sha256": {
+        "scripts/avatar-lint.sh": "e715a56cf6e29f47a00fbedb3120da12f762f88b97bdddbcc1ec39e0a6ac292a",
+        "scripts/glass-lint.sh": "a41635c887fcb51c5dc6ba9a14bfa96c138a33100c2e059a1fdf99e04802bf34"
+      },
+      "counts": "two lint gates, not test counts"
+    },
+    {
+      "gate": "iOS control-size-lint",
+      "disposition": "PASS fresh corrected tree",
+      "exit": 0,
+      "seconds": 0.07209316699299961,
+      "receipt": "../swift/CONTROL-SIZE.json",
+      "input_files": 52,
+      "source_unchanged": true,
+      "counts": "one lint gate;52input hashes are not52tests"
+    },
+    {
+      "gate": "merge selftest + rebase/verify-cache/deploy helper gates",
+      "disposition": "PASS actual final CI Layout on supported Linux Bash/tooling",
+      "execution": "Same final Layout set-e step invokes all4 scripts. Existing Mac Bash3.2 parse/GNU-stat failures remain historical platform reds, not passing local suites.",
+      "historical_local": "merge57ok thenexit2; rebase10ok/4fail GNUstat; verify76ok/26fail GNUstat; deploy terminal selftestok. Do not equate printed markers with assertions.",
+      "source_sha256": {
+        "scripts/merge/selftest.sh": "5be19b3c63622967775d1ba7f4aa98f7891599a225cecfbf10e58ac3606e2321",
+        "scripts/merge/rebase-preserved-selftest.sh": "82b4c3e004614fa77171d9a64091c7beab91380b3a0ef1aeeca554e40f71eb8d",
+        "scripts/merge/verify-cache-selftest.sh": "567e57144c04d1be909a642059c4df674d5d4581a708b95683af520edaf4241f",
+        "scripts/deploy/arbos-deploy-worker": "07afc1fe02ec69d0d311074257e8d3b0b2bb7c446b56fd571025bd95f5974d3b"
+      }
+    },
+    {
+      "gate": "Busy-reply fake-relay unittest",
+      "disposition": "PASS reused exact unchanged helper/test source",
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 29.112,
+      "receipt_role": "final-ops/RESULTS.json",
+      "source_sha256": {
+        "scripts/deploy/busy-reply-smoke.py": "f473f4c9d65c5e5b3607ac4e2dc462295708ecbc301e6f038d0b8c3eeb11faf2",
+        "scripts/deploy/test_busy_reply_smoke.py": "c1dc394a57efe7dea1652397815fa38add9cb538f57df571abb281577244438e"
+      },
+      "scope": "Fakelocalhostrelay/arbosctl only; source-identical BASE\u2192C19; not real agent latency"
+    },
+    {
+      "gate": "Original Python syntax inventory",
+      "disposition": "PASS coverage by unchanged-source parse receipts plus exact-current imports/compile",
+      "original_files": 78,
+      "unchanged_files": 74,
+      "changed_files": {
+        "scripts/ci/xctestrun-env.py": "1a9f4766ed774637078a01f8578c1401dc4ef04b95e404ebf61ba5aa67e97c70",
+        "scripts/feedback/feedback_poller.py": "f68edb1e2b97e968ab1a8184c0ae91c43a3cd7d03ee81772e5df27bea77ddf20",
+        "voice/arbos_voice/vision.py": "0a32b6df229abbc4c4a379e554776fbfdc309e55d88320683f53aeb45c8ab663",
+        "voice/arbos_voice/worker.py": "dbae3cf0df16897feb159d9be9a5e72761bb52b4a177d4fd733f8918e2ee9548"
+      },
+      "coverage": {
+        "scripts/ci/xctestrun-env.py": "Current finalCI12 isolation unit tests parse/import exact1a9f source",
+        "scripts/feedback/feedback_poller.py": "deploy-publication/GATES.json poller_compile_only+actual adapter tests, exactf68e source",
+        "voice/arbos_voice/worker.py": "state-voice-worker/final-combined.json SDK/controller84P imports exactdbae source",
+        "voice/arbos_voice/vision.py": "same84P SDK/controller execution, exact0a32 source"
+      },
+      "not_claimed": "A fresh single78-file AST command or aggregate syntax coverage of all168new Python helper files"
+    },
+    {
+      "gate": "Original standalone JavaScript syntax3",
+      "disposition": "PASS reused unchanged2 + exact-current Node check1",
+      "unchanged": [
+        "site/main.js",
+        "site/welcome/welcome.js"
+      ],
+      "changed": "edge/sites-worker/src/index.js",
+      "changed_source_sha256": "7b79ca391a0ab2b1c7c331f19b3ac4103f68b3cbb86effd9932fdc834c35979d",
+      "current_check": "node --check src/index.js",
+      "current_exit": 0,
+      "current_seconds": 0.021010917029343545,
+      "additional_tests": 37,
+      "source_receipt_role": "structure-backend-cleanup/sites-syntax.json + provenance.json exact7b79 source",
+      "not_claimed": "A fresh combined3-file invocation or an app speed measurement"
+    },
+    {
+      "gate": "Voice collection prerequisites",
+      "disposition": "RESOLVED through actual private SDK tests",
+      "historical": "Original0tests/2collection errors remain old-environment comparison only",
+      "current_tests": 84,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 6.202760083018802,
+      "receipt_role": "state-voice-worker/final-combined.json",
+      "scope": "Includes original test_updates/test_usage_loop and added lifecycle/vision checks; real SDK imported under fake effects/access guards/network denial; no provider/device/session access"
+    },
+    {
+      "gate": "Rust workspace + final app assertions",
+      "disposition": "PASS within separate declared runtime scopes",
+      "scope": "Corrected tree preserves all C19 Rust/harness inputs: actual completed419d CI2586Rust/0fail/3ignored and94harness passes. Final native unit558strictP+1expected/0fail and5AvatarP; separate predecessor completeUI55P/0fail/13skip. Not a final-source unfiltered wholeUI result."
+    }
+  ],
+  "source_receipt_sha256": "64523c8a8a0e3a77ad724c50766bf5c8a8083f33880b95040b7a5ce90dedce09",
+  "historical_tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "corrected_tree": "f3903159bb239a21f68a62ec029b82102ffe3f87"
+}

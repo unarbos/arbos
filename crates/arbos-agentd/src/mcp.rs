@@ -100,6 +100,7 @@ fn tools(chat_text_max: Option<usize>) -> Value {
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
         a.extend(crate::disk::tool_specs());
+        a.extend(crate::app::tool_specs());
     }
     list
 }
@@ -335,6 +336,8 @@ async fn call_tool(
             | "request_secret"
             | "secrets_save_from_message"
             | "browser_fill"
+            // Destructive cmds are gated inside `app::call_tool` (approval card per command).
+            | "arbos_app"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
             return err_result(format!("not executed: {refusal}"));
@@ -1005,6 +1008,7 @@ async fn call_tool(
         "goals_list" | "goals_create" | "goals_update" | "goals_log" | "goals_delete" => {
             crate::goals::call_tool(a, name, args, &chat_for_scratch).await
         }
+        "arbos_app" => crate::app::call_tool(a, args, &chat_for_scratch).await,
         _ => err_result(format!("unknown tool {name}")),
     }
 }
