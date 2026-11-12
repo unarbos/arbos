@@ -492,7 +492,8 @@ async fn socket(
                 let Some(Ok(TMsg::Binary(b))) = msg else {
                     break;
                 };
-                match Frame::decode(b).ok().flatten().map(|f| f.ty) {
+                let got = Frame::decode(b).ok().flatten();
+                match got.as_ref().map(|f| f.ty) {
                     Some(FrameType::State) => {
                         let after = json!({ "after": 0, "excludeOwn": true });
                         sink.send(frame(FrameType::RowsReq, after, Vec::new())).await
@@ -508,7 +509,10 @@ async fn socket(
                         Ok(())
                     }
                     Some(FrameType::Error) => {
-                        sockets.errors.fetch_add(1, Ordering::Relaxed);
+                        if sockets.errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                            let header = got.map(|f| f.header);
+                            println!("  the first error a socket was sent: {header:?}");
+                        }
                         Ok(())
                     }
                     _ => Ok(()),
@@ -627,15 +631,27 @@ impl Run {
     /// A user comes back: the chat on screen, a message a while later, and once the box is up,
     /// a session on it.
     async fn arrival(self: Arc<Self>, u: Arc<User>, session: Duration) {
-        let looked = (Instant::now(), None);
-        self.waking.lock().unwrap().insert(u.id.clone(), looked);
+        let looked = Instant::now();
         let _ = u.primary.send(Cmd::Focus(true));
-        tokio::time::sleep(Duration::from_millis(self.k.think_ms)).await;
+        // The look wakes the box when its node has room to spare, at once or at a later beat
+        // of the device's presence: the wake is timed from when the relay took it up, as near
+        // as a look every 10 ms tells.
+        let mut woken = false;
+        while looked.elapsed() < Duration::from_millis(self.k.think_ms) {
+            if !woken && self.state.box_state(&u.id).await.0 != BoxState::Asleep {
+                woken = true;
+                let mut waking = self.waking.lock().unwrap();
+                waking.insert(u.id.clone(), (Instant::now(), None));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let sent = Instant::now();
-        // Still asleep: the look did not wake it, and the PUSH is what does.
-        let asleep = self.state.box_state(&u.id).await.0 == BoxState::Asleep;
-        if let Some(w) = self.waking.lock().unwrap().get_mut(&u.id) {
-            *w = (if asleep { sent } else { w.0 }, Some(sent));
+        // Still asleep: the PUSH is what wakes it.
+        if self.state.box_state(&u.id).await.0 == BoxState::Asleep {
+            let mut waking = self.waking.lock().unwrap();
+            waking.insert(u.id.clone(), (sent, Some(sent)));
+        } else if let Some(w) = self.waking.lock().unwrap().get_mut(&u.id) {
+            w.1 = Some(sent);
         }
         self.push_counted(&u).await;
         // Unprefetched from cold is the slowest wake there is; twice that is a lost one.
