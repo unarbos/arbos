@@ -113,7 +113,7 @@ struct Woken {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Asleep {
+enum Rest {
     AsleepClean,
     AsleepCkpt,
     /// Asleep with its checkpoint or its disk in the object store.
@@ -144,7 +144,7 @@ struct Prefetched {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Slept {
-    state: Asleep,
+    state: Rest,
     files_bytes: Option<u64>,
     scratch_bytes: Option<u64>,
     trash_bytes: Option<u64>,
