@@ -80,13 +80,14 @@ final class GroupTitlePushTests: XCTestCase {
     }
 
     /// What the extension reads the message with is kept where both it and the app can reach
-    /// it (their App Group), and is gone once signed out.
+    /// it (their App Group), and is gone once signed out. A build signed without the group
+    /// (CI's) keeps nothing.
     func testThePreviewVaultIsSharedThroughTheAppGroupAndForgets() throws {
-        XCTAssertNotNil(PreviewVault.storeRoot, "the test host has the App Group")
         let kept = PreviewVault.load()
         defer { PreviewVault.save(kept) }
         let device = PreviewVault.Device(userId: "@gh_7:arbos.test", deviceId: "D1", storeKey: "k")
         PreviewVault.save(device)
+        guard PreviewVault.storeRoot != nil else { return XCTAssertNil(PreviewVault.load()) }
         XCTAssertEqual(PreviewVault.load(), device)
         PreviewVault.save(nil)
         XCTAssertNil(PreviewVault.load())
@@ -94,15 +95,21 @@ final class GroupTitlePushTests: XCTestCase {
 
     /// The Matrix store an earlier build kept in the app's own container is moved, whole, to
     /// where the extension can read it, once; it is the device's only copy of its keys.
+    /// Without the App Group it stays where it was.
     func testAnEarlierStoreIsMovedToTheAppGroupWhole() throws {
         let fm = FileManager.default
         let device = "TESTDEVICE-\(UUID().uuidString)"
         let old = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix").appendingPathComponent(device)
-        let shared = try XCTUnwrap(PreviewVault.storeRoot).appendingPathComponent(device)
-        defer { try? fm.removeItem(at: old); try? fm.removeItem(at: shared) }
+        defer { try? fm.removeItem(at: old) }
         try fm.createDirectory(at: old, withIntermediateDirectories: true)
         try Data("keys".utf8).write(to: old.appendingPathComponent("matrix-sdk-crypto.sqlite3"))
+        guard let shared = PreviewVault.storeRoot?.appendingPathComponent(device) else {
+            XCTAssertEqual(WalletVault.storeDir(device: device), old.path)
+            XCTAssertEqual(try Data(contentsOf: old.appendingPathComponent("matrix-sdk-crypto.sqlite3")), Data("keys".utf8))
+            return
+        }
+        defer { try? fm.removeItem(at: shared) }
         XCTAssertEqual(WalletVault.storeDir(device: device), shared.path)
         XCTAssertEqual(try Data(contentsOf: shared.appendingPathComponent("matrix-sdk-crypto.sqlite3")), Data("keys".utf8))
         XCTAssertFalse(fm.fileExists(atPath: old.path))
