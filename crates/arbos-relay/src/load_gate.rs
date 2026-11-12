@@ -71,6 +71,9 @@ struct Knobs {
     warm: usize,
     /// Wakes of a sleeping box per minute (spec: 30).
     wakes_per_min: f64,
+    /// Sleeping boxes woken at one instant, once, as the clock starts: every node is still full
+    /// from admission then, so each of them takes the place of an idle box.
+    burst: usize,
     minutes: f64,
     /// Daemon time of a clean wake and of a restore, ms. Measured on a 4 vCPU / 16 GB host with
     /// the real agent image: 180–200 and 210–220.
@@ -100,6 +103,7 @@ impl Knobs {
             node_cap: knob("ARBOS_LOAD_NODE_CAP", 160),
             warm: knob("ARBOS_LOAD_WARM", 150),
             wakes_per_min: knob("ARBOS_LOAD_WAKES_PER_MIN", 30.0),
+            burst: knob("ARBOS_LOAD_BURST", 0),
             minutes: knob("ARBOS_LOAD_MINUTES", 10.0),
             clean_ms: knob("ARBOS_LOAD_CLEAN_WAKE_MS", 200),
             restore_ms: knob("ARBOS_LOAD_RESTORE_MS", 220),
@@ -150,6 +154,8 @@ enum Kind {
 #[derive(Default, Clone, Copy)]
 struct FakeBox {
     running: bool,
+    /// The daemon has been asked to wake it and has not answered yet.
+    waking: bool,
     ckpt: bool,
     ckpt_cold: bool,
     work_cold: bool,
@@ -161,6 +167,8 @@ struct FakeBox {
 struct Woke {
     user: String,
     kind: Kind,
+    /// When the daemon was asked, and when the box's socket was up.
+    asked: Instant,
     at: Instant,
 }
 
@@ -176,6 +184,8 @@ struct FakeNode {
     rooms: Arc<Mutex<HashMap<String, (String, String)>>>,
     tokens: Mutex<HashMap<String, String>>,
     stops: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    /// The most boxes that were running or being woken here at one instant.
+    most_up: AtomicUsize,
     sleeps: AtomicU64,
     archives: AtomicU64,
 }
@@ -284,6 +294,15 @@ async fn answer(State(node): State<Arc<FakeNode>>, req: Request) -> Response {
                 return refused(StatusCode::NOT_FOUND, "no such box");
             };
             if !b.running {
+                let asked = Instant::now();
+                // What the cap is a promise about: a box holds memory from here on.
+                b.waking = true;
+                let up = {
+                    let mut boxes = node.boxes.lock().unwrap();
+                    boxes.insert(user.to_owned(), b);
+                    boxes.values().filter(|b| b.running || b.waking).count()
+                };
+                node.most_up.fetch_max(up, Ordering::Relaxed);
                 // A cold box nobody asked back is fetched here, before it starts.
                 if (b.work_cold || b.ckpt_cold) && !b.fetched {
                     tokio::time::sleep(ms(node.k.fetch_ms)).await;
@@ -311,6 +330,7 @@ async fn answer(State(node): State<Arc<FakeNode>>, req: Request) -> Response {
                 let up = Woke {
                     user: user.to_owned(),
                     kind,
+                    asked,
                     at: Instant::now(),
                 };
                 let room = node.rooms.lock().unwrap().get(user).cloned();
@@ -513,6 +533,8 @@ struct User {
 #[derive(Default)]
 struct Stats {
     wakes: Mutex<HashMap<Kind, Vec<f64>>>,
+    /// From the PUSH that wakes a box to its daemon being asked: the relay's share of a wake.
+    queued: Mutex<Vec<f64>>,
     wakes_lost: AtomicU64,
     acks: Mutex<Vec<f64>>,
     acks_lost: AtomicU64,
@@ -630,28 +652,21 @@ fn pct(samples: &mut [f64], p: f64) -> f64 {
     samples[((samples.len() as f64 * p / 100.0).ceil() as usize).clamp(1, samples.len()) - 1]
 }
 
-/// This process's CPU seconds so far and its resident memory in MB, as `ps` has them.
+/// This process's CPU seconds so far and the most memory it has had resident, in MB. Asked of
+/// the kernel: past some 10,000 open descriptors macOS does not start a `ps` to ask.
 fn cpu_and_rss() -> (f64, f64) {
-    let pid = std::process::id().to_string();
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-o", "time=", "-p", &pid])
-        .output()
-        .expect("ps");
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut fields = text.split_whitespace();
-    let rss_kb: f64 = fields
-        .next()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(f64::NAN);
-    // `[dd-]hh:mm:ss` on Linux, `m:ss.cc` on macOS: every part is worth 60 of the next, but days.
-    let time = fields.next().unwrap_or_default();
-    let (days, clock) = time.split_once('-').unwrap_or(("0", time));
-    let clock = clock
-        .split(':')
-        .fold(0.0, |s, part| s * 60.0 + part.parse().unwrap_or(f64::NAN));
+    use nix::sys::resource::{getrusage, UsageWho};
+    let used = getrusage(UsageWho::RUSAGE_SELF).expect("getrusage");
+    let secs = |t: nix::sys::time::TimeVal| t.tv_sec() as f64 + t.tv_usec() as f64 / 1e6;
+    // Bytes on macOS, kilobytes on Linux.
+    let per_mb = if cfg!(target_os = "macos") {
+        1024.0 * 1024.0
+    } else {
+        1024.0
+    };
     (
-        days.parse().unwrap_or(0.0) * 86_400.0 + clock,
-        rss_kb / 1024.0,
+        secs(used.user_time()) + secs(used.system_time()),
+        used.max_rss() as f64 / per_mb,
     )
 }
 
@@ -702,6 +717,7 @@ async fn the_thousand_user_load_gate() {
             rooms: rooms.clone(),
             tokens: Mutex::default(),
             stops: Mutex::default(),
+            most_up: AtomicUsize::new(0),
             sleeps: AtomicU64::new(0),
             archives: AtomicU64::new(0),
         });
@@ -835,6 +851,8 @@ async fn the_thousand_user_load_gate() {
         while let Some(w) = woken.recv().await {
             let sent = timing.waking.lock().unwrap().remove(&w.user);
             if let Some(sent) = sent {
+                let queued = w.asked.saturating_duration_since(sent).as_secs_f64();
+                timing.stats.queued.lock().unwrap().push(queued);
                 let took = w.at.saturating_duration_since(sent).as_secs_f64();
                 let mut wakes = timing.stats.wakes.lock().unwrap();
                 wakes.entry(w.kind).or_default().push(took);
@@ -974,25 +992,29 @@ async fn the_thousand_user_load_gate() {
     let mut arrivals = tokio::time::interval(Duration::from_secs_f64(60.0 / k.wakes_per_min));
     let mut asked = 0u64;
     let mut warm_seen = Vec::new();
+    let mut burst = k.burst;
     while started.elapsed() < steady {
         arrivals.tick().await;
-        // A sleeping user nobody is already waiting on.
-        let mut pick = None;
-        for _ in 0..200 {
-            let u = run.users[run.rng.lock().unwrap().below(run.users.len())].clone();
-            let free = !run.busy.lock().unwrap().contains(&u.id);
-            if free && state.box_state(&u.id).await.0 == BoxState::Asleep {
-                pick = Some(u);
-                break;
+        // The burst is the first arrival; they all think for as long, so all send at once.
+        for _ in 0..std::mem::take(&mut burst).max(1) {
+            // A sleeping user nobody is already waiting on.
+            let mut pick = None;
+            for _ in 0..200 {
+                let u = run.users[run.rng.lock().unwrap().below(run.users.len())].clone();
+                let free = !run.busy.lock().unwrap().contains(&u.id);
+                if free && state.box_state(&u.id).await.0 == BoxState::Asleep {
+                    pick = Some(u);
+                    break;
+                }
             }
+            let Some(u) = pick else {
+                continue;
+            };
+            asked += 1;
+            run.busy.lock().unwrap().insert(u.id.clone());
+            let length = run.rng.lock().unwrap().around(session);
+            tokio::spawn(run.clone().arrival(u, length));
         }
-        let Some(u) = pick else {
-            continue;
-        };
-        asked += 1;
-        run.busy.lock().unwrap().insert(u.id.clone());
-        let length = run.rng.lock().unwrap().around(session);
-        tokio::spawn(run.clone().arrival(u, length));
         let mut up = 0;
         for u in &run.users {
             let st = state.box_state(&u.id).await.0;
@@ -1020,6 +1042,9 @@ async fn the_thousand_user_load_gate() {
         .map(|f| f.archives.load(Ordering::Relaxed))
         .sum();
     let mut wakes = std::mem::take(&mut *run.stats.wakes.lock().unwrap());
+    let mut queued = std::mem::take(&mut *run.stats.queued.lock().unwrap());
+    let most_up = fakes.iter().map(|f| f.most_up.load(Ordering::Relaxed));
+    let most_up = most_up.max().unwrap_or(0);
     let mut acks = std::mem::take(&mut *run.stats.acks.lock().unwrap());
     let lost = run.stats.wakes_lost.load(Ordering::Relaxed);
     let acks_lost = run.stats.acks_lost.load(Ordering::Relaxed);
@@ -1043,6 +1068,13 @@ async fn the_thousand_user_load_gate() {
             pct(s, 100.0)
         );
     }
+    println!(
+        "    PUSH to the daemon asked: p50 {:.3} s, p99 {:.3} s, max {:.3} s; most boxes up on a node {most_up} of {}",
+        pct(&mut queued, 50.0),
+        pct(&mut queued, 99.0),
+        pct(&mut queued, 100.0),
+        k.node_cap
+    );
     println!("    sleeps {slept}: {idle_sleeps} idle, {} at the cap; archived {} ({archived_before} before the clock started)",
         slept.saturating_sub(idle_sleeps), archived);
     println!("    PUSH to ACK: n {}, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, max {:.1} ms; unacked {acks_lost}",
@@ -1059,7 +1091,7 @@ async fn the_thousand_user_load_gate() {
         k.sockets
     );
     println!(
-        "    process (relay + clients + fake daemons): {:.2} cores, {rss_mb:.0} MB resident",
+        "    process (relay + clients + fake daemons): {:.2} cores, {rss_mb:.0} MB resident at most",
         (cpu_after - cpu_before) / wall
     );
 
@@ -1078,6 +1110,11 @@ async fn the_thousand_user_load_gate() {
                 refusals.len()
             ),
             waitlist + waitlist_after == 0 && refusals.is_empty() && cap.has_room,
+        ),
+        verdict(
+            "no node over its cap at any instant",
+            format!("{most_up} of {}", k.node_cap),
+            most_up <= k.node_cap,
         ),
         verdict(
             "p95 Asleep-Clean wake < 1.0 s",
