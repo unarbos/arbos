@@ -940,6 +940,10 @@ async fn handle_frame(
                 // docs/box-scaling.md §4.2: a chat on screen asks its cold box back.
                 if focused.is_some() {
                     crate::boxd::prefetch_for_project(state, project_id).await;
+                    // §4.2: and wakes a sleeping one while its node has room to spare.
+                    if project_id != people::PEOPLE_PROJECT {
+                        crate::boxd::wake_for_focus(state, project_id).await;
+                    }
                 }
                 // §4.2: typing in an agent's chat wakes its sleeping box ahead of the message.
                 if f.header.get("typing").and_then(|v| v.as_bool()) == Some(true)

@@ -195,6 +195,9 @@ agentd calls busy, or one still on its way up. A box that wakes on a busy node t
 free slot at once instead of waiting for another box's sleep, and a node with more wanted than
 it holds runs at most `max_resident` less eight boxes awake, 152 of 160. Only when the free
 slots are all taken does a wake wait for the sleep of the box it takes the place of.
+A sleeping box is woken when its user types in its chat or sends, and already when the chat
+comes on screen if its node is at or below that soft ceiling; a box its user stopped is woken
+by neither.
 
 **Certificates.** One private CA for the pool, kept off the hosts; from it a certificate for
 each node, naming the address the relay dials, and one for the relay:

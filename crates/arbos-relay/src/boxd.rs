@@ -78,8 +78,14 @@ const WAKES_PER_NODE: usize = 8;
 /// does not first wait for another box to be put to sleep: with none, at 3,000 and at 5,000
 /// users with every node at its cap, half the wakes waited 0.51 s for that sleep before the
 /// daemon was asked. It is the wakes a node is asked for at once, so none of those waits; the
-/// slots are refilled behind them ([`keep_headroom`]). It costs a node at its cap that many of
-/// its boxes awake, 8 of 160, and a node with a small cap never gives up more than a quarter.
+/// slots are refilled behind them ([`keep_headroom`]).
+///
+/// So the cap is the hard ceiling and the cap less this the soft one: below the soft one an
+/// idle box keeps its fifteen minutes ([`IDLE_MS`]), and above it the box its user left longest
+/// is put to sleep now. That is cheap for its user, whose next message brings it back in the
+/// 250 ms a restore was measured at on Linux (275 ms for a clean start). It costs a node at
+/// its cap that many of its boxes awake, 8 of 160, and a node with a small cap never gives up
+/// more than a quarter.
 const HEADROOM: usize = WAKES_PER_NODE;
 /// How often a node's headroom is looked at when no wake has asked for it to be.
 const HEADROOM_TICK: Duration = Duration::from_secs(5);
@@ -1375,28 +1381,48 @@ pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
 /// box asleep behind it is woken now, the second or three before the message is sent. A box its
 /// user stopped stays down until they send or start it, as it does for everything but those.
 pub async fn wake_for_typing(state: &AppState, project_id: &str) {
-    if state.cfg.boxd.is_none() {
-        return;
+    if let Some(user_id) = asleep_behind(state, project_id).await {
+        boxes::ensure_awake(state, &user_id, "typing").await;
     }
-    let Some(user_id) = state.user_of(project_id) else {
+}
+
+/// A person has a chat of this project on screen (`focused_chat` on `PRESENCE`): a `boxd` box
+/// asleep behind it is woken now, so it is up before the first keystroke, while its node is at
+/// or below its soft ceiling ([`HEADROOM`]). On a node above it a look is not worth another
+/// box's sleep, and the box waits for the typing or the message.
+pub async fn wake_for_focus(state: &AppState, project_id: &str) {
+    let Some(user_id) = asleep_behind(state, project_id).await else {
         return;
     };
+    let Ok(node) = node_of(state, &user_id) else {
+        return;
+    };
+    let spare = match see(state, node, &user_id).await {
+        Ok(seen) => seen.resident + node.headroom() <= node.max_resident,
+        Err(_) => false,
+    };
+    if spare {
+        boxes::ensure_awake(state, &user_id, "focus").await;
+    }
+}
+
+/// The user whose `boxd` box is asleep behind this project, and not held down by their Stop.
+async fn asleep_behind(state: &AppState, project_id: &str) -> Option<String> {
+    state.cfg.boxd.as_ref()?;
+    let user_id = state.user_of(project_id)?;
     let on_boxd = matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == boxes::Provider::Boxd.as_str());
     // Fail closed: a hold that cannot be read is a hold.
-    if !on_boxd
-        || state.box_state(&user_id).await.0 != BoxState::Asleep
-        || state.db.box_held(&user_id).unwrap_or(true)
-    {
-        return;
-    }
-    boxes::ensure_awake(state, &user_id, "typing").await;
+    let asleep = on_boxd
+        && state.box_state(&user_id).await.0 == BoxState::Asleep
+        && !state.db.box_held(&user_id).unwrap_or(true);
+    asleep.then_some(user_id)
 }
 
 // ---- the cold tier (§3.3) and the prefetch (§4.2) --------------------------------------------
 
 /// A client has a chat of this project on screen (`focused_chat` on `PRESENCE`): if the box
-/// behind it is cold, ask it back now, so the wake that a message brings finds it on the host.
-/// The box is not woken: looking at a chat is not using the machine.
+/// behind it is cold, ask it back now, so its wake finds it on the host. Whether the look also
+/// wakes it is [`wake_for_focus`]'s to say.
 pub async fn prefetch_for_project(state: &AppState, project_id: &str) {
     if state.cfg.boxd.is_none() {
         return;
@@ -3693,5 +3719,33 @@ mod tests {
         assert!(most_up <= 12, "{most_up} boxes up under a cap of 12");
         let woken = fake.paths().iter().filter(|p| p.ends_with("/wake")).count();
         assert!(woken > 40, "the burst woke some: {woken}");
+    }
+
+    /// A chat on screen wakes the sleeping box behind it while its node is at or below its
+    /// soft ceiling: not on a node above it, and not a box its user stopped.
+    #[tokio::test]
+    async fn a_chat_on_screen_wakes_its_box_only_on_a_node_with_room_to_spare() {
+        let (state, _fake, users) = twelve_idle().await;
+        let node = &state.cfg.boxd.as_ref().unwrap().nodes[0];
+        let project = |i: usize| crate::people::tests_support::project_of(&state, &users[i], "p");
+        let projects = [project(0), project(1), project(2)];
+        // Twelve of twelve awake: above the soft ceiling of nine, and nothing is asleep yet.
+        keep_headroom(&state, node).await;
+        for user in &users[..3] {
+            assert_eq!(state.box_state(user).await.0, BoxState::Asleep);
+        }
+        // Nine awake, at the soft ceiling. A stopped box stays down; a sleeping one comes up.
+        state.db.set_box_held(&users[2], true).unwrap();
+        wake_for_focus(&state, &projects[2]).await;
+        assert_eq!(state.box_state(&users[2]).await.0, BoxState::Asleep);
+        wake_for_focus(&state, &projects[0]).await;
+        assert_eq!(state.box_state(&users[0]).await.0, BoxState::Waking);
+        let jobs = state.db.due_wake_jobs().unwrap();
+        assert_eq!((jobs.len(), jobs[0].1.as_str()), (1, "focus"));
+        // Ten with a slot now, above the soft ceiling: the next look wakes nothing, typing does.
+        wake_for_focus(&state, &projects[1]).await;
+        assert_eq!(state.box_state(&users[1]).await.0, BoxState::Asleep);
+        wake_for_typing(&state, &projects[1]).await;
+        assert_eq!(state.box_state(&users[1]).await.0, BoxState::Waking);
     }
 }
