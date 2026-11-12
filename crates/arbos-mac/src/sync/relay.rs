@@ -3223,8 +3223,8 @@ fn apply_native_unread(shared: &Arc<Shared>) {
 /// Read every native chat's room once per homeserver client: the newest page, then live
 /// rows through the listener, so an unopened chat still previews and notifies the way a
 /// synced Loro doc does.
-// One `/messages` request per native chat per launch, one after the other; a persistent
-// event cache (spec §3.2) is what makes this free.
+// Read from the device's event store; the homeserver is asked only for a chat the store
+// holds less than a page of.
 async fn open_native_rooms(shared: Arc<Shared>) {
     let Some(client) = matrix_client(&shared) else {
         return;
@@ -3238,6 +3238,7 @@ async fn open_native_rooms(shared: Arc<Shared>) {
         .collect();
     // A client that was replaced reads for nobody: `native_opened` is the current one's.
     let current = || matrix_client(&shared).is_some_and(|c| Arc::ptr_eq(&c, &client));
+    let mut opened = Vec::new();
     for chat_id in chats {
         let Some(room) = shared.native_room(&chat_id) else {
             continue;
@@ -3245,18 +3246,54 @@ async fn open_native_rooms(shared: Arc<Shared>) {
         if !current() || !shared.native_opened.lock().unwrap().insert(room.clone()) {
             continue;
         }
-        let opened = client.open_room(&room).await;
+        let rows = client.open_room(&room).await;
         if !current() {
             return;
         }
-        match opened {
-            Ok(rows) => emit_native(&shared, &chat_id, &rows),
+        match rows {
+            Ok(rows) => {
+                emit_native(&shared, &chat_id, &rows);
+                opened.push((chat_id, room));
+            }
             Err(err) => {
                 shared.native_opened.lock().unwrap().remove(&room);
                 if !matches!(err, MatrixError::NoRoom(_)) {
                     shared.diagnostic("matrix-people-open", err.to_string());
                 }
             }
+        }
+    }
+    // Once every chat shows what its room has: what each said before it was read there.
+    for (chat_id, room) in opened {
+        if !current() {
+            return;
+        }
+        carry_history(&shared, &client, &chat_id, &room).await;
+    }
+}
+
+/// Carry a native chat's earlier history from its Loro room into its homeserver room: the
+/// relay hands out signed rows a batch at a time, the homeserver client sends them, and the
+/// relay is told which events they became. Stops at the first thing that fails (the next
+/// launch, or another member's device, takes it up there) and when another device is at it.
+async fn carry_history(shared: &Arc<Shared>, client: &MatrixClient, chat_id: &str, room: &str) {
+    let path = format!("/chats/{chat_id}/matrix/history");
+    loop {
+        let Ok(page) = shared.get_json(&path).await else {
+            return;
+        };
+        if page["rows"].as_array().is_none_or(Vec::is_empty) {
+            return;
+        }
+        let carried = match client.carry_history(room, &page.to_string()).await {
+            Ok(report) => serde_json::from_str::<Value>(&report).unwrap_or(Value::Null),
+            Err(err) => {
+                shared.diagnostic("matrix-history", err.to_string());
+                return;
+            }
+        };
+        if shared.post_json(&path, carried).await.is_err() || page["more"] != true {
+            return;
         }
     }
 }

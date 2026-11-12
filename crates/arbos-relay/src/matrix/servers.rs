@@ -1620,8 +1620,9 @@ pub async fn me_matrix_people(State(state): State<AppState>, principal: Principa
     Json(json!({ "rooms": rooms })).into_response()
 }
 
-/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id, people_native}` for this
-/// device. The token is minted once through the appservice login
+/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id, people_native,
+/// history_key}` for this device. `history_key` is the key the relay signs carried history
+/// with (`history.rs`); an app pins the first one it is told. The token is minted once through the appservice login
 /// (`m.login.application_service`), stored encrypted, and handed back on every call; sign-out
 /// revokes it with the device. `people_native` is the user's `users.matrix_people_native`
 /// (`PUT /admin/matrix/people/{user}`); a failed lookup reads as off.
@@ -1642,9 +1643,10 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
         .db
         .matrix_people_native_users()
         .is_ok_and(|u| u.contains(&me));
+    let history_key = super::history::public_key(&state);
     if let Ok(Some((mx_device, enc))) = state.db.matrix_device(&device_id) {
         if let Ok(token) = state.relay_key.decrypt(&enc) {
-            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native }))
+            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native, "history_key": history_key }))
                 .into_response();
         }
     }
@@ -1669,7 +1671,7 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     // A device that can read channels can be told about them: the relay becomes this user's
     // push gateway (every live device; reads.rs `on_notify` fans channel messages out).
     state.matrix.pushers(&state, &me, true);
-    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native }))
+    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native, "history_key": history_key }))
         .into_response()
 }
 

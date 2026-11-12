@@ -10,9 +10,10 @@
 //! Switches: `ARBOS_MATRIX=off|dual|on` (relay env; `off` = nothing is queued, `dual` = stage A
 //! writes, `on` = reads allowed per user, stage B), `ARBOS_MATRIX_E2EE=on` (stage D: new DMs
 //! and private groups of up to [`E2EE_MEMBER_CAP`] members are created end-to-end encrypted and
-//! the relay stops mirroring messages into them; channels stay plaintext. Flip it once every
-//! shipped app decrypts — an older app cannot read or post in an encrypted room, and a room
-//! never goes back) and the kill switch file `/etc/arbos/matrix.disabled` (the worker pauses; the outbox keeps queueing).
+//! the relay stops mirroring messages into them; channels stay plaintext. An older app cannot
+//! read or post in an encrypted room, and a room never goes back, so
+//! `ARBOS_MATRIX_E2EE_MIN_CLIENTS` names the oldest app of each platform that decrypts and a
+//! chat is encrypted only when everyone in it runs at least that, [`clients_decrypt`]) and the kill switch file `/etc/arbos/matrix.disabled` (the worker pauses; the outbox keeps queueing).
 //!
 //! Identity (design §2.3): `@<user_id>:arbos.life` for people (the relay `user_id` is the
 //! localpart, lower-cased), `@_a_<project_id>:arbos.life` for agents.
@@ -21,6 +22,8 @@ pub mod appservice;
 pub mod backfill;
 pub mod client;
 pub mod db;
+pub mod history;
+pub mod native;
 pub mod reads;
 pub mod servers;
 pub mod servers_db;
@@ -66,6 +69,85 @@ pub fn people_native_room(
     }
     let room = state.db.matrix_room(&cm.chat.id).ok()??;
     (room.closed_at.is_none() && room.project_id.is_none()).then_some(room.room_id)
+}
+
+/// An app as it names itself in `X-Arbos-Client`: `(platform, version, build)`.
+pub type AppBuild = (String, String, String);
+
+/// `ARBOS_MATRIX_E2EE_MIN_CLIENTS`: what the apps send as `X-Arbos-Client`, one per platform,
+/// comma-separated (`mac/0.6.420, ios/1.0.0 (202611200000)`). A value that does not read as
+/// that stops the relay rather than switching the check off.
+fn min_clients(s: Option<&str>) -> anyhow::Result<Vec<AppBuild>> {
+    s.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            crate::releases::parse_client(c).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARBOS_MATRIX_E2EE_MIN_CLIENTS: {c:?} is not platform/version (build)"
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether an app at `have` is at least `min`, both `(version, build)`: dotted numbers, then
+/// the build number when `min` names one. A part that is not a number counts as 0.
+fn at_least(have: (&str, &str), min: (&str, &str)) -> bool {
+    let parts = |v: &str| {
+        let mut n: Vec<u64> = v.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+        while n.last() == Some(&0) {
+            n.pop();
+        }
+        n
+    };
+    let build = |b: &str| b.parse::<u64>().unwrap_or(0);
+    match parts(have.0).cmp(&parts(min.0)) {
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => min.1.is_empty() || build(have.1) >= build(min.1),
+    }
+}
+
+/// A signed-in device counts for [`clients_decrypt`] when it was seen this recently; one
+/// left in a drawer does not keep its owner's chats in the clear for good.
+const ACTIVE_DEVICE_MS: i64 = 30 * 24 * 3_600_000;
+
+/// Whether every one of `users` runs apps that decrypt: each has a signed-in device, and each
+/// of their devices seen in the last [`ACTIVE_DEVICE_MS`] (or, when none was, the one seen
+/// last) last said it runs at least its platform's minimum. A device that never said what it
+/// runs, or runs a platform with no minimum, does not. A failed lookup reads as no: an
+/// unencrypted chat is one everybody can read.
+pub fn clients_decrypt<'a>(state: &AppState, users: impl Iterator<Item = &'a str>) -> bool {
+    let min = &state.matrix.cfg.e2ee_min_clients;
+    if min.is_empty() {
+        return true;
+    }
+    let now = arbos_core::ids::now_ms();
+    for user in users {
+        let Ok(mut devices) = state.db.matrix_device_clients(user) else {
+            return false;
+        };
+        // Newest first; the active ones, or the newest alone.
+        devices.sort_by_key(|(seen, _)| std::cmp::Reverse(*seen));
+        let active = devices
+            .iter()
+            .filter(|(seen, _)| now - seen <= ACTIVE_DEVICE_MS)
+            .count()
+            .max(1);
+        let decrypts = |client: &Option<AppBuild>| {
+            client.as_ref().is_some_and(|(platform, version, build)| {
+                min.iter()
+                    .find(|(p, _, _)| p == platform)
+                    .is_some_and(|(_, v, b)| at_least((version, build), (v, b)))
+            })
+        };
+        if devices.is_empty() || !devices.iter().take(active).all(|(_, c)| decrypts(c)) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `ARBOS_MATRIX`.
@@ -134,6 +216,10 @@ pub struct Config {
     pub hs_token_bridges: String,
     /// Stage D: DMs and private groups made from now on carry `m.room.encryption`.
     pub e2ee: bool,
+    /// The oldest app of each platform that decrypts (`ARBOS_MATRIX_E2EE_MIN_CLIENTS`), as
+    /// `(platform, version, build)`. A chat is made encrypted only when every person in it
+    /// runs at least these ([`clients_decrypt`]); empty means nobody is checked.
+    pub e2ee_min_clients: Vec<AppBuild>,
     pub disabled_file: PathBuf,
 }
 
@@ -172,6 +258,7 @@ impl Config {
             as_token_users: as_users,
             hs_token_users: hs_users,
             e2ee: get("ARBOS_MATRIX_E2EE").as_deref() == Some("on"),
+            e2ee_min_clients: min_clients(get("ARBOS_MATRIX_E2EE_MIN_CLIENTS").as_deref())?,
             disabled_file: PathBuf::from(DISABLED_FILE),
         })
     }
@@ -188,6 +275,7 @@ impl Config {
             as_token_bridges: String::new(),
             hs_token_bridges: String::new(),
             e2ee: false,
+            e2ee_min_clients: Vec::new(),
             disabled_file: PathBuf::from(DISABLED_FILE),
         }
     }
@@ -324,6 +412,35 @@ pub enum Job {
         chat_id: String,
         project_id: Option<String>,
     },
+    /// Phase 3: a member's device sent this message into the chat's room on the homeserver;
+    /// write it into the Loro room (`native.rs`). `reply_to` is the event it answers.
+    NativeMessage {
+        chat_id: String,
+        event_id: String,
+        user_id: String,
+        message_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parts: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+        ts: i64,
+    },
+    /// Phase 3: an event was removed in the chat's room on the homeserver; remove its Loro row
+    /// (or take back the reaction it was).
+    NativeRemoval { chat_id: String, event_id: String },
+    /// Phase 3: a member's device reacted with `key` to the event `target` on the homeserver;
+    /// put the reaction on the Loro row.
+    NativeReaction {
+        chat_id: String,
+        event_id: String,
+        user_id: String,
+        target: String,
+        key: String,
+    },
+    /// Phase 3: read the chat's room from its beginning and write into the Loro room whatever
+    /// its members sent there that the Loro room does not have (`native.rs`).
+    NativeCatchUp { chat_id: String },
 }
 
 impl Job {
@@ -335,7 +452,11 @@ impl Job {
             | Job::Read { chat_id, .. }
             | Job::Archive { chat_id, .. }
             | Job::CloseRoom { chat_id }
-            | Job::Resync { chat_id, .. } => chat_id,
+            | Job::Resync { chat_id, .. }
+            | Job::NativeMessage { chat_id, .. }
+            | Job::NativeRemoval { chat_id, .. }
+            | Job::NativeReaction { chat_id, .. }
+            | Job::NativeCatchUp { chat_id } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
             Job::SyncServer { server_id } => server_id,
             Job::SyncChannel { channel_id } | Job::ChannelNotice { channel_id, .. } => channel_id,
@@ -386,6 +507,10 @@ pub struct Matrix {
     pub cfg: Config,
     pub wake: Notify,
     pub counters: Counters,
+    /// The device carrying each chat's history into its room, and until when (`history.rs`).
+    pub history_leases: std::sync::Mutex<std::collections::HashMap<String, (String, i64)>>,
+    /// The people whose homeserver account has been told a carried row is no new message.
+    pub history_quiet: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Matrix {
@@ -394,6 +519,8 @@ impl Matrix {
             cfg,
             wake: Notify::new(),
             counters: Counters::default(),
+            history_leases: Default::default(),
+            history_quiet: Default::default(),
         })
     }
 
@@ -613,6 +740,115 @@ mod tests {
         assert_eq!(Mode::parse(Some("dual")).unwrap(), Mode::Dual);
         assert_eq!(Mode::parse(Some(" on ")).unwrap(), Mode::On);
         assert!(Mode::parse(Some("yes")).is_err());
+    }
+
+    #[test]
+    fn the_oldest_apps_that_decrypt_are_read_or_the_relay_does_not_start() {
+        assert!(min_clients(None).unwrap().is_empty());
+        assert!(min_clients(Some(" ")).unwrap().is_empty());
+        assert_eq!(
+            min_clients(Some("mac/0.6.420, ios/1.0.0 (202611200000)")).unwrap(),
+            [
+                ("mac".to_owned(), "0.6.420".to_owned(), String::new()),
+                (
+                    "ios".to_owned(),
+                    "1.0.0".to_owned(),
+                    "202611200000".to_owned()
+                ),
+            ]
+        );
+        assert!(min_clients(Some("mac")).is_err());
+        assert!(min_clients(Some("mac/0.6.420, on")).is_err());
+        // (have, min) -> at least
+        for (have, min, ok) in [
+            (("0.6.420", ""), ("0.6.420", ""), true),
+            (("0.6.421", ""), ("0.6.420", ""), true),
+            (("0.7", ""), ("0.6.420", ""), true),
+            (("0.6.42", ""), ("0.6.420", ""), false),
+            (("0.6.419", "9999"), ("0.6.420", ""), false),
+            (("1.0", "202611200000"), ("1.0.0", "202611200000"), true),
+            (("1.0.0", "202611190000"), ("1.0.0", "202611200000"), false),
+            (("1.0.1", "1"), ("1.0.0", "202611200000"), true),
+            (("1.0.0", ""), ("1.0.0", "202611200000"), false),
+            (("", ""), ("0.0.1", ""), false),
+            (("soon", ""), ("0.0.1", ""), false),
+        ] {
+            assert_eq!(at_least(have, min), ok, "{have:?} against {min:?}");
+        }
+    }
+
+    #[test]
+    fn a_chat_is_encrypted_only_when_everyone_in_it_runs_an_app_that_decrypts() {
+        use crate::people::tests_support::person;
+        use crate::state::test_support::test_state;
+        let mut state = test_state(crate::state::AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1501);
+        let (bob, bob_dev) = person(&state, 1502);
+        let device = |p: &crate::auth::Principal| match p {
+            crate::auth::Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!(),
+        };
+        let (alice_dev, bob_dev) = (device(&alice_dev), device(&bob_dev));
+        let both = || clients_decrypt(&state, [alice.as_str(), bob.as_str()].into_iter());
+        // No minimum named: nobody is checked.
+        assert!(both());
+        state.matrix = Matrix::new(Config {
+            e2ee_min_clients: min_clients(Some("mac/0.6.420, ios/1.0.0 (500)")).unwrap(),
+            ..Config::off()
+        });
+        let both = || clients_decrypt(&state, [alice.as_str(), bob.as_str()].into_iter());
+        let now = arbos_core::ids::now_ms();
+        let seen = |dev: &str, at: i64| {
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE devices SET last_seen_at = ?2 WHERE id = ?1",
+                        rusqlite::params![dev, at],
+                    )
+                })
+                .unwrap();
+        };
+        let runs = |dev: &str, user: &str, platform: &str, version: &str, build: &str, at: i64| {
+            state
+                .db
+                .note_device_version(dev, user, platform, version, build, at)
+                .unwrap();
+            seen(dev, at);
+        };
+        // Devices that never said what they run.
+        assert!(!both());
+        runs(&alice_dev, &alice, "mac", "0.6.420", "1", now);
+        assert!(!both(), "bob's is still unknown");
+        runs(&bob_dev, &bob, "ios", "1.0.0", "499", now);
+        assert!(!both(), "bob's build is one short");
+        runs(&bob_dev, &bob, "ios", "1.0.0", "500", now + 1);
+        assert!(both());
+        // What a device said last is what counts, not the best it ever said.
+        runs(&bob_dev, &bob, "ios", "0.9.0", "900", now + 2);
+        assert!(!both());
+        runs(&bob_dev, &bob, "ios", "1.0.1", "1", now + 3);
+        assert!(both());
+        // A second device of Alice's on an old build, in use: not yet.
+        let old = arbos_core::ids::ulid();
+        state
+            .db
+            .insert_device(&old, "old mac", &arbos_core::ids::ulid(), &alice, "github")
+            .unwrap();
+        runs(&old, &alice, "mac", "0.6.300", "1", now);
+        assert!(!both());
+        // The same device last seen two months ago does not hold her back; signed out, neither.
+        seen(&old, now - 2 * ACTIVE_DEVICE_MS);
+        assert!(both());
+        seen(&old, now);
+        assert!(!both());
+        state.db.revoke_device_fully(&old).unwrap();
+        assert!(both());
+        // A platform with no minimum is not known to decrypt.
+        runs(&bob_dev, &bob, "android", "9.9.9", "1", now + 4);
+        assert!(!both());
+        // Someone with no device at all reads nothing encrypted.
+        assert!(!clients_decrypt(&state, ["gh_nobody"].into_iter()));
     }
 
     #[test]

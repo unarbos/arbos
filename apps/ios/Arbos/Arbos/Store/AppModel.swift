@@ -511,6 +511,9 @@ final class AppModel: ObservableObject {
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
     var channelLoading: Set<Id> = []
+    /// Native chats whose earlier history this launch has already offered to carry
+    /// (`carryHistory`).
+    var historyAsked: Set<Id> = []
     /// Servers whose member list was asked for this session (`wantServerRosters`).
     var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).

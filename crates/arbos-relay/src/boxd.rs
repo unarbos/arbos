@@ -2120,9 +2120,14 @@ mod tests {
     #[tokio::test]
     async fn a_box_is_ranked_by_its_last_turn_and_not_by_its_own_requests() {
         let (state, _fake, user) = relay().await;
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         let mut row = state.db.user_box(&user).unwrap().unwrap();
         row.last_started_at = Some(1);
         state.db.upsert_box(&row).unwrap();
@@ -2286,9 +2291,14 @@ mod tests {
 
     /// A box made on the fake daemon and asleep since `asleep_ms` ago.
     async fn asleep_for(state: &AppState, user: &str, asleep_ms: i64) {
-        boxes::create_box(state, user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            state,
+            &mut state.restart.admit_creation(user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         boxes::stop_box(state, user, false).await.unwrap();
         let mut row = state.db.user_box(user).unwrap().unwrap();
         row.last_stopped_at = Some(now_ms() - asleep_ms);
@@ -2611,9 +2621,14 @@ mod tests {
     #[tokio::test]
     async fn the_cold_replies_are_validated_and_a_cold_sleep_is_recorded() {
         let (state, fake, user) = relay().await;
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         fake.answer(
             "sleep",
             200,
@@ -2693,9 +2708,14 @@ mod tests {
     async fn typing_wakes_a_sleeping_box_and_leaves_a_stopped_one_down() {
         let (mut state, fake, user) = relay().await;
         let project = crate::people::tests_support::project_of(&state, &user, "Typing");
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
         wake_for_typing(&state, &project).await;
         assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
@@ -2794,9 +2814,14 @@ mod tests {
     }
 
     async fn make_awake(state: &AppState, user: &str) {
-        boxes::create_box(state, user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            state,
+            &mut state.restart.admit_creation(user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(user, BoxState::Awake, None).await;
     }
 
@@ -2897,7 +2922,13 @@ mod tests {
         // An admin's delete drops the row and leaves the disk; the next box is made where the
         // disk is, or not at all.
         state.db.delete_box_row(&a).unwrap();
-        let e = boxes::create_box(&state, &a, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&a).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("node-1 did not answer"));
         assert!(state.db.user_box(&a).unwrap().is_none());
         assert_eq!(
@@ -2909,7 +2940,13 @@ mod tests {
         // Nor is a box sent to a node this relay no longer lists.
         let cfg = Arc::get_mut(&mut state.cfg).expect("one holder");
         cfg.boxd.as_mut().unwrap().nodes.pop();
-        let e = boxes::create_box(&state, &a, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&a).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("node-1 is not one"));
         assert_eq!(asked(&fake0, &a), [] as [&str; 0]);
     }
@@ -2934,7 +2971,13 @@ mod tests {
         let (state, [fake0, fake1], [a, ..]) = two_nodes([160, 160]).await;
         fake0.answer("status", 200, listing(&a));
         fake1.answer("status", 200, listing(&a));
-        let e = boxes::create_box(&state, &a, Provider::Boxd, None).await;
+        let e = boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&a).await,
+            Provider::Boxd,
+            None,
+        )
+        .await;
         assert!(e.unwrap_err().to_string().contains("more than one node"));
         assert_eq!(
             [asked(&fake0, &a), asked(&fake1, &a)],
@@ -3235,9 +3278,14 @@ mod tests {
     #[tokio::test]
     async fn a_queued_wake_reaches_the_daemon_at_once() {
         let (state, fake, user) = relay().await;
-        boxes::create_box(&state, &user, Provider::Boxd, None)
-            .await
-            .unwrap();
+        boxes::create_box(
+            &state,
+            &mut state.restart.admit_creation(&user).await,
+            Provider::Boxd,
+            None,
+        )
+        .await
+        .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
         boxes::stop_box(&state, &user, false).await.unwrap();
         boxes::spawn_wake_runner(state.clone()).await;

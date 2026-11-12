@@ -137,6 +137,17 @@ final class ServerChannelSenderTests: XCTestCase {
         }
     }
 
+    func testTheHistoryKeyIsTheRelaysStringOrNone() {
+        func parsed(_ key: String) -> String? {
+            let json = #"{"homeserver":"https://hs","user_id":"@gh_7:hs","access_token":"t","device_id":"D"\#(key)}"#
+            return MatrixCredentials.parse(try! JSONSerialization.jsonObject(with: Data(json.utf8)))?.historyKey
+        }
+        XCTAssertEqual(parsed(#","history_key":"6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw""#), "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw")
+        for none in ["", #","history_key":null"#, #","history_key":7"#] {
+            XCTAssertNil(parsed(none), none)
+        }
+    }
+
     /// A row as `arbos_matrix::rows::message_row` writes it.
     private func native(_ id: String, mxid: String, text: String, locked: Bool = false, pending: Bool = false,
                         extra: String = "") -> ArbosFFI.MatrixMessageRow {

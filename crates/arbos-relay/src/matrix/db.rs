@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS matrix_devices (
   device_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, mxid TEXT NOT NULL, mx_device_id TEXT NOT NULL,
   mx_token_enc TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS matrix_reactions (
+  chat_id TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  key TEXT NOT NULL, PRIMARY KEY (chat_id, event_id)
+);
 CREATE TABLE IF NOT EXISTS matrix_txn_seen (
   appservice TEXT NOT NULL, txn_id TEXT NOT NULL, seen_at INTEGER NOT NULL, events INTEGER NOT NULL,
   PRIMARY KEY (appservice, txn_id)
@@ -53,6 +57,10 @@ pub fn migrate_matrix(c: &Connection) {
     );
     let _ = c.execute(
         "ALTER TABLE users ADD COLUMN matrix_people_native INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE matrix_events ADD COLUMN carried INTEGER NOT NULL DEFAULT 0",
         [],
     );
 }
@@ -372,6 +380,18 @@ impl Db {
         })
     }
 
+    /// The message a chat's event is (`matrix_events`, read the other way).
+    pub fn matrix_message_of(&self, chat_id: &str, event_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT message_id FROM matrix_events WHERE chat_id = ?1 AND event_id = ?2",
+                params![chat_id, event_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn matrix_insert_event(
         &self,
         chat_id: &str,
@@ -386,6 +406,39 @@ impl Db {
                 params![chat_id, message_id, event_id, sender, ts],
             )?;
             Ok(())
+        })
+    }
+
+    /// A member's device carried this row into the room with the relay's signature
+    /// (`history.rs`). A row the mirror had already written keeps the mirror's event.
+    pub fn matrix_record_carried(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        event_id: &str,
+        sender: &str,
+        ts: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO matrix_events(chat_id, message_id, event_id, sender, ts, carried) VALUES (?1, ?2, ?3, ?4, ?5, 1)
+                 ON CONFLICT(chat_id, message_id) DO UPDATE SET carried = 1",
+                params![chat_id, message_id, event_id, sender, ts],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every message of a chat the room has an event for, and whether a device carried it.
+    pub fn matrix_events_carried(
+        &self,
+        chat_id: &str,
+    ) -> Result<std::collections::HashMap<String, bool>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT message_id, carried FROM matrix_events WHERE chat_id = ?1")?;
+            let rows = st.query_map(params![chat_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
         })
     }
 
@@ -614,6 +667,80 @@ impl Db {
                 params![device_id],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Every signed-in device of a user: when it was last seen (when it was made, if never),
+    /// and the `(platform, version, build)` it last said it runs, if it ever said.
+    pub fn matrix_device_clients(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(i64, Option<super::AppBuild>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT COALESCE(d.last_seen_at, d.created_at), v.platform, v.app_version, v.build
+                 FROM devices d LEFT JOIN device_versions v ON v.rowid = (
+                   SELECT rowid FROM device_versions WHERE device_id = d.id
+                   ORDER BY last_seen_at DESC, rowid DESC LIMIT 1)
+                 WHERE d.user_id = ?1 AND d.revoked_at IS NULL",
+            )?;
+            let rows = st.query_map(params![user_id], |r| {
+                let platform: Option<String> = r.get(1)?;
+                Ok((
+                    r.get(0)?,
+                    match platform {
+                        Some(p) => Some((p, r.get(2)?, r.get(3)?)),
+                        None => None,
+                    },
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
+    // ---- reactions carried back from the homeserver (phase 3) ---------------------------------
+
+    /// Remember the reaction an event of a chat's room is; `false` when it was known.
+    pub fn matrix_insert_reaction(
+        &self,
+        chat_id: &str,
+        event_id: &str,
+        message_id: &str,
+        user_id: &str,
+        key: &str,
+    ) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "INSERT OR IGNORE INTO matrix_reactions(chat_id, event_id, message_id, user_id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![chat_id, event_id, message_id, user_id, key],
+            )? > 0)
+        })
+    }
+
+    /// Forget the reaction an event was: `(message_id, user_id, key, whether another event of
+    /// that person still holds the same reaction on the message)`.
+    pub fn matrix_take_reaction(
+        &self,
+        chat_id: &str,
+        event_id: &str,
+    ) -> Result<Option<(String, String, String, bool)>> {
+        self.with(|c| {
+            let Some((message_id, user_id, key)) = c
+                .query_row(
+                    "DELETE FROM matrix_reactions WHERE chat_id = ?1 AND event_id = ?2 RETURNING message_id, user_id, key",
+                    params![chat_id, event_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let held: i64 = c.query_row(
+                "SELECT COUNT(*) FROM matrix_reactions WHERE chat_id = ?1 AND message_id = ?2 AND user_id = ?3 AND key = ?4",
+                params![chat_id, message_id, user_id, key],
+                |r| r.get(0),
+            )?;
+            Ok(Some((message_id, user_id, key, held > 0)))
         })
     }
 

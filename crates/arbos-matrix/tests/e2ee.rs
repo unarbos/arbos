@@ -106,6 +106,7 @@ impl Hs {
             access_token: v["access_token"].as_str().unwrap().into(),
             device_id: v["device_id"].as_str().unwrap().into(),
             people_native: false,
+            history_key: None,
         }
     }
 }
@@ -777,7 +778,8 @@ fn row_json(r: &MessageRow) -> Value {
 /// Phase 3 verbs in a people chat, two native devices: a send shows before the homeserver has
 /// it, a reply names the row it answers, a reaction is the reacting account's and comes off
 /// again, a removed message leaves both timelines, and a receipt lands on the row asked for.
-/// In an encrypted chat the reply is ciphertext on the homeserver and a reaction is refused.
+/// In an encrypted chat the reply and the reaction are ciphertext on the homeserver, which is
+/// told neither the row they are about nor the emoji, and counts no unread for a reaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn people_chats_reply_react_remove_and_read() {
     let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
@@ -955,12 +957,12 @@ async fn people_chats_reply_react_remove_and_read() {
 
     // React: Bob's reaction reads as Bob's on both devices; asking twice sends it once.
     bob1.react(&dm, &first, "👍", true).await.unwrap();
-    let reacted = |c: Arc<MatrixClient>, on: bool| {
-        let (dm, first, bob) = (dm.clone(), first.clone(), bob.clone());
+    let reacted = |c: Arc<MatrixClient>, room: &String, row: &String, on: bool| {
+        let (room, row, bob) = (room.clone(), row.clone(), bob.clone());
         async move {
             eventually(|| async {
-                let rows = c.open_room(&dm).await.ok()?;
-                let v = row_json(rows.iter().find(|r| r.event_id == first)?);
+                let rows = c.open_room(&room).await.ok()?;
+                let v = row_json(rows.iter().find(|r| r.event_id == row)?);
                 (v["reactions"]["👍"][format!("user:{bob}")].as_bool() == on.then_some(true))
                     .then_some(v)
             })
@@ -968,7 +970,7 @@ async fn people_chats_reply_react_remove_and_read() {
         }
     };
     for c in [&alice1, &bob1] {
-        let v = reacted(c.clone(), true).await;
+        let v = reacted(c.clone(), &dm, &first, true).await;
         assert_eq!(v["reactions"].as_object().unwrap().len(), 1, "{v}");
     }
     bob1.react(&dm, &first, "👍", true).await.unwrap();
@@ -986,12 +988,12 @@ async fn people_chats_reply_react_remove_and_read() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["type"] == "m.reaction")
+        .filter(|e| e["type"] == arbos_matrix::rows::REACTION)
         .count();
     assert_eq!(reactions, 1, "the second ask sent nothing");
     bob1.react(&dm, &first, "👍", false).await.unwrap();
     for c in [&alice1, &bob1] {
-        reacted(c.clone(), false).await;
+        reacted(c.clone(), &dm, &first, false).await;
     }
 
     // Read: a private receipt on the row asked for, and a bad id is refused here.
@@ -1025,8 +1027,9 @@ async fn people_chats_reply_react_remove_and_read() {
     let reply = row_of(alice1.clone(), dm.clone(), "01P3VERBSREPLY000000000000").await;
     assert!(row_json(&reply)["replyTo"].is_null());
 
-    // Encrypted chat: the message and its reply are ciphertext on the homeserver, the reply
-    // still names its row, and a reaction is refused rather than sent in the clear.
+    // Encrypted chat: the message, its reply and a reaction are ciphertext on the homeserver.
+    // The reply still names its row and the reaction reads as Bob's, though nothing outside
+    // the ciphertext says which row either is about, or with what.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let secret = alice1
         .send_text(
@@ -1050,7 +1053,24 @@ async fn people_chats_reply_react_remove_and_read() {
     let reply = row_of(alice1.clone(), group.clone(), "01P3SECRETREPLY00000000000").await;
     assert_eq!(reply.text, "got the code");
     assert_eq!(row_json(&reply)["replyTo"], "01P3SECRETFIRST00000000000");
-    assert!(bob1.react(&group, &secret, "👍", true).await.is_err());
+    // Alice has Bob's reply unread; his reaction does not count as another unread message.
+    let unread = || async {
+        hs.call(
+            "GET",
+            "/_matrix/client/v3/sync?timeout=0",
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await["rooms"]["join"][&group]["unread_notifications"]["notification_count"]
+            .as_u64()
+    };
+    let before = eventually(|| async { unread().await.filter(|n| *n > 0) }).await;
+    bob1.react(&group, &secret, "👍", true).await.unwrap();
+    for c in [&alice1, &bob1] {
+        let v = reacted(c.clone(), &group, &secret, true).await;
+        assert_eq!(v["reactions"].as_object().unwrap().len(), 1, "{v}");
+    }
+    assert_eq!(unread().await, Some(before));
     let raw = hs
         .call(
             "GET",
@@ -1058,24 +1078,54 @@ async fn people_chats_reply_react_remove_and_read() {
             Some(&a.access_token),
             Value::Null,
         )
-        .await
-        .to_string();
-    assert!(raw.contains("m.room.encrypted"));
-    for clear in ["door code", "got the code", "m.reaction", "m.room.message"] {
-        assert!(
-            !raw.contains(clear),
-            "{clear} in the clear on the homeserver"
-        );
+        .await;
+    let sent: Vec<&Value> = raw["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["state_key"].is_null())
+        .collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    for e in &sent {
+        assert_eq!(e["type"], "m.room.encrypted");
+        let said = e["content"].to_string();
+        for clear in [
+            "door code",
+            "got the code",
+            "👍",
+            secret.as_str(),
+            "reply_to",
+        ] {
+            assert!(
+                !said.contains(clear),
+                "{clear} in the clear on the homeserver"
+            );
+        }
+    }
+    bob1.react(&group, &secret, "👍", false).await.unwrap();
+    for c in [&alice1, &bob1] {
+        reacted(c.clone(), &group, &secret, false).await;
     }
     // A reaction the homeserver (or a member's other client) writes there in the clear is
-    // nobody's reaction.
-    hs.call(
-        "PUT",
-        &format!("/_matrix/client/v3/rooms/{group}/send/m.reaction/forged"),
-        Some(&b.access_token),
-        json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": secret, "key": "👎" } }),
-    )
-    .await;
+    // nobody's reaction, in either spelling.
+    for (kind, content) in [
+        (
+            "m.reaction",
+            json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": secret, "key": "👎" } }),
+        ),
+        (
+            arbos_matrix::rows::REACTION,
+            arbos_matrix::rows::reaction_content(&secret, "👎"),
+        ),
+    ] {
+        hs.call(
+            "PUT",
+            &format!("/_matrix/client/v3/rooms/{group}/send/{kind}/forged"),
+            Some(&b.access_token),
+            content,
+        )
+        .await;
+    }
     alice1
         .send_text(&group, "after", "01P3SECRETAFTER00000000000")
         .await
@@ -1090,6 +1140,810 @@ async fn people_chats_reply_react_remove_and_read() {
     );
 
     for c in [alice1, bob1] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A row whose key arrives after it — a live message to a device no key was sent to, and the
+/// history it read before it had the passphrase — becomes the message by itself: the listener
+/// is handed the opened rows, with no second `open_room`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_that_arrives_after_its_message_opens_the_row() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-late-key-{tag}"));
+    let (alice, bob) = (format!("la{tag}"), format!("lb{tag}"));
+    let passphrase = "the passphrase arbos-wallet derives from the phrase";
+    let a1 = hs.register(&alice).await;
+    let b1 = hs.register(&bob).await;
+    let (alice1, bob1) = (start(&a1, &dir).await, start(&b1, &dir).await);
+    alice1.recover(passphrase).await.unwrap();
+    bob1.recover("bob's passphrase").await.unwrap();
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a1.access_token),
+            json!({ "preset": "private_chat", "invite": [b1.user_id],
+                    "initial_state": [{ "type": "m.room.encryption", "state_key": "",
+                                        "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b1.access_token),
+        json!({}),
+    )
+    .await;
+    eventually(|| async { alice1.open_room(&room).await.ok() }).await;
+    eventually(|| async { bob1.open_room(&room).await.ok() }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    alice1
+        .send_text(&room, "before the new phone", "01LATEKEYBEFORE00000000000")
+        .await
+        .unwrap();
+
+    // Alice's new phone, not yet given the passphrase: it reads the history locked, and Bob's
+    // devices send it no key for what he says next.
+    let a2 = hs.login(&alice).await;
+    let seen = Arc::new(Seen(Mutex::new(Vec::new())));
+    let alice2 = MatrixClient::start(
+        a2.clone(),
+        Crypto {
+            store_dir: dir.join(&a2.device_id),
+            store_key: Some("test store key".into()),
+            first_device: false,
+        },
+        seen.clone(),
+    )
+    .await
+    .unwrap();
+    let opened = eventually(|| async { alice2.open_room(&room).await.ok() }).await;
+    assert!(opened.iter().any(|r| r.locked), "{opened:?}");
+    bob1.send_text(
+        &room,
+        "said while it was locked",
+        "01LATEKEYLIVE0000000000000",
+    )
+    .await
+    .unwrap();
+    let last = || seen.0.lock().unwrap().last().cloned().unwrap_or_default();
+    eventually(|| async { (last().iter().filter(|r| r.locked).count() == 2).then_some(()) }).await;
+
+    // Both keys are in the backup (Alice's first device put them there) before she types the
+    // phrase; then the rows open through the listener alone.
+    let version = hs
+        .call(
+            "GET",
+            "/_matrix/client/v3/room_keys/version",
+            Some(&a1.access_token),
+            Value::Null,
+        )
+        .await["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually(|| async {
+        let keys = hs
+            .call(
+                "GET",
+                &format!("/_matrix/client/v3/room_keys/keys/{room}?version={version}"),
+                Some(&a1.access_token),
+                Value::Null,
+            )
+            .await;
+        (keys["sessions"].as_object().map_or(0, |s| s.len()) >= 2).then_some(())
+    })
+    .await;
+    alice2.recover(passphrase).await.unwrap();
+    let rows = eventually(|| async {
+        let rows = last();
+        rows.iter().all(|r| !r.locked).then_some(rows)
+    })
+    .await;
+    let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["before the new phone", "said while it was locked"]);
+
+    for c in [alice1, bob1, alice2] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An encrypted group of three native devices, as the relay makes and changes it: a member
+/// added later reads what is said from then on (and nothing of before, which stays locked),
+/// reactions and replies cross all three, and once a member is removed the next message is
+/// under a new key and never reaches them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_encrypted_group_takes_a_late_member_and_loses_one() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-group-{tag}"));
+    let mut people = Vec::new();
+    for name in ["ga", "gb", "gc"] {
+        let s = Session {
+            people_native: true,
+            ..hs.register(&format!("{name}{tag}")).await
+        };
+        let c = start(&s, &dir).await;
+        // Cross-signed devices: an encrypted room's keys go to no other kind.
+        c.recover(&format!("{name}'s passphrase")).await.unwrap();
+        people.push((s, c));
+    }
+    let [(a, alice), (b, bob), (c, carol)] = &people[..] else {
+        unreachable!()
+    };
+
+    // The room as `matrix/worker.rs::create_room_body` makes an encrypted group.
+    let group = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "visibility": "private", "is_direct": false,
+                    "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P3TRIO" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P3TRIO", "kind": "group", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.history_visibility", "state_key": "",
+                          "content": { "history_visibility": "shared" } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } },
+                    ],
+                    "power_level_content_override": { "users": {}, "invite": 0 } }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let join = |s: &Session| {
+        let (hs, group, token) = (&hs, group.clone(), s.access_token.clone());
+        async move {
+            hs.call(
+                "POST",
+                &format!("/_matrix/client/v3/join/{group}"),
+                Some(&token),
+                json!({}),
+            )
+            .await;
+        }
+    };
+    join(b).await;
+    let listed = |c: &Arc<MatrixClient>, on: bool| {
+        let c = c.clone();
+        async move {
+            eventually(|| async {
+                (c.snapshot()
+                    .await
+                    .people
+                    .iter()
+                    .any(|p| p.chat_id == "01P3TRIO")
+                    == on)
+                    .then_some(())
+            })
+            .await
+        }
+    };
+    let reads = |c: &Arc<MatrixClient>, id: &'static str| {
+        let (c, group) = (c.clone(), group.clone());
+        async move {
+            eventually(|| async {
+                let rows = c.open_room(&group).await.ok()?;
+                rows.into_iter()
+                    .find(|r| r.id == id && !r.pending && !r.locked)
+            })
+            .await
+        }
+    };
+    for c in [alice, bob] {
+        listed(c, true).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Two of them talk.
+    let one = alice
+        .send_text(&group, "one: just us two", "01P3TRIOONE000000000000000")
+        .await
+        .unwrap();
+    reads(bob, "01P3TRIOONE000000000000000").await;
+    bob.send(
+        &group,
+        "two: still two",
+        Vec::new(),
+        Some(&one),
+        "01P3TRIOTWO000000000000000",
+    )
+    .await
+    .unwrap();
+    reads(alice, "01P3TRIOTWO000000000000000").await;
+
+    // Carol is added, as the relay adds a member (the creator invites, she joins).
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/rooms/{group}/invite"),
+        Some(&a.access_token),
+        json!({ "user_id": c.user_id }),
+    )
+    .await;
+    join(c).await;
+    listed(carol, true).await;
+    // What was said before she came is not hers to read: locked rows, no content.
+    let before = eventually(|| async {
+        let rows = carol.open_room(&group).await.ok()?;
+        (rows.len() >= 2).then_some(rows)
+    })
+    .await;
+    assert!(before.iter().all(|r| r.locked), "{before:?}");
+    assert!(!format!("{before:?}").contains("just us two"));
+    // And no key is on its way: the rows say so instead of asking her to wait.
+    assert!(
+        before
+            .iter()
+            .all(|r| r.text == arbos_matrix::rows::LOCKED_BEFORE_JOIN),
+        "{before:?}"
+    );
+
+    // From then on all three read each other, replies and reactions included.
+    let three = eventually(|| async {
+        alice
+            .send_text(&group, "three: welcome", "01P3TRIOTHREE0000000000000")
+            .await
+            .ok()
+    })
+    .await;
+    for c in [bob, carol] {
+        assert_eq!(
+            reads(c, "01P3TRIOTHREE0000000000000").await.text,
+            "three: welcome"
+        );
+    }
+    carol
+        .send(
+            &group,
+            "four: glad to be here",
+            Vec::new(),
+            Some(&three),
+            "01P3TRIOFOUR00000000000000",
+        )
+        .await
+        .unwrap();
+    for c in [alice, bob] {
+        let row = reads(c, "01P3TRIOFOUR00000000000000").await;
+        assert_eq!(row.sender, format!("user:gc{tag}"));
+        assert_eq!(row_json(&row)["replyTo"], "01P3TRIOTHREE0000000000000");
+    }
+    carol.react(&group, &three, "🎉", true).await.unwrap();
+    for c in [alice, bob, carol] {
+        eventually(|| async {
+            let rows = c.open_room(&group).await.ok()?;
+            let v = row_json(rows.iter().find(|r| r.event_id == three)?);
+            v["reactions"]["🎉"][format!("user:gc{tag}")]
+                .as_bool()
+                .map(drop)
+        })
+        .await;
+    }
+    // Her earlier rows are still locked: nobody sent her those keys.
+    let rows = carol.open_room(&group).await.unwrap();
+    assert_eq!(rows.iter().filter(|r| r.locked).count(), 2, "{rows:?}");
+
+    // Bob is removed, as the relay removes a member. His list drops the chat, and what Alice
+    // says next is under a new key that is not sent to him.
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/rooms/{group}/kick"),
+        Some(&a.access_token),
+        json!({ "user_id": b.user_id, "reason": "left the chat" }),
+    )
+    .await;
+    listed(bob, false).await;
+    // Alice's device has seen him go before she speaks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let five = alice
+        .send_text(&group, "five: without bob", "01P3TRIOFIVE00000000000000")
+        .await
+        .unwrap();
+    assert_eq!(
+        reads(carol, "01P3TRIOFIVE00000000000000").await.text,
+        "five: without bob"
+    );
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{group}/messages?dir=b&limit=50"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await;
+    let events = raw["chunk"].as_array().unwrap();
+    let session = |id: &str| {
+        let e = events.iter().find(|e| e["event_id"] == id).unwrap();
+        assert_eq!(e["type"], "m.room.encrypted");
+        e["content"]["session_id"].as_str().unwrap().to_owned()
+    };
+    assert_ne!(
+        session(&three),
+        session(&five),
+        "no new key after a removal"
+    );
+    for e in events.iter().filter(|e| e["state_key"].is_null()) {
+        assert_eq!(e["type"], "m.room.encrypted", "{e}");
+    }
+    // The homeserver hands him nothing from after he left, and his device shows no such row.
+    let his = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{group}/messages?dir=b&limit=50"),
+            Some(&b.access_token),
+            Value::Null,
+        )
+        .await
+        .to_string();
+    assert!(!his.contains(&five));
+    assert!(bob
+        .send_text(&group, "still here?", "01P3TRIOGONE00000000000000")
+        .await
+        .is_err());
+
+    for (_, c) in &people {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A chat's earlier history, carried into its encrypted room by a member's device: every
+/// member reads each row as its signed sender's, at its signed time, the homeserver holds
+/// ciphertext only, and nothing a member writes under the relay's name without the relay's
+/// signature for that room is shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn earlier_history_is_carried_into_an_encrypted_room_and_cannot_be_forged() {
+    use arbos_matrix::rows::{history_bytes, history_content, HistoryRow};
+    use matrix_sdk_crypto::vodozemac::Ed25519Keypair;
+
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-history-{tag}"));
+    // The relay's history key, and somebody else's.
+    let (relay, other) = (Ed25519Keypair::new(), Ed25519Keypair::new());
+    let relay_key = relay.public_key().to_base64();
+    let mut people = Vec::new();
+    for name in ["ha", "hb"] {
+        let s = Session {
+            people_native: true,
+            history_key: Some(relay_key.clone()),
+            ..hs.register(&format!("{name}{tag}")).await
+        };
+        let c = start(&s, &dir).await;
+        c.recover(&format!("{name}'s passphrase")).await.unwrap();
+        people.push((s, c));
+    }
+    let [(a, alice), (b, bob)] = &people[..] else {
+        unreachable!()
+    };
+    let room = |chat: &'static str, encrypted: bool| {
+        let (hs, a, b) = (&hs, a, b);
+        async move {
+            let mut state = vec![json!({ "type": "life.arbos.chat", "state_key": "",
+                        "content": { "chat_id": chat, "kind": "group", "project_id": null,
+                                     "created_by": a.user_id, "created_at": 1700, "epoch": 1 } })];
+            if encrypted {
+                state.push(json!({ "type": "m.room.encryption", "state_key": "",
+                                   "content": { "algorithm": "m.megolm.v1.aes-sha2" } }));
+            }
+            let id = hs
+                .call(
+                    "POST",
+                    "/_matrix/client/v3/createRoom",
+                    Some(&a.access_token),
+                    json!({ "preset": "private_chat", "invite": [b.user_id],
+                            "creation_content": { "life.arbos.chat_id": chat },
+                            "initial_state": state }),
+                )
+                .await["room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            hs.call(
+                "POST",
+                &format!("/_matrix/client/v3/join/{id}"),
+                Some(&b.access_token),
+                json!({}),
+            )
+            .await;
+            id
+        }
+    };
+    let sealed = room("01P3HIST", true).await;
+    let plain = room("01P3PLAIN", false).await;
+    for c in [alice, bob] {
+        eventually(|| async { (c.snapshot().await.people.len() == 2).then_some(()) }).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The relay tells the homeserver a carried row is no new message, for every member,
+    // before it hands one out (`matrix/history.rs`).
+    hs.call(
+        "PUT",
+        "/_matrix/client/v3/pushrules/global/override/life.arbos.history",
+        Some(&b.access_token),
+        arbos_matrix::rows::history_push_rule(),
+    )
+    .await;
+
+    // Something said in the room itself, after the history.
+    alice
+        .send_text(&sealed, "said here", "01P3HISTNOW")
+        .await
+        .unwrap();
+    let unread = || async {
+        hs.call(
+            "GET",
+            "/_matrix/client/v3/sync?timeout=0",
+            Some(&b.access_token),
+            Value::Null,
+        )
+        .await["rooms"]["join"][&sealed]["unread_notifications"]["notification_count"]
+            .as_u64()
+    };
+    let before = eventually(|| async { unread().await.filter(|n| *n > 0) }).await;
+    let signed = |by: &Ed25519Keypair, room: &str, chat: &str, mut row: HistoryRow| {
+        let bytes = history_bytes(by.public_key().as_bytes(), room, chat, &row);
+        row.sig = by.sign(&bytes).to_base64();
+        row
+    };
+    let row = |id: &str, sender: &str, ts: i64, text: &str, reply_to: &str| HistoryRow {
+        id: id.into(),
+        sender: sender.into(),
+        handle: "carol".into(),
+        ts,
+        text: text.into(),
+        reply_to: reply_to.into(),
+        parts: String::new(),
+        sig: String::new(),
+    };
+    let alices = format!(
+        "user:{}",
+        a.user_id.trim_start_matches('@').split(':').next().unwrap()
+    );
+    // Carol left before the chat came here; the second row is Alice's own; the third the
+    // relay's system line.
+    let history = [
+        row(
+            "01P3HISTONE",
+            "user:gh_carol",
+            1_000,
+            "carol: before all this",
+            "",
+        ),
+        row(
+            "01P3HISTTWO",
+            &alices,
+            2_000,
+            "alice: answering carol",
+            "01P3HISTONE",
+        ),
+        row("01P3HISTTHREE", "system", 3_000, "Carol left", ""),
+    ]
+    .map(|r| signed(&relay, &sealed, "01P3HIST", r));
+    let page = |room: &str, key: &str, rows: &[HistoryRow]| {
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({ "id": r.id, "sender": r.sender, "handle": r.handle, "ts": r.ts,
+                        "text": r.text, "reply_to": r.reply_to, "parts": r.parts, "sig": r.sig })
+            })
+            .collect();
+        json!({ "v": 1, "key": key, "room_id": room, "rows": rows, "more": false }).to_string()
+    };
+
+    // A page that is not this room's, not the pinned key's, or has one row the relay did not
+    // sign as it stands, is not carried at all.
+    let mut changed = history.clone();
+    changed[1].text = "alice: I owe bob a thousand".into();
+    let forged = history
+        .clone()
+        .map(|r| signed(&other, &sealed, "01P3HIST", r));
+    for (why, bad) in [
+        ("another room's page", page(&plain, &relay_key, &history)),
+        ("a changed row", page(&sealed, &relay_key, &changed)),
+        (
+            "another signer",
+            page(&sealed, &other.public_key().to_base64(), &forged),
+        ),
+        ("another signer's rows", page(&sealed, &relay_key, &forged)),
+        ("not a page", "{}".to_owned()),
+    ] {
+        assert!(alice.carry_history(&sealed, &bad).await.is_err(), "{why}");
+    }
+
+    // Alice's device carries it; carried again, it is the same three events.
+    let carried: Value = serde_json::from_str(
+        &alice
+            .carry_history(&sealed, &page(&sealed, &relay_key, &history))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(carried["carried"].as_array().unwrap().len(), 3, "{carried}");
+    assert_eq!(carried["carried"][0]["id"], "01P3HISTONE");
+    let again: Value = serde_json::from_str(
+        &alice
+            .carry_history(&sealed, &page(&sealed, &relay_key, &history))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(again, carried);
+
+    // Both read the history in its place, before what was said here, each row its sender's.
+    for c in [alice, bob] {
+        let rows = eventually(|| async {
+            let rows = c.open_room(&sealed).await.ok()?;
+            (rows.iter().filter(|r| !r.locked).count() == 4).then_some(rows)
+        })
+        .await;
+        let read: Vec<(&str, &str, i64)> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.sender.as_str(), r.created_at))
+            .take(3)
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("01P3HISTONE", "user:gh_carol", 1_000),
+                ("01P3HISTTWO", alices.as_str(), 2_000),
+                ("01P3HISTTHREE", "system", 3_000),
+            ],
+            "{rows:?}"
+        );
+        assert_eq!(rows[3].id, "01P3HISTNOW");
+        assert_eq!(rows[0].text, "carol: before all this");
+        assert_eq!(row_json(&rows[0])["senderHandle"], "carol");
+        assert_eq!(row_json(&rows[1])["replyTo"], "01P3HISTONE");
+        assert_eq!(row_json(&rows[2])["role"], "system");
+    }
+    // Old history is not new mail: Bob has the one message said here to read.
+    assert_eq!(unread().await, Some(before));
+
+    // The homeserver has ciphertext, that these are carried rows, and each row's id (the
+    // transaction id, as with any message sent here); nothing of who said what, or when.
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{sealed}/messages?dir=b&limit=50"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await
+        .to_string();
+    assert!(raw.contains("life.arbos.history"));
+    for secret in ["before all this", "gh_carol", "Carol left"] {
+        assert!(!raw.contains(secret), "{secret} on the homeserver");
+    }
+
+    // Bob writes history of his own into both rooms: rows signed by another key, the relay's
+    // rows for the other room, a relay row with its words changed, and (into the encrypted
+    // room) a relay row in the clear. None is shown, there or here.
+    let put = |room: &str, txn: String, content: Value| {
+        let (hs, token, room) = (&hs, b.access_token.clone(), room.to_owned());
+        async move {
+            hs.call(
+                "PUT",
+                &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}"),
+                Some(&token),
+                content,
+            )
+            .await;
+        }
+    };
+    let for_plain = |id: &str, text: &str| {
+        signed(
+            &relay,
+            &plain,
+            "01P3PLAIN",
+            row(id, "user:gh_carol", 500, text, ""),
+        )
+    };
+    let mut reworded = history_content(&for_plain("01P3F3", "carol: hello"));
+    reworded["body"] = json!("carol: bob can have my seat");
+    let lies = [
+        history_content(&signed(
+            &other,
+            &plain,
+            "01P3PLAIN",
+            row("01P3F1", "user:gh_carol", 500, "carol: pay bob", ""),
+        )),
+        history_content(&history[0]),
+        reworded,
+    ];
+    for (i, content) in lies.into_iter().enumerate() {
+        put(&plain, format!("lie{i}"), content).await;
+    }
+    put(&sealed, "clear".into(), history_content(&history[0])).await;
+    // One the relay did sign for this room is shown, so the lies before it were read too.
+    put(
+        &plain,
+        "truth".into(),
+        history_content(&for_plain("01P3TRUE", "carol: the one true row")),
+    )
+    .await;
+    let rows = eventually(|| async {
+        let rows = alice.open_room(&plain).await.ok()?;
+        rows.iter().any(|r| r.id == "01P3TRUE").then_some(rows)
+    })
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].sender, "user:gh_carol");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let rows = alice.open_room(&sealed).await.unwrap();
+    assert_eq!(rows.len(), 4, "{rows:?}");
+
+    for (_, c) in &people {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The device keeps what it has read. A people chat read once is read again after a restart
+/// with the homeserver out of reach, under the same rules as when it arrived; and what was
+/// said while the device was away is all there once it is back, not just the newest of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_is_read_from_the_device_after_a_restart_and_made_whole_again() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-cache-{tag}"));
+    let mut people = Vec::new();
+    for name in ["ca", "cb"] {
+        let s = Session {
+            people_native: true,
+            ..hs.register(&format!("{name}{tag}")).await
+        };
+        let c = start(&s, &dir).await;
+        c.recover(&format!("{name}'s passphrase")).await.unwrap();
+        people.push((s, c));
+    }
+    let [(a, alice), (b, bob)] = &people[..] else {
+        unreachable!()
+    };
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P3KEPT" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P3KEPT", "kind": "dm", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } },
+                    ] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b.access_token),
+        json!({}),
+    )
+    .await;
+    for c in [alice, bob] {
+        eventually(|| async { (c.snapshot().await.people.len() == 1).then_some(()) }).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let say = |n: usize| {
+        let (alice, room) = (alice.clone(), room.clone());
+        async move {
+            alice
+                .send_text(&room, &format!("kept {n}"), &format!("01P3KEPT{n:02}"))
+                .await
+                .unwrap()
+        }
+    };
+    let has = |c: &Arc<MatrixClient>, upto: usize| {
+        let (c, room) = (c.clone(), room.clone());
+        async move {
+            eventually(|| async {
+                let rows = c.open_room(&room).await.ok()?;
+                let read: Vec<&str> = rows
+                    .iter()
+                    .filter(|r| !r.locked)
+                    .map(|r| r.text.as_str())
+                    .collect();
+                let want: Vec<String> = (1..=upto).map(|n| format!("kept {n}")).collect();
+                (read == want).then_some(())
+            })
+            .await
+        }
+    };
+    for n in 1..=3 {
+        say(n).await;
+    }
+    // Written into the encrypted room in the clear: never shown, from the homeserver or from
+    // the device's own store.
+    hs.call(
+        "PUT",
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/clear"),
+        Some(&a.access_token),
+        json!({ "msgtype": "m.text", "body": "wire me the money" }),
+    )
+    .await;
+    has(bob, 3).await;
+    bob.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Bob's device again, and nothing answers as the homeserver: the chat is listed and read
+    // from what the device kept, decrypted then and not shown as anything else now.
+    let nowhere = Session {
+        homeserver: "http://127.0.0.1:9".into(),
+        ..b.clone()
+    };
+    let offline = start_as(&nowhere, &dir, false).await;
+    let listed = offline.snapshot().await.people;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].encrypted);
+    let rows = offline
+        .open_room(&room)
+        .await
+        .expect("read from the device");
+    let read: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(read, ["kept 1", "kept 2", "kept 3"], "{rows:?}");
+    assert!(rows.iter().all(|r| !r.locked && r.sender != "system"));
+    offline.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // While Bob's device is away six more are said. Back online, a sync hands it the newest
+    // one only; the five between are fetched, not left out.
+    for n in 4..=9 {
+        say(n).await;
+    }
+    let back = start_as(b, &dir, false).await;
+    has(&back, 9).await;
+    // And a burst while it is open and listening: every one of them arrives.
+    futures::future::join_all((10..=15).map(say)).await;
+    eventually(|| async {
+        let rows = back.open_room(&room).await.ok()?;
+        (10..=15)
+            .all(|n| rows.iter().any(|r| r.text == format!("kept {n}")))
+            .then_some(())
+    })
+    .await;
+
+    for c in [alice, &back] {
         c.stop();
     }
     let _ = std::fs::remove_dir_all(&dir);

@@ -126,7 +126,7 @@ fn sender_of(row: &Value, owner: Option<&str>, project_id: Option<&str>) -> Stri
 
 /// Parts worth carrying besides the text: attachments and visible status/error lines. Tool
 /// calls, reasoning and hidden parts stay in the Loro doc (the agent control plane).
-fn carried_parts(row: &Value) -> Option<Value> {
+pub(super) fn carried_parts(row: &Value) -> Option<Value> {
     let parts = row["parts"].as_array()?;
     let keep: Vec<Value> = parts
         .iter()
