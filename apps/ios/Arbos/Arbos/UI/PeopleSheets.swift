@@ -230,6 +230,7 @@ struct NewChatSheet: View {
     }
 
     /// Same glass back as Settings (`ProfileTopBar`) plus a centred title.
+    /// Title is VoiceOver-hidden so it cannot collapse `new-message-back` out of the tree.
     private var topBar: some View {
         ZStack(alignment: .top) {
             ProfileTopBar(screen: .newMessage, backIdentifier: "new-message-back") { EmptyView() }
@@ -239,6 +240,7 @@ struct NewChatSheet: View {
                 .padding(.top, 16)
                 .frame(maxWidth: .infinity)
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 
