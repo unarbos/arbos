@@ -222,7 +222,8 @@ async fn create_box_row(
         Provider::Process => format!("local-{user_id}"),
         Provider::Docker => format!("arbos-box-{}", user_id.to_ascii_lowercase()),
         Provider::Gvisor => crate::fleet::container_name(user_id),
-        Provider::Boxd => format!("arbos-box-{user_id}"),
+        // The daemon's id for it, dot and all (`arbos-boxd` `Boxd::paths`).
+        Provider::Boxd => format!("arbos-box-{user_id}."),
     };
     state.db.begin_box_create(
         user_id,

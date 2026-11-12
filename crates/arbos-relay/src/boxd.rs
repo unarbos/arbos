@@ -353,8 +353,9 @@ pub async fn create_box(
         .rsplit_once('-')
         .map(|(_, v)| v)
         .unwrap_or(&snapshot);
-    // The id the daemon runs the sandbox under.
-    let name = format!("arbos-box-{user_id}");
+    // The id the daemon runs the sandbox under. The dot ends it: runsc takes the start of an
+    // id for the whole of it, and no user id holds a dot.
+    let name = format!("arbos-box-{user_id}.");
     sb.sandbox_id = Some(name.clone());
     sb.device_id = format!("box:{name}");
     // Kept as for the other providers: the relay's database holds only the box token's hash, and
@@ -951,7 +952,7 @@ mod tests {
         assert_eq!(sb.provider, "boxd");
         let row = state.db.user_box(&user).unwrap().expect("row");
         assert_eq!(row.box_url.as_deref(), Some("http://10.207.0.2:7788"));
-        assert_eq!(row.sandbox_id, Some(format!("arbos-box-{user}")));
+        assert_eq!(row.sandbox_id, Some(format!("arbos-box-{user}.")));
         assert_eq!(row.snapshot.as_deref(), Some("arbos-agent-1.2.3"));
         let ensure = fake.calls.lock().unwrap()[1].clone();
         assert_eq!(ensure.0, format!("/v1/boxes/{user}/ensure"));
