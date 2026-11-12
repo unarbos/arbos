@@ -86,6 +86,8 @@ mod media;
 mod memory;
 #[cfg(test)]
 mod model_switch_tests;
+#[cfg(test)]
+mod model_usage_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;

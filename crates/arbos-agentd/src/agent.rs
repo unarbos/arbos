@@ -2702,6 +2702,36 @@ impl Agent {
         self.turn_lock.try_lock().is_err()
     }
 
+    /// Snapshot attribution before forwarding a model request. The shared main child switches
+    /// chats without respawning, so its startup environment cannot identify the active session.
+    pub(crate) async fn model_usage_context(
+        &self,
+        worker: Option<&str>,
+    ) -> Result<arbos_core::usage::UsageContext> {
+        use arbos_core::usage::UsageContext;
+        let id = match worker {
+            Some(id) => {
+                if self.store.subagent(id)?.is_none() {
+                    return Err(anyhow!("unknown worker session"));
+                }
+                Some(id.to_owned())
+            }
+            None => self.current_chat.lock().await.clone(),
+        };
+        let Some(id) = id else {
+            return Ok(UsageContext::default());
+        };
+        let mut context = self.store.usage_context(&id)?;
+        if worker.is_none() {
+            if let Some(turn) = self.turn.lock().await.as_ref() {
+                if Some(&turn.chat_id) == context.chat_id.as_ref() {
+                    context.turn_id = Some(turn.user_msg_id.clone());
+                }
+            }
+        }
+        Ok(context)
+    }
+
     /// User messages waiting for the turn lock.
     pub(crate) fn sends_waiting(&self) -> usize {
         self.pending_sends.load(Ordering::SeqCst)
@@ -7828,11 +7858,15 @@ impl Agent {
         let chat = chat_id.to_owned();
         let text = format!("User: {ask}\nAgent: {reply}");
         let msg = msg_id.to_owned();
+        let usage_context = self
+            .store
+            .usage_context(chat_id)
+            .unwrap_or_else(|_| arbos_core::usage::UsageContext::for_chat(chat_id));
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             if let Err(e) = me
                 .memory
-                .write_pass(&msg, &chat, "assistant", &text, &[])
+                .write_pass(&msg, &chat, usage_context, "assistant", &text, &[])
                 .await
             {
                 tracing::debug!(error = %e, "memory write pass");
@@ -13228,7 +13262,8 @@ impl Agent {
             "user",
             Some("user"),
             brief,
-            Some(&json!({ "chat_id": chat_id, "pack": "pack-v0" })),
+            Some(&json!({ "chat_id": chat_id, "turn_id": in_reply_to,
+                "job_id": job.as_ref().map(|j| j.id.as_str()), "pack": "pack-v0" })),
         );
 
         let mut resumed_fresh = false;
@@ -13851,6 +13886,16 @@ impl Agent {
                 .to_owned();
             let text2 = text.clone();
             let chat = chat_id.to_owned();
+            // This pass may run after the worker is woken elsewhere. Carry this run's origin
+            // into the background task instead of looking up mutable session metadata later.
+            let usage_context = arbos_core::usage::UsageContext {
+                session_id: Some(sid.clone()),
+                chat_id: Some(chat.clone()),
+                parent_session_id: Some(chat.clone()),
+                turn_id: Some(in_reply_to.to_owned()),
+                job_id: job.as_ref().map(|j| j.id.clone()),
+                ..Default::default()
+            };
             tokio::spawn(async move {
                 me.index_session_history(&sid, harness).await;
                 let body = if summary_text.is_empty() {
@@ -13863,6 +13908,7 @@ impl Agent {
                     .write_pass(
                         &format!("subagent:{sid}"),
                         &sid,
+                        usage_context,
                         "subagent",
                         &body,
                         &proposals,
@@ -14139,7 +14185,11 @@ impl Agent {
                 .unwrap_or_default(),
             if raw_trim.trim().is_empty() { "(nothing was written)" } else { raw_trim.trim() }
         );
-        let llm = self.llm.with_purpose("job-result");
+        let llm = self.llm.with_purpose("job-result").with_context(
+            self.store
+                .usage_context(chat_id)
+                .unwrap_or_else(|_| arbos_core::usage::UsageContext::for_chat(chat_id)),
+        );
         // What is posted when the model writes nothing, or nothing that survives the strip below:
         // the worker's own words for finished work, a plain line otherwise.
         //

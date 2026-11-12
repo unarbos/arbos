@@ -100,6 +100,7 @@ for line in sys.stdin:
         continue
     if "@HANG_BRIEF@" in line:
         hang = True
+        open("@HANG_READY@", "w").close()
     if not os.path.exists(once):
         open(once, "w").close()
         subprocess.Popen(
@@ -146,6 +147,10 @@ impl Fixture {
                     &root.join("writers-spawned").display().to_string(),
                 )
                 .replace("@HANG@", SIBLING)
+                .replace(
+                    "@HANG_READY@",
+                    &root.join("hang-ready").display().to_string(),
+                )
                 .replace("@HANG_BRIEF@", HANG_BRIEF),
         )
         .unwrap();
@@ -621,6 +626,12 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
         subject, doomed,
         "the two sessions must differ or this measures nothing"
     );
+    // A visible process may still be booting and not have consumed its first prompt. The
+    // hold-on-close premise exists only once the worker has actually read HANG_BRIEF.
+    wait_for("the doomed worker receives its hold-on-close brief", || {
+        fx.root.join("hang-ready").exists()
+    })
+    .await;
 
     // Hold only the doomed child's process handle before cancellation. stop_jobs can
     // still send its RPC and reap its tree; owned cleanup then pauses without making

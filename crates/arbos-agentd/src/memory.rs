@@ -281,6 +281,7 @@ impl Memory {
         &self,
         event_id: &str,
         thread_id: &str,
+        usage_context: arbos_core::usage::UsageContext,
         source_role: &str,
         text: &str,
         proposals: &[Value],
@@ -312,6 +313,8 @@ impl Memory {
         let model = self.models.resolve(ModelRole::Decision).await;
         let (v, ms) = match self
             .llm
+            .with_context(usage_context)
+            .with_purpose("memory-write")
             .complete_json(&model, WRITE_SYSTEM, &user, 1500)
             .await
         {
@@ -480,6 +483,8 @@ impl Memory {
             // Summarising a chat is the agent's own reading of it, so it runs on the agent's model.
             let model = self.models.resolve(ModelRole::Talking).await;
             self.llm
+                .with_context(self.store.usage_context(chat_id)?)
+                .with_purpose("compaction")
                 .complete_json(&model, COMPACTION_SYSTEM, &body, 2500)
                 .await
                 .map(|(v, _ms)| v)
@@ -626,6 +631,7 @@ impl Memory {
             self.write_pass(
                 &format!("compaction:{through}"),
                 chat_id,
+                self.store.usage_context(chat_id)?,
                 "compaction",
                 &summary,
                 &candidates,

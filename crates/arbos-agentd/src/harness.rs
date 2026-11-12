@@ -828,6 +828,10 @@ impl PrimeAdapter {
             ("DO_NOT_TRACK".into(), "1".into()),
             ("ARBOS_SESSION_ID".into(), session_id.to_owned()),
             (
+                "ARBOS_MODEL_TOKEN".into(),
+                self.cfg.model_proxy_token(Some(session_id)),
+            ),
+            (
                 "ARBOS_STATE_DIR".into(),
                 self.cfg.state_dir.display().to_string(),
             ),
@@ -846,9 +850,12 @@ impl PrimeAdapter {
                 "ARBOS_TALKING_MODEL".into(),
                 self.models.resolve(ModelRole::Talking).await,
             ),
-            // D2: Prime's `openrouter` provider is pointed at the loopback stub by models.json in the prime
-            // dir; the box token is the only credential it ever sees.
-            ("OPENROUTER_API_KEY".into(), self.cfg.box_token.clone()),
+            // Prime's provider uses the loopback stub and a session credential. The stub adds
+            // the real box token before forwarding to the relay.
+            (
+                "OPENROUTER_API_KEY".into(),
+                self.cfg.model_proxy_token(Some(session_id)),
+            ),
             (
                 "HOME".into(),
                 std::env::var("HOME").unwrap_or_else(|_| "/home/daytona".into()),
@@ -1114,6 +1121,10 @@ impl PiAdapter {
             ("PI_SKIP_VERSION_CHECK".into(), "1".into()),
             ("ARBOS_SESSION_ID".into(), session_id.to_owned()),
             ("ARBOS_SESSION_ROLE".into(), role.to_owned()),
+            (
+                "ARBOS_MODEL_TOKEN".into(),
+                cfg.model_proxy_token((role != "main").then_some(session_id)),
+            ),
             (
                 "ARBOS_STATE_DIR".into(),
                 cfg.state_dir.display().to_string(),
@@ -1819,7 +1830,10 @@ impl ClaudeCodeAdapter {
             .current_dir(cwd)
             .env("CLAUDE_CONFIG_DIR", self.cfg.state_dir.join("claude"))
             .env("ANTHROPIC_BASE_URL", self.cfg.proxy_base())
-            .env("ANTHROPIC_AUTH_TOKEN", &self.cfg.box_token)
+            .env(
+                "ANTHROPIC_AUTH_TOKEN",
+                self.cfg.model_proxy_token(Some(session_id)),
+            )
             // The relay's Anthropic passthrough may sit on OpenRouter, whose ids are `anthropic/<model>`.
             // Claude Code's own cheap lane is pointed at the same model: a worker of an agent set
             // to one model never quietly drops to another (Jacob, 2026-11-04).

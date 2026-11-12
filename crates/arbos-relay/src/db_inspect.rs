@@ -19,7 +19,9 @@ impl Db {
     ) -> Result<Vec<Value>> {
         self.read(|c| {
             let mut st = c.prepare(
-                "SELECT id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms
+                "SELECT id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms,
+                 request_id, session_id, session_run_id, parent_session_id, chat_id, turn_id, job_id,
+                 upstream_id, provider, actual_usd, cost_source, metering_status
                  FROM usage WHERE project_id = ?1 AND at > ?2 ORDER BY at ASC, id ASC LIMIT ?3",
             )?;
             let rows = st.query_map(params![project_id, after_ms, limit], |r| {
@@ -28,6 +30,12 @@ impl Db {
                     "model": r.get::<_, String>(3)?, "input": r.get::<_, i64>(4)?, "output": r.get::<_, i64>(5)?,
                     "cache_read": r.get::<_, i64>(6)?, "cache_write": r.get::<_, i64>(7)?, "usd": r.get::<_, f64>(8)?,
                     "latency_ms": r.get::<_, i64>(9)?, "ttfb_ms": r.get::<_, Option<i64>>(10)?,
+                    "request_id": r.get::<_, Option<String>>(11)?, "session_id": r.get::<_, Option<String>>(12)?,
+                    "session_run_id": r.get::<_, Option<String>>(13)?, "parent_session_id": r.get::<_, Option<String>>(14)?,
+                    "chat_id": r.get::<_, Option<String>>(15)?, "turn_id": r.get::<_, Option<String>>(16)?,
+                    "job_id": r.get::<_, Option<String>>(17)?, "upstream_id": r.get::<_, Option<String>>(18)?,
+                    "provider": r.get::<_, Option<String>>(19)?, "actual_usd": r.get::<_, Option<f64>>(20)?,
+                    "cost_source": r.get::<_, String>(21)?, "metering_status": r.get::<_, String>(22)?,
                 }))
             })?;
             rows.collect()

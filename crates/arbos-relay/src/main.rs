@@ -93,6 +93,7 @@ mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
+mod usage;
 mod vault;
 mod vaults;
 mod voice;
@@ -873,6 +874,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/push", post(api::push))
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))
+        .route("/projects/{id}/sessions/usage", get(api::sessions_usage))
+        .route(
+            "/projects/{id}/sessions/{session}/usage",
+            get(api::session_usage),
+        )
         .route("/projects/{id}/timings", post(api::record_timing))
         .route("/projects/{id}/activity", post(api::set_activity))
         .route(

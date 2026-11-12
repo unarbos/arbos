@@ -45,6 +45,9 @@ struct Meter {
     cache_read: i64,
     cache_write: i64,
     cost: Option<f64>,
+    openai_input: Option<i64>,
+    usage_seen: bool,
+    finished: bool,
 }
 
 pub(crate) fn start_of_utc_day_ms() -> i64 {
@@ -236,97 +239,127 @@ impl Meter {
             / 1_000_000.0
     }
 
-    fn absorb_openai_usage(&mut self, u: &Value) {
-        if let Some(n) = u.get("prompt_tokens").and_then(Value::as_i64) {
-            self.input = n;
+    fn absorb_cost(&mut self, u: &Value) {
+        if let Some(c) = u
+            .get("cost")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= 0.0)
+        {
+            self.cost = Some(c);
         }
-        if let Some(n) = u.get("completion_tokens").and_then(Value::as_i64) {
-            self.output = n;
+    }
+
+    fn absorb_openai_usage(&mut self, u: &Value) {
+        if let Some(n) = u
+            .get("prompt_tokens")
+            .or_else(|| u.get("input_tokens"))
+            .and_then(Value::as_i64)
+        {
+            self.openai_input = Some(n.max(0));
+            self.usage_seen = true;
+        }
+        if let Some(n) = u
+            .get("completion_tokens")
+            .or_else(|| u.get("output_tokens"))
+            .and_then(Value::as_i64)
+        {
+            self.output = n.max(0);
+            self.usage_seen = true;
         }
         if let Some(n) = u
             .pointer("/prompt_tokens_details/cached_tokens")
+            .or_else(|| u.pointer("/input_tokens_details/cached_tokens"))
             .and_then(Value::as_i64)
         {
-            self.cache_read = n;
-            self.input -= n.min(self.input);
+            self.cache_read = n.max(0);
         }
         if let Some(n) = u
             .pointer("/prompt_tokens_details/cache_write_tokens")
             .and_then(Value::as_i64)
         {
-            self.cache_write = n;
+            self.cache_write = n.max(0);
         }
-        if let Some(c) = u.get("cost").and_then(Value::as_f64) {
-            self.cost = Some(c);
+        // OpenAI prompt counts include cached tokens. Normalize into disjoint buckets, also
+        // when an upstream repeats a cumulative usage snapshot or sends details separately.
+        if let Some(total) = self.openai_input {
+            self.cache_read = self.cache_read.min(total);
+            self.cache_write = self.cache_write.min(total - self.cache_read);
+            self.input = total - self.cache_read - self.cache_write;
         }
-    }
-
-    /// Decisions API usage: `{ input_tokens, output_tokens, cost }` (cost in USD, output free).
-    fn absorb_decisions_usage(&mut self, u: &Value) {
-        if let Some(n) = u.get("input_tokens").and_then(Value::as_i64) {
-            self.input = n;
-        }
-        if let Some(n) = u.get("output_tokens").and_then(Value::as_i64) {
-            self.output = n;
-        }
-        if let Some(c) = u.get("cost").and_then(Value::as_f64) {
-            self.cost = Some(c);
-        }
+        self.absorb_cost(u);
     }
 
     fn absorb_anthropic_usage(&mut self, u: &Value) {
-        if let Some(n) = u.get("input_tokens").and_then(Value::as_i64) {
-            self.input = n;
+        for (key, target) in [
+            ("input_tokens", &mut self.input),
+            ("output_tokens", &mut self.output),
+            ("cache_read_input_tokens", &mut self.cache_read),
+            ("cache_creation_input_tokens", &mut self.cache_write),
+        ] {
+            if let Some(n) = u.get(key).and_then(Value::as_i64) {
+                *target = n.max(0);
+                self.usage_seen = true;
+            }
         }
-        if let Some(n) = u.get("output_tokens").and_then(Value::as_i64) {
-            self.output = n;
+        self.absorb_cost(u);
+    }
+
+    fn scan_value(&mut self, api: Api, v: &Value) {
+        let body = v.get("response").filter(|r| r.is_object()).unwrap_or(v);
+        if let Some(m) = body.get("model").and_then(Value::as_str) {
+            self.model = m.to_owned();
         }
-        if let Some(n) = u.get("cache_read_input_tokens").and_then(Value::as_i64) {
-            self.cache_read = n;
-        }
-        if let Some(n) = u.get("cache_creation_input_tokens").and_then(Value::as_i64) {
-            self.cache_write = n;
+        match api {
+            Api::OpenAi => {
+                if let Some(u) = body.get("usage").filter(|u| u.is_object()) {
+                    self.absorb_openai_usage(u);
+                    // Chat Completions emits its aggregate usage at the end; Responses nests
+                    // usage in response.completed (response.failed may carry partial usage).
+                    self.finished |= v.get("response").is_none()
+                        && (u.get("completion_tokens").is_some()
+                            || u.get("output_tokens").is_some());
+                }
+                self.finished |=
+                    v.get("type").and_then(Value::as_str) == Some("response.completed");
+            }
+            Api::Anthropic => {
+                if let Some(u) = v.pointer("/message/usage") {
+                    self.absorb_anthropic_usage(u);
+                    if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
+                        self.model = m.to_owned();
+                    }
+                }
+                if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                    self.absorb_anthropic_usage(u);
+                }
+                self.finished |=
+                    matches!(v.get("type").and_then(Value::as_str), Some("message_stop"))
+                        || v.get("stop_reason").is_some_and(|s| !s.is_null())
+                        || v.pointer("/delta/stop_reason")
+                            .is_some_and(|s| !s.is_null());
+            }
+            Api::Decisions => {
+                if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                    self.absorb_anthropic_usage(u);
+                    self.finished = true;
+                }
+            }
         }
     }
 
-    /// Scan one SSE event or JSON body for usage.
+    /// Complete JSON bodies (including pretty JSON), or complete SSE data lines.
     fn scan(&mut self, api: Api, text: &str) {
+        if let Ok(v) = serde_json::from_str::<Value>(text) {
+            self.scan_value(api, &v);
+            return;
+        }
         for line in text.lines() {
             let payload = line
                 .strip_prefix("data:")
                 .map(str::trim)
                 .unwrap_or(line.trim());
-            if payload.is_empty() || payload == "[DONE]" || !payload.starts_with('{') {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<Value>(payload) else {
-                continue;
-            };
-            if let Some(m) = v.get("model").and_then(Value::as_str) {
-                self.model = m.to_owned();
-            }
-            match api {
-                Api::OpenAi => {
-                    if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-                        self.absorb_openai_usage(u);
-                    }
-                }
-                Api::Anthropic => {
-                    if let Some(u) = v.pointer("/message/usage") {
-                        self.absorb_anthropic_usage(u);
-                        if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
-                            self.model = m.to_owned();
-                        }
-                    }
-                    if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-                        self.absorb_anthropic_usage(u);
-                    }
-                }
-                Api::Decisions => {
-                    if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-                        self.absorb_decisions_usage(u);
-                    }
-                }
+            if let Ok(v) = serde_json::from_str::<Value>(payload) {
+                self.scan_value(api, &v);
             }
         }
     }
@@ -358,8 +391,35 @@ pub(crate) fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -
         .map(|p| p.id)
 }
 
+fn usage_context(headers: &HeaderMap) -> arbos_core::usage::UsageContext {
+    let mut context = arbos_core::usage::UsageContext::default();
+    // IDs are metadata, never SQL fragments. Bound them before persisting and do not
+    // forward internal attribution headers to the upstream provider.
+    let read = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 256
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+            })
+            .map(str::to_owned)
+    };
+    context.session_id = read("x-arbos-session");
+    if context.session_id.is_some() {
+        context.session_run_id = read("x-arbos-session-run");
+        context.parent_session_id = read("x-arbos-parent-session");
+        context.chat_id = read("x-arbos-chat");
+        context.turn_id = read("x-arbos-turn");
+        context.job_id = read("x-arbos-job");
+    }
+    context
+}
+
 /// Hex characters in the id the relay gives each model call and returns in `x-arbos-req-id`.
-pub const REQ_ID_HEX: usize = 12;
+pub const REQ_ID_HEX: usize = 32;
 
 fn new_req_id() -> String {
     use rand::Rng;
@@ -389,9 +449,16 @@ async fn forward(
     mut body: Bytes,
     project_override: Option<String>,
 ) -> Response {
-    let project_id = project_of(&state, &principal, &headers)
-        .or(project_override)
-        .unwrap_or_else(|| "relay-admin".to_owned());
+    let project_id = match project_override {
+        Some(id) if matches!(principal, Principal::Admin) => id,
+        Some(id) => match state.db.project(&id) {
+            Ok(Some(project)) if state.allows(&principal, &project.id) => project.id,
+            _ => return (StatusCode::NOT_FOUND, "no such project").into_response(),
+        },
+        None => {
+            project_of(&state, &principal, &headers).unwrap_or_else(|| "relay-admin".to_owned())
+        }
+    };
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
     }
@@ -413,6 +480,7 @@ async fn forward(
     // the `x-arbos-req-id` returned below — by `req_id`. The proxy sees every prompt and logs
     // none of it: what goes in the journal is the shape, hashed.
     let req_id = new_req_id();
+    let context = usage_context(&headers);
     let shape = req_json.as_ref().map(prompt_shape).unwrap_or_default();
     tracing::info!(
         req_id,
@@ -473,7 +541,7 @@ async fn forward(
             };
             if let Some(v) = req_json.as_mut() {
                 normalize_openai_reasoning_body(&model, v);
-                if is_stream {
+                if is_stream && path_tail.ends_with("chat/completions") {
                     v["stream_options"] = json!({ "include_usage": true });
                     if base.contains("openrouter") {
                         v["usage"] = json!({ "include": true });
@@ -563,8 +631,8 @@ async fn forward(
     }
 
     // `x-arbos-purpose: <feature>` (agentd's memory tree sends `memory-tree`): the usage row's
-    // `api` becomes `<api>:<feature>` and the ledger reference `<model>|<feature>`, so a feature's
-    // spend sums exactly; untagged calls keep the old shapes.
+    // `api` becomes `<api>:<feature>`. The ledger reference also carries the model, optional
+    // purpose and request id, so a debit can be traced back to this usage row.
     let purpose: Option<String> = headers
         .get("x-arbos-purpose")
         .and_then(|v| v.to_str().ok())
@@ -600,14 +668,22 @@ async fn forward(
         let mut generation: (Option<String>, Option<String>) = (None, None);
         let mut stream = upstream.bytes_stream();
         let mut carry = String::new();
-        while let Some(chunk) = stream.next().await {
+        let mut interrupted = false;
+        loop {
+            let chunk = tokio::select! {
+                _ = tx.closed() => { interrupted = true; break; }
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
             match chunk {
                 Ok(b) => {
                     if ttfb.is_none() {
                         ttfb = Some(t0.elapsed().as_millis() as i64);
                     }
                     carry.push_str(&String::from_utf8_lossy(&b));
-                    if let Some(idx) = carry.rfind('\n') {
+                    if let Some(idx) = carry.rfind('\n').filter(|_| is_stream) {
                         let (done, rest) = carry.split_at(idx + 1);
                         meter.scan(api, done);
                         if generation.0.is_none() || generation.1.is_none() {
@@ -618,10 +694,12 @@ async fn forward(
                         carry = rest.to_owned();
                     }
                     if tx.send(Ok(b)).await.is_err() {
+                        interrupted = true;
                         break;
                     }
                 }
                 Err(e) => {
+                    interrupted = true;
                     let _ = tx.send(Err(std::io::Error::other(e))).await;
                     break;
                 }
@@ -656,31 +734,67 @@ async fn forward(
             cache_write = meter.cache_write,
             "model call done"
         );
-        if status.is_success() {
-            let _ = db.record_usage(
-                &pid,
-                &api_name,
-                &meter.model,
+        // Record every upstream response, including failures without usage. A missing charge
+        // remains unknown; omitting the row would hide it from coverage counts.
+        let cost_source = if meter.cost.is_some() {
+            "reported"
+        } else if meter.usage_seen {
+            "estimated"
+        } else {
+            "unknown"
+        };
+        let metering_status = if interrupted || !status.is_success() {
+            "partial"
+        } else if !meter.usage_seen {
+            "unknown"
+        } else if meter.finished {
+            "complete"
+        } else {
+            "partial"
+        };
+        let record = crate::usage::UsageRecord {
+            project_id: &pid,
+            api: &api_name,
+            model: &meter.model,
+            tokens: [
                 meter.input,
                 meter.output,
                 meter.cache_read,
                 meter.cache_write,
-                meter.usd(),
-                t0.elapsed().as_millis() as i64,
-                ttfb,
-            );
-            let reference = match &purpose {
-                Some(p) => format!("{}|{p}", meter.model),
-                None => meter.model.clone(),
-            };
-            crate::credits::charge_call(
-                &meter_state,
-                &payer,
-                &pid,
-                meter.usd(),
-                "inference",
-                Some(&reference),
-            );
+            ],
+            usd: meter.usd(),
+            latency_ms: t0.elapsed().as_millis() as i64,
+            ttfb_ms: ttfb,
+            context,
+            request_id: Some(&req_id),
+            actual_usd: meter.cost,
+            upstream_id: generation
+                .0
+                .as_deref()
+                .or(Some(upstream_marks.upstream_id.as_str()).filter(|s| !s.is_empty())),
+            provider: generation.1.as_deref(),
+            cost_source: Some(cost_source),
+            metering_status: Some(metering_status),
+        };
+        match db.record_model_usage(record) {
+            // Observing a failed response must preserve the existing charging policy: only
+            // successful responses are debited, even when an error contains usage metadata.
+            Ok(true) if status.is_success() => {
+                let reference = match &purpose {
+                    Some(p) => format!("{}|{p}|{req_id}", meter.model),
+                    None => format!("{}|{req_id}", meter.model),
+                };
+                crate::credits::charge_call(
+                    &meter_state,
+                    &payer,
+                    &pid,
+                    meter.usd(),
+                    "inference",
+                    Some(&reference),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(req_id, error = %e, "model usage not recorded"),
         }
     });
     let body = Body::from_stream(tokio_stream_wrap(rx));
@@ -1619,5 +1733,325 @@ mod tests {
         let before = body.clone();
         normalize_openai_reasoning_body("anthropic/claude-sonnet-5.5", &mut body);
         assert_eq!(body, before);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_project_hint_cannot_attribute_a_call_to_another_owner() {
+        use crate::{
+            people::tests_support::{person, project_of},
+            state::{test_support::test_state, AuthMode},
+        };
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 9881);
+        let (outsider, _) = person(&state, 9882);
+        let project = project_of(&state, &owner, "Metered project");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", project.parse().unwrap());
+        let response = openai(
+            State(state.clone()),
+            Principal::Box { user_id: outsider },
+            Path("chat/completions".into()),
+            headers,
+            Bytes::from_static(br#"{"model":"m"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(state
+            .db
+            .usage_rows_after(&project, 0, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_upstream_responses_are_metered_without_changing_credit_policy() {
+        use crate::{
+            people::tests_support::{person, project_of},
+            state::{test_support::test_state, AuthMode},
+        };
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                let mut response = json!({"error":{"message":"try again"}});
+                if body["with_usage"] == true {
+                    response["usage"] =
+                        json!({"prompt_tokens":10, "completion_tokens":0, "cost":0.5});
+                }
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(response))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 9883);
+        let project = project_of(&state, &owner, "Failed requests");
+        state
+            .db
+            .grant_credits(&owner, 10.0, "test grant", "test")
+            .unwrap();
+        let mut cfg = (*state.cfg).clone();
+        cfg.openai_base = base;
+        cfg.openai_key = Some("test".into());
+        state.cfg = std::sync::Arc::new(cfg);
+        for with_usage in [false, true] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", project.parse().unwrap());
+            headers.insert("x-arbos-session", HeaderValue::from_static("s"));
+            let response = openai(
+                State(state.clone()),
+                Principal::Box {
+                    user_id: owner.clone(),
+                },
+                Path("chat/completions".into()),
+                headers,
+                Bytes::from(json!({"model":"m", "with_usage":with_usage}).to_string()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+        }
+        let rows = state
+            .db
+            .session_usage(&project, Some("s"), 0, i64::MAX, false)
+            .unwrap();
+        assert_eq!(rows[0].totals.calls, 2);
+        assert_eq!(rows[0].unknown_cost_calls, 1);
+        assert_eq!(rows[0].reported_cost_calls, 1);
+        assert_eq!(rows[0].incomplete_calls, 2);
+        assert_eq!(rows[0].actual_usd, Some(0.5));
+        assert_eq!(
+            state.db.credits(&owner, 0).unwrap().balance_usd,
+            10.0,
+            "recording failed requests must not introduce new account debits"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn cumulative_chat_snapshots_and_cache_buckets_are_not_double_counted() {
+        let mut m = Meter::default();
+        let v = json!({"prompt_tokens": 100, "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 10}, "cost": 0.003});
+        m.absorb_openai_usage(&v);
+        m.absorb_openai_usage(&v);
+        assert_eq!(
+            (m.input, m.output, m.cache_read, m.cache_write),
+            (30, 20, 60, 10)
+        );
+        assert_eq!(m.usd(), 0.003);
+        m.absorb_openai_usage(&json!({"prompt_tokens_details": {"cached_tokens": 70}}));
+        assert_eq!(m.input, 20);
+    }
+
+    #[test]
+    fn responses_events_and_pretty_json_are_metered() {
+        let mut m = Meter::default();
+        m.scan(Api::OpenAi, "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"m\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":60}}}}\n\n");
+        assert_eq!((m.input, m.output, m.cache_read), (40, 20, 60));
+        assert!(m.finished);
+        let mut pretty = Meter::default();
+        pretty.scan(Api::OpenAi, &serde_json::to_string_pretty(&json!({"model": "m", "usage": {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0}})).unwrap());
+        assert_eq!(pretty.cost, Some(0.0));
+        assert_eq!(pretty.output, 20);
+        assert!(pretty.finished);
+    }
+
+    #[test]
+    fn anthropic_usage_merges_start_and_final_delta() {
+        let mut m = Meter::default();
+        m.scan(Api::Anthropic, "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":40}}}\n");
+        assert!(!m.finished);
+        m.scan(Api::Anthropic, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":20,\"cost\":0.01}}\n");
+        assert_eq!((m.input, m.output, m.cache_read), (10, 20, 40));
+        assert_eq!(m.cost, Some(0.01));
+        assert!(m.finished);
+        m.absorb_cost(&json!({"cost": -1}));
+        assert_eq!(m.cost, Some(0.01));
+    }
+
+    #[tokio::test]
+    async fn request_context_and_reported_cost_reach_the_same_usage_row() {
+        use crate::state::{test_support::test_state, AuthMode};
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|headers: HeaderMap| async move {
+                assert!(
+                    headers.get("x-arbos-session").is_none(),
+                    "internal ids stay on the relay"
+                );
+                (
+                    [("content-type", "application/json")],
+                    serde_json::to_string_pretty(&json!({
+                        "id":"gen-usage", "provider":"provider-test", "model":"m",
+                        "usage":{"prompt_tokens":100,"completion_tokens":20,"cost":0.003}
+                    }))
+                    .unwrap(),
+                )
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(l, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Paircode);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openai_base = base;
+        cfg.openai_key = Some("test".into());
+        state.cfg = std::sync::Arc::new(cfg);
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("x-arbos-project", "p"),
+            ("x-arbos-session", "worker"),
+            ("x-arbos-parent-session", "main"),
+            ("x-arbos-session-run", "run-1"),
+            ("x-arbos-purpose", "research"),
+        ] {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+        let r = openai(
+            State(state.clone()),
+            Principal::Admin,
+            Path("chat/completions".into()),
+            headers,
+            Bytes::from_static(br#"{"model":"m","messages":[]}"#),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let request_id = r.headers()["x-arbos-req-id"].to_str().unwrap().to_owned();
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["usage"]["cost"],
+            0.003
+        );
+        let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["request_id"], request_id);
+        assert_eq!(rows[0]["session_id"], "worker");
+        assert_eq!(rows[0]["parent_session_id"], "main");
+        assert_eq!(rows[0]["session_run_id"], "run-1");
+        assert_eq!(rows[0]["actual_usd"], 0.003);
+        assert_eq!(rows[0]["cost_source"], "reported");
+        assert_eq!(rows[0]["metering_status"], "complete");
+        assert_eq!(rows[0]["api"], "openai:research");
+        assert_eq!(rows[0]["upstream_id"], "gen-usage");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn truncated_and_unmetered_responses_remain_visibly_incomplete() {
+        use crate::state::{test_support::test_state, AuthMode};
+        let app = axum::Router::new().route("/v1/messages", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+            let text = if body["case"] == "partial" {
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n"
+            } else { "{\"content\":[]}" };
+            ([("content-type", "text/event-stream")], text)
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Paircode);
+        let mut cfg = (*state.cfg).clone();
+        cfg.anthropic_base = base;
+        cfg.anthropic_key = Some("test".into());
+        state.cfg = std::sync::Arc::new(cfg);
+        for case in ["partial", "unknown"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", HeaderValue::from_static("p"));
+            headers.insert("x-arbos-session", HeaderValue::from_static(case));
+            let response = anthropic(
+                State(state.clone()),
+                Principal::Admin,
+                Path("v1/messages".into()),
+                headers,
+                Bytes::from(json!({"model":"m", "stream":true, "case":case}).to_string()),
+            )
+            .await;
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let usage = state
+                .db
+                .session_usage("p", Some(case), 0, i64::MAX, false)
+                .unwrap();
+            assert_eq!(usage[0].incomplete_calls, 1);
+            assert_eq!(usage[0].actual_usd, None);
+        }
+        let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
+        assert_eq!(rows[0]["metering_status"], "partial");
+        assert_eq!(rows[0]["input"], 10);
+        assert_eq!(rows[1]["metering_status"], "unknown");
+        assert_eq!(rows[1]["cost_source"], "unknown");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_records_a_partial_call_without_waiting_for_more_upstream_bytes() {
+        use crate::state::{test_support::test_state, AuthMode};
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                let start = futures::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(
+                        b"data: {\"id\":\"gen-pending\"}\n\n",
+                    ))
+                });
+                Body::from_stream(start.chain(futures::stream::pending()))
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(l, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Paircode);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openai_base = base;
+        cfg.openai_key = Some("test".into());
+        state.cfg = std::sync::Arc::new(cfg);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", HeaderValue::from_static("p"));
+        let response = openai(
+            State(state.clone()),
+            Principal::Admin,
+            Path("chat/completions".into()),
+            headers,
+            Bytes::from_static(br#"{"model":"m","stream":true}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        let row = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(row) = state
+                    .db
+                    .usage_rows_after("p", 0, 10)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancellation must not wait for the provider to produce another chunk");
+        assert_eq!(row["metering_status"], "partial");
+        assert_eq!(row["cost_source"], "unknown");
+        assert!(row["actual_usd"].is_null());
+        server.abort();
     }
 }

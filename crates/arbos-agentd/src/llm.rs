@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 
+#[derive(Clone)]
 pub struct Llm {
     http: crate::sync::RelayHttp,
     base: String,
@@ -20,6 +21,7 @@ pub struct Llm {
     /// Sent as `x-arbos-purpose`; the relay tags the usage row and ledger entry with it so a
     /// feature's spend (e.g. `memory-tree`) can be summed exactly.
     purpose: Option<String>,
+    context: arbos_core::usage::UsageContext,
     /// Models whose endpoint refuses `reasoning {enabled: false}`, learned from the first
     /// rejection. Shared by every `with_purpose` clone, so one chat's 400 spares every later
     /// call on this box the same wasted round trip.
@@ -57,6 +59,7 @@ impl Llm {
             token: cfg.box_token.clone(),
             project_id: cfg.project_id.clone(),
             purpose: None,
+            context: Default::default(),
             reasoning_always_on: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -64,17 +67,27 @@ impl Llm {
     /// The same client with every call tagged `x-arbos-purpose: <purpose>`.
     pub fn with_purpose(&self, purpose: &str) -> Self {
         Self {
-            http: self.http.clone(),
-            base: self.base.clone(),
-            decisions_url: self.decisions_url.clone(),
-            token: self.token.clone(),
-            project_id: self.project_id.clone(),
             purpose: Some(purpose.to_owned()),
-            reasoning_always_on: Arc::clone(&self.reasoning_always_on),
+            ..self.clone()
         }
     }
 
-    fn purpose_header(&self, r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub fn with_context(&self, context: arbos_core::usage::UsageContext) -> Self {
+        Self {
+            context,
+            ..self.clone()
+        }
+    }
+
+    fn request_headers(&self, mut r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if !self.project_id.is_empty() {
+            r = r.header("x-arbos-project", &self.project_id);
+        }
+        for (name, value) in self.context.headers() {
+            if let Some(value) = value {
+                r = r.header(name, value);
+            }
+        }
         match &self.purpose {
             Some(p) => r.header("x-arbos-purpose", p),
             None => r,
@@ -94,12 +107,11 @@ impl Llm {
         let t0 = Instant::now();
         let body = json!({ "model": model, "state": state, "questions": questions });
         let resp = self
-            .purpose_header(
+            .request_headers(
                 self.http
                     .get()
                     .post(&self.decisions_url)
-                    .bearer_auth(&self.token)
-                    .header("x-arbos-project", &self.project_id),
+                    .bearer_auth(&self.token),
             )
             .timeout(timeout)
             .json(&body)
@@ -166,6 +178,7 @@ impl Llm {
             token: token.to_owned(),
             project_id: String::new(),
             purpose: None,
+            context: Default::default(),
             reasoning_always_on: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -223,7 +236,7 @@ impl Llm {
             }
         }
         let resp = self
-            .purpose_header(
+            .request_headers(
                 self.http
                     .get()
                     .post(format!("{}/chat/completions", self.base))

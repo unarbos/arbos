@@ -392,6 +392,34 @@ async fn stub_forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
+    let context = match token {
+        Some(t) if t == a.cfg.model_proxy_token(None) => a.model_usage_context(None).await,
+        Some(t) if t.starts_with("arbos-model:worker:") => {
+            let id = t
+                .strip_prefix("arbos-model:worker:")
+                .unwrap()
+                .split(':')
+                .next()
+                .unwrap();
+            if t != a.cfg.model_proxy_token(Some(id)) {
+                return (StatusCode::UNAUTHORIZED, "invalid model credential").into_response();
+            }
+            a.model_usage_context(Some(id)).await
+        }
+        // Old children can finish during a rolling upgrade. Their shared credential cannot
+        // distinguish workers from the main child; keep these calls explicitly unattributed.
+        Some(t) if t == a.cfg.box_token => Ok(Default::default()),
+        _ => return (StatusCode::UNAUTHORIZED, "invalid model credential").into_response(),
+    };
+    let context = match context {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     // SDKs append their own `/v1/...` to a base URL that already ends in `/v1`; collapse it.
     let path = uri.path().replacen("/v1/v1/", "/v1/", 1);
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -415,11 +443,17 @@ async fn stub_forward(
         .bearer_auth(&a.cfg.box_token)
         .header("x-arbos-project", &a.cfg.project_id)
         .body(body);
+    for (name, value) in context.headers() {
+        if let Some(value) = value {
+            req = req.header(name, value);
+        }
+    }
     for h in [
         "content-type",
         "accept",
         "anthropic-version",
         "anthropic-beta",
+        "x-arbos-purpose",
     ] {
         if let Some(v) = headers.get(h) {
             req = req.header(h, v);
@@ -678,11 +712,16 @@ mod tests {
         let (agent, _root) =
             crate::status::tests::test_agent_on_relay(&format!("http://127.0.0.1:{port}")).await;
         for _ in 0..3 {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", agent.cfg.box_token).parse().unwrap(),
+            );
             let r = stub_forward(
                 State(agent.clone()),
                 Method::POST,
                 "/v1/messages".parse::<Uri>().unwrap(),
-                HeaderMap::new(),
+                headers,
                 Bytes::from_static(b"{}"),
             )
             .await;
