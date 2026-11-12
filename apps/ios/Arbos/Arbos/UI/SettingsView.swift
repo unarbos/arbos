@@ -48,6 +48,7 @@ struct SettingsView: View {
     @State private var showPrivacyPage: Bool
     @State private var showAboutPage: Bool
     @State private var showDevicesPage: Bool
+    @State private var showAgentLinksPage: Bool
     @State private var showRelayPage: Bool
     @State private var showSecretsPage: Bool
 
@@ -69,6 +70,7 @@ struct SettingsView: View {
         _showPrivacyPage = State(initialValue: landing == "privacy")
         _showAboutPage = State(initialValue: landing == "about")
         _showDevicesPage = State(initialValue: landing == "devices")
+        _showAgentLinksPage = State(initialValue: landing?.hasPrefix("agent-links") == true)
         _showRelayPage = State(initialValue: landing == "relay")
         _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
     }
@@ -116,6 +118,7 @@ struct SettingsView: View {
                 Task { await push.refreshStatus() }
                 Task { await model.refreshSecrets() }
                 Task { await model.refreshDevices() }
+                Task { await model.refreshAgentLinks() }
                 Task { await model.refreshGoals() }
                 if let page = landing, page.hasPrefix("avatar") {
                     tab = "Profile"
@@ -150,6 +153,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
             .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
+            .navigationDestination(isPresented: $showAgentLinksPage) { AgentAccessLinkPage(landing: landing) }
             .navigationDestination(isPresented: $showRelayPage) {
                 // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
                 #if DEBUG
@@ -206,6 +210,18 @@ struct SettingsView: View {
             }))
         }
         if model.credentials != nil || model.isFixture {
+            // Agent access link (Nov 3): the one place an outside agent is given a way in,
+            // and the one place every agent token is listed — including the reader tokens
+            // that used to show under Devices. A Button drives the same
+            // `showAgentLinksPage` destination the rig lands on (NavigationLink taps under
+            // PaneCard were visible to XCTest but did not push).
+            account.append(AnyView(Button {
+                showAgentLinksPage = true
+            } label: {
+                SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-agent-links")))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)
@@ -316,10 +332,18 @@ struct SettingsView: View {
     // MARK: Row summaries
 
     private var devicesSummary: String? {
-        switch AuthDevice.visible(model.devices).count {
+        switch AuthDevice.signedIn(model.devices).count {
         case 0: return nil
         case 1: return "1 device"
         case let n: return "\(n) devices"
+        }
+    }
+
+    private var agentLinksSummary: String? {
+        switch model.agentLinkRows.count {
+        case 0: return nil
+        case 1: return "1 link"
+        case let n: return "\(n) links"
         }
     }
 
@@ -1189,7 +1213,7 @@ struct DevicesPage: View {
     @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
-        AuthDevice.visible(model.devices)
+        AuthDevice.signedIn(model.devices)
     }
 
     var body: some View {
@@ -1198,14 +1222,14 @@ struct DevicesPage: View {
                 // The page's note: under the page header, before the first card.
                 ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
                           onTryAgain: { Task { await model.refreshDevices() } })
-            } else if !model.devicesLoaded && model.devices.isEmpty {
+            } else if !model.devicesLoaded && rows.isEmpty {
                 Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
-            } else if model.devices.isEmpty {
+            } else if rows.isEmpty {
                 Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
             } else {
-                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab. Agent tokens live in Agent access link.") {
                     ForEach(rows) { d in
                         PaneRow(
                             leading: .tile(d.glyph),
