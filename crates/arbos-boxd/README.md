@@ -3,8 +3,9 @@
 The root daemon on a compute host that runs each user's box as an OCI bundle directly under
 `runsc` (docs/box-scaling.md §3 and §4.1). The relay calls it for boxes on its
 `boxd` provider, which is off unless the relay has `ARBOS_BOXD_URL` and `ARBOS_BOXD_TOKEN_FILE`
-(a copy of the token below that the relay's user can read, mode 0600). The R2 cold tier and
-multi-node are later phases.
+(a copy of the token below that the relay's user can read, mode 0600). The cold tier is off
+unless the daemon has `ARBOS_BOXD_S3_ENDPOINT` ([below](#the-cold-tier)). Multi-node is a later
+phase.
 
 ## What the host needs
 
@@ -91,6 +92,7 @@ Settings are environment variables, all optional:
 | `ARBOS_BOXD_TOKEN_FILE` | `/etc/arbos-boxd/token` |
 | `ARBOS_BOXD_PORT` | `7790` (always on `127.0.0.1`) |
 | `ARBOS_BOXD_PLATFORM` | `systrap` |
+| `ARBOS_BOXD_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_CREDENTIALS_FILE` | unset: no cold tier |
 
 A box's sandbox, network namespace and cgroup are all named `arbos-box-<user_id>.`, with the
 dot: runsc takes an id that is the start of exactly one sandbox's as that sandbox, and no user
@@ -120,11 +122,13 @@ are `{"error": "..."}`.
 | Request | Answer |
 | --- | --- |
 | `POST /v1/boxes/{user_id}/ensure` with `{"version": "0.6.409", "env": {...}}` | `{"created", "size_gb"}`. 409 if the version is not installed, or if it would change the bundle of a box that is running or checkpointed. |
-| `POST /v1/boxes/{user_id}/wake` | `{"state": "warm", "restored", "box_url"}`. Does nothing to a running box. |
-| `POST /v1/boxes/{user_id}/sleep` | `{"state": "asleep_clean" \| "asleep_ckpt", "files_bytes", "scratch_bytes", "trash_bytes", "work_bytes", "ckpt_bytes"}`. 409 `busy: <reason>` when agentd refuses, and the box keeps running. 502 when agentd does not answer. |
+| `POST /v1/boxes/{user_id}/wake` | `{"state": "warm", "restored", "box_url"}`. Does nothing to a running box. A cold box is fetched and checked first; 502 if it does not come back whole, and the box is not started. |
+| `POST /v1/boxes/{user_id}/sleep` | `{"state": "asleep_clean" \| "asleep_ckpt" \| "cold", "files_bytes", "scratch_bytes", "trash_bytes", "work_bytes", "ckpt_bytes"}`. 409 `busy: <reason>` when agentd refuses, and the box keeps running. 502 when agentd does not answer. |
 | `POST /v1/boxes/{user_id}/sleep?force=true` | The same answer, always `asleep_clean` and with a null split. agentd is not asked: a busy box is stopped too, and no checkpoint is written or kept, so every process in the box ends. `/work` is untouched. This is the user's Stop and an operator's delete of the box. |
 | `POST /v1/boxes/{user_id}/grow` | `{"size_gb"}`: 8 → 32 → 128. 409 at 128, or while the box is asleep. |
-| `GET /v1/host/status` | `mem_available_gb`, `swap_used_gb`, `load5`, `disk_free_gb`, `resident_boxes`, `present_boxes`, and `boxes[]` with `user_id`, `running`, `size_gb`, `work_bytes`, `ckpt_bytes`. |
+| `POST /v1/boxes/{user_id}/archive` with `{"part": "ckpt" \| "work"}` | `{"archived", "stored_bytes"}`: the sleeping box's checkpoint or disk is in the object store and off this host. `archived` is false when it already was. 409 while the box is awake, when it has no such part, or with the cold tier off. 502 when the upload did not round-trip; the local copy is kept. |
+| `POST /v1/boxes/{user_id}/prefetch` | `{"cold"}`, at once. If the box was cold it is being brought back behind the answer; it stays asleep. |
+| `GET /v1/host/status` | `mem_available_gb`, `swap_used_gb`, `load5`, `disk_free_gb`, `resident_boxes`, `present_boxes`, `cold_tier`, and `boxes[]` with `user_id`, `running`, `size_gb`, `work_bytes`, `ckpt_bytes`, `work_cold`, `ckpt_cold`. A box whose disk is in the store is listed and is not `present`. |
 
 Known limit: a box with any workspace is always checkpointed, never stopped clean. Inside
 gVisor agentd has no writable cgroup v2, so it cannot count a workspace's processes and
@@ -133,6 +137,40 @@ reports `active_user_pids: null`, which is not zero. Only a box with no workspac
 `env` is the box's environment (the relay's `boxes::box_env`). `ARBOS_MCP_TOKEN` in it is the
 bearer the daemon uses for agentd's `POST /box/prepare-sleep`. `box_url` is the box's own
 address on the bridge, port 7788; no port is published on the host.
+
+## The cold tier
+
+docs/box-scaling.md §3.3: a box asleep for days gives its checkpoint, and later its disk, to an
+S3-compatible bucket (Cloudflare R2), and its next wake brings them back. The relay decides
+when (`arbos-relay/src/boxd.rs`: a checkpoint after 3 days, or at once below 150 GB free; a
+disk after 14 days and below 250 GB free) and archives only on a host whose status says
+`cold_tier`. The host needs `zstd` on `PATH` as well, and:
+
+| Variable | |
+| --- | --- |
+| `ARBOS_BOXD_S3_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com`. Setting it turns the tier on; the daemon does not start if the rest is missing. HTTPS only. |
+| `ARBOS_BOXD_S3_BUCKET` | A bucket for this host alone. |
+| `ARBOS_BOXD_S3_REGION` | Default `auto` (R2). |
+| `ARBOS_BOXD_S3_CREDENTIALS_FILE` | A file only root reads, mode 0600, of two lines: the access key id, then the secret. Or `ARBOS_BOXD_S3_ACCESS_KEY_ID` and `ARBOS_BOXD_S3_SECRET_ACCESS_KEY` in the environment. |
+
+A checkpoint is packed with `tar`, a disk with `zstd`, beside the box, so an archive needs room
+for the pack while it runs. The pack goes up as 64 MiB objects, `boxes/<user_id>/ckpt/00000…`
+and `boxes/<user_id>/work/00000…`, each with its SHA-256 signed into the request. Every object
+is then read back and hashed, and only after that is the record written
+(`boxes/<user_id>/{ckpt,work}.cold.json` on the host, mode 0600; a copy goes to the bucket as
+`boxes/<user_id>/{ckpt,work}.json` for rebuilding a lost host) and the local copy removed.
+
+A wake, or a prefetch ahead of it, downloads against the host's record: an object of another
+length or hash is refused, the box stays asleep, and the wake answers 502 with the reason.
+What came back is on the disk before it gets its name. Once a box runs again the bucket's copy
+is no longer its disk: the record goes before the disk is mounted and the objects after.
+A box fetched back and not run since is archived again without an upload.
+
+The bucket's contents are a user's files as they are on the host, compressed and not
+encrypted by the daemon: use a private bucket and the store's own encryption at rest.
+
+Turning the tier off again (unsetting the endpoint) with boxes still cold leaves those boxes
+unable to wake until it is back: their wake answers 502 and says so.
 
 ## Moving a Docker `runsc` box here
 
@@ -171,6 +209,7 @@ To go back before step 6: `DELETE /admin/users/$u/box` again, set the provider b
 
 ## Testing
 
-`cargo test -p arbos-boxd` runs the state machine against a fake host, anywhere. The real
+`cargo test -p arbos-boxd` runs the state machine against a fake host and an in-process object
+store, anywhere. The cold tier has not been run against a real bucket. The real
 path (loop devices, ext4, network namespaces, runsc checkpoint and restore) is
 `scripts/ci/boxd-linux-test.sh`, which needs only Docker.

@@ -2,19 +2,20 @@
 //! self-managed OCI bundle directly under `runsc`, with no Docker in the path
 //! (docs/box-scaling.md §3, §4.1).
 //!
-//! This is Phase 1: the supervisor on its own. It makes a box's disk and bundle (`ensure`),
-//! starts it or restores it from a checkpoint (`wake`), stops it clean or checkpoints it
-//! (`sleep`), grows its disk online (`grow`), and reports the host (`status`).
+//! It makes a box's disk and bundle (`ensure`), starts it or restores it from a checkpoint
+//! (`wake`), stops it clean or checkpoints it (`sleep`), grows its disk online (`grow`), moves
+//! a sleeping box's checkpoint or disk to an object store and back (`archive`, `prefetch`,
+//! and `wake` again; off without `ARBOS_BOXD_S3_ENDPOINT`), and reports the host (`status`).
 //!
-//! Not here, on purpose, because later phases own them: the R2 cold tier (`prefetch`,
-//! `archive`, fetching a cold box on wake), the relay's `Provider::Boxd`, the idle supervisor
-//! that decides when a box sleeps, and more than one node (mTLS). Nothing calls this daemon
-//! yet.
+//! It does what it is asked and decides nothing: when a box sleeps, is archived or is fetched
+//! ahead of a wake is the relay's (`arbos-relay/src/boxd.rs`). More than one node (mTLS) is a
+//! later phase.
 //!
 //! It listens on loopback only and every request carries a bearer token; see the README for
 //! the operator's steps.
 
 mod boxes;
+mod cold;
 mod http;
 mod oci;
 mod sys;
@@ -45,7 +46,9 @@ async fn main() -> Result<()> {
         root: env("ARBOS_BOXD_ROOT", "/var/lib/arbos-boxd"),
         run: env("ARBOS_BOXD_RUNSC_ROOT", "/var/run/arbos-runsc"),
         platform: env("ARBOS_BOXD_PLATFORM", "systrap"),
+        store: cold::Store::from_env()?.map(Arc::new),
     };
+    tracing::info!(cold_tier = cfg.store.is_some(), "arbos-boxd starting");
     let boxd = Arc::new(boxes::Boxd::new(cfg, Arc::new(sys::Host::new()?)));
     boxd.init().await.context("host setup")?;
     // Loopback, always: the relay is on this host, and a box reaches the host only over the

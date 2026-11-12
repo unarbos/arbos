@@ -6,6 +6,7 @@
 //! - `mnt/` — where it is mounted while the box is awake
 //! - `config.json` — the OCI bundle (it holds the box's tokens, so it is 0600)
 //! - `ckpt/` — a checkpoint, present only while the box sleeps with user processes
+//! - `ckpt.cold.json`, `work.cold.json` — what the cold tier holds of the box (`cold.rs`)
 //! - `ip` — the box's address on the bridge
 //! - `box.log` — the sandbox's stdout and stderr
 //!
@@ -25,6 +26,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::cold::{Manifest, Store};
 use crate::oci;
 use crate::sys::{Out, Sys, AGENTD_PORT};
 
@@ -102,6 +104,24 @@ pub fn stop_kind(active_user_pids: Option<u64>) -> Stop {
     }
 }
 
+/// The two things of a sleeping box the cold tier takes (§3.3): its checkpoint, as `ckpt.tar`,
+/// and its disk, as `work.img.zst`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Ckpt,
+    Work,
+}
+
+impl Part {
+    fn name(self) -> &'static str {
+        match self {
+            Part::Ckpt => "ckpt",
+            Part::Work => "work",
+        }
+    }
+}
+
 /// What agentd reports from prepare-sleep (`arbos-agentd/src/sleep.rs`). Only these are read.
 #[derive(Deserialize)]
 struct SleepReport {
@@ -140,6 +160,8 @@ pub struct Cfg {
     pub run: String,
     /// runsc `--platform`. `systrap` in production; a knob because not every kernel has it.
     pub platform: String,
+    /// The cold tier's bucket, or `None` while the tier is off.
+    pub store: Option<Arc<Store>>,
 }
 
 struct Paths {
@@ -152,6 +174,41 @@ struct Paths {
     ckpt: String,
     ip: String,
     log: String,
+    /// Where the cold tier keeps this box: `boxes/<user_id>`.
+    cold: String,
+}
+
+impl Paths {
+    /// The part on this host: the checkpoint directory, or the disk image.
+    fn local(&self, part: Part) -> &str {
+        match part {
+            Part::Ckpt => &self.ckpt,
+            Part::Work => &self.img,
+        }
+    }
+
+    fn has(&self, part: Part) -> bool {
+        std::fs::symlink_metadata(self.local(part)).is_ok_and(|m| match part {
+            Part::Ckpt => m.is_dir(),
+            Part::Work => m.is_file(),
+        })
+    }
+
+    /// The manifest of the part's upload. While it is there the store holds exactly what the
+    /// local copy holds, if there is one: it is written before the local copy goes and
+    /// removed before the box next runs.
+    fn record(&self, part: Part) -> String {
+        format!("{}/{}.cold.json", self.dir, part.name())
+    }
+
+    /// The packed part on its way to or from the store.
+    fn pack(&self, part: Part) -> String {
+        format!("{}/{}.pack", self.dir, part.name())
+    }
+
+    fn prefix(&self, part: Part) -> String {
+        format!("{}/{}", self.cold, part.name())
+    }
 }
 
 pub struct Boxd {
@@ -183,6 +240,12 @@ fn write_private(path: &str, bytes: &[u8]) -> std::io::Result<()> {
         .open(&tmp)?;
     std::io::Write::write_all(&mut f, bytes)?;
     std::fs::rename(tmp, path)
+}
+
+/// Flush a file, or a directory's entries, to the disk. The cold tier's order of steps (the
+/// record before the local copy goes, no record before the box runs) has to hold over a crash.
+fn sync(path: &str) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
 }
 
 fn remove_dir_if_there(dir: &str) -> std::io::Result<()> {
@@ -296,6 +359,7 @@ impl Boxd {
             ckpt: format!("{dir}/ckpt"),
             ip: format!("{dir}/ip"),
             log: format!("{dir}/box.log"),
+            cold: format!("boxes/{}", user.0),
             dir,
         })
     }
@@ -380,7 +444,9 @@ impl Boxd {
         let (rootfs, image) = self.image(version).await?;
         mkdir_private(&p.dir)?;
         mkdir_private(&p.mnt)?;
-        let created = !Path::new(&p.img).exists();
+        // A disk in the cold tier is a disk: no empty one is made in its place.
+        let cold_work = self.record(&p, Part::Work)?;
+        let created = !Path::new(&p.img).exists() && cold_work.is_none();
         if created {
             // Formatted beside it and renamed, so a `work.img` is always a filesystem.
             let tmp = format!("{}.tmp", p.img);
@@ -425,7 +491,9 @@ impl Boxd {
         if current.as_ref() != Some(&config) {
             // A checkpoint restores only into the bundle it was taken from, and a running
             // box's next checkpoint is taken from this one.
-            if self.running(&p.id).await? || Path::new(&p.ckpt).exists() {
+            let checkpointed =
+                Path::new(&p.ckpt).exists() || self.record(&p, Part::Ckpt)?.is_some();
+            if self.running(&p.id).await? || checkpointed {
                 return Err(refuse(
                     StatusCode::CONFLICT,
                     "the box's image or environment changes only while it is asleep with no checkpoint",
@@ -433,8 +501,195 @@ impl Boxd {
             }
             write_private(&p.config, &serde_json::to_vec_pretty(&config)?)?;
         }
-        let size_gb = std::fs::metadata(&p.img)?.len() / GIB;
-        Ok(json!({ "created": created, "size_gb": size_gb }))
+        let size = match cold_work.filter(|_| !p.has(Part::Work)) {
+            Some(m) => m.source_bytes,
+            None => std::fs::metadata(&p.img)?.len(),
+        };
+        Ok(json!({ "created": created, "size_gb": size / GIB }))
+    }
+
+    /// The part's cold record, if it has one. A record that cannot be read is an error and
+    /// not an absence: the box is not started, and no disk is made, on a guess.
+    fn record(&self, p: &Paths, part: Part) -> anyhow::Result<Option<Manifest>> {
+        match std::fs::read(p.record(part)) {
+            Ok(bytes) => {
+                Ok(Some(Manifest::parse(&bytes).with_context(|| {
+                    format!("{} is not a cold record", p.record(part))
+                })?))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The part is in the store and not on this host.
+    fn cold(&self, p: &Paths, part: Part) -> anyhow::Result<bool> {
+        Ok(!p.has(part) && self.record(p, part)?.is_some())
+    }
+
+    fn store(&self) -> Res<&Arc<Store>> {
+        self.cfg.store.as_ref().ok_or_else(|| {
+            refuse(
+                StatusCode::CONFLICT,
+                "the cold tier is off on this host: ARBOS_BOXD_S3_ENDPOINT is not set",
+            )
+        })
+    }
+
+    /// `POST /v1/boxes/{user_id}/archive`: move a sleeping box's checkpoint or disk to the
+    /// object store (§3.3). The local copy goes only after every byte of the upload has been
+    /// read back and matched, and after the record of it is on disk.
+    pub async fn archive(&self, user: &UserId, part: Part) -> Res<Value> {
+        let store = self.store()?;
+        let _box = self.lock(user).await;
+        let p = self.paths(user)?;
+        self.config(&p)?;
+        if self.running(&p.id).await? || self.loop_dev(&p.img).await?.is_some() {
+            return Err(refuse(
+                StatusCode::CONFLICT,
+                "the box is awake; only a sleeping box is archived",
+            ));
+        }
+        let known = self.record(&p, part)?;
+        let answer =
+            |archived: bool, m: &Manifest| json!({ "archived": archived, "stored_bytes": m.bytes });
+        if !p.has(part) {
+            return match known {
+                Some(m) => Ok(answer(false, &m)),
+                None => Err(refuse(
+                    StatusCode::CONFLICT,
+                    format!("the box has no {} to archive", part.name()),
+                )),
+            };
+        }
+        let m = match known {
+            // Fetched back and not run since: the store still holds exactly this.
+            Some(m) => m,
+            None => {
+                let (local, pack) = (p.local(part), p.pack(part));
+                let packed = match part {
+                    Part::Ckpt => self.run(&["tar", "-cf", &pack, "-C", local, "."]).await,
+                    Part::Work => self.run(&["zstd", "-q", "-f", "-o", &pack, local]).await,
+                };
+                let source_bytes = match part {
+                    Part::Ckpt => 0,
+                    Part::Work => std::fs::metadata(local)?.len(),
+                };
+                let uploaded = match packed {
+                    Ok(_) => store.upload(&p.prefix(part), &pack, source_bytes).await,
+                    Err(e) => Err(e),
+                };
+                let _ = std::fs::remove_file(&pack);
+                let gateway = |e: anyhow::Error| {
+                    refuse(StatusCode::BAD_GATEWAY, format!("archive failed: {e:#}"))
+                };
+                let m = uploaded.map_err(gateway)?;
+                write_private(&p.record(part), &serde_json::to_vec(&m)?)?;
+                sync(&p.record(part))?;
+                sync(&p.dir)?;
+                m
+            }
+        };
+        match part {
+            Part::Ckpt => std::fs::remove_dir_all(&p.ckpt)?,
+            Part::Work => std::fs::remove_file(&p.img)?,
+        }
+        tracing::info!(id = %p.id, part = part.name(), stored_bytes = m.bytes, "box part archived");
+        Ok(answer(true, &m))
+    }
+
+    /// Bring back whatever of the box is in the store, each part checked against its record
+    /// before it is given its name. On any failure the box is as cold as it was.
+    async fn fetch_cold(&self, p: &Paths) -> Res<()> {
+        for part in [Part::Work, Part::Ckpt] {
+            let Some(m) = self.record(p, part)?.filter(|_| !p.has(part)) else {
+                continue;
+            };
+            let (local, pack) = (p.local(part), p.pack(part));
+            let tmp = format!("{local}.tmp");
+            let fetched = async {
+                self.store()
+                    .map_err(|e| anyhow!(e.msg))?
+                    .download(&p.prefix(part), &m, &pack)
+                    .await?;
+                match part {
+                    Part::Ckpt => {
+                        remove_dir_if_there(&tmp)?;
+                        mkdir_private(&tmp)?;
+                        self.run(&["tar", "-xf", &pack, "-C", &tmp]).await?;
+                        for file in std::fs::read_dir(&tmp)?.flatten() {
+                            std::fs::File::open(file.path())?.sync_all()?;
+                        }
+                    }
+                    Part::Work => {
+                        self.run(&["zstd", "-d", "-q", "-f", "--sparse", "-o", &tmp, &pack])
+                            .await?;
+                        // zstd checks its own frame; this checks it was this disk's.
+                        if std::fs::metadata(&tmp)?.len() != m.source_bytes {
+                            bail!("the disk that came back is not the size that was archived");
+                        }
+                    }
+                }
+                // On the disk before it has its name: a crash leaves the part cold or whole.
+                sync(&tmp)?;
+                std::fs::rename(&tmp, local)?;
+                Ok(sync(&p.dir)?)
+            };
+            let fetched: anyhow::Result<()> = fetched.await;
+            let _ = std::fs::remove_file(&pack);
+            fetched.map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_dir_all(&tmp);
+                let why = format!(
+                    "the box is cold and its {} did not come back: {e:#}",
+                    part.name()
+                );
+                refuse(StatusCode::BAD_GATEWAY, why)
+            })?;
+            tracing::info!(id = %p.id, part = part.name(), stored_bytes = m.bytes, "box part fetched");
+        }
+        Ok(())
+    }
+
+    /// Drop a part's record, and then what the store holds of it. Called before the local copy
+    /// may change or go, which is the moment the store's stops being a copy of it.
+    fn forget_cold(&self, p: &Paths, part: Part) -> anyhow::Result<()> {
+        let Some(m) = self.record(p, part)? else {
+            return Ok(());
+        };
+        std::fs::remove_file(p.record(part))?;
+        sync(&p.dir)?;
+        if let Some(store) = self.cfg.store.clone() {
+            let (prefix, id) = (p.prefix(part), p.id.clone());
+            // Off the wake's clock: a 16 GiB checkpoint is 256 deletes. What a failed one
+            // leaves is overwritten by the box's next archive.
+            tokio::spawn(async move {
+                if let Err(e) = store.remove(&prefix, &m).await {
+                    tracing::warn!(%id, error = %format!("{e:#}"), "cold objects not removed");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// `POST /v1/boxes/{user_id}/prefetch`: start bringing a cold box back to this host ahead
+    /// of its wake, and answer at once. A wake that comes meanwhile waits on the box's lock
+    /// and finds the work done; a second prefetch finds nothing left to do.
+    pub fn prefetch(self: &Arc<Self>, user: &UserId) -> Res<Value> {
+        let p = self.paths(user)?;
+        self.config(&p)?;
+        let cold = self.cold(&p, Part::Work)? || self.cold(&p, Part::Ckpt)?;
+        if cold {
+            self.store()?;
+            let (boxd, user) = (self.clone(), user.clone());
+            tokio::spawn(async move {
+                let _box = boxd.lock(&user).await;
+                if let Err(e) = boxd.fetch_cold(&p).await {
+                    tracing::warn!(id = %p.id, error = %e.msg, "prefetch failed");
+                }
+            });
+        }
+        Ok(json!({ "cold": cold }))
     }
 
     async fn loop_dev(&self, img: &str) -> anyhow::Result<Option<String>> {
@@ -574,6 +829,13 @@ impl Boxd {
             }
             return Ok(answer(false));
         }
+        // A cold box comes back whole and checked before any of it is mounted or run, and from
+        // here on the store's copy is not this box's.
+        self.fetch_cold(&p).await?;
+        for part in [Part::Work, Part::Ckpt] {
+            self.forget_cold(&p, part)?;
+        }
+        let has_ckpt = Path::new(&p.ckpt).is_dir();
         // A sandbox that exited by itself still holds its id.
         let _ = self.runsc(&["delete", "--force", &p.id], None).await;
         self.mount(&p).await?;
@@ -655,6 +917,7 @@ impl Boxd {
                 }
             }
         } else if force {
+            self.forget_cold(&p, Part::Ckpt)?;
             remove_dir_if_there(&p.ckpt)?;
         }
         // Also what clears the id of a sandbox that exited by itself.
@@ -676,10 +939,17 @@ impl Boxd {
         }
         self.net_down(&p.id, self.ip(&p)?).await;
         let has_ckpt = Path::new(&p.ckpt).is_dir();
-        tracing::info!(id = %p.id, checkpointed = has_ckpt, "box asleep");
+        // A box that was not running may have been asleep in the store.
+        let cold = self.cold(&p, Part::Work)? || self.cold(&p, Part::Ckpt)?;
+        tracing::info!(id = %p.id, checkpointed = has_ckpt, cold, "box asleep");
         let report = report.as_ref();
+        let state = match (cold, has_ckpt) {
+            (true, _) => "cold",
+            (false, true) => "asleep_ckpt",
+            (false, false) => "asleep_clean",
+        };
         Ok(json!({
-            "state": if has_ckpt { "asleep_ckpt" } else { "asleep_clean" },
+            "state": state,
             // The split is agentd's, so it is null when the box was not running to ask.
             "files_bytes": report.map(|r| r.files_bytes),
             "scratch_bytes": report.map(|r| r.scratch_bytes),
@@ -747,6 +1017,7 @@ impl Boxd {
     }
 
     /// `GET /v1/host/status` (§4.1). Memory, swap and load are null where `/proc` has none.
+    /// `cold_tier` is whether this host has an object store; the relay archives only then.
     pub async fn status(&self) -> Res<Value> {
         let listed = self.runsc(&["list", "--quiet"], None).await?;
         let listed = listed.ok("runsc list")?;
@@ -760,15 +1031,25 @@ impl Boxd {
             let Ok(p) = self.paths(&user) else {
                 continue;
             };
-            let Ok(image) = std::fs::symlink_metadata(&p.img) else {
+            // A record that cannot be read is not a box this can describe.
+            let (Ok(work_cold), Ok(ckpt_cold)) =
+                (self.cold(&p, Part::Work), self.cold(&p, Part::Ckpt))
+            else {
                 continue;
+            };
+            let size = match std::fs::symlink_metadata(&p.img) {
+                Ok(image) => image.len(),
+                Err(_) if work_cold => self.record(&p, Part::Work)?.map_or(0, |m| m.source_bytes),
+                Err(_) => continue,
             };
             boxes.push(json!({
                 "user_id": user.0,
                 "running": running.contains(p.id.as_str()),
-                "size_gb": image.len() / GIB,
-                "work_bytes": image.blocks() * 512,
+                "size_gb": size / GIB,
+                "work_bytes": disk_bytes(&p.img),
                 "ckpt_bytes": disk_bytes(&p.ckpt),
+                "work_cold": work_cold,
+                "ckpt_cold": ckpt_cold,
             }));
         }
         let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
@@ -786,7 +1067,9 @@ impl Boxd {
             "load5": load5,
             "disk_free_gb": free as f64 / 1e9,
             "resident_boxes": boxes.iter().filter(|b| b["running"] == true).count(),
-            "present_boxes": boxes.len(),
+            // A box whose disk is in the store holds none of this host's.
+            "present_boxes": boxes.iter().filter(|b| b["work_cold"] == false).count(),
+            "cold_tier": self.cfg.store.is_some(),
             "boxes": boxes,
         }))
     }
@@ -800,6 +1083,10 @@ pub mod tests {
 
     /// A daemon on a fake host, rooted in a fresh temp directory with image `1.0` installed.
     pub async fn boxd(tag: &str) -> (Arc<Boxd>, Arc<Fake>, String) {
+        boxd_with(tag, None).await
+    }
+
+    async fn boxd_with(tag: &str, store: Option<Store>) -> (Arc<Boxd>, Arc<Fake>, String) {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let root =
@@ -820,6 +1107,7 @@ pub mod tests {
             run: format!("{root}/run"),
             platform: "systrap".into(),
             root: root.clone(),
+            store: store.map(Arc::new),
         };
         let boxd = Arc::new(Boxd::new(cfg, fake.clone()));
         boxd.init().await.unwrap();
@@ -1275,6 +1563,317 @@ pub mod tests {
         for key in ["mem_available_gb", "swap_used_gb", "load5"] {
             assert!(s.get(key).is_some(), "{key}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- the cold tier ----
+
+    const CKPT: &str =
+        r#"{"active_user_pids":3,"files_bytes":1,"scratch_bytes":1,"trash_bytes":1}"#;
+
+    /// A box asleep with a checkpoint, on a host with an object store.
+    async fn asleep_with_a_store(
+        tag: &str,
+    ) -> (
+        Arc<Boxd>,
+        Arc<Fake>,
+        Arc<crate::cold::tests::Fake>,
+        String,
+        UserId,
+    ) {
+        let (bucket, store) = crate::cold::tests::served().await;
+        let (b, fake, root) = boxd_with(tag, Some(store)).await;
+        let u = user("u_cold");
+        b.ensure(&u, "1.0", &env("t")).await.unwrap();
+        b.wake(&u).await.unwrap();
+        fake.answer(200, CKPT);
+        assert_eq!(b.sleep(&u, false).await.unwrap()["state"], "asleep_ckpt");
+        (b, fake, bucket, root, u)
+    }
+
+    /// What happens off the request's clock (a prefetch, the deletes after a wake) happens.
+    async fn eventually(what: &str, done: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("never: {what}");
+    }
+
+    fn there(path: &str) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    /// The checkpoint goes to the store, then the disk; the host keeps a private record of
+    /// each and nothing else of them. The box is still a box: ensure makes it no new disk and
+    /// status still lists it. Its wake brings both back before anything is mounted, restores
+    /// it, and leaves nothing in the store.
+    #[tokio::test]
+    async fn a_sleeping_box_goes_to_the_store_and_its_wake_brings_it_back() {
+        let (b, fake, bucket, root, u) = asleep_with_a_store("cold").await;
+        let dir = format!("{root}/boxes/u_cold");
+        let (img, ckpt) = (format!("{dir}/work.img"), format!("{dir}/ckpt"));
+        let one = |s: &Value| s["boxes"][0].clone();
+
+        let r = b.archive(&u, Part::Ckpt).await.unwrap();
+        assert_eq!(r["archived"], true);
+        assert!(r["stored_bytes"].as_u64().unwrap() > 0);
+        assert!(!there(&ckpt) && there(&img));
+        let record = std::fs::metadata(format!("{dir}/ckpt.cold.json")).unwrap();
+        assert_eq!(record.mode() & 0o777, 0o600);
+        assert!(!there(&format!("{dir}/ckpt.pack")));
+        assert!(bucket
+            .keys()
+            .contains(&"/cold/boxes/u_cold/ckpt/00000".to_owned()));
+        let s = b.status().await.unwrap();
+        assert_eq!(
+            (
+                &one(&s)["ckpt_cold"],
+                &one(&s)["work_cold"],
+                &s["present_boxes"],
+                &s["cold_tier"]
+            ),
+            (&json!(true), &json!(false), &json!(1), &json!(true))
+        );
+        // Again: nothing to do, and nothing sent.
+        let puts = bucket.called("PUT");
+        assert_eq!(b.archive(&u, Part::Ckpt).await.unwrap()["archived"], false);
+        assert_eq!(bucket.called("PUT"), puts);
+
+        assert_eq!(b.archive(&u, Part::Work).await.unwrap()["archived"], true);
+        assert!(!there(&img));
+        let s = b.status().await.unwrap();
+        assert_eq!(
+            (
+                &one(&s)["work_cold"],
+                &one(&s)["size_gb"],
+                &one(&s)["work_bytes"],
+                &s["present_boxes"]
+            ),
+            (&json!(true), &json!(8), &json!(0), &json!(0))
+        );
+        // A disk in the store is this box's disk, and its checkpoint still pins its bundle.
+        assert_eq!(
+            b.ensure(&u, "1.0", &env("t")).await.unwrap(),
+            json!({ "created": false, "size_gb": 8 })
+        );
+        assert_eq!(fake.ran("mkfs.ext4"), 1);
+        assert_eq!(
+            status(b.ensure(&u, "1.0", &env("other")).await),
+            StatusCode::CONFLICT
+        );
+        // An unforced sleep of it stops nothing and says where it is.
+        assert_eq!(b.sleep(&u, false).await.unwrap()["state"], "cold");
+
+        let woke = b.wake(&u).await.unwrap();
+        assert_eq!(woke["restored"], true);
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 8 * GIB);
+        let log = fake.log.lock().unwrap().clone();
+        let at = |needle: &str| log.iter().rposition(|l| l.contains(needle)).unwrap();
+        assert!(at("zstd -d") < at("mount -o") && at("tar -xf") < at(" restore "));
+        for name in [
+            "work.cold.json",
+            "ckpt.cold.json",
+            "work.pack",
+            "ckpt.pack",
+            "ckpt",
+        ] {
+            assert!(!there(&format!("{dir}/{name}")), "{name}");
+        }
+        eventually("the store is emptied", || bucket.keys().is_empty()).await;
+        let s = b.status().await.unwrap();
+        assert_eq!(
+            (
+                &one(&s)["work_cold"],
+                &one(&s)["ckpt_cold"],
+                &s["present_boxes"]
+            ),
+            (&json!(false), &json!(false), &json!(1))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A chunk that is not what was uploaded, a store that is down, a record that cannot be
+    /// read: the wake fails saying so, nothing is mounted or run, and the box is as cold as it
+    /// was. Once the store has the bytes again the same wake goes through.
+    #[tokio::test]
+    async fn a_cold_box_that_does_not_come_back_whole_is_not_started() {
+        let (b, fake, bucket, root, u) = asleep_with_a_store("cold-bad").await;
+        let dir = format!("{root}/boxes/u_cold");
+        b.archive(&u, Part::Ckpt).await.unwrap();
+        b.archive(&u, Part::Work).await.unwrap();
+        let before = fake.log.lock().unwrap().len();
+        let untouched = |why: &str| {
+            let log = fake.log.lock().unwrap().clone();
+            let ran = |needle: &str| log[before..].iter().any(|l| l.contains(needle));
+            assert!(
+                !ran("mount") && !ran("--detach") && !ran("losetup --find"),
+                "{why}: {log:?}"
+            );
+            for gone in [
+                "work.img",
+                "work.img.tmp",
+                "work.pack",
+                "ckpt",
+                "ckpt.tmp",
+                "ckpt.pack",
+            ] {
+                assert!(!there(&format!("{dir}/{gone}")), "{why}: {gone}");
+            }
+            for kept in ["work.cold.json", "ckpt.cold.json"] {
+                assert!(there(&format!("{dir}/{kept}")), "{why}: {kept}");
+            }
+        };
+
+        let key = "/cold/boxes/u_cold/work/00000".to_owned();
+        let good = bucket.objects.lock().unwrap()[&key].clone();
+        let mut bad = good.clone();
+        bad[0] ^= 1;
+        bucket.objects.lock().unwrap().insert(key.clone(), bad);
+        let e = b.wake(&u).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(e.msg.contains("its work did not come back"), "{}", e.msg);
+        untouched("a changed chunk");
+
+        bucket.objects.lock().unwrap().insert(key.clone(), good);
+        *bucket.fail.lock().unwrap() = Some((403, 99, "ckpt"));
+        let e = b.wake(&u).await.unwrap_err();
+        assert!(
+            e.msg.contains("its ckpt did not come back") && e.msg.contains("403"),
+            "{}",
+            e.msg
+        );
+        assert!(!e.msg.contains("AKIA"), "{}", e.msg);
+        // The disk had come back; it stays, and its record with it.
+        assert!(there(&format!("{dir}/work.img")) && there(&format!("{dir}/work.cold.json")));
+        assert_eq!(fake.ran("mount -o"), 1, "only the first wake mounted");
+
+        *bucket.fail.lock().unwrap() = None;
+        let record = format!("{dir}/ckpt.cold.json");
+        let kept = std::fs::read(&record).unwrap();
+        std::fs::write(&record, b"{}").unwrap();
+        assert_eq!(status(b.wake(&u).await), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!((fake.ran("mount -o"), fake.ran(" restore ")), (1, 0));
+
+        std::fs::write(&record, kept).unwrap();
+        assert_eq!(b.wake(&u).await.unwrap()["restored"], true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An upload the store did not keep whole, or refused, costs the box nothing: the local
+    /// copy stays, no record is written, and the refusal carries no credential. So do the
+    /// archives that make no sense: of a running box, of a checkpoint a box does not have, of a
+    /// box nobody made, and any on a host with no store.
+    #[tokio::test]
+    async fn an_archive_that_did_not_round_trip_keeps_the_local_copy() {
+        let (b, fake, bucket, root, u) = asleep_with_a_store("cold-keep").await;
+        let dir = format!("{root}/boxes/u_cold");
+        let kept = |part: &str| {
+            assert!(there(&format!("{dir}/ckpt")) && there(&format!("{dir}/work.img")));
+            assert!(!there(&format!("{dir}/{part}.cold.json")));
+            assert!(!there(&format!("{dir}/{part}.pack")));
+        };
+        *bucket.mangle.lock().unwrap() = Some("ckpt/00001");
+        let e = b.archive(&u, Part::Ckpt).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(
+            e.msg.contains("not the 4 bytes that were uploaded"),
+            "{}",
+            e.msg
+        );
+        kept("ckpt");
+        *bucket.mangle.lock().unwrap() = None;
+        *bucket.fail.lock().unwrap() = Some((403, 99, "work"));
+        let e = b.archive(&u, Part::Work).await.unwrap_err();
+        assert!(
+            e.msg.contains("403") && !e.msg.contains("AKIA"),
+            "{}",
+            e.msg
+        );
+        kept("work");
+        *bucket.fail.lock().unwrap() = None;
+
+        b.wake(&u).await.unwrap();
+        let puts = bucket.called("PUT");
+        assert_eq!(
+            status(b.archive(&u, Part::Work).await),
+            StatusCode::CONFLICT
+        );
+        fake.answer(
+            200,
+            r#"{"active_user_pids":0,"files_bytes":0,"scratch_bytes":0,"trash_bytes":0}"#,
+        );
+        b.sleep(&u, false).await.unwrap();
+        assert_eq!(
+            status(b.archive(&u, Part::Ckpt).await),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(b.archive(&user("u_nobody"), Part::Work).await),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(bucket.called("PUT"), puts);
+
+        let (off, _, root2, u2) = awake("cold-off").await;
+        assert_eq!(
+            status(off.archive(&u2, Part::Work).await),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(off.prefetch(&u2).unwrap(), json!({ "cold": false }));
+        assert_eq!(off.status().await.unwrap()["cold_tier"], false);
+        for r in [root, root2] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// A prefetch answers at once and brings the box back behind it; the box stays asleep and
+    /// its record stays, so archiving it again sends nothing. A wake finds the work done and
+    /// fetches nothing twice. A box that is not cold has nothing to prefetch.
+    #[tokio::test]
+    async fn a_prefetch_stages_a_cold_box_and_the_wake_does_not_fetch_it_again() {
+        let (b, fake, bucket, root, u) = asleep_with_a_store("prefetch").await;
+        let dir = format!("{root}/boxes/u_cold");
+        let (img, ckpt) = (format!("{dir}/work.img"), format!("{dir}/ckpt"));
+        assert_eq!(b.prefetch(&u).unwrap(), json!({ "cold": false }));
+        b.archive(&u, Part::Ckpt).await.unwrap();
+        b.archive(&u, Part::Work).await.unwrap();
+
+        assert_eq!(b.prefetch(&u).unwrap(), json!({ "cold": true }));
+        eventually("the box is staged", || there(&img) && there(&ckpt)).await;
+        // The prefetch holds the box's lock until it is done.
+        drop(b.lock(&u).await);
+        assert_eq!(fake.ran("--detach"), 1, "a prefetch starts nothing");
+        assert!(there(&format!("{dir}/work.cold.json")) && !bucket.keys().is_empty());
+
+        // Staged and never run: the store's copy is still this box's.
+        let puts = bucket.called("PUT");
+        assert_eq!(b.archive(&u, Part::Work).await.unwrap()["archived"], true);
+        assert!(!there(&img));
+        assert_eq!(bucket.called("PUT"), puts);
+
+        // A prefetch and a wake together: one fetch of the disk between them.
+        let gets = bucket.called("GET /cold/boxes/u_cold/work/00000");
+        assert_eq!(b.prefetch(&u).unwrap(), json!({ "cold": true }));
+        assert_eq!(b.wake(&u).await.unwrap()["restored"], true);
+        assert_eq!(bucket.called("GET /cold/boxes/u_cold/work/00000"), gets + 1);
+        eventually("the store is emptied", || bucket.keys().is_empty()).await;
+        assert_eq!(status(b.prefetch(&user("u_nobody"))), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The user's Stop keeps no checkpoint, in the store either.
+    #[tokio::test]
+    async fn a_forced_sleep_drops_a_checkpoint_from_the_store_too() {
+        let (b, _fake, bucket, root, u) = asleep_with_a_store("cold-force").await;
+        b.archive(&u, Part::Ckpt).await.unwrap();
+        let r = b.sleep(&u, true).await.unwrap();
+        assert_eq!(r["state"], "asleep_clean");
+        assert!(!there(&format!("{root}/boxes/u_cold/ckpt.cold.json")));
+        eventually("the store is emptied", || bucket.keys().is_empty()).await;
+        assert_eq!(b.wake(&u).await.unwrap()["restored"], false);
+        b.ensure(&u, "1.0", &env("other")).await.unwrap_err();
         let _ = std::fs::remove_dir_all(&root);
     }
 }
