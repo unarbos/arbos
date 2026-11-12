@@ -1135,9 +1135,7 @@ impl Shell {
 
         // Drop the stale All · Agents · People · Servers pref so old segment
         // choices do not linger ([feedback chat-list-no-filter-mac-2026-11-10]).
-        let _ = std::fs::remove_file(
-            crate::sync::credentials::config_dir().join("sidebar_filter"),
-        );
+        let _ = std::fs::remove_file(crate::sync::credentials::config_dir().join("sidebar_filter"));
 
         let shell = Self {
             state,

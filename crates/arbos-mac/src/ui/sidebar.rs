@@ -3060,7 +3060,6 @@ mod strip_tests {
         );
         assert_eq!(strip_controls(true, false), vec![StripControl::Collapse]);
     }
-
 }
 
 #[cfg(test)]
@@ -4325,17 +4324,12 @@ mod pin_tests {
     /// No filter UI; an agent, a people chat, and a server all appear as rows
     /// together ([feedback chat-list-no-filter-mac-2026-11-10]).
     #[gpui::test]
-    fn the_list_shows_agents_people_and_servers_together_with_no_filter(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_list_shows_agents_people_and_servers_together_with_no_filter(cx: &mut TestAppContext) {
         let (_rt, _cmds, _state, shell, vcx) = mount(cx);
         assert!(vcx.debug_bounds("sidebar-filter").is_none());
         assert!(vcx.debug_bounds("sidebar-filter-all").is_none());
         assert!(vcx.debug_bounds("sidebar-filter-agents").is_none());
-        assert!(
-            vcx.debug_bounds("row-time-arbos").is_some(),
-            "agent row"
-        );
+        assert!(vcx.debug_bounds("row-time-arbos").is_some(), "agent row");
         assert!(vcx.debug_bounds("row-time-dm").is_some(), "people chat row");
         // Server rows use ElementId, not a `row-time-*` debug selector; the
         // list model is the observable that every kind is present together.
@@ -4346,7 +4340,10 @@ mod pin_tests {
                 .collect()
         });
         assert!(ids.contains(&"arbos".into()), "agent in the list: {ids:?}");
-        assert!(ids.contains(&"dm".into()), "people chat in the list: {ids:?}");
+        assert!(
+            ids.contains(&"dm".into()),
+            "people chat in the list: {ids:?}"
+        );
         assert!(ids.contains(&"srv".into()), "server in the list: {ids:?}");
     }
 
