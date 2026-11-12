@@ -1550,6 +1550,14 @@ pub(crate) async fn run_wake_jobs(state: &AppState) {
         tracing::info!(%user_id, %reason, attempts, "waking box");
         match start_box(state, &user_id).await {
             Ok(()) => {}
+            Err(e) if e.to_string() == crate::boxd::FETCHING => {
+                // Not a failed wake: the daemon is bringing a cold box back from the object
+                // store. Look again shortly. Each look restarts the waking clock (`start_box`
+                // does), so the box is not called unreachable for not having dialled in yet.
+                let _ = state
+                    .db
+                    .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
+            }
             Err(e) => {
                 tracing::warn!(%user_id, error = %e, "wake failed");
                 let n = state

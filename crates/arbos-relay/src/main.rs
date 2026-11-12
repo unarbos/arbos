@@ -406,6 +406,7 @@ async fn main() -> anyhow::Result<()> {
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     boxd::spawn_idle_sleeper(state.clone()).await;
+    boxd::spawn_cold_tier(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;

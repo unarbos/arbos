@@ -4,11 +4,16 @@
 //!
 //! Off unless `ARBOS_BOXD_URL` is set. One daemon, on loopback, written to `boxes.node_id` as
 //! [`NODE`]: a second host is Phase 4, and the in-place move of the Docker `runsc` boxes is an operator's step.
+//!
+//! Phase 3 is here too: a box asleep for days is moved to the daemon's object store (§3.3) and
+//! asked back ahead of its wake (§4.2). That half is off unless the daemon's host status says
+//! `cold_tier`, which it does only with an object store of its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -34,6 +39,27 @@ const IDLE_MS: i64 = 15 * 60_000;
 const ROUTINE_HORIZON_MS: i64 = 20 * 60_000;
 /// §4.2: an asleep box is woken this long before its routine is due, so the run finds it up.
 const ROUTINE_HEAD_START_MS: i64 = 60_000;
+/// §3.3: a checkpoint goes to the object store once its box has slept this long, or at once
+/// while the host has less than [`CKPT_EARLY_FREE_GB`] of disk free.
+const CKPT_COLD_MS: i64 = 3 * 24 * 3_600_000;
+const CKPT_EARLY_FREE_GB: f64 = 150.0;
+/// §3.3: a disk goes once its box has slept this long and the host has less than
+/// [`WORK_COLD_FREE_GB`] free.
+const WORK_COLD_MS: i64 = 14 * 24 * 3_600_000;
+const WORK_COLD_FREE_GB: f64 = 250.0;
+/// How often sleeping boxes are looked over for the object store, and how many are sent in one
+/// pass: an archive packs, uploads and reads back, so a pass is bounded and the oldest go first.
+const TIER_TICK: Duration = Duration::from_secs(300);
+const ARCHIVES_PER_TICK: usize = 4;
+/// §4.2: a cold box is asked back this long before its routine is due.
+const PREFETCH_HEAD_START_MS: i64 = 5 * 60_000;
+/// A box's user is asked after at most this often, however many presence frames say so.
+const WANTED_EVERY_MS: i64 = 60_000;
+/// A box that was wanted this lately is not sent to the object store: it was just asked back.
+const WANTED_HOLD_MS: i64 = 30 * 60_000;
+/// Error text of a wake that found the box still on its way back from the object store. It is
+/// not a failed wake: `boxes::run_wake_jobs` looks again in a few seconds.
+pub const FETCHING: &str = "the machine is coming back from cold storage";
 /// §4.2: below this much free disk on the daemon's host no new box is made. The spec's own
 /// number for these boxes, and not `ARBOS_HOST_MIN_FREE_DISK_GB`, which is the gVisor fleet's.
 const MIN_FREE_DISK_GB: f64 = 80.0;
@@ -55,6 +81,11 @@ pub struct Boxd {
     url: String,
     token: String,
     max_resident: usize,
+    /// user_id → when the box was last wanted: a client had one of its chats on screen, or a
+    /// routine of its user was five minutes off. In memory only: after a restart a box asked
+    /// back a moment ago may be archived again, which sends nothing and costs its next wake
+    /// the fetch.
+    wanted: Arc<std::sync::Mutex<HashMap<String, i64>>>,
 }
 
 /// Every field the daemon sends is named in these, so a reply of any other shape is refused.
@@ -85,6 +116,29 @@ struct Woken {
 enum Asleep {
     AsleepClean,
     AsleepCkpt,
+    /// Asleep with its checkpoint or its disk in the object store.
+    Cold,
+}
+
+/// What of a sleeping box goes to the object store (the daemon's `Part`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Ckpt,
+    Work,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Archived {
+    archived: bool,
+    stored_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Prefetched {
+    cold: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +161,11 @@ struct HostBox {
     size_gb: u64,
     work_bytes: u64,
     ckpt_bytes: u64,
+    /// The two a daemon from before the cold tier does not send.
+    #[serde(default)]
+    work_cold: bool,
+    #[serde(default)]
+    ckpt_cold: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +178,9 @@ struct HostStatus {
     disk_free_gb: f64,
     resident_boxes: u64,
     present_boxes: u64,
+    /// The host has an object store. Absent from a daemon that has no cold tier at all.
+    #[serde(default)]
+    cold_tier: bool,
     boxes: Vec<HostBox>,
 }
 
@@ -206,6 +268,7 @@ impl Boxd {
             url: format!("http://{addr}"),
             token,
             max_resident: MAX_RESIDENT,
+            wanted: Arc::default(),
         })
     }
 
@@ -309,6 +372,50 @@ impl Boxd {
         Ok(Some(slept))
     }
 
+    /// Move a sleeping box's checkpoint or disk to the object store. The daemon answers once
+    /// the upload has been read back and the local copy is gone, which takes minutes.
+    async fn archive(&self, http: &reqwest::Client, user_id: &str, part: Part) -> Result<Archived> {
+        let path = box_path(user_id, "archive")?;
+        let body = json!({ "part": part });
+        let (status, bytes) = self
+            .send(
+                http,
+                Method::POST,
+                &path,
+                Some(&body),
+                Duration::from_secs(1800),
+            )
+            .await?;
+        reply(&path, status, &bytes)
+    }
+
+    /// Ask a cold box back to the host ahead of its wake. `true` while it is still on its way;
+    /// an error is the daemon saying why its last fetch failed.
+    async fn prefetch(&self, http: &reqwest::Client, user_id: &str) -> Result<bool> {
+        let path = box_path(user_id, "prefetch")?;
+        let (status, bytes) = self
+            .send(http, Method::POST, &path, None, Duration::from_secs(30))
+            .await?;
+        Ok(reply::<Prefetched>(&path, status, &bytes)?.cold)
+    }
+
+    /// Note that the box is wanted now. `false` if it was noted within `every_ms` already.
+    fn want(&self, user_id: &str, now: i64, every_ms: i64) -> bool {
+        let mut wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if wanted.get(user_id).is_some_and(|t| now - *t < every_ms) {
+            return false;
+        }
+        wanted.insert(user_id.to_owned(), now);
+        true
+    }
+
+    fn wanted_lately(&self, user_id: &str, now: i64) -> bool {
+        let wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        wanted
+            .get(user_id)
+            .is_some_and(|t| now - *t < WANTED_HOLD_MS)
+    }
+
     async fn host(&self, http: &reqwest::Client) -> Result<HostStatus> {
         let path = "/v1/host/status";
         let (status, bytes) = self
@@ -373,6 +480,11 @@ pub async fn create_box(
 
 /// Wake an existing box and record where it listens.
 pub async fn start_box(state: &AppState, user_id: &str, sb: &mut Sandbox) -> Result<()> {
+    // A cold box is fetched before it takes anyone's place on the host, and behind this call:
+    // the fetch can take minutes and the wake jobs run one at a time.
+    if is_cold(state, user_id) && of(state)?.prefetch(&state.http, user_id).await? {
+        bail!(FETCHING);
+    }
     make_room(state, user_id).await?;
     // A box being made has no row yet, and this writes nothing.
     record(state, user_id, "waking", None);
@@ -410,6 +522,11 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
         storage.as_deref(),
     );
     Ok(())
+}
+
+/// The row says the box sleeps with its checkpoint or its disk in the object store.
+fn is_cold(state: &AppState, user_id: &str) -> bool {
+    matches!(state.db.box_lifecycle(user_id), Ok(Some((_, lifecycle, _))) if lifecycle == "cold")
 }
 
 /// `boxes.lifecycle_state`: where the daemon last left the box. It is a record of what the
@@ -626,25 +743,171 @@ async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String, i64>) {
     *idle_since = kept;
 }
 
-/// The routine lookahead (§4.2), on the routine scheduler's tick: wake each asleep `boxd` box
-/// whose user has a routine due within [`ROUTINE_HEAD_START_MS`]. The same routine then holds
-/// it up (`Sample::routine_soon`). The five-minute prefetch of a cold box is Phase 3.
+/// The routine lookahead (§4.2), on the routine scheduler's tick: a sleeping `boxd` box whose
+/// user has a routine due within [`PREFETCH_HEAD_START_MS`] is asked back from the object store
+/// if it is cold, and woken once the routine is within [`ROUTINE_HEAD_START_MS`]. The same
+/// routine then holds it up (`Sample::routine_soon`).
 pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
     if state.cfg.boxd.is_none() {
         return;
     }
-    let Ok(due) = state.db.due_routines(now + ROUTINE_HEAD_START_MS) else {
+    let Ok(due) = state.db.due_routines(now + PREFETCH_HEAD_START_MS) else {
         return;
     };
-    let users: HashSet<String> = due
+    // user → their soonest routine. The rows come soonest first.
+    let mut users: HashMap<String, i64> = HashMap::new();
+    for rt in &due {
+        if let (Some(user_id), Some(at)) = (state.user_of(&rt.project_id), rt.next_run_at) {
+            users.entry(user_id).or_insert(at);
+        }
+    }
+    for (user_id, at) in users {
+        let on_boxd = matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == boxes::Provider::Boxd.as_str());
+        if !on_boxd || state.box_state(&user_id).await.0 != BoxState::Asleep {
+            continue;
+        }
+        if at <= now + ROUTINE_HEAD_START_MS {
+            tracing::info!(%user_id, "boxd: waking ahead of a routine");
+            boxes::ensure_awake(state, &user_id, "routine lookahead").await;
+        } else {
+            prefetch(state, &user_id).await;
+        }
+    }
+}
+
+// ---- the cold tier (§3.3) and the prefetch (§4.2) --------------------------------------------
+
+/// A client has a chat of this project on screen (`focused_chat` on `PRESENCE`): if the box
+/// behind it is cold, ask it back now, so the wake that a message brings finds it on the host.
+/// The box is not woken: looking at a chat is not using the machine.
+pub async fn prefetch_for_project(state: &AppState, project_id: &str) {
+    if state.cfg.boxd.is_none() {
+        return;
+    }
+    if let Some(user_id) = state.user_of(project_id) {
+        prefetch(state, &user_id).await;
+    }
+}
+
+/// Ask the user's box back from the object store if it is asleep there. Returns at once; the
+/// daemon fetches behind its answer. Presence frames come every few seconds, so a user is
+/// looked up at most once a minute, and the note taken here also keeps the box from being
+/// archived for [`WANTED_HOLD_MS`].
+async fn prefetch(state: &AppState, user_id: &str) {
+    let Some(boxd) = state.cfg.boxd.as_ref() else {
+        return;
+    };
+    if !boxd.want(user_id, now_ms(), WANTED_EVERY_MS)
+        || !is_cold(state, user_id)
+        || state.box_state(user_id).await.0 != BoxState::Asleep
+    {
+        return;
+    }
+    let (boxd, http, user_id) = (boxd.clone(), state.http.clone(), user_id.to_owned());
+    tokio::spawn(async move {
+        match boxd.prefetch(&http, &user_id).await {
+            Ok(cold) => tracing::info!(%user_id, cold, "boxd: cold box asked back"),
+            Err(e) => tracing::warn!(%user_id, error = %e, "boxd: prefetch failed"),
+        }
+    });
+}
+
+/// What one pass sees of one sleeping box.
+#[derive(Debug, Clone, Copy)]
+pub struct Sleeper {
+    /// How long ago the box was last stopped.
+    pub asleep_ms: i64,
+    pub ckpt_local: bool,
+    pub work_local: bool,
+    /// Wanted lately, or a routine of its user is due soon: it stays where it is.
+    pub held: bool,
+}
+
+/// §3.3, pure: what of a sleeping box goes to the object store now, if anything. The checkpoint
+/// first, after three days or at once on a host short of disk; the disk only after fourteen
+/// days, and only while the host is short of disk.
+pub fn tier_step(b: &Sleeper, disk_free_gb: f64) -> Option<Part> {
+    if b.held {
+        return None;
+    }
+    if b.ckpt_local && (b.asleep_ms >= CKPT_COLD_MS || disk_free_gb < CKPT_EARLY_FREE_GB) {
+        return Some(Part::Ckpt);
+    }
+    let work = b.work_local && b.asleep_ms >= WORK_COLD_MS && disk_free_gb < WORK_COLD_FREE_GB;
+    work.then_some(Part::Work)
+}
+
+/// Every five minutes: move what [`tier_step`] says to the object store, on a host that has one.
+pub async fn spawn_cold_tier(state: AppState) {
+    if state.cfg.boxd.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(TIER_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            tier_tick(&state).await;
+        }
+    });
+}
+
+async fn tier_tick(state: &AppState) {
+    let Ok(boxd) = of(state) else {
+        return;
+    };
+    let now = now_ms();
+    // Fail closed: a host that cannot be read, or routines that cannot, archive nothing.
+    let (Ok(host), Ok(due), Ok(rows)) = (
+        boxd.host(&state.http).await,
+        state.db.due_routines(now + ROUTINE_HORIZON_MS),
+        state.db.list_boxes(),
+    ) else {
+        return;
+    };
+    if !host.cold_tier {
+        return;
+    }
+    let soon: HashSet<String> = due
         .iter()
         .filter_map(|rt| state.user_of(&rt.project_id))
         .collect();
-    for user_id in users {
-        let on_boxd = matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == boxes::Provider::Boxd.as_str());
-        if on_boxd && state.box_state(&user_id).await.0 == BoxState::Asleep {
-            tracing::info!(%user_id, "boxd: waking ahead of a routine");
-            boxes::ensure_awake(state, &user_id, "routine lookahead").await;
+    let on_host: HashMap<&str, &HostBox> =
+        host.boxes.iter().map(|b| (b.user_id.as_str(), b)).collect();
+    let mut todo = Vec::new();
+    for b in rows {
+        // Only a box both the relay and the daemon call asleep, with a stop to count from.
+        let (Some(on), Some(stopped)) = (on_host.get(b.user_id.as_str()), b.last_stopped_at) else {
+            continue;
+        };
+        if b.provider != boxes::Provider::Boxd.as_str()
+            || on.running
+            || state.box_state(&b.user_id).await.0 != BoxState::Asleep
+        {
+            continue;
+        }
+        let sleeper = Sleeper {
+            asleep_ms: now - stopped,
+            // A checkpoint on the host is one that takes up disk there.
+            ckpt_local: on.ckpt_bytes > 0,
+            work_local: !on.work_cold,
+            held: soon.contains(&b.user_id) || boxd.wanted_lately(&b.user_id, now),
+        };
+        if let Some(part) = tier_step(&sleeper, host.disk_free_gb) {
+            todo.push((sleeper.asleep_ms, b.user_id, part));
+        }
+    }
+    todo.sort_by_key(|(asleep_ms, ..)| std::cmp::Reverse(*asleep_ms));
+    for (_, user_id, part) in todo.into_iter().take(ARCHIVES_PER_TICK) {
+        match boxd.archive(&state.http, &user_id, part).await {
+            Ok(a) => {
+                tracing::info!(%user_id, ?part, archived = a.archived, stored_bytes = a.stored_bytes, "boxd: box archived");
+                // A wake that came meanwhile has the row; it fetches the box back itself.
+                if state.box_state(&user_id).await.0 == BoxState::Asleep {
+                    record(state, &user_id, "cold", None);
+                }
+            }
+            Err(e) => tracing::warn!(%user_id, ?part, error = %e, "boxd: archive failed"),
         }
     }
 }
@@ -697,6 +960,8 @@ mod tests {
                 "disk_free_gb": 900.0, "resident_boxes": 1, "present_boxes": 1,
                 "boxes": [{ "user_id": "u_a", "running": true, "size_gb": 8,
                     "work_bytes": 4096, "ckpt_bytes": 0 }] }),
+            "archive" => json!({ "archived": true, "stored_bytes": 10 }),
+            "prefetch" => json!({ "cold": false }),
             _ => return (404, json!({ "error": "no such route" })),
         };
         (200, body)
@@ -735,6 +1000,7 @@ mod tests {
             url,
             token: token.to_owned(),
             max_resident: MAX_RESIDENT,
+            wanted: Arc::default(),
         };
         (fake, boxd)
     }
@@ -1543,5 +1809,382 @@ mod tests {
         // Asleep boxes are not sampled, so nothing asks the daemon again.
         idle_tick(&state, &mut clock()).await;
         assert_eq!(sleeps(), 2);
+    }
+
+    // ---- the cold tier and the prefetch ----
+
+    const DAY: i64 = 24 * 3_600_000;
+
+    /// What the daemon says of a host with an object store and one sleeping box on it.
+    fn cold_host(user: &str, disk_free_gb: f64, ckpt_bytes: u64, work_cold: bool) -> Value {
+        json!({ "mem_available_gb": 400.0, "swap_used_gb": 0.0, "load5": 1.0,
+            "disk_free_gb": disk_free_gb, "resident_boxes": 0, "present_boxes": 1,
+            "cold_tier": true,
+            "boxes": [{ "user_id": user, "running": false, "size_gb": 8, "work_bytes": 4096,
+                "ckpt_bytes": ckpt_bytes, "work_cold": work_cold, "ckpt_cold": false }] })
+    }
+
+    /// A box made on the fake daemon and asleep since `asleep_ms` ago.
+    async fn asleep_for(state: &AppState, user: &str, asleep_ms: i64) {
+        boxes::create_box(state, user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        boxes::stop_box(state, user, false).await.unwrap();
+        let mut row = state.db.user_box(user).unwrap().unwrap();
+        row.last_stopped_at = Some(now_ms() - asleep_ms);
+        state.db.upsert_box(&row).unwrap();
+    }
+
+    fn calls(fake: &Fake, op: &str) -> Vec<(String, Value)> {
+        let calls = fake.calls.lock().unwrap();
+        let of_op = |c: &&(String, Value)| c.0.ends_with(op);
+        calls.iter().filter(of_op).cloned().collect()
+    }
+
+    async fn eventually(what: &str, done: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("never: {what}");
+    }
+
+    /// §3.3, to the millisecond and the gigabyte: a checkpoint at three days or under 150 GB
+    /// free, a disk at fourteen days and under 250 GB free, the checkpoint first, and nothing
+    /// of a box that is wanted or has nothing on the host.
+    #[test]
+    fn a_checkpoint_goes_cold_at_three_days_and_a_disk_at_fourteen_on_a_short_host() {
+        let b = |asleep_ms, ckpt_local, work_local| Sleeper {
+            asleep_ms,
+            ckpt_local,
+            work_local,
+            held: false,
+        };
+        let roomy = 900.0;
+        assert_eq!(tier_step(&b(3 * DAY - 1, true, true), roomy), None);
+        assert_eq!(tier_step(&b(3 * DAY, true, true), roomy), Some(Part::Ckpt));
+        assert_eq!(tier_step(&b(60_000, true, true), 150.0), None);
+        assert_eq!(tier_step(&b(60_000, true, true), 149.9), Some(Part::Ckpt));
+        assert_eq!(
+            tier_step(&b(60_000, false, true), 10.0),
+            None,
+            "a young disk stays"
+        );
+
+        assert_eq!(tier_step(&b(14 * DAY, false, true), roomy), None);
+        assert_eq!(tier_step(&b(14 * DAY, false, true), 250.0), None);
+        assert_eq!(tier_step(&b(14 * DAY - 1, false, true), 249.9), None);
+        assert_eq!(
+            tier_step(&b(14 * DAY, false, true), 249.9),
+            Some(Part::Work)
+        );
+        assert_eq!(tier_step(&b(14 * DAY, true, true), 249.9), Some(Part::Ckpt));
+        assert_eq!(tier_step(&b(99 * DAY, false, false), 1.0), None);
+        let held = Sleeper {
+            held: true,
+            ..b(99 * DAY, true, true)
+        };
+        assert_eq!(tier_step(&held, 1.0), None);
+    }
+
+    /// One pass: nothing on a host without an object store; then the old checkpoint goes and
+    /// the row says cold. Not a box that is awake, one a client just looked at, one with a
+    /// routine near, or one whose archive the daemon refused.
+    #[tokio::test]
+    async fn a_pass_archives_what_is_due_and_only_on_a_host_with_a_store() {
+        let (state, fake, user) = relay().await;
+        asleep_for(&state, &user, 4 * DAY).await;
+        let lifecycle = || state.db.box_lifecycle(&user).unwrap().unwrap().1;
+        let mut host = cold_host(&user, 900.0, 4096, false);
+        host["cold_tier"] = json!(false);
+        fake.answer("status", 200, host.clone());
+        tier_tick(&state).await;
+        // A daemon from before the cold tier says nothing of one.
+        host.as_object_mut().unwrap().remove("cold_tier");
+        fake.answer("status", 200, host);
+        tier_tick(&state).await;
+        assert!(calls(&fake, "/archive").is_empty());
+
+        fake.answer("status", 200, cold_host(&user, 900.0, 4096, false));
+        let boxd = state.cfg.boxd.as_ref().unwrap();
+        assert!(boxd.want(&user, now_ms(), WANTED_EVERY_MS));
+        tier_tick(&state).await;
+        assert!(calls(&fake, "/archive").is_empty(), "wanted a moment ago");
+        boxd.wanted.lock().unwrap().clear();
+
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        tier_tick(&state).await;
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        fake.answer(
+            "archive",
+            502,
+            json!({ "error": "archive failed: object store PUT boxes/u/ckpt/00000: 503" }),
+        );
+        tier_tick(&state).await;
+        assert_eq!(
+            calls(&fake, "/archive").len(),
+            1,
+            "an awake box is not asked for"
+        );
+        assert_eq!(
+            lifecycle(),
+            "asleep_clean",
+            "a failed archive changes nothing"
+        );
+
+        fake.replies.lock().unwrap().remove("archive");
+        tier_tick(&state).await;
+        let sent = calls(&fake, "/archive");
+        assert_eq!(
+            sent[1],
+            (
+                format!("/v1/boxes/{user}/archive"),
+                json!({ "part": "ckpt" })
+            )
+        );
+        assert_eq!(lifecycle(), "cold");
+
+        // Its disk, ten days on, on a host short of disk. A routine twenty minutes off holds it.
+        let mut row = state.db.user_box(&user).unwrap().unwrap();
+        row.last_stopped_at = Some(now_ms() - 14 * DAY);
+        state.db.upsert_box(&row).unwrap();
+        fake.answer("status", 200, cold_host(&user, 200.0, 0, false));
+        let project_id = crate::people::tests_support::project_of(&state, &user, "First");
+        let routine = crate::db::Routine {
+            id: "soon".into(),
+            project_id,
+            chat_id: "c".into(),
+            name: "n".into(),
+            prompt: "p".into(),
+            trigger: json!({ "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" }),
+            enabled: true,
+            created_at: now_ms(),
+            last_run_at: None,
+            next_run_at: Some(now_ms() + ROUTINE_HORIZON_MS - 60_000),
+        };
+        state.db.insert_routine(&routine).unwrap();
+        tier_tick(&state).await;
+        assert_eq!(calls(&fake, "/archive").len(), 2, "a routine is near");
+        state.db.delete_routine("soon").unwrap();
+        tier_tick(&state).await;
+        assert_eq!(calls(&fake, "/archive")[2].1, json!({ "part": "work" }));
+        // All of it is in the store now: there is nothing left to send.
+        fake.answer("status", 200, cold_host(&user, 200.0, 0, true));
+        tier_tick(&state).await;
+        assert_eq!(calls(&fake, "/archive").len(), 3);
+    }
+
+    /// A pass sends at most four boxes, the longest asleep first.
+    #[tokio::test]
+    async fn a_pass_is_bounded_and_takes_the_longest_asleep_first() {
+        let (state, fake, first) = relay().await;
+        let mut users = vec![first];
+        for n in 0..5 {
+            users.push(person(&state, 9710 + n).0);
+        }
+        let mut host = cold_host("x", 900.0, 4096, false);
+        let mut on_host = Vec::new();
+        for (n, user) in users.iter().enumerate() {
+            asleep_for(&state, user, (4 + n as i64) * DAY).await;
+            on_host.push(json!({ "user_id": user, "running": false, "size_gb": 8,
+                "work_bytes": 4096, "ckpt_bytes": 4096 }));
+        }
+        host["boxes"] = json!(on_host);
+        fake.answer("status", 200, host);
+        tier_tick(&state).await;
+        let sent: Vec<String> = calls(&fake, "/archive").into_iter().map(|c| c.0).collect();
+        let oldest: Vec<String> = users
+            .iter()
+            .rev()
+            .take(ARCHIVES_PER_TICK)
+            .map(|u| format!("/v1/boxes/{u}/archive"))
+            .collect();
+        assert_eq!(sent, oldest);
+    }
+
+    /// A chat on screen asks its cold box back, once a minute at most, and wakes nothing. A
+    /// box that is not cold, or not asleep, is not asked for; nor is anything without the provider.
+    #[tokio::test]
+    async fn a_focused_chat_asks_a_cold_box_back_and_does_not_wake_it() {
+        let (mut state, fake, user) = relay().await;
+        let project_id = crate::people::tests_support::project_of(&state, &user, "First");
+        asleep_for(&state, &user, DAY).await;
+        let wanted = |state: &AppState| state.cfg.boxd.as_ref().unwrap().wanted.clone();
+        prefetch_for_project(&state, &project_id).await;
+        assert!(
+            wanted(&state).lock().unwrap().contains_key(&user),
+            "a look is noted"
+        );
+        wanted(&state).lock().unwrap().clear();
+
+        record(&state, &user, "cold", None);
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        prefetch_for_project(&state, &project_id).await;
+        wanted(&state).lock().unwrap().clear();
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        prefetch_for_project(&state, "no-such-project").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(calls(&fake, "/prefetch").is_empty());
+
+        prefetch_for_project(&state, &project_id).await;
+        prefetch_for_project(&state, &project_id).await;
+        eventually("the daemon is asked", || {
+            !calls(&fake, "/prefetch").is_empty()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(calls(&fake, "/prefetch").len(), 1, "once a minute");
+        assert!(calls(&fake, "/wake").len() == 1 && state.db.due_wake_jobs().unwrap().is_empty());
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+
+        wanted(&state).lock().unwrap().clear();
+        Arc::get_mut(&mut state.cfg).expect("one holder").boxd = None;
+        prefetch_for_project(&state, &project_id).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(calls(&fake, "/prefetch").len(), 1);
+    }
+
+    /// Five minutes ahead of a routine a cold box is asked back, not woken; a minute ahead it
+    /// is woken.
+    #[tokio::test]
+    async fn a_cold_box_is_asked_back_five_minutes_ahead_of_its_routine() {
+        let (state, fake, user) = relay().await;
+        let project_id = crate::people::tests_support::project_of(&state, &user, "First");
+        asleep_for(&state, &user, DAY).await;
+        record(&state, &user, "cold", None);
+        let now = now_ms();
+        let due = |id: &str, at: i64| crate::db::Routine {
+            id: id.into(),
+            project_id: project_id.clone(),
+            chat_id: "c".into(),
+            name: "n".into(),
+            prompt: "p".into(),
+            trigger: json!({ "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" }),
+            enabled: true,
+            created_at: now,
+            last_run_at: None,
+            next_run_at: Some(at),
+        };
+        state
+            .db
+            .insert_routine(&due("later", now + PREFETCH_HEAD_START_MS + 1))
+            .unwrap();
+        wake_ahead_of_routines(&state, now).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(calls(&fake, "/prefetch").is_empty(), "too early");
+
+        state
+            .db
+            .insert_routine(&due("five", now + PREFETCH_HEAD_START_MS))
+            .unwrap();
+        wake_ahead_of_routines(&state, now).await;
+        eventually("the daemon is asked", || {
+            calls(&fake, "/prefetch").len() == 1
+        })
+        .await;
+        assert!(
+            state.db.due_wake_jobs().unwrap().is_empty(),
+            "asked back, not woken"
+        );
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+
+        state
+            .db
+            .insert_routine(&due("one", now + ROUTINE_HEAD_START_MS))
+            .unwrap();
+        wake_ahead_of_routines(&state, now).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Waking);
+        assert_eq!(state.db.due_wake_jobs().unwrap().len(), 1);
+    }
+
+    /// The wake of a cold box waits for the fetch without holding the wake jobs: while the
+    /// daemon says the box is on its way the job stays, the box reads waking, nobody is put to
+    /// sleep for it and it is not started. Once it is back the same job wakes it. A fetch that
+    /// failed ends the wake with the daemon's reason.
+    #[tokio::test]
+    async fn the_wake_of_a_cold_box_waits_for_its_fetch_and_fails_with_the_reason() {
+        let (state, fake, user) = relay().await;
+        asleep_for(&state, &user, DAY).await;
+        record(&state, &user, "cold", None);
+        let wakes = || calls(&fake, "/wake").len();
+        let statuses = calls(&fake, "/status").len();
+        fake.answer("prefetch", 200, json!({ "cold": true }));
+        let e = boxes::start_box(&state, &user).await.unwrap_err();
+        assert_eq!(e.to_string(), FETCHING);
+
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        boxes::ensure_awake(&state, &user, "send").await;
+        for _ in 0..5 {
+            let _ = state.db.retry_wake_job(&user, -1, "due");
+            boxes::run_wake_jobs(&state).await;
+            assert_eq!(state.box_state(&user).await.0, BoxState::Waking);
+        }
+        assert_eq!(calls(&fake, "/prefetch").len(), 6, "every pass asked");
+        assert_eq!((wakes(), calls(&fake, "/status").len()), (1, statuses));
+        assert_eq!(state.db.box_lifecycle(&user).unwrap().unwrap().1, "cold");
+
+        fake.answer("prefetch", 200, json!({ "cold": false }));
+        let _ = state.db.retry_wake_job(&user, -1, "due");
+        boxes::run_wake_jobs(&state).await;
+        assert_eq!(wakes(), 2);
+        assert_eq!(state.db.box_lifecycle(&user).unwrap().unwrap().1, "warm");
+
+        boxes::stop_box(&state, &user, false).await.unwrap();
+        record(&state, &user, "cold", None);
+        let why = "the box is cold and its work did not come back: object store GET boxes/u/work/00000: 503 Service Unavailable";
+        fake.answer("prefetch", 502, json!({ "error": why }));
+        let e = boxes::start_box(&state, &user)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("its work did not come back") && e.contains("503"),
+            "{e}"
+        );
+        assert_eq!(wakes(), 2, "not started on a disk that did not come back");
+    }
+
+    /// The daemon's word for a box left in the object store is kept, and only the documented
+    /// shapes of the two new replies are taken.
+    #[tokio::test]
+    async fn the_cold_replies_are_validated_and_a_cold_sleep_is_recorded() {
+        let (state, fake, user) = relay().await;
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        fake.answer(
+            "sleep",
+            200,
+            json!({ "state": "cold", "files_bytes": null, "scratch_bytes": null,
+                "trash_bytes": null, "work_bytes": 0, "ckpt_bytes": 0 }),
+        );
+        boxes::stop_box(&state, &user, true).await.unwrap();
+        assert_eq!(state.db.box_lifecycle(&user).unwrap().unwrap().1, "cold");
+
+        let boxd = state.cfg.boxd.as_ref().unwrap();
+        for bad in [
+            json!({ "archived": true }),
+            json!({ "archived": "yes", "stored_bytes": 1 }),
+            json!({ "archived": true, "stored_bytes": -1 }),
+            json!({ "archived": true, "stored_bytes": 1, "key": "x" }),
+        ] {
+            fake.answer("archive", 200, bad.clone());
+            assert!(
+                boxd.archive(&state.http, &user, Part::Work).await.is_err(),
+                "{bad}"
+            );
+        }
+        for bad in [
+            json!({}),
+            json!({ "cold": 1 }),
+            json!({ "cold": true, "x": 1 }),
+        ] {
+            fake.answer("prefetch", 200, bad.clone());
+            assert!(boxd.prefetch(&state.http, &user).await.is_err(), "{bad}");
+        }
+        assert!(boxd.archive(&state.http, "a/b", Part::Ckpt).await.is_err());
+        assert!(boxd.prefetch(&state.http, "..").await.is_err());
     }
 }
