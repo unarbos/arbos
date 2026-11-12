@@ -226,6 +226,22 @@ class Moves(unittest.TestCase):
         self.assertIn("stuck", out)
         self.assertFalse(os.path.exists(self.new))
 
+    def test_a_start_refused_because_the_box_is_already_there_goes_on_to_verify(self):
+        class Raced(FakeWorld):
+            def relay(self, method, path, body=None, token=None, timeout=60):
+                if path == "/machine/start" and self.setting == "boxd":
+                    # The relay's sweep made the box first; this start is the one refused.
+                    super().relay(method, path, body, token, timeout)
+                    raise urllib.error.HTTPError(path, 502, "box create: 409", None, None)
+                return super().relay(method, path, body, token, timeout)
+        self.world = None
+        argv = ["--yes", "--user", U, "--data", self.data, "--boxd-root", self.boxd,
+                "--boxd-token-file", self.token, "--state-dir", os.path.join(self.boxd, "migrate"),
+                "--idle-seconds", "0", "--idle-wait", "0", "--wake-seconds", "0", "--poll", "0"]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = m.main(argv, world=Raced)
+        self.assertEqual((code, self.ino(self.old), self.ino(self.new)), (0, None, self.disk), out.getvalue())
+
     def test_a_run_cut_short_is_picked_up_where_it_stopped(self):
         # After the link.
         self.run_tool("--dry-run")

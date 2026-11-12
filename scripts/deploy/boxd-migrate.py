@@ -327,10 +327,11 @@ def rollback(w, user, why):
     """Put a box that did not verify back on gvisor, on the disk it had. Returns the outcome."""
     print(f"  {user}: rolling back: {why}")
     w.write_record(user, phase="rolling_back", why=why)
+    # The provider first: whatever makes this user's next box makes it on gvisor.
+    w.set_provider(user, "gvisor")
     machine = w.users().get(user) or {}
     if machine.get("exists") and machine.get("provider") == "boxd":
         w.delete_box(user)  # a forced stop on the daemon: nothing holds the disk after it
-    w.set_provider(user, "gvisor")
     old, _ = w.file_id(w.old(user))
     new, _ = w.file_id(w.new(user))
     if new is not None:
@@ -396,7 +397,11 @@ def migrate(w, user):
             try:
                 w.start(user)
             except (urllib.error.URLError, OSError) as e:
-                return rollback(w, user, f"the start was refused: {e}")
+                # The relay's own sweep may have made the box a moment before this asked:
+                # then it is there, and `verify` is what judges it.
+                machine = w.users().get(user) or {}
+                if not (machine.get("exists") and machine.get("provider") == "boxd"):
+                    return rollback(w, user, f"the start was refused: {e}")
         elif step == "verify":
             if s.record is None:
                 return "skip", "on the daemon, but not by this tool; the old work.img is left alone"
