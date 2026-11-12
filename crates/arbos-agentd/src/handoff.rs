@@ -419,7 +419,7 @@ pub async fn on_detected_decided(agent: &Arc<Agent>, payload: &Value, approved: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::tests::test_agent_with;
+    use crate::status::tests::{test_agent_with, wait_until};
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -428,6 +428,18 @@ mod tests {
         "sk_",
         "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
     );
+
+    /// The newest approval card in the room for `name`, if it is posted yet.
+    async fn card(host: &crate::sync::SharedHost, name: &str) -> Option<Value> {
+        host.lock()
+            .await
+            .doc
+            .messages()
+            .iter()
+            .rev()
+            .flat_map(|m| m.parts.clone())
+            .find(|p| p["kind"] == "approval" && p["payload"]["name"] == name)
+    }
 
     /// A relay stub for the box secrets routes: records every from-message body, hands the
     /// value out once for the scrub, answers empty lists for the refreshes.
@@ -706,12 +718,10 @@ mod tests {
             )
             .await
             .unwrap();
-        for _ in 0..50 {
-            if !bodies.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        wait_until("the vault write reached the relay", || async {
+            !bodies.lock().unwrap().is_empty()
+        })
+        .await;
         let bodies = bodies.lock().unwrap().clone();
         assert_eq!(bodies.len(), 1, "{bodies:?}");
         assert_eq!(bodies[0]["message_id"], msg_id);
@@ -738,31 +748,21 @@ mod tests {
             .await
         });
         // the card appears with no value field and the suggested name
-        let mut approval_id = None;
-        for _ in 0..100 {
-            let h = host.lock().await;
-            if let Some(p) = h
-                .doc
-                .messages()
-                .iter()
-                .rev()
-                .flat_map(|m| m.parts.clone())
-                .find(|p| p["kind"] == "approval")
-            {
-                approval_id = p["approvalId"].as_str().map(str::to_owned);
-                assert_eq!(p["payload"]["kind"], OFFER_KIND);
-                assert_eq!(p["payload"]["name"], "STRIPE_KEY");
-                assert!(p["payload"].get("value").is_none());
-                break;
-            }
-            drop(h);
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        let approval_id = approval_id.expect("the request card was posted");
+        wait_until("the request card was posted", || async {
+            card(&host, "STRIPE_KEY").await.is_some()
+        })
+        .await;
+        let p = card(&host, "STRIPE_KEY").await.expect("the request card");
+        assert_eq!(p["payload"]["kind"], OFFER_KIND);
+        assert_eq!(p["payload"]["name"], "STRIPE_KEY");
+        assert!(p["payload"].get("value").is_none());
+        let approval_id = p["approvalId"]
+            .as_str()
+            .expect("the card names its approval");
         // the device saved through POST /secrets and answers the card with the reference
         agent
             .decide_approval_from_command(
-                &approval_id,
+                approval_id,
                 ApprovalOutcome::Approved,
                 "user:test",
                 &json!({ "approvalId": approval_id, "secret": { "id": "sec_1", "name": "STRIPE_KEY", "env": "STRIPE_KEY" } }),
@@ -782,26 +782,17 @@ mod tests {
         let tool = tokio::spawn(async move {
             request_secret(&a2, &json!({ "name": "other", "purpose": "x" }), chat).await
         });
-        let mut id = None;
-        for _ in 0..100 {
-            let h = host.lock().await;
-            if let Some(p) = h
-                .doc
-                .messages()
-                .iter()
-                .rev()
-                .flat_map(|m| m.parts.clone())
-                .find(|p| p["kind"] == "approval" && p["payload"]["name"] == "OTHER")
-            {
-                id = p["approvalId"].as_str().map(str::to_owned);
-                break;
-            }
-            drop(h);
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        wait_until("the second request card was posted", || async {
+            card(&host, "OTHER").await.is_some()
+        })
+        .await;
+        let other = card(&host, "OTHER").await.expect("the second request card");
+        let other_id = other["approvalId"]
+            .as_str()
+            .expect("the card names its approval");
         agent
             .decide_approval(
-                &id.unwrap(),
+                other_id,
                 ApprovalOutcome::Rejected { reason: None },
                 "user:test",
             )
