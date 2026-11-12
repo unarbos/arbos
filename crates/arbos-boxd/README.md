@@ -186,6 +186,11 @@ cap, its memory floor and its cold tier are that node's, and nothing moves a box
 While a node is down its boxes fail to wake with `boxd node-1 did not answer ...`, and are not
 made anew anywhere else.
 
+Boxes wake side by side: the relay asks a node for at most eight wakes at once, and no node's
+wakes wait for another's. A slot on a node is taken before its daemon is asked and given back
+if the wake fails, and on a full node the box put to sleep for a newcomer is that newcomer's
+alone, so a node is never over its cap however many wake at once.
+
 **Certificates.** One private CA for the pool, kept off the hosts; from it a certificate for
 each node, naming the address the relay dials, and one for the relay:
 
