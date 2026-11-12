@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::boxes::{valid_env, valid_version, Boxd, Error, UserId};
+use crate::boxes::{valid_env, valid_version, Boxd, Error, Part, UserId};
 
 /// Shorter than this is not a secret anyone generated.
 const MIN_TOKEN_LEN: usize = 32;
@@ -143,6 +143,30 @@ async fn grow(State(app): State<App>, Path(user): Path<String>) -> Response {
     finish(async move { app.boxd.grow(&user).await }).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveReq {
+    part: Part,
+}
+
+async fn archive(
+    State(app): State<App>,
+    Path(user): Path<String>,
+    body: Result<Json<ArchiveReq>, JsonRejection>,
+) -> Response {
+    let (Some(user), Ok(Json(req))) = (UserId::parse(&user), body) else {
+        return invalid();
+    };
+    finish(async move { app.boxd.archive(&user, req.part).await }).await
+}
+
+async fn prefetch(State(app): State<App>, Path(user): Path<String>) -> Response {
+    let Some(user) = UserId::parse(&user) else {
+        return invalid();
+    };
+    finish(async move { app.boxd.prefetch(&user) }).await
+}
+
 async fn status(State(app): State<App>) -> Response {
     finish(async move { app.boxd.status().await }).await
 }
@@ -157,6 +181,8 @@ pub fn router(boxd: Arc<Boxd>, token: &str) -> Router {
         .route("/v1/boxes/{user_id}/wake", post(wake))
         .route("/v1/boxes/{user_id}/sleep", post(sleep))
         .route("/v1/boxes/{user_id}/grow", post(grow))
+        .route("/v1/boxes/{user_id}/archive", post(archive))
+        .route("/v1/boxes/{user_id}/prefetch", post(prefetch))
         .route("/v1/host/status", get(status))
         // An ensure body is a version and a few dozen short variables.
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -194,7 +220,13 @@ mod tests {
             Some(format!("Basic {TOKEN}")),
             Some("Bearer ".to_owned()),
         ];
-        for path in ["/v1/host/status", "/v1/boxes/u_a/wake", "/nothing-here"] {
+        for path in [
+            "/v1/host/status",
+            "/v1/boxes/u_a/wake",
+            "/v1/boxes/u_a/archive",
+            "/v1/boxes/u_a/prefetch",
+            "/nothing-here",
+        ] {
             for h in &headers {
                 let mut req = http.post(format!("{url}{path}"));
                 if path.ends_with("status") {
@@ -263,6 +295,31 @@ mod tests {
             assert_eq!(post(&path, json!({})).await, 400, "{query}");
         }
         assert_eq!(post("/v1/boxes/u_a/sleep?force=true", json!({})).await, 200);
+        // An archive names one of the two parts and nothing else. This host has no store, so
+        // the one that is well formed is refused as that, and a prefetch finds nothing cold.
+        for body in [
+            json!({}),
+            json!({ "part": "home" }),
+            json!({ "part": "ckpt", "force": true }),
+            json!("work"),
+        ] {
+            assert_eq!(
+                post("/v1/boxes/u_a/archive", body.clone()).await,
+                400,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            post("/v1/boxes/a.b/archive", json!({ "part": "work" })).await,
+            400
+        );
+        assert_eq!(post("/v1/boxes/a.b/prefetch", json!({})).await, 400);
+        assert_eq!(
+            post("/v1/boxes/u_a/archive", json!({ "part": "work" })).await,
+            409
+        );
+        assert_eq!(post("/v1/boxes/u_a/prefetch", json!({})).await, 200);
+        assert_eq!(post("/v1/boxes/u_b/prefetch", json!({})).await, 404);
         let _ = std::fs::remove_dir_all(&root);
     }
 

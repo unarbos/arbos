@@ -980,6 +980,16 @@ async fn handle_frame(
             if let Principal::Device { id, .. } = principal {
                 let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
                 crate::notify::set_focus(state, id, focused).await;
+                // docs/box-scaling.md §4.2: a chat on screen asks its cold box back.
+                if focused.is_some() {
+                    crate::boxd::prefetch_for_project(state, project_id).await;
+                }
+                // §4.2: typing in an agent's chat wakes its sleeping box ahead of the message.
+                if f.header.get("typing").and_then(|v| v.as_bool()) == Some(true)
+                    && project_id != people::PEOPLE_PROJECT
+                {
+                    crate::boxd::wake_for_typing(state, project_id).await;
+                }
                 // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
                 // `flush_presence` writes every device's stamp in one transaction.
                 state

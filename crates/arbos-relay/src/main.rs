@@ -50,6 +50,8 @@ mod images;
 mod inspect;
 mod link_icons;
 mod livekit;
+#[cfg(test)]
+mod load_gate;
 mod local;
 mod matrix;
 mod moderation;
@@ -331,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
         local_children: Arc::new(Mutex::new(HashMap::new())),
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
+        wake_kick: Arc::default(),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
         decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -350,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
+        last_turn: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
@@ -407,6 +411,7 @@ async fn main() -> anyhow::Result<()> {
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     boxd::spawn_idle_sleeper(state.clone()).await;
+    boxd::spawn_cold_tier(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;

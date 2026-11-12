@@ -89,6 +89,9 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN node_id TEXT",
         "ALTER TABLE boxes ADD COLUMN lifecycle_state TEXT",
         "ALTER TABLE boxes ADD COLUMN storage_json TEXT",
+        // The `boxd` node that holds this user's disk (docs/box-scaling.md Phase 4). It outlives
+        // the box row, which an admin's delete drops while the disk stays on its node.
+        "ALTER TABLE users ADD COLUMN boxd_node TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -1371,6 +1374,40 @@ impl Db {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
+        })
+    }
+
+    /// The node of every `boxd` box that has one on its row, by user.
+    pub fn boxd_box_nodes(&self) -> Result<HashMap<String, String>> {
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, node_id FROM boxes WHERE provider = 'boxd' AND node_id IS NOT NULL",
+            )?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    /// The node a user's disk was made on, kept whether or not they have a box row.
+    pub fn set_boxd_node(&self, user_id: &str, node_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE users SET boxd_node = ?2 WHERE id = ?1",
+                params![user_id, node_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn boxd_node(&self, user_id: &str) -> Result<Option<String>> {
+        self.read(|c| {
+            c.query_row(
+                "SELECT boxd_node FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
         })
     }
 

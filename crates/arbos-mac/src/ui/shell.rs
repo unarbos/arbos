@@ -598,7 +598,7 @@ impl Shell {
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
         {
-            // Keystrokes in a people chat → presence "typing" (throttled in AppState).
+            // Keystrokes → presence "typing" (throttled in AppState).
             let composer_input = composer.read(cx).input.clone();
             cx.observe(&composer_input, |this, input, cx| {
                 if input.read(cx).text().trim().is_empty() {

@@ -949,6 +949,7 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     state
         .set_box_state(user_id, BoxState::Waking, Some(reason))
         .await;
+    state.wake_kick.notify_one();
 }
 
 /// Stale-box detector (runs from the liveness sweep and from `ensure_awake`): a box that has been
@@ -1507,7 +1508,12 @@ pub async fn spawn_sandboxless_box_check(state: AppState) {
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(750)).await;
+            // A job just queued is run now: a user is waiting on it. The timer is for the jobs
+            // that come due by themselves (a retry, a cold box on its way back).
+            tokio::select! {
+                _ = state.wake_kick.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+            }
             run_wake_jobs(&state).await;
         }
     });
@@ -1545,6 +1551,14 @@ pub(crate) async fn run_wake_jobs(state: &AppState) {
         tracing::info!(%user_id, %reason, attempts, "waking box");
         match start_box(state, &user_id).await {
             Ok(()) => {}
+            Err(e) if e.to_string() == crate::boxd::FETCHING => {
+                // Not a failed wake: the daemon is bringing a cold box back from the object
+                // store. Look again shortly. Each look restarts the waking clock (`start_box`
+                // does), so the box is not called unreachable for not having dialled in yet.
+                let _ = state
+                    .db
+                    .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
+            }
             Err(e) => {
                 tracing::warn!(%user_id, error = %e, "wake failed");
                 let n = state
@@ -1569,6 +1583,8 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
         let mut t = state.turn_running.lock().await;
         if turn_running {
             t.insert(user_id.to_owned(), now_ms());
+            let mut last = state.last_turn.lock().await;
+            last.insert(user_id.to_owned(), now_ms());
         } else {
             t.remove(user_id);
         }

@@ -55,6 +55,8 @@ impl Host {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .no_proxy()
+            // A box checkpointed or stopped since the last call has dead sockets: none is kept.
+            .pool_max_idle_per_host(0)
             .timeout(PREPARE_SLEEP_TIMEOUT)
             .build()?;
         Ok(Self { http })
@@ -169,6 +171,18 @@ pub mod fake {
                 "mountpoint" => ok = self.mounted.lock().unwrap().contains(&last),
                 "mount" => drop(self.mounted.lock().unwrap().insert(last)),
                 "umount" => drop(self.mounted.lock().unwrap().remove(&last)),
+                // A pack is one small file that remembers what it was made of, and unpacks
+                // to it: a checkpoint to a directory with a file in it, a disk to its length.
+                "tar" if has("-cf") => std::fs::write(argv[2], b"a checkpoint")?,
+                "tar" if has("-xf") => std::fs::write(format!("{last}/checkpoint.img"), b"")?,
+                "zstd" if has("-d") => {
+                    let len = std::fs::read_to_string(&last)?.parse()?;
+                    std::fs::File::create(argv[argv.len() - 2])?.set_len(len)?;
+                }
+                "zstd" => {
+                    let len = std::fs::metadata(&last)?.len();
+                    std::fs::write(argv[argv.len() - 2], len.to_string())?;
+                }
                 "runsc" => {
                     let mut running = self.running.lock().unwrap();
                     if has("state") {

@@ -423,6 +423,8 @@ pub struct AppState {
     pub box_conns: Arc<Mutex<HashMap<String, (u32, i64)>>>,
     /// user_id → ms when the current wake started (for wake timing).
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
+    /// Told when a wake job is queued, so the runner takes it now and not at its next look.
+    pub wake_kick: Arc<tokio::sync::Notify>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
     /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
@@ -469,6 +471,9 @@ pub struct AppState {
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
+    /// user_id → the last keepalive that said a turn was running. Unlike `turn_running` it stays
+    /// once the turn ends: it ranks `boxd` boxes by use (`fleet::last_active_ms`).
+    pub last_turn: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
     pub evicted: Arc<Mutex<HashMap<String, i64>>>,
     /// Last host pressure sample (D89), for `/admin/fleet`.
@@ -812,6 +817,7 @@ pub(crate) mod test_support {
             local_children: Arc::new(Mutex::new(HashMap::new())),
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
+            wake_kick: Arc::default(),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -831,6 +837,7 @@ pub(crate) mod test_support {
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
+            last_turn: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),

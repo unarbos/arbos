@@ -829,9 +829,32 @@ pub fn pick_eviction(cands: &[Candidate]) -> Option<String> {
 /// A keepalive said a turn is running this recently → the sandbox is busy.
 pub(crate) const TURN_FRESH_MS: i64 = 3 * 60_000;
 
+/// When a box was last in use. `last_seen_at` is stamped by every request the box itself makes,
+/// its 3 s poll included, so on `boxd`, where this picks the box that sleeps at the resident cap,
+/// only what its user did counts: a client's row, a turn, a start.
+pub fn last_active_ms(
+    provider: Provider,
+    last_seen_at: Option<i64>,
+    last_started_at: Option<i64>,
+    last_client_push: Option<i64>,
+    last_turn: Option<i64>,
+) -> i64 {
+    let own = if provider == Provider::Boxd {
+        last_turn
+    } else {
+        last_seen_at
+    };
+    [own, last_started_at, last_client_push]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+}
+
 pub(crate) async fn candidates(state: &AppState, provider: Provider) -> Vec<Candidate> {
     let boxes = state.db.list_boxes().unwrap_or_default();
     let turns = state.turn_running.lock().await.clone();
+    let last_turns = state.last_turn.lock().await.clone();
     let pushes = state.last_client_push.lock().await.clone();
     let mut out = Vec::new();
     for b in boxes
@@ -839,14 +862,13 @@ pub(crate) async fn candidates(state: &AppState, provider: Provider) -> Vec<Cand
         .filter(|b| b.provider == provider.as_str())
     {
         let (st, _) = state.box_state(&b.user_id).await;
-        let last_active_ms = [
-            b.last_seen_at.unwrap_or(0),
-            b.last_started_at.unwrap_or(0),
-            pushes.get(&b.user_id).copied().unwrap_or(0),
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
+        let last_active_ms = last_active_ms(
+            provider,
+            b.last_seen_at,
+            b.last_started_at,
+            pushes.get(&b.user_id).copied(),
+            last_turns.get(&b.user_id).copied(),
+        );
         out.push(Candidate {
             turn_running: turns
                 .get(&b.user_id)
@@ -1442,6 +1464,42 @@ mod tests {
         assert!(state.db.waitlist_remove("u_b").unwrap());
         assert_eq!(state.db.waitlist_position("u_a").unwrap(), Some(1));
         assert!(!state.db.is_waitlisted("u_b").unwrap());
+    }
+
+    /// A box that polls is not a box in use: on `boxd` the newest of a client's row, a turn and
+    /// a start ranks it, and `last_seen_at` does not. The gVisor fleet ranks as it did.
+    #[test]
+    fn a_boxd_box_is_ranked_by_its_user_and_not_by_its_own_poll() {
+        let at = |p, seen, started, push, turn| last_active_ms(p, seen, started, push, turn);
+        assert_eq!(at(Provider::Boxd, Some(900), Some(10), Some(20), None), 20);
+        assert_eq!(at(Provider::Boxd, Some(900), Some(10), None, Some(30)), 30);
+        assert_eq!(
+            at(Provider::Boxd, Some(900), Some(40), Some(20), Some(30)),
+            40
+        );
+        assert_eq!(at(Provider::Boxd, Some(900), None, None, None), 0);
+        assert_eq!(
+            at(Provider::Gvisor, Some(900), Some(10), Some(20), Some(950)),
+            900
+        );
+        // The box whose user wrote last stays up, whichever box polled last.
+        let c = |u: &str, t| Candidate {
+            user_id: u.into(),
+            awake: true,
+            turn_running: false,
+            last_active_ms: t,
+        };
+        let cands = [
+            c(
+                "polled_now",
+                at(Provider::Boxd, Some(999), Some(1), Some(5), None),
+            ),
+            c(
+                "used_now",
+                at(Provider::Boxd, Some(100), Some(1), Some(50), None),
+            ),
+        ];
+        assert_eq!(pick_eviction(&cands).as_deref(), Some("polled_now"));
     }
 
     #[test]
