@@ -1195,7 +1195,7 @@ mod tests {
     /// the landed row; older notices without them stay valid.
     #[tokio::test]
     async fn handoff_destination_ids_merge_onto_agent_message() {
-        use super::{Delivery, Agent};
+        use super::{Agent, Delivery};
         use crate::status::tests::test_agent;
 
         let (agent, root) = test_agent().await;
@@ -1221,7 +1221,10 @@ mod tests {
             let am = h.doc.message("row-dest").unwrap().rest["agentMessage"].clone();
             assert_eq!(am["chatId"], "bubble-home");
             assert_eq!(am["messageId"], "landed-1");
-            assert_eq!(am["toProjectId"], "bubble", "other agentMessage fields stay");
+            assert_eq!(
+                am["toProjectId"], "bubble",
+                "other agentMessage fields stay"
+            );
         }
         // A row with no agentMessage is a no-op (old / unrelated notices).
         {

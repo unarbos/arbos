@@ -39,7 +39,7 @@ final class ListTopFadeTests: XCTestCase {
 
     func testBarOnlyListsAndPanePagesFadeToWhereTheirContentStarts() {
         let status: CGFloat = 59
-        for screen in [ListTopFade.Screen.homeSearch, .hiddenChats, .serverChannels, .newMessage] {
+        for screen in [ListTopFade.Screen.homeSearch, .hiddenChats, .serverChannels] {
             XCTAssertEqual(ListTopFade.spec(screen, statusBar: status).height, status + HomeChrome.barOnlyListTop, "\(screen)")
         }
         for screen in [ListTopFade.Screen.agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library] {

@@ -2388,10 +2388,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat_id = self.chat_id.clone().unwrap_or_default();
-        let openable = self
-            .state
-            .read(cx)
-            .can_open_handoff(&chat_id, message_id);
+        let openable = self.state.read(cx).can_open_handoff(&chat_id, message_id);
         self.agent_line_inner(
             lead,
             names,

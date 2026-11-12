@@ -3998,11 +3998,7 @@ impl AppState {
         let chat_id = self
             .primary_chat(&project_id)
             .map(|c| c.id.clone())
-            .or_else(|| {
-                self.visible_tabs(&project_id)
-                    .first()
-                    .map(|c| c.id.clone())
-            });
+            .or_else(|| self.visible_tabs(&project_id).first().map(|c| c.id.clone()));
 
         if let Some(am) = am {
             if !am.id.is_empty() {
@@ -13728,12 +13724,7 @@ mod handoff_nav_tests {
         }
     }
 
-    fn handoff_msg(
-        id: &str,
-        chat_id: &str,
-        to_name: &str,
-        am: Option<AgentMessageRef>,
-    ) -> Message {
+    fn handoff_msg(id: &str, chat_id: &str, to_name: &str, am: Option<AgentMessageRef>) -> Message {
         let mut m: Message = serde_json::from_value(serde_json::json!({
             "id": id,
             "chatId": chat_id,
