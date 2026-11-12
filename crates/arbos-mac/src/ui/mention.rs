@@ -376,8 +376,8 @@ impl Mentions {
         );
         // Me, by handle like everyone else: a bubble that says `@<my handle>` is my
         // chip for me too, as it is for the other members (Scout's report, Oct 29: his
-        // own `@A` read as raw text). Before the chat people so a same-named directory
-        // result cannot take my name's chip.
+        // own `@A` read as raw text — [feedback typed-handle-mention-chip-2026-10-29]).
+        // Before the chat people so a same-named directory result cannot take my name's chip.
         let me = Person {
             id: s.me_id(),
             handle: s.me_handle(),
@@ -1009,6 +1009,41 @@ pub(crate) mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
         assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
+    }
+
+    /// Scout, 2026-10-29: Affinity's "@A yo wassup" stayed raw text for Scout
+    /// because the viewer was only indexed by id, never by handle. With me in
+    /// the table by handle (as `from_state` adds me), `@A` is Scout's chip
+    /// ([feedback typed-handle-mention-chip-2026-10-29]).
+    #[test]
+    fn my_own_typed_handle_is_a_chip() {
+        let m = mentions(&[
+            (
+                "a",
+                "Scout",
+                ProfilePage::User {
+                    handle: "a".into(),
+                    space_id: None,
+                },
+            ),
+            (
+                "z",
+                "Affinity",
+                ProfilePage::User {
+                    handle: "z".into(),
+                    space_id: None,
+                },
+            ),
+        ]);
+        let text = m.display("@A yo wassup");
+        assert_eq!(text, format!("{CELL}Scout yo wassup"));
+        let chips = m.find(&text);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].1.id.as_deref(), Some("user:gh_a"));
+        assert!(
+            m.by_handle("A").is_some(),
+            "the viewer's handle must resolve"
+        );
     }
 
     /// Affinity, 2026-10-29: `@A` (Scout, a chat member with a photo) drew as
