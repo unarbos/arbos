@@ -664,7 +664,7 @@ impl Db {
 
     /// Device row as `(user_id, revoked)`; `None` when the id is unknown.
     pub fn device_status(&self, device_id: &str) -> Result<Option<(String, bool)>> {
-        self.read(|c| {
+        self.with(|c| {
             c.query_row(
                 "SELECT user_id, revoked_at IS NOT NULL FROM devices WHERE id = ?1",
                 params![device_id],

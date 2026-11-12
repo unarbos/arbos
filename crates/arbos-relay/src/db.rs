@@ -1131,7 +1131,7 @@ impl Db {
     /// match and otherwise returns the most recently active project with that name; callers that
     /// know the user should use `project_of_user_by_name`.
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
-        self.read(|c| {
+        self.with(|c| {
             c.query_row(
                 &format!(
                     "SELECT {} FROM projects WHERE (id = ?1 OR name = ?1) AND deleted_at IS NULL ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
@@ -1657,7 +1657,7 @@ impl Db {
 
     /// The user's box, if one was created.
     pub fn user_box(&self, user_id: &str) -> Result<Option<Sandbox>> {
-        self.read(|c| {
+        self.with(|c| {
             c.query_row(
                 &format!("SELECT {} FROM boxes WHERE user_id = ?1", Self::BOX_COLS),
                 params![user_id],
@@ -1668,7 +1668,7 @@ impl Db {
     }
 
     pub fn list_boxes(&self) -> Result<Vec<Sandbox>> {
-        self.read(|c| {
+        self.with(|c| {
             let mut st = c.prepare(&format!("SELECT {} FROM boxes", Self::BOX_COLS))?;
             let rows = st.query_map([], Self::row_to_box)?;
             rows.collect()
