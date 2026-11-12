@@ -2187,4 +2187,46 @@ mod tests {
         assert!(boxd.archive(&state.http, "a/b", Part::Ckpt).await.is_err());
         assert!(boxd.prefetch(&state.http, "..").await.is_err());
     }
+
+    /// `GET /machine` of a cold box: where it was left and what its disk held, from the row.
+    /// The daemon is not asked, the box is not woken, and a box of another provider answers
+    /// what it always did.
+    #[tokio::test]
+    async fn the_machine_card_of_a_cold_box_is_served_from_the_row_and_wakes_nothing() {
+        let (state, fake, user) = relay().await;
+        let (_, device) = person(&state, 9700);
+        let machine = |state: &AppState| {
+            let (state, device) = (state.clone(), device.clone());
+            async move {
+                let reply = crate::api::machine(State(state), device).await.unwrap();
+                let bytes = axum::body::to_bytes(reply.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            }
+        };
+        let none = machine(&state).await;
+        assert!(none.get("lifecycle_state").is_none() && none.get("storage").is_none());
+
+        asleep_for(&state, &user, DAY).await;
+        record(&state, &user, "cold", None);
+        let asked = fake.paths().len();
+        let cold = machine(&state).await;
+        assert_eq!(cold["state"], "asleep");
+        assert_eq!(cold["lifecycle_state"], "cold");
+        let at = cold["storage"]["at"].as_i64().unwrap();
+        assert_eq!(
+            cold["storage"],
+            json!({ "files_bytes": 1, "scratch_bytes": 2, "trash_bytes": null, "at": at })
+        );
+        assert_eq!(fake.paths().len(), asked, "the daemon was not asked");
+        assert!(state.db.due_wake_jobs().unwrap().is_empty());
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+
+        let mut row = state.db.user_box(&user).unwrap().unwrap();
+        row.provider = "gvisor".into();
+        row.user_id = "u_gvisor".into();
+        state.db.upsert_box(&row).unwrap();
+        assert_eq!(state.db.box_lifecycle("u_gvisor").unwrap(), None);
+    }
 }

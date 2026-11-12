@@ -1345,6 +1345,10 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .credits(&user_id, start_of_day())
         .map(|c| c.machine_today_usd)
         .unwrap_or(0.0);
+    // docs/box-scaling.md §3.3: where the daemon last left a `boxd` box, and the storage split
+    // of its last sleep, both from the row. Nothing here asks the box or the daemon, so the
+    // card of a sleeping or cold machine wakes and fetches nothing.
+    let lifecycle = state.db.box_lifecycle(&user_id).map_err(internal)?;
     Ok(Json(MachineStatusDto {
         user_id,
         state: bs,
@@ -1377,6 +1381,11 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         always_on: state.cfg.always_on,
         held,
         machine_today_usd,
+        lifecycle_state: lifecycle.as_ref().map(|l| l.1.clone()),
+        // Unreadable is absent: the card draws no numbers rather than wrong ones.
+        storage: lifecycle
+            .and_then(|l| l.2)
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
     .into_response())
 }

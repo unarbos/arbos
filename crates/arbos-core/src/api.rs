@@ -719,6 +719,22 @@ pub struct MachineImageDto {
     pub default: String,
 }
 
+/// What a machine's disk held when it last went to sleep, on `GET /machine`. The relay keeps
+/// it, so reading it never wakes the machine.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineStorageDto {
+    #[typeshare(serialized_as = "I54")]
+    pub files_bytes: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub scratch_bytes: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub trash_bytes: Option<i64>,
+    /// When it was measured, ms.
+    #[typeshare(serialized_as = "I54")]
+    pub at: i64,
+}
+
 /// `GET /machine` success body.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -742,6 +758,13 @@ pub struct MachineStatusDto {
     pub always_on: bool,
     pub held: bool,
     pub machine_today_usd: f64,
+    /// A machine that sleeps by itself says where it was last left: `warm`, `waking`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold` (its files are in cold storage) or `error`.
+    /// Absent for every other machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<MachineStorageDto>,
 }
 
 /// `POST /machine/start|stop|restart` reply.

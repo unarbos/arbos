@@ -1348,6 +1348,23 @@ public struct MachineWorkspaceDto: Codable {
 	}
 }
 
+/// What a machine's disk held when it last went to sleep, on `GET /machine`. The relay keeps
+/// it, so reading it never wakes the machine.
+public struct MachineStorageDto: Codable {
+	public let files_bytes: Int64
+	public let scratch_bytes: Int64?
+	public let trash_bytes: Int64?
+	/// When it was measured, ms.
+	public let at: Int64
+
+	public init(files_bytes: Int64, scratch_bytes: Int64?, trash_bytes: Int64?, at: Int64) {
+		self.files_bytes = files_bytes
+		self.scratch_bytes = scratch_bytes
+		self.trash_bytes = trash_bytes
+		self.at = at
+	}
+}
+
 /// `GET /machine` success body.
 public struct MachineStatusDto: Codable {
 	public let user_id: String
@@ -1365,8 +1382,13 @@ public struct MachineStatusDto: Codable {
 	public let always_on: Bool
 	public let held: Bool
 	public let machine_today_usd: Double
+	/// A machine that sleeps by itself says where it was last left: `warm`, `waking`,
+	/// `asleep_clean`, `asleep_ckpt`, `cold` (its files are in cold storage) or `error`.
+	/// Absent for every other machine.
+	public let lifecycle_state: String?
+	public let storage: MachineStorageDto?
 
-	public init(user_id: String, state: String, since: Int64, provider: String?, sandbox_id: String?, spec: MachineSpecDto, spend_today_usd: Double, spend_cap_usd: Double, workspaces: [MachineWorkspaceDto], migrated_from: [String], image: MachineImageDto, image_outdated: Bool, always_on: Bool, held: Bool, machine_today_usd: Double) {
+	public init(user_id: String, state: String, since: Int64, provider: String?, sandbox_id: String?, spec: MachineSpecDto, spend_today_usd: Double, spend_cap_usd: Double, workspaces: [MachineWorkspaceDto], migrated_from: [String], image: MachineImageDto, image_outdated: Bool, always_on: Bool, held: Bool, machine_today_usd: Double, lifecycle_state: String?, storage: MachineStorageDto?) {
 		self.user_id = user_id
 		self.state = state
 		self.since = since
@@ -1382,6 +1404,8 @@ public struct MachineStatusDto: Codable {
 		self.always_on = always_on
 		self.held = held
 		self.machine_today_usd = machine_today_usd
+		self.lifecycle_state = lifecycle_state
+		self.storage = storage
 	}
 }
 
