@@ -123,7 +123,7 @@ impl Composer {
                 .h(px(FIELD_H))
                 .px(px(10.0))
                 .rounded(px(8.0))
-                .bg(theme.field)
+                .bg(theme.field_fill())
                 .border_1()
                 .border_color(theme.field_border)
                 .flex()

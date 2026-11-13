@@ -1147,7 +1147,8 @@ mod tests {
         let state = test_state(AuthMode::Github);
         let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
         let good = serde_json::to_value(poll()).unwrap();
-        let cases: [(&str, fn(&mut serde_json::Value)); 5] = [
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit); 5] = [
             ("an unknown field", |p| p["anonymous"] = json!(true)),
             ("one option", |p| {
                 p["options"].as_array_mut().unwrap().truncate(1)
