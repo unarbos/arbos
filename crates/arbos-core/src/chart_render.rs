@@ -2,6 +2,9 @@
 //! tests read it) and, behind the `chart-png` feature, the PNG agentd attaches as the fallback
 //! for clients that cannot draw the `chart` part (old apps, push previews, Library). Light
 //! theme on white, 16:9, bundled Inter subsets so the box needs no system fonts.
+//!
+//! The fonts are **Inter** (Rasmus Andersson, SIL Open Font License 1.1) — provenance,
+//! attribution and the licence text in `crates/arbos-core/assets/README.md`.
 
 use std::fmt::Write as _;
 
