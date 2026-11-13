@@ -19,7 +19,11 @@ name: iOS
 # adds it to the external group(s) in the TESTFLIGHT_GROUPS repository variable
 # (default "Arbos public", public link https://testflight.apple.com/join/ec5fWCuJ)
 # and submits it for Beta App Review; the internal group sees every build on
-# its own. The step runs only when the build was uploaded (main / dispatch).
+# its own. That is the `submit` job, and it runs on a hosted Linux runner, not
+# the EC2 Mac: the lane only polls App Store Connect over HTTPS, and holding the
+# Mac's one heavy slot through Apple's processing wait starved three screenshot
+# lanes on 2026-10-31 (run 41240009057). It runs only when the build was
+# uploaded (main / dispatch).
 #
 # The lanes print every xcodebuild line and write build/xcodebuild-<lane>.log;
 # the last step keeps those logs as an artifact, pass or fail.
@@ -89,8 +93,14 @@ jobs:
     runs-on: ${{ inputs.runner || 'arbos-mac' }}
     # 45 was hit on 2026-10-27 23:15 (#2122's build): the archive waited for the shared Mac's heavy slot, then
     # Apple's processing took > 18 min and the job was cancelled inside "Wait for processing" with the build
-    # already uploaded — the run had to be redone by the next push. The wait itself is bounded in the step.
+    # already uploaded — the run had to be redone by the next push. Apple's wait is the `submit` job's now, so
+    # this budget covers the slot wait (up to 45 min) plus the build, and a cancellation during Apple's
+    # processing no longer kills a job that holds the Mac.
     timeout-minutes: 90
+    outputs:
+      # `submit` needs the same number: the Fastfile's build_number is BUILD_NUMBER + the last 6 digits of
+      # GITHUB_RUN_ID, and the run id is shared by every job of the run (and survives a re-run).
+      build_number: ${{ steps.build.outputs.number }}
     env:
       APP_DIR: apps/ios/Arbos
       HAVE_OP: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
@@ -223,15 +233,69 @@ jobs:
           echo "==> fastlane beta (build $BUILD_NUMBER)"
           AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane beta
           echo "TestFlight upload finished: build $BUILD_NUMBER (com.unarbos.arbos.ios)." >> "$GITHUB_STEP_SUMMARY"
+      # The seam: the archive and the signed upload are the last work that needs this box — a toolchain, a
+      # signing identity and the 250 GB volume. Nothing below may touch the Mac; the Apple-side wait and the
+      # Beta App Review submission are the `submit` job. Keep this step directly under the upload and above
+      # the artifact upload, which only reads log files off local disk.
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: |
+          /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
+            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
+          done
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-logs-${{ steps.build.outputs.number }}
+          path: apps/ios/Arbos/build/xcodebuild-*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Apple's side of the release: wait until the build is processed, add it to the external group(s) and
+  # submit it for Beta App Review. `fastlane distribute` passes `distribute_only: true`, so it uploads
+  # nothing and only polls the App Store Connect API over HTTPS — no Xcode, no keychain, no signing
+  # material beyond the API key, and no local state from the `phone` job but the build number. So it does
+  # not run on `arbos-mac`: on run 41240009057 the Mac's one heavy slot was held 25m55s, and every lane that
+  # asked for the box in that window was refused outright (arbos-heavy-slot.sh refuses rigs for as long as a
+  # release lane holds a slot). The lane's own cap is wait_processing_timeout_duration: 1500, and the
+  # "Another build is in review" path adds up to 15 more minutes of sleeping, none of it on this box.
+  submit:
+    name: Submit the build for Beta App Review
+    needs: phone
+    runs-on: ubuntu-latest
+    # Same condition as the upload in `phone`: main pushes and a dispatch that asked to upload. A failed or
+    # cancelled `phone` job skips this one (`needs` without `always()`), so nothing submits a build that
+    # never reached Apple.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
+          (github.event_name == 'push' && github.ref_name == 'main') }}
+    # Apple's processing wait is capped at 1500 s in the Fastfile; the review-retry and transient-retry
+    # paths can add half an hour of sleeping on a bad Apple night. Same budget the one job used to have.
+    timeout-minutes: 90
+    env:
+      APP_DIR: apps/ios/Arbos
+      HAVE_OP: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned, not the Gemfile's `~> 2.228`: the EC2 Mac runs a gem installed once (2.241.1), so a fastlane
+      # release cannot break it, and an unpinned `gem install` here would hand that power to every run. Bump
+      # this and the Gemfile together. `--user-install` keeps clear of the image's root-owned gem dir; the
+      # install measured ~23 s on a hosted Linux runner, so it is not worth a cache.
+      - name: fastlane on PATH
+        env:
+          FASTLANE_VERSION: "2.241.2"
+        run: |
+          set -euo pipefail
+          gem install --user-install --no-document fastlane -v "$FASTLANE_VERSION"
+          echo "$(ruby -e 'print Gem.user_dir')/bin" >> "$GITHUB_PATH"
       - name: Wait for processing, add the build to the external group, submit for Beta App Review
-        if: >-
-          ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
-              (github.event_name == 'push' && github.ref_name == 'main') }}
         env:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
-          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          BUILD_NUMBER: ${{ needs.phone.outputs.build_number }}
           TESTFLIGHT_GROUPS: ${{ vars.TESTFLIGHT_GROUPS || 'Arbos public' }}
           CHANGELOG: ${{ github.event.head_commit.message }}
         run: |
@@ -253,7 +317,7 @@ jobs:
       # learns about it (GET /releases/current → the app's "Update available" card; push
       # `release_published`). Best effort — TestFlight already has the build.
       - name: Relay admin token from 1Password
-        if: env.UPLOAD == 'true' && env.HAVE_OP == 'true'
+        if: env.HAVE_OP == 'true'
         uses: 1password/load-secrets-action@v2
         with:
           export-env: true
@@ -261,10 +325,9 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           ARBOS_RELAY_ADMIN_TOKEN: op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential
       - name: Tell the relay
-        if: env.UPLOAD == 'true'
         env:
           ARBOS_RELAY_ADMIN_TOKEN: ${{ env.ARBOS_RELAY_ADMIN_TOKEN || secrets.ARBOS_RELAY_ADMIN_TOKEN }}
-          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          BUILD_NUMBER: ${{ needs.phone.outputs.build_number }}
           RELAY_URL: ${{ vars.ARBOS_RELAY_URL || 'https://relay.arbos.life' }}
         run: |
           set +x
@@ -281,18 +344,3 @@ jobs:
           else
             echo "::warning::relay did not accept the release notice (older relay?); the Update card waits for the next build"
           fi
-      - name: Keep the xcodebuild logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xcodebuild-logs-${{ steps.build.outputs.number }}
-          path: apps/ios/Arbos/build/xcodebuild-*.log
-          if-no-files-found: ignore
-          retention-days: 14
-      - name: Release the heavy-job slot
-        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
-        run: |
-          /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
-          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
-            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
-          done
