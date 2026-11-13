@@ -322,7 +322,7 @@ impl Grant {
 
 /// The chat a card for someone else's ask goes to: the owner's pinned ("main") chat with this
 /// agent, opened if needed; the asking chat only when the project has no such chat.
-async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
+pub(crate) async fn owner_card_chat(agent: &Agent, asking_chat: &str) -> String {
     let chats = agent.store.chats().unwrap_or_default();
     let Some(main) = chats
         .iter()
