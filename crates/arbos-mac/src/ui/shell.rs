@@ -475,6 +475,10 @@ pub struct Shell {
     name_click_serial: u64,
     /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
     pub(crate) model_search_input: Entity<ComposerInput>,
+    /// Settings → Bot → Timezone (`ui::tzpick`): whether the zone list is dropped down, and
+    /// the filter field inside it.
+    pub(crate) timezone_pick: bool,
+    pub(crate) timezone_search_input: Entity<ComposerInput>,
     /// The right pane body's scroll (every page): a dropped-down agent row is
     /// scrolled into view once (`agent_pick_reveal`), a page pushed over
     /// another starts at the top, and `‹` restores the page underneath.
@@ -914,6 +918,18 @@ impl Shell {
         }
         cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
+        let timezone_search_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            timezone_search_input.update(cx, |input, _| {
+                input.set_placeholder("Search time zones");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.pick_first_timezone(window, cx));
+                }));
+            });
+        }
+        cx.observe(&timezone_search_input, |_, _, cx| cx.notify())
+            .detach();
         let name_input = cx.new(ComposerInput::new);
         {
             let weak = cx.weak_entity();
@@ -1285,6 +1301,8 @@ impl Shell {
             agent_name_input,
             name_click_serial: 0,
             model_search_input,
+            timezone_pick: false,
+            timezone_search_input,
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
             slides: PaneSlides::default(),
@@ -1424,6 +1442,7 @@ impl Shell {
             || focused(&self.wake_auth_input)
             || focused(&self.avatar_prompt_input)
             || focused(&self.model_search_input)
+            || focused(&self.timezone_search_input)
             || focused(&self.agent_link_name_input)
             || focused(&self.tab_rename_input)
             || focused(&self.feedback.read(cx).note)
@@ -3385,6 +3404,9 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        if self.close_timezone_pick(Some(window), cx) {
+            return;
+        }
         // The Secrets forms' "Add agent" dropdown folds first; the form stays.
         if self.secrets.update(cx, |p, cx| p.close_agent_picker(cx)) {
             return;
@@ -3576,6 +3598,7 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.close_timezone_pick(None, cx);
         self.secrets.update(cx, |p, cx| {
             p.close_agent_picker(cx);
         });

@@ -151,7 +151,9 @@ final class CoreChatDoc {
                 ReplyRefRecord(chatId: $0.chatId, projectId: $0.projectId, messageId: $0.messageId,
                                chatTitle: $0.chatTitle, sender: $0.sender, senderName: $0.senderName,
                                senderHandle: $0.senderHandle, text: $0.text)
-            }
+            },
+            // Settings → Bot → Timezone; `nil` leaves the Rust side to read the phone's zone.
+            tzOverride: TimeZoneSetting.chosen()
         )
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }
