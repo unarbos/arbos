@@ -51,6 +51,7 @@
     "id": "gh_301",
     "last_login_at": 1700000000000,
     "login": "user301",
-    "name": null
+    "name": null,
+    "name_source": "github"
   }
 }
