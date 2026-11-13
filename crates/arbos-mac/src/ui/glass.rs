@@ -231,6 +231,16 @@ pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Di
 
 /// Filled primary button (white on dark): the iPhone CTA.
 pub fn primary_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Stateful<Div> {
+    primary_button_off(id, label, theme)
+        .opacity(1.0)
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.88))
+        .active(|s| s.opacity(0.76))
+}
+
+/// The primary button while it cannot act: dimmed, and the same under the pointer and a press
+/// (a hover style cannot be taken back off an element, so the off face is built without one).
+pub fn primary_button_off(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(38.0))
@@ -243,9 +253,7 @@ pub fn primary_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> S
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.on_primary)
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.88))
-        .active(|s| s.opacity(0.76))
+        .opacity(0.45)
         .child(label.to_string())
 }
 
