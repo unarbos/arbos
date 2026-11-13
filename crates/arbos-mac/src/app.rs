@@ -8754,14 +8754,35 @@ impl AppState {
         }
     }
 
-    /// Ask for the current item's picture and its neighbours' so paging is instant.
+    /// Viewer → a thumbnail in the strip: go straight to that page.
+    pub fn media_viewer_show(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_mut() else {
+            return;
+        };
+        if viewer.forward_open || index >= viewer.items.len() || index == viewer.index {
+            return;
+        }
+        viewer.playing = None;
+        viewer.index = index;
+        self.ensure_viewer_pictures();
+        cx.notify();
+    }
+
+    /// Ask for the current item's picture and every one the strip shows beside it,
+    /// so paging and a click on a thumbnail are both instant.
     fn ensure_viewer_pictures(&mut self) {
         let Some(viewer) = self.media_viewer.as_ref() else {
             return;
         };
         let slot = viewer.slot.clone();
+        let strip = crate::ui::media_viewer::strip_window(
+            viewer.index,
+            viewer.items.len(),
+            crate::ui::media_viewer::STRIP_MAX,
+        );
         let keys: Vec<String> = [viewer.index.wrapping_sub(1), viewer.index, viewer.index + 1]
             .into_iter()
+            .chain(strip)
             .filter_map(|ix| viewer.items.get(ix))
             .filter(|i| i.attachment.kind() == AttachmentKind::Image)
             .filter_map(|i| i.attachment.blob_ref.clone())
@@ -16069,5 +16090,224 @@ mod coalesced_banner_withdraw_tests {
         });
         assert!(notify::record::take().withdrawn.contains(&DM.into()));
         assert_eq!(notify::withdrawn_ids(DM, [id.as_str()]), vec![id]);
+    }
+}
+
+#[cfg(test)]
+mod viewer_copy_tests {
+    //! Jacob, 2026-11-03: "copy button does not copy the image for paste". The write
+    //! side ([feedback copy-image-messages-mac-2026-10-27]) lives in `crate::pasteboard`,
+    //! and `ui::media_viewer` never names it — the pill dispatches an action and the
+    //! path runs through `AppState`. These tests pin that path end to end, so the
+    //! viewer's Copy cannot quietly stop reaching the pasteboard:
+    //!
+    //! Copy pill / ⌘C → `media_viewer_copy` → `copy_attachment` → `copy_body` →
+    //! `FetchCopyBlobs` → `finish_copy` → `pasteboard::plan` + `pasteboard::write`.
+    //!
+    //! Under `cargo test` `pasteboard::write` goes to gpui's test clipboard, not the
+    //! real `NSPasteboard` (that path is `#[cfg(all(target_os = "macos", not(test)))]`).
+    //! So these prove the wiring and the item layout; only a Mac proves the system
+    //! pasteboard and a paste into another app.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, ClipboardEntry, Entity, ImageFormat, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, SpaceKind};
+
+    const SLOT: &str = "arbos";
+    const CHAT: &str = "arbos-main";
+    const KEY: &str = "blob-flip-credit";
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn png_2x2() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 40, 90, 255]))
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("png");
+        out.into_inner()
+    }
+
+    fn picture_message() -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "m1", "chatId": CHAT, "role": "user", "sender": "user:gh_me",
+            "status": "done", "createdAt": 1_700_000_000_000u64,
+            "parts": [{
+                "id": "a1", "kind": "attachment",
+                "attachment": { "name": "flip-credit.png", "mime": "image/png", "ref": KEY },
+            }],
+        }))
+        .expect("picture message")
+    }
+
+    /// One agent space with one chat holding Jacob's picture, the viewer closed.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Commands, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, _cx| {
+            s.account = Some(AccountView {
+                id: "gh_me".into(),
+                login: "jacob".into(),
+                name: "Jacob".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            s.projects.push(Project {
+                id: SLOT.into(),
+                name: "Arbos".into(),
+                kind: SpaceKind::Project,
+                ..Default::default()
+            });
+            s.chats.insert(
+                SLOT.into(),
+                vec![Chat {
+                    id: CHAT.into(),
+                    project_id: SLOT.into(),
+                    title: String::new(),
+                    is_pinned: true,
+                    is_system: false,
+                    unread: false,
+                    unread_count: 0,
+                    last_message_at: 1_000,
+                    archived_at: None,
+                    kind: ChatKind::Chat,
+                    participants: Vec::new(),
+                }],
+            );
+            s.selected_project = Some(SLOT.into());
+            s.messages.insert(CHAT.into(), vec![picture_message()]);
+        });
+        (rt, commands, state)
+    }
+
+    /// Every command the source was handed since the last drain.
+    fn drain(commands: &Commands) -> Vec<ClientCommand> {
+        let mut slot = commands.lock().expect("commands slot");
+        let Some(rx) = slot.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+
+    /// The viewer's Copy asks for the picture's own bytes, then puts them on the
+    /// pasteboard — and the composer's paste stages them as a picture.
+    #[gpui::test]
+    fn the_viewers_copy_puts_the_picture_on_the_pasteboard(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| s.open_media_in_chat(CHAT, "m1", "a1", cx));
+        assert!(
+            state.read_with(cx, |s, _| s.media_viewer.is_some()),
+            "the viewer opened on the picture"
+        );
+        drain(&commands);
+
+        state.update(cx, |s, cx| s.media_viewer_copy(cx));
+        let request = drain(&commands)
+            .into_iter()
+            .find_map(|c| match c {
+                // Never the thumbnail: the pasteboard gets what the sender uploaded.
+                ClientCommand::FetchCopyBlobs {
+                    project_id,
+                    request,
+                    keys,
+                } => {
+                    assert_eq!(project_id, SLOT);
+                    assert_eq!(keys, [KEY.to_string()]);
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("Copy asked the source for the picture's bytes");
+
+        let bytes = png_2x2();
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::CopyBlobs {
+                    request,
+                    blobs: vec![Some(crate::sync::CopyBlob {
+                        key: KEY.into(),
+                        mime: "image/png".into(),
+                        bytes: Arc::new(bytes.clone()),
+                    })],
+                },
+                cx,
+            );
+        });
+
+        let item = cx
+            .update(|cx| crate::pasteboard::read(cx))
+            .expect("something on the pasteboard");
+        let images: Vec<&gpui::Image> = item
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                ClipboardEntry::Image(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1, "the picture itself, not a URL or a name");
+        assert_eq!(images[0].format, ImageFormat::Png);
+        assert_eq!(
+            images[0].bytes, bytes,
+            "the original bytes, not a re-encode"
+        );
+        // ⌘V in the composer: the same read, then staged as a picture.
+        let pasted = crate::ui::composer::Pasted::from_clipboard(&item);
+        assert_eq!(pasted.images.len(), 1, "⌘V stages it as a picture");
+        assert!(pasted.text.is_none(), "a wordless picture pastes no words");
+    }
+
+    /// A profile picture is not a chat attachment: its Copy asks for nothing.
+    #[gpui::test]
+    fn a_profile_pictures_viewer_copies_nothing(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.open_picture_viewer("Jacob", "https://example.test/a.png", cx)
+        });
+        drain(&commands);
+        state.update(cx, |s, cx| s.media_viewer_copy(cx));
+        assert!(
+            !drain(&commands)
+                .iter()
+                .any(|c| matches!(c, ClientCommand::FetchCopyBlobs { .. })),
+            "no blob fetch for an avatar"
+        );
     }
 }
