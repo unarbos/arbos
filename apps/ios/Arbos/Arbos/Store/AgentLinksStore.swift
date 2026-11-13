@@ -361,7 +361,9 @@ extension AppModel {
     /// Settings → Agent access link opened: read the list (the fixture seeds the mockups' three).
     func refreshAgentLinks() async {
         if isFixture {
-            agentLinks = AgentAccessLink.fixture()
+            // Seed once. A later read must not bring back a link the page revoked, or drop one
+            // it minted, which the relay never does; Settings reads again on every appear.
+            if !agentLinksLoaded { agentLinks = AgentAccessLink.fixture() }
             agentLinksMintable = true
             agentLinksLoaded = true
             return

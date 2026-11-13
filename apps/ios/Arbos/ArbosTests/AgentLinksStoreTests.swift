@@ -75,4 +75,22 @@ final class AgentLinksStoreTests: XCTestCase {
         XCTAssertFalse(AuthDevice.signedIn(devices).contains { $0.isAgentToken })
         XCTAssertEqual(AuthDevice.signedIn(devices).count, 2)
     }
+
+    /// Settings reads the list again each time it appears. In the fixture that read used to
+    /// put the three seed rows back, so a revoked link returned under the reader's finger
+    /// (`AgentAccessLinkUITests`, "Revoke drops the row at once").
+    @MainActor
+    func testAFixtureRereadKeepsARevokeAndAMint() async {
+        let model = AppModel()
+        model.isFixture = true
+        await model.refreshAgentLinks()
+        XCTAssertEqual(model.agentLinks.count, 3)
+
+        model.revokeAgentLink("lnk-fx-codex")
+        let minted = await model.createAgentLink(label: "New", scope: .read, expiry: .sevenDays)
+        await model.refreshAgentLinks()
+
+        XCTAssertFalse(model.agentLinks.contains { $0.id == "lnk-fx-codex" })
+        XCTAssertTrue(model.agentLinks.contains { $0.id == minted?.id })
+    }
 }

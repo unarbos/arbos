@@ -125,9 +125,13 @@ final class ComposerParityUITests: XCTestCase {
     ///
     /// The screenshot is in pixels and an element's frame is in points, so the frame is scaled
     /// by the ratio between the two rather than by an assumed device scale.
-    private func brightness(_ app: XCUIApplication, of rect: CGRect) -> Double {
-        guard let shot = app.screenshot().image.cgImage else { return 0 }
-        let scale = CGFloat(shot.width) / app.windows.firstMatch.frame.width
+    ///
+    /// The shot and the window's width are passed in, not read here: reading either through
+    /// the app waits on its accessibility tree, and on a slow runner that wait outlasted the
+    /// light this is measuring.
+    private func brightness(_ shot: XCUIScreenshot, of rect: CGRect, windowWidth: CGFloat) -> Double {
+        guard let shot = shot.image.cgImage else { return 0 }
+        let scale = CGFloat(shot.width) / windowWidth
         let box = CGRect(x: rect.minX * scale, y: rect.minY * scale,
                          width: rect.width * scale, height: rect.height * scale)
         guard let piece = shot.cropping(to: box) else { return 0 }
@@ -174,7 +178,8 @@ final class ComposerParityUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "the keyboard is up")
         Thread.sleep(forTimeInterval: 1)
         let pill = box.frame
-        let resting = brightness(app, of: pill)
+        let windowWidth = app.windows.firstMatch.frame.width
+        let resting = brightness(XCUIScreen.main.screenshot(), of: pill, windowWidth: windowWidth)
 
         // All XCUI work stays on the test thread. Held well past the arming delay; the press
         // also raises Paste / AutoFill — the highlight must not take that touch away. The
@@ -182,11 +187,14 @@ final class ComposerParityUITests: XCTestCase {
         // brightness sample run after press returns without a background queue.
         let finger = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         finger.press(forDuration: 1.2)
+        // The picture first, and straight off the screen: the light lasts `HoldHighlight.tail`
+        // (3 s) after lift, and a query of the app before this one could use all of it.
+        let shot = XCUIScreen.main.screenshot()
         let lit = probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch
         XCTAssertTrue(lit.waitForExistence(timeout: 5),
                       "touch-and-hold lights the box the way Grok's does")
 
-        let held = brightness(app, of: pill)
+        let held = brightness(shot, of: pill, windowWidth: windowWidth)
         let delta = abs(held - resting)
         // Threshold 8 (was 12): #2998 dropped `PillSurface.translucentAlpha` to 0.12, so a
         // good still reads ~10.26 mean delta on CI instead of the older denser-pill figure.
