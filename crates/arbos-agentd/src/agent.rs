@@ -5714,6 +5714,30 @@ impl Agent {
         }
     }
 
+    /// What this workspace still owes its owner: open job rows (`queued` or `running`) and
+    /// approval cards nobody has answered. `None` when the store could not be read, so a reader
+    /// draws nothing rather than claiming nothing is left.
+    ///
+    /// Read from the store on purpose, and deliberately **not** [`Agent::jobs_running`]. That
+    /// counter counts asks answered beside a running turn — runs with no job row, no job id and
+    /// nothing `list_jobs` can name (see [`Agent::start_job_for_send`]) — so a box with three
+    /// real jobs has `jobs_running == 0`. Anything that shows the owner how much work is
+    /// outstanding must read this instead, and the two rows here are the two kinds of
+    /// outstanding work: work the agent is doing, and work waiting on the owner's answer.
+    pub(crate) fn work_outstanding(&self) -> Option<(u64, u64)> {
+        let jobs = self
+            .store
+            .open_jobs()
+            .inspect_err(|e| tracing::warn!(error = %e, "open jobs unreadable"))
+            .ok()?;
+        let cards = self
+            .store
+            .pending_approvals()
+            .inspect_err(|e| tracing::warn!(error = %e, "pending approvals unreadable"))
+            .ok()?;
+        Some((jobs.len() as u64, cards.len() as u64))
+    }
+
     /// Was this job cancelled? The one question every late writer asks before it puts anything
     /// in the chat (bug S: a cancelled job posted a result and a file 23 minutes afterwards).
     /// Has this chat a job that is `queued` or `running`? The question `handle_command` asks

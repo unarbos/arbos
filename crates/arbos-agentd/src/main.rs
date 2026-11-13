@@ -138,6 +138,8 @@ mod worker_lifetime;
 #[cfg(test)]
 mod worker_model_refusal_tests;
 #[cfg(test)]
+mod work_outstanding_tests;
+#[cfg(test)]
 mod worker_retention_tests;
 mod workspace;
 

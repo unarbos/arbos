@@ -521,7 +521,7 @@ impl Shell {
                 );
             }
 
-            // Agents card: running now, jobs, the breakdown.
+            // Agents card: running now, outstanding work, the breakdown.
             if let (Some(r), false) = (live, plan.agents.is_empty()) {
                 let mut card = settings_group(&theme);
                 let usage = r.usage_rows();
@@ -532,9 +532,9 @@ impl Shell {
                             glass::row("Running now", &theme)
                                 .child(value(machine::running_now(r), &theme)),
                         ),
-                        machine::Row::Jobs => {
-                            card.child(glass::row("Background jobs", &theme).child(value(
-                                machine::jobs_value(r.jobs_running().unwrap_or(0)),
+                        machine::Row::Outstanding => {
+                            card.child(glass::row("Outstanding work", &theme).child(value(
+                                machine::outstanding_value(r.outstanding().unwrap_or_default()),
                                 &theme,
                             )))
                         }

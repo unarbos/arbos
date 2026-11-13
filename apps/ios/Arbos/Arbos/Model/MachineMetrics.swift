@@ -163,20 +163,39 @@ enum MachineMetrics {
         return "\(r.running.count) of \(total) agent\(total == 1 ? "" : "s")"
     }
 
-    /// "2 running" / "None".
-    static func jobsValue(_ jobs: Int64) -> String {
-        jobs == 0 ? "None" : "\(jobs) running"
+    /// What is outstanding, one phrase per kind: "2 jobs" / "1 waiting for you" /
+    /// "2 jobs · 1 waiting for you". Empty when nothing is.
+    ///
+    /// The two are never added together: a job waiting on a card is one open row and one open
+    /// card, and a single number would count that job twice.
+    private static func outstandingParts(_ o: Outstanding) -> [String] {
+        var parts: [String] = []
+        if o.jobs > 0 { parts.append("\(o.jobs) job\(o.jobs == 1 ? "" : "s")") }
+        if o.approvals > 0 { parts.append("\(o.approvals) waiting for you") }
+        return parts
     }
 
-    /// "Working · 42 s · 1 job" / "Idle" (the tool count stays on the Computer tab).
+    /// "2 jobs" / "1 waiting for you" / "2 jobs · 1 waiting for you" / "None".
+    static func outstandingValue(_ o: Outstanding) -> String {
+        o.isClear ? "None" : outstandingParts(o).joined(separator: " · ")
+    }
+
+    /// "Working · 42 s · 1 job" / "2 jobs · 1 waiting for you" / "Idle" (the tool count stays
+    /// on the Computer tab).
+    ///
+    /// "Idle" is said only when this agent owes its owner nothing. A card the owner has not
+    /// answered is outstanding work on them, it has no deadline, and an agent that reads
+    /// "Idle" beside one is telling them there is nothing to come back to.
     static func agentStatus(_ w: BoxWorkspace) -> String {
-        if !w.running {
-            if let j = w.jobsRunning, j > 0 { return "Idle · \(j) job\(j == 1 ? "" : "s")" }
+        let o = w.outstanding ?? Outstanding()
+        var parts: [String] = []
+        if w.running {
+            parts.append("Working")
+            if let ms = w.elapsedMs { parts.append(AgentPane.durationS(ms / 1000)) }
+        } else if o.isClear {
             return "Idle"
         }
-        var parts = ["Working"]
-        if let ms = w.elapsedMs { parts.append(AgentPane.durationS(ms / 1000)) }
-        if let j = w.jobsRunning, j > 0 { parts.append("\(j) job\(j == 1 ? "" : "s")") }
+        parts.append(contentsOf: outstandingParts(o))
         return parts.joined(separator: " · ")
     }
 
@@ -232,7 +251,7 @@ enum MachineMetrics {
         // resources card
         case disk, memory, cpu, network, notAnswering
         // agents card
-        case runningNow, jobs, breakdown, agent(Id)
+        case runningNow, outstanding, breakdown, agent(Id)
         // action card
         case requestBiggerMachine, restart, start, stop
     }
@@ -274,7 +293,7 @@ enum MachineMetrics {
             if cpuGauge(r) != nil { p.resources.append(.cpu) }
             if netValue(r) != nil { p.resources.append(.network) }
             p.agents.append(.runningNow)
-            if r.jobsRunning != nil { p.agents.append(.jobs) }
+            if r.outstanding != nil { p.agents.append(.outstanding) }
             let usage = r.usageRows
             if !usage.isEmpty {
                 p.agents.append(.breakdown)
