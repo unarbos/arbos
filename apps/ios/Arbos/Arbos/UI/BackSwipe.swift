@@ -634,6 +634,8 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
         layer.shadowOpacity = 0.18
         layer.shadowRadius = 8
         layer.shadowOffset = CGSize(width: -3, height: 0)
+        // A path, so the shadow is not derived from the whole screen's alpha every frame.
+        layer.shadowPath = UIBezierPath(rect: leavingView.bounds).cgPath
 
         UIView.animate(withDuration: transitionDuration(using: context), delay: 0, options: .curveLinear) {
             box.transform = CGAffineTransform(translationX: width, y: 0)
@@ -648,6 +650,7 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
             dim.removeFromSuperview()
             arrivingView.transform = .identity
             (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
+            layer.shadowPath = nil
             // The box comes down and the screen goes back to the container, before the lines
             // below decide which of the two screens this animator leaves behind.
             leavingView.transform = .identity

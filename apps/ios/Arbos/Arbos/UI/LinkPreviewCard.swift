@@ -42,10 +42,9 @@ struct LinkPreviewCard: View {
 
     var body: some View {
         let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
-        Button {
-            guard origin.allowsPrivate(model), let url = preview.openURL else { return }
-            openURL(url)
-        } label: {
+        // Not a Button: a Button counts a back swipe that starts on the card as a tap when the
+        // finger lifts. The lift after a hold that opened the message menu is not a tap either.
+        Group {
             VStack(alignment: .leading, spacing: 0) {
                 if preview.expanded { media }
                 HStack(alignment: .top, spacing: 10) {
@@ -62,7 +61,11 @@ struct LinkPreviewCard: View {
             .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .onTapGesture {
+            guard !ChatGestures.tapEndsHold(), origin.allowsPrivate(model), let url = preview.openURL else { return }
+            openURL(url)
+        }
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("link-card")
         .accessibilityLabel(preview.oneLine)
         .accessibilityHint("Opens the link")

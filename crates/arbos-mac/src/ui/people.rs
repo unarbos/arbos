@@ -459,6 +459,7 @@ pub fn new_chat_sheet(
                                 div()
                                     .text_size(px(TEXT_SMALL))
                                     .text_color(theme.text_muted)
+                                    .truncate()
                                     .child(format!("@{}", person.handle)),
                             ),
                     )
@@ -538,7 +539,7 @@ pub fn new_chat_sheet(
         Some(
             glass::primary_button("add-members-go", "Add", &theme)
                 .h(px(34.0))
-                .when(!can_add, |el| el.opacity(0.45))
+                .when(!can_add, |el| el.opacity(0.45).active(|s| s.opacity(0.88)))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if !can_add {
                         return;
@@ -557,7 +558,9 @@ pub fn new_chat_sheet(
                 &theme,
             )
             .h(px(34.0))
-            .when(!can_create, |el| el.opacity(0.45))
+            .when(!can_create, |el| {
+                el.opacity(0.45).active(|s| s.opacity(0.88))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !can_create {
                     return;
@@ -886,6 +889,7 @@ fn new_group_body(
                             div()
                                 .text_size(px(TEXT_SMALL))
                                 .text_color(theme.text_muted)
+                                .truncate()
                                 .child(format!("@{}", person.handle)),
                         ),
                 )
@@ -1133,6 +1137,7 @@ pub fn members_popover(
                             div()
                                 .text_size(px(12.5))
                                 .text_color(theme.text)
+                                .truncate()
                                 .child(format!("{} · @{}", a.name, a.handle)),
                         )
                         .child(

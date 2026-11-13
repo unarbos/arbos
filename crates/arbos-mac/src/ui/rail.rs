@@ -576,9 +576,10 @@ pub(crate) fn render_tip(shell: &Shell, cx: &Context<Shell>) -> Option<Div> {
             .items_center()
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
-            .whitespace_nowrap()
+            // A 60-character server name ends in an ellipsis, not across the chat.
+            .max_w(px(280.0))
             .debug_selector(|| "rail-tip".into())
-            .child(entry.name()),
+            .child(div().min_w_0().truncate().child(entry.name())),
     )
 }
 

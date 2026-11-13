@@ -129,7 +129,7 @@ struct RootView: View {
                 InCallOverlay(expected: expectedPeople)
                     .environmentObject(model)
                     .environment(\.theme, theme)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.fromTop)
             }
         }
         .animation(.spring(duration: 0.3), value: calls.isPresented)

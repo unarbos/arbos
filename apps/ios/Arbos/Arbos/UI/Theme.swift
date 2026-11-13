@@ -22,6 +22,13 @@ enum Haptics {
     static func pick() { selection.selectionChanged() }
 }
 
+extension AnyTransition {
+    /// Slides from the top; a plain fade under Reduce Motion.
+    static var fromTop: AnyTransition {
+        UIAccessibility.isReduceMotionEnabled ? .opacity : .move(edge: .top).combined(with: .opacity)
+    }
+}
+
 /// Telegram-style text size steps (Q6). Index 3 = the design size.
 enum TextScale {
     static let steps: [CGFloat] = [0.85, 0.9, 0.95, 1.0, 1.1, 1.2, 1.3]

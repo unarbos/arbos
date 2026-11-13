@@ -1430,10 +1430,15 @@ struct PeopleRow: View {
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
-                    Text(label)
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.muted)
-                        .lineLimit(1)
+                        // The handle gives way before the name does.
+                        .layoutPriority(1)
+                    // A person with no display name: the title already is the handle.
+                    if label != title {
+                        Text(label)
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(theme.muted)
+                            .lineLimit(1)
+                    }
                     Spacer()
                     if pinned {
                         Image(systemName: "pin.fill")
@@ -1472,12 +1477,14 @@ struct PeopleRow: View {
 struct PulseDot: View {
     let color: Color
     @State private var on = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
-            .fill(color.opacity(on ? 1 : 0.35))
+            .fill(color.opacity(on || reduceMotion ? 1 : 0.35))
             .frame(width: 7, height: 7)
             .onAppear {
+                guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true }
             }
     }

@@ -562,7 +562,9 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
                 .mt(px(metrics::PILL_MT))
                 .child(
                     div()
-                        .flex_shrink_0()
+                        // Shrinks with a narrow chat column (the name inside truncates)
+                        // instead of running over the panes beside it.
+                        .min_w_0()
                         .max_w(px(460.0))
                         .debug_selector(|| "chat-header-pill".into())
                         .child(pill),

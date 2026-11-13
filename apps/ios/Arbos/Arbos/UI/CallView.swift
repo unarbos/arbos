@@ -68,6 +68,7 @@ struct CallScreen: View {
                         Text(headline)
                             .font(theme.font(Theme.small, weight: .semibold))
                             .foregroundStyle(theme.muted)
+                            .monospacedDigit()
                     }
                     HStack {
                         Button { collapse() } label: {
@@ -113,7 +114,7 @@ struct CallScreen: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 40)
                 .onEnded { v in
-                    if v.translation.height > 120, v.translation.height > abs(v.translation.width) * 1.5 { collapse() }
+                    if v.translation.height > 120 || v.predictedEndTranslation.height > 400, v.translation.height > abs(v.translation.width) * 1.5 { collapse() }
                 }
         )
     }
@@ -212,6 +213,9 @@ struct CallScreen: View {
             Text(groupTitle ?? primaryPerson?.displayName ?? calls.call?.startedBy?.displayName ?? "Call")
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
                 .padding(.top, 28)
             Text(status)
                 .font(theme.font(Theme.body))
@@ -255,6 +259,7 @@ struct CallScreen: View {
             }
             if let groupTitle {
                 Text(groupTitle).font(theme.font(22, weight: .semibold)).foregroundStyle(theme.text)
+                    .lineLimit(2).multilineTextAlignment(.center).padding(.horizontal, 32)
             }
             Text(status)
                 .font(theme.font(Theme.body))
@@ -485,7 +490,8 @@ struct IncomingCallView: View {
                     if let p = inc.from ?? inc.call.startedBy {
                         CallPersonAvatar(person: p, size: 128)
                             .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150)) // control-size: exception callControls
-                        Text(p.displayName).font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text).padding(.top, 28)
+                        Text(p.displayName).font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text)
+                            .lineLimit(2).multilineTextAlignment(.center).padding(.horizontal, 32).padding(.top, 28)
                         Text("@\(p.handle)").font(theme.font(Theme.body)).foregroundStyle(theme.muted).padding(.top, 4)
                     }
                     Spacer()

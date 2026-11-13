@@ -331,6 +331,7 @@ pub(crate) fn tab_pill(
                 .when(!is_selected, |d| d.text_color(label_muted))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(pk) = this.pending_picker_mut() {
@@ -734,6 +735,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .when(can_reset, |d| {
             d.cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(pk) = this.avatar_picker.as_mut() {
                         pk.reset = true;
@@ -761,6 +763,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             .text_color(label_muted)
             .cursor_pointer()
             .hover(|s| s.opacity(0.85))
+            .active(|s| s.opacity(0.7))
             .child("View")
             .on_click(cx.listener(move |this, _, _, cx| this.view_picture(&name, &url, cx)))
     });
@@ -887,6 +890,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 .left(px(BAR_INSET))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(|this, _, _, cx| this.close_avatar_picker(cx))),
         )
         .child(if can_set {
@@ -894,6 +898,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 .right(px(BAR_INSET))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .on_click(cx.listener(|this, _, _, cx| this.set_avatar(cx)))
         } else {
             pill("avatar-set", "Set avatar", p.create_bg, p.create_text).right(px(BAR_INSET))

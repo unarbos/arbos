@@ -2060,8 +2060,8 @@ struct RowView: View, Equatable {
     /// with that emoji; long-press lists everyone who used it below the chips.
     private var reactionChips: some View {
         let mine = model.myUserId
-        return HStack(spacing: 4) {
-            if row.role == .user { Spacer(minLength: 0) }
+        // Wraps: many different emoji take a second line instead of squeezing the chips.
+        return WrapLayout(spacing: 4) {
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
                 let selected = !showReactionSenders && selectedReactionEmoji == reaction.emoji
@@ -2111,8 +2111,8 @@ struct RowView: View, Equatable {
                     selectedReactionEmoji = selected ? nil : reaction.emoji
                 }
             }
-            if row.role != .user { Spacer(minLength: 0) }
         }
+        .frame(maxWidth: .infinity, alignment: row.role == .user ? .trailing : .leading)
         .padding(.leading, reactionLeading)
     }
 
@@ -2121,7 +2121,7 @@ struct RowView: View, Equatable {
         let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
         return HStack(spacing: 0) {
             if row.role == .user { Spacer(minLength: 0) }
-            Text(names)
+            Text("\(reaction.emoji) \(names)")
                 .font(theme.font(12))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(row.role == .user ? .trailing : .leading)
@@ -3827,10 +3827,9 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
-            Button {
-                guard !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
-                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-            } label: {
+            // Not a Button, as the picture tile above: a Button counts a back swipe that starts
+            // on the card as a tap when the finger lifts, and the file opened under the pop.
+            Group {
                 // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
                 // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
                 HStack(spacing: 14) {
@@ -3839,7 +3838,7 @@ struct FileCard: View {
                         .frame(width: 21, height: 27)
                         .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1).truncationMode(.middle)
                         Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
                     }
                 }
@@ -3849,8 +3848,11 @@ struct FileCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(item.blobRef == nil)
+            .onTapGesture {
+                guard item.blobRef != nil, !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            }
+            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
                 Text(captionText)

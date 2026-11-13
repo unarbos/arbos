@@ -7,12 +7,13 @@
 //! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
 //! open from the sidebar row's control-click menu.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     actions, deferred, div, fill, img, point, prelude::*, px, relative, size, App, Bounds,
@@ -243,6 +244,14 @@ struct Layout {
     pill_mask: Bounds<Pixels>,
 }
 
+/// Half of the caret's blink: on this long, then off this long (macOS's own is about this).
+const CARET_BLINK_MS: u64 = 530;
+
+/// Is the caret drawn this long after it last moved? On for the first half-period.
+fn caret_lit(since_moved: Duration) -> bool {
+    (since_moved.as_millis() / CARET_BLINK_MS as u128) % 2 == 0
+}
+
 pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
@@ -255,6 +264,14 @@ pub struct ComposerInput {
     /// Every other move paints a boundary caret at the end of the row above,
     /// as NSTextView's upstream affinity does.
     caret_downstream: bool,
+    /// The caret blinks as the system's does: solid from the last time it moved or the text
+    /// changed (`caret_moved`, noticed at paint through `caret_seen`), then on and off every
+    /// [`CARET_BLINK_MS`]. A paint that has a caret to show sets `caret_live`, and the ticker
+    /// only redraws a field that set it, so a field without focus costs one idle wake.
+    caret_seen: Cell<(usize, usize)>,
+    caret_moved: Cell<Instant>,
+    caret_live: Cell<bool>,
+    _caret_ticker: gpui::Task<()>,
     layout: Option<Layout>,
     is_selecting: bool,
     /// The pointer over the committed chips (hover / pressed), by chip range.
@@ -327,6 +344,22 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             caret_downstream: false,
+            caret_seen: Cell::new((usize::MAX, 0)),
+            caret_moved: Cell::new(Instant::now()),
+            caret_live: Cell::new(false),
+            _caret_ticker: cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(CARET_BLINK_MS))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.caret_live.replace(false) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }),
             layout: None,
             is_selecting: false,
             chips: mention::ChipPointer::default(),
@@ -2242,7 +2275,16 @@ impl Element for InputElement {
         let mut cursor_quad = None;
         let mut selections = Vec::new();
         if content.is_empty() || selected_range.is_empty() {
-            if let Some(pos) = cursor_pos {
+            let input = self.input.read(cx);
+            let seen = (cursor, content.len());
+            if input.caret_seen.replace(seen) != seen {
+                input.caret_moved.set(Instant::now());
+            }
+            if input.focus_handle.is_focused(window) {
+                input.caret_live.set(true);
+            }
+            let lit = caret_lit(input.caret_moved.get().elapsed());
+            if let Some(pos) = cursor_pos.filter(|_| lit) {
                 cursor_quad = Some(fill(
                     Bounds::new(
                         point(bounds.left() + pos.x, bounds.top() + pos.y - dy + px(1.0)),
@@ -3573,7 +3615,10 @@ impl Composer {
                     div()
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
-                        .whitespace_nowrap()
+                        // Capped so a long name leaves the handle (what tells two people
+                        // apart) its room.
+                        .max_w(px(180.0))
+                        .truncate()
                         .child(match c.description {
                             Some(_) => format!("@{}", c.handle),
                             None => c.name.clone(),
@@ -3587,6 +3632,7 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
+                        .text_ellipsis()
                         .child(match c.description {
                             Some(d) => format!("· {d}"),
                             None => format!("@{}", c.handle),
@@ -3838,6 +3884,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .child(
                     div()
                         .text_size(px(TEXT_TINY))
@@ -3859,6 +3906,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 // The disc itself never fades: it is the same white circle in
                 // both states, so it holds still and only its mark changes.
                 .child(if crossfade {
@@ -4857,6 +4905,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn the_caret_is_solid_after_a_move_then_blinks_on_the_half_period() {
+        let ms = Duration::from_millis;
+        assert!(caret_lit(ms(0)) && caret_lit(ms(CARET_BLINK_MS - 1)));
+        assert!(!caret_lit(ms(CARET_BLINK_MS)) && !caret_lit(ms(2 * CARET_BLINK_MS - 1)));
+        assert!(caret_lit(ms(2 * CARET_BLINK_MS)));
+    }
 
     fn image(format: gpui::ImageFormat, bytes: &[u8]) -> gpui::Image {
         let bytes = bytes.to_vec();
