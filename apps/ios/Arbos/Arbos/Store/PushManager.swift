@@ -103,10 +103,10 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         Task { await sendTokenIfNeeded() }
     }
 
+    /// A signed build without the `aps-environment` entitlement fails here, mints no token and
+    /// registers nothing — so this is the only place the device half of push leaves a trace.
     func didFailToRegister(_ error: Error) {
-        #if DEBUG
-        print("push: registration failed: \(error.localizedDescription)")
-        #endif
+        notifyLog.error("apns registration failed: \(error.localizedDescription, privacy: .public)")
     }
 
     /// Sends the token once per (token, relay) — called after sign-in and on token change.
