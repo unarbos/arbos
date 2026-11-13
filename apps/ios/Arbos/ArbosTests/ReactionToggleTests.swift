@@ -149,23 +149,39 @@ final class NativeReactionTests: XCTestCase {
         XCTAssertTrue(mine(), "a refused removal puts it back")
     }
 
-    @MainActor func testATimelineThatArrivesFirstDoesNotUndoItAndTheEchoSettlesIt() {
-        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
-        // Someone else's message came in before my reaction's event: the rows do not have it yet.
-        var rows = [row("m1"), row("m2")]
-        AppModel.holdReactions(&rows, held: &held, me: me, now: 2_000)
-        XCTAssertEqual(rows[0].reactions, [MessageReaction(emoji: "👍", senders: [me])])
-        XCTAssertEqual(held.count, 1, "still waiting for the homeserver")
+    /// The homeserver's rows replace the chat's rows whole. One that arrives between the tap and
+    /// the reaction's own event (someone else's message) used to take the chip off again.
+    @MainActor func testATimelineThatArrivesFirstDoesNotUndoItAndTheEchoSettlesIt() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let me = try XCTUnwrap(model.myUserId)
+        model.applyNativeRooms(["dm1": "!r"])
+        model.matrixSnapshot = MatrixSnapshot(spaces: [], channels: [], people: [MatrixPeopleRow(
+            roomId: "!r", chatId: "dm1", kind: "dm", encrypted: true, unread: 0, mentions: 0,
+            lastText: "", lastSender: "", lastSenderName: "", lastTs: 0)])
+        func timeline(_ reactions: String) -> [MatrixMessageRow] {
+            [MatrixMessageRow(eventId: "$e1", id: "m1", sender: "user:gh_alice", senderName: "alice", text: "hi",
+                              createdAt: 1, locked: false, pending: false,
+                              json: #"{"id":"m1","role":"user","sender":"user:gh_alice","reactions":\#(reactions)}"#)]
+        }
+        func mine() -> Bool { model.messages(of: "dm1").first?.reactions.contains { $0.emoji == "👍" && $0.senders.contains(me) } == true }
+
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), true)
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertTrue(mine(), "rows without my reaction yet do not take it off")
+        XCTAssertEqual(model.heldReactions["dm1"]?.count, 1, "still waiting for the homeserver")
 
         // The echo: the rows agree, nothing is laid over them any more.
-        rows = [row("m1", reactions: [MessageReaction(emoji: "👍", senders: [me])])]
-        AppModel.holdReactions(&rows, held: &held, me: me, now: 3_000)
-        XCTAssertEqual(rows[0].reactions, [MessageReaction(emoji: "👍", senders: [me])])
-        XCTAssertTrue(held.isEmpty)
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline(#"{"👍":{"\#(me)":true}}"#))
+        XCTAssertTrue(mine())
+        XCTAssertNil(model.heldReactions["dm1"])
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertFalse(mine(), "once settled, the homeserver's rows are the truth again")
 
         // An event that never comes back does not pin the row for good.
-        held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
-        rows = [row("m1")]
+        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
+        var rows = [row("m1")]
         AppModel.holdReactions(&rows, held: &held, me: me, now: 61_001)
         XCTAssertTrue(rows[0].reactions.isEmpty)
         XCTAssertTrue(held.isEmpty)

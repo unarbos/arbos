@@ -134,6 +134,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `iphone-create-entity-edit-style-2026-11-10` | 2026-11-10 | iPhone | Create New Agent / Group / Server / Connect uses the Edit-page hierarchy (Done/Create pill, sectioned Name and Appearance cards), not the old bottom-sheet layout. | `JacobAskGuardTests.testCreateEntityUsesTheEditPageHierarchy` |
 | `iphone-entity-nav-push-2026-11-10` | 2026-11-10 | iPhone | From + → create/profile → edit → sub-pages, every step is a navigation push with edge-swipe back; avatar / model / voice / group edit are pushes, not sheets. | `EntityNavPushUITests` |
 | `closed-app-call-ring-2026-11-11` | 2026-11-11 | iPhone | VoIP and APNs tokens re-upload on every foreground pass so a closed iPhone can still ring after the relay drops a dead Apple token (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995). | `JacobAskGuardTests.testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged` |
+| `iphone-reaction-instant-2026-11-13` | 2026-11-13 | iPhone | Tapping an emoji reaction (capsule, picker, or chip) paints the chip on the bubble in the same frame — before the doc onChange, coalesce, or relay ACK (TestFlight app-01M7B901FGH3KDZPX8T7DYXPPZ / #3048). | `OptimisticReactionTests` |
 
 ## Superseded
 
