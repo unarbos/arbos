@@ -1288,26 +1288,34 @@ extension AppModel {
         return String(decoding: try JSONSerialization.data(withJSONObject: part), as: UTF8.self)
     }
 
-    /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
-    /// arrives.
+    /// Flip my reaction on a native chat's row. The chip is painted at once; the
+    /// homeserver event confirms it (or we roll the paint back on failure) —
+    /// same instant rule as the Loro path ([feedback iphone-reaction-instant-2026-11-13]).
     func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
         guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId,
               case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
         // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
         // Ceiling: one another app put on with a skin tone is not taken back from here.
         let key = MessageReaction.normalizeEmoji(emoji)
+        // Read before the paint so `on` is the intended post-tap state, not the flipped one.
         let mine = messages(of: chatId).first { $0.id == messageId }?.reactions
             .contains { $0.emoji == key && $0.senders.contains(me) } ?? false
+        guard paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me) else { return }
+        Haptics.pick()
         Task {
             guard acceptsMatrix(owner), !Task.isCancelled,
                   let event = await nativeEventId(client, room: room, messageId: messageId),
-                  acceptsMatrix(owner), !Task.isCancelled else { return }
+                  acceptsMatrix(owner), !Task.isCancelled else {
+                // No event id (or the account flipped): put the chip back.
+                _ = paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me)
+                return
+            }
             do {
                 try await client.react(roomId: room, eventId: event, key: key, on: !mine)
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
-                Haptics.pick()
             } catch {
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                _ = paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me)
                 fail("update the reaction", error)
             }
         }

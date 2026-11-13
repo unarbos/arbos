@@ -6018,29 +6018,62 @@ final class AppModel: ObservableObject {
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
+    ///
+    /// The chip is painted onto `messages` in this same turn — before the doc's
+    /// `onChange` hop, the live coalesce window, or a relay / homeserver ACK —
+    /// so the transcript shows it the moment the tap returns
+    /// ([feedback iphone-reaction-instant-2026-11-13]; TestFlight
+    /// app-01M7B901FGH3KDZPX8T7DYXPPZ / #3048). A later snapshot reconciles; a
+    /// failed write rolls the paint back.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
-        #if DEBUG || ARBOS_FIXTURE
-        if isFixture {
-            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
-            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
-            messages[chatId] = list
-            Haptics.pick()
-            return
-        }
-        #endif
         if nativeRooms[chatId] != nil {
             reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
             return
         }
+        // Chip first — same frame as the tap. The fixture short-circuit used to
+        // paint here and return; the live path only wrote the doc and waited for
+        // onChange, so the chip lagged a beat. Both paths paint now.
+        guard paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me) else { return }
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture, docs[chatId] == nil {
+            Haptics.pick()
+            return
+        }
+        #endif
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
             doc.commit()
             Haptics.pick()
         } catch {
+            _ = paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me)
             fail("update the reaction", error)
         }
+    }
+
+    /// Toggle my reaction on the in-memory row so the chip appears or disappears
+    /// in the same turn as the tap. Returns false when the message is not in the list.
+    /// Reassigns the whole dictionary so `@Published` fires (subscript writes alone
+    /// have left ChatView's rows stale — see `applySnapshot`). Native people chats
+    /// and channels live in `channelRows`; Loro rooms live in `messages`.
+    @discardableResult
+    func paintLocalReaction(chatId: Id, messageId: Id, emoji: String, sender: String) -> Bool {
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: sender)
+            var next = messages
+            next[chatId] = list
+            messages = next
+            return true
+        }
+        if var list = channelRows[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: sender)
+            var next = channelRows
+            next[chatId] = list
+            channelRows = next
+            return true
+        }
+        return false
     }
 
     /// Post a poll in a people chat (`docs/polls.md`). False when the fields are not a poll
