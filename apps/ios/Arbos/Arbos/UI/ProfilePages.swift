@@ -418,12 +418,13 @@ struct PaneTabs: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { t in
-                Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
+                Button { selected = t } label: {
                     Text(t)
                         .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
                         .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
-                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
+                        // Only the pill fades; the pane under the tabs cuts.
+                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear).animation(.easeOut(duration: 0.15), value: selected))
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)
@@ -521,6 +522,7 @@ struct PaneHeader<Avatar: View>: View {
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+                .minimumScaleFactor(0.6)
             if let badge {
                 Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
             }
@@ -723,7 +725,9 @@ func lastSeenLine(_ at: Int64?, online: Bool = false, now: Int64 = nowMs()) -> (
     if age < 3600 { return ("last seen \(age / 60) min ago", false) }
     if age < 86_400 {
         let d = Date(timeIntervalSince1970: Double(at) / 1000)
-        return ("last seen today at \(d.formatted(date: .omitted, time: .shortened))", false)
+        // Inside 24 hours is not always the same calendar day.
+        let day = Calendar.current.isDate(d, inSameDayAs: Date(timeIntervalSince1970: Double(now) / 1000)) ? "today" : "yesterday"
+        return ("last seen \(day) at \(d.formatted(date: .omitted, time: .shortened))", false)
     }
     if age < 7 * 86_400 { return ("last seen \(age / 86_400) day\(age / 86_400 == 1 ? "" : "s") ago", false) }
     return ("last seen a long time ago", false)
@@ -2186,8 +2190,8 @@ enum GroupActivity {
     static func whenLabel(_ at: Int64, now: Int64 = nowMs()) -> String {
         guard at > 0 else { return "" }
         let date = Date(timeIntervalSince1970: Double(at) / 1000)
-        let age = max(0, now - at)
-        if age < 86_400_000 {
+        // A bare clock only for today's events; last night's carries its date.
+        if Calendar.current.isDate(date, inSameDayAs: Date(timeIntervalSince1970: Double(now) / 1000)) {
             return date.formatted(date: .omitted, time: .shortened)
         }
         return date.formatted(date: .abbreviated, time: .shortened)

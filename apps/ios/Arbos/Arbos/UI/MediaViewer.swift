@@ -298,6 +298,8 @@ struct MediaViewer: View {
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
+        // The cover itself is clear, so the black layer above fades to the chat during the dismiss drag.
+        .presentationBackground(.clear)
         .onAppear {
             if capturedOrigin == nil { capturedOrigin = origin }
             guard origin.allowsView(model) else { return }
@@ -730,11 +732,13 @@ private struct VerticalDismissProbe: UIViewRepresentable {
             case .ended, .cancelled:
                 // `dragOffset` only advances on a clearly vertical pull, so past
                 // 120 pt is enough — do not re-test the final point (a slight
-                // sideways lift at the end used to cancel a good dismiss).
-                if dragOffset > 120 {
+                // sideways lift at the end used to cancel a good dismiss). A downward
+                // flick closes from a shorter pull.
+                let vy = pan.velocity(in: pan.view).y
+                if dragOffset > 120 || (pan.state == .ended && dragOffset > 24 && vy > 800) {
                     onClose()
                 } else {
-                    withAnimation(.easeOut(duration: 0.2)) {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                         offset.wrappedValue = 0
                         progress.wrappedValue = 0
                     }
@@ -839,10 +843,10 @@ private struct ZoomableImagePage: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .scaleEffect(scale)
                         .offset(offset)
-                        .gesture(magnify)
+                        .gesture(magnify(in: geo.size))
                         // Pan only while zoomed: an always-on DragGesture steals the
                         // album's horizontal page swipe at 1× and freezes it.
-                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
+                        .simultaneousGesture(pan(in: geo.size), including: scale > minScale + 0.01 ? .all : .subviews)
                         .onTapGesture(count: 2, perform: toggleZoom)
                         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
                         .accessibilityLabel("Image")
@@ -875,22 +879,33 @@ private struct ZoomableImagePage: View {
         }
     }
 
-    private var magnify: some Gesture {
+    private func magnify(in size: CGSize) -> some Gesture {
         MagnifyGesture()
             .onChanged { v in scale = min(max(baseScale * v.magnification, minScale), maxScale) }
             .onEnded { _ in
                 baseScale = scale
-                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } }
+                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } } else { settle(in: size) }
             }
     }
 
-    private var pan: some Gesture {
+    /// The zoomed picture springs back so it still covers the viewport (or is centred on an
+    /// axis where it is smaller); the limit is the fitted picture, not the letterboxed frame.
+    private func settle(in size: CGSize) {
+        let fit = image.map { AVMakeRect(aspectRatio: $0.size, insideRect: CGRect(origin: .zero, size: size)).size } ?? size
+        let mx = max(0, (fit.width * scale - size.width) / 2), my = max(0, (fit.height * scale - size.height) / 2)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            offset = CGSize(width: min(max(offset.width, -mx), mx), height: min(max(offset.height, -my), my))
+        }
+        baseOffset = offset
+    }
+
+    private func pan(in size: CGSize) -> some Gesture {
         DragGesture()
             .onChanged { v in
                 guard scale > minScale else { return }
                 offset = CGSize(width: baseOffset.width + v.translation.width, height: baseOffset.height + v.translation.height)
             }
-            .onEnded { _ in if scale > minScale { baseOffset = offset } }
+            .onEnded { _ in if scale > minScale { settle(in: size) } }
     }
 
     private func toggleZoom() {

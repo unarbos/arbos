@@ -740,11 +740,8 @@ struct ChatSession: View {
             closeSearch()
             return
         }
-        if effect.animate {
-            withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
-        } else {
-            showSearch = effect.open
-        }
+        // Keyboard-initiated: the bar cuts in, as every close path already cuts out.
+        showSearch = effect.open
         if effect.focus {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; searchFocused = true }
         }
@@ -1370,12 +1367,16 @@ struct ChatSession: View {
         // y457 (24 pt above the bar, dead centre of the chevron's 44 pt hit). Hide them for
         // the life of the bar; they return the moment it closes.
         .overlay(alignment: .bottom) {
-            if newBelowCount > 0, !showSearch {
-                ChatBarHeightReader(bar: chatBarHeight) { bar in
-                    newMessagesPill.padding(.bottom, bar + 10)
+            // The fade is scoped to the chip, not the whole canvas.
+            ZStack {
+                if newBelowCount > 0, !showSearch {
+                    ChatBarHeightReader(bar: chatBarHeight) { bar in
+                        newMessagesPill.padding(.bottom, bar + 10)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
+            .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         }
         // Centred over the composer, like the reference build and like `newMessagesPill` above,
         // which takes the same slot when there is something below to count. Pinned to the
@@ -1384,16 +1385,18 @@ struct ChatSession: View {
         // straight through — so the hit target is the disc and not a full-width bar, and a
         // UIKit tap inside it still works while the transcript decelerates.
         .overlay(alignment: .bottom) {
-            if newBelowCount == 0, awayFromBottom, !showSearch {
-                ChatBarHeightReader(bar: chatBarHeight) { bar in
-                    scrollToBottomButton
-                        .padding(.bottom, bar + 10)
+            ZStack {
+                if newBelowCount == 0, awayFromBottom, !showSearch {
+                    ChatBarHeightReader(bar: chatBarHeight) { bar in
+                        scrollToBottomButton
+                            .padding(.bottom, bar + 10)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
+            .animation(.easeOut(duration: 0.2), value: awayFromBottom)
+            .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         }
-        .animation(.easeOut(duration: 0.2), value: awayFromBottom)
-        .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .environment(\.composerInset, composerSideInset)
         // The bar floats over the transcript instead of being a bottom safe-area inset: every
         // change of its height (the chat opening, the status row, a reply or edit banner,
@@ -2544,6 +2547,8 @@ struct ChatSession: View {
                         Text("No messages match “\(searchText.trimmingCharacters(in: .whitespaces))”")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 60)
                             .accessibilityIdentifier("chat-search-no-matches")
@@ -3481,7 +3486,7 @@ struct ChatSession: View {
             .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
-            .transition(.opacity.combined(with: .move(edge: .top)))
+            .transition(.fromTop)
         }
     }
 
@@ -3493,6 +3498,7 @@ struct ChatSession: View {
             Text(name)
                 .font(theme.font(20, weight: .semibold))
                 .foregroundStyle(theme.text)
+                .multilineTextAlignment(.center)
             Text("Ask \(name) anything. It plans, delegates, or answers.")
                 .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
@@ -4160,11 +4166,11 @@ struct ChatSession: View {
                                 }
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     Text(m.isAgent ? (m.project?.name ?? m.handle) : (m.name?.isEmpty == false ? m.name! : m.handle))
-                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1).layoutPriority(1)
                                     Text("@" + ComposerMention.handle(of: m))
                                         .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
                                     if let tag = MentionDraft.tag(for: m, among: rows, me: model.user?.login) {
-                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder)
+                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder).lineLimit(1).fixedSize()
                                     }
                                 }
                                 Spacer(minLength: 0)
