@@ -457,6 +457,49 @@ pub fn menu_row(
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
+/// Gap between a text menu row's label and its keyboard equivalent.
+const MENU_SHORTCUT_GAP: f32 = 24.0;
+
+/// Menu row of a system text menu: the label, then its keyboard equivalent at
+/// the trailing edge, and no symbol — the shape AppKit draws for Edit and for
+/// a text field's secondary-click menu, which carry no icons. A row that is
+/// not `enabled` paints faint, takes no highlight and keeps the arrow cursor,
+/// as a greyed `NSMenuItem` does.
+pub fn menu_text_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    shortcut: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let row = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(MENU_SHORTCUT_GAP))
+        .h(px(MENU_ROW_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(MENU_ROW_RADIUS))
+        .text_size(px(TEXT_SMALL))
+        .text_color(if enabled {
+            theme.text
+        } else {
+            theme.text_faint
+        });
+    let row = if enabled {
+        highlight::row(row.cursor_pointer(), false, highlight::Shape::Own, theme)
+    } else {
+        row
+    };
+    row.child(div().flex_1().min_w_0().truncate().child(label.into()))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(theme.text_faint)
+                .child(shortcut),
+        )
+}
+
 /// Hitbox behaviour for every floating popover / menu / sheet: block clicks
 /// **and** wheel/trackpad scroll into the view behind it. GPUI's
 /// [`InteractiveElement::occlude`] (`HitboxBehavior::BlockMouse`) — not

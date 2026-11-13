@@ -30,6 +30,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::chart_viewer;
 use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
+use crate::ui::composer_menu;
 use crate::ui::connect_agent;
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
@@ -308,6 +309,12 @@ pub struct Shell {
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The chat field's editing menu (`composer_menu`), opened by a
+    /// right-click or a control-click in the field.
+    pub(crate) composer_menu: Option<composer_menu::ComposerMenu>,
+    /// `ARBOS_RIG_COMPOSER_MENU=x,y` (screenshot / recording rig): opens the
+    /// field's menu there at launch; cleared once it has.
+    rig_composer_menu: Option<gpui::Point<gpui::Pixels>>,
     /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
     /// picker for the newest message of the open chat; cleared once it has.
     rig_forward_message: bool,
@@ -758,6 +765,7 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.edit_message(chat_id, message_id, text, cx));
                 }
+                ComposerEvent::ContextMenu { at } => this.open_composer_menu(*at, cx),
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )
@@ -1225,6 +1233,8 @@ impl Shell {
             chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            composer_menu: None,
+            rig_composer_menu: composer_menu::rig_anchor(),
             rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
             rig_people_query: std::env::var("ARBOS_PEOPLE_QUERY")
                 .ok()
@@ -3306,6 +3316,14 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        // The chat field's editing menu closes before anything else, and
+        // leaves the draft and the caret alone — a menu dismissed with Esc is
+        // not an edit.
+        if self.composer_menu.is_some() {
+            self.composer_menu = None;
+            cx.notify();
+            return;
+        }
         if self.palette.open {
             self.close_palette(window, cx);
             return;
@@ -3573,6 +3591,21 @@ impl Shell {
         cx.notify();
     }
 
+    /// Right-click / control-click in the chat field: its editing menu at the
+    /// click, validated once against the field and the pasteboard as AppKit
+    /// validates a menu when it appears.
+    pub(crate) fn open_composer_menu(
+        &mut self,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_popovers(cx);
+        let input = self.composer.read(cx).input.clone();
+        let state = input.read(cx).edit_state(cx);
+        self.composer_menu = Some(composer_menu::ComposerMenu { input, at, state });
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -3587,6 +3620,7 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.composer_menu.is_some()
             || self.member_menu.is_some()
             || self.library.menu.is_some()
             || self.reaction_capsule.is_some()
@@ -3602,6 +3636,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
+            self.composer_menu = None;
             self.close_reaction_capsule(cx);
             cx.notify();
         }
@@ -5692,6 +5727,12 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(at) = self.rig_composer_menu.take() {
+            self.open_composer_menu(at, cx);
+        }
+        if let Some(menu) = composer_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         if self.rig_forward_message {

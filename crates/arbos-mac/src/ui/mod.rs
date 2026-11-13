@@ -17,6 +17,7 @@ pub mod chart_card;
 pub mod chart_viewer;
 pub mod chat_search;
 pub mod composer;
+pub mod composer_menu;
 pub mod connect_agent;
 pub mod connectors;
 pub mod create_entity;
