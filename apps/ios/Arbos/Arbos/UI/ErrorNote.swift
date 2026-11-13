@@ -251,7 +251,14 @@ struct ToastHost: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Full width, but only as tall as the notices in it. `maxHeight: .infinity` made this
+        // layout box the whole content area, and SwiftUI publishes a container with no children
+        // at its own box rather than at the union of children it does not have — so an empty
+        // toast layer put one full-screen accessibility element over every row, measured at
+        // `(0, 62, 402, 778)` on a 402×874 screen, which VoiceOver reads over the chat list.
+        // Vertical placement belongs to the three callers, each an `.overlay(alignment: .top)`;
+        // a box this size centres without that alignment, so `ToastStackTests` pins all three.
+        .frame(maxWidth: .infinity)
         .allowsHitTesting(!model.toasts.isEmpty)
         .animation(.easeOut(duration: 0.2), value: model.toasts)
         .accessibilityIdentifier("toast-slot")

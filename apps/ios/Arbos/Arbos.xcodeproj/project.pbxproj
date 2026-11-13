@@ -82,6 +82,7 @@
 		A1BB0000000000000000003D /* AvatarBackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */; };
 		A1MN00000000000000000012 /* MessagedNoticeNavUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */; };
 		A1BB00000000000000000041 /* TranscriptFirstFrameUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */; };
+		A1BB00000000000000000043 /* ToastSlotAccessibilityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* ToastSlotAccessibilityUITests.swift */; };
 		A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CAB7000000000000000001 /* CaptureRigUITests.swift */; };
 		A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000107 /* ComposerParityUITests.swift */; };
 		A1A1300000000000000000C2 /* AgentAccessLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */; };
@@ -371,6 +372,7 @@
 		A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarBackSwipeUITests.swift; sourceTree = "<group>"; };
 		A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagedNoticeNavUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFirstFrameUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000042 /* ToastSlotAccessibilityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastSlotAccessibilityUITests.swift; sourceTree = "<group>"; };
 		A1CAB7000000000000000001 /* CaptureRigUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRigUITests.swift; sourceTree = "<group>"; };
 		A1F000000000000000000107 /* ComposerParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerParityUITests.swift; sourceTree = "<group>"; };
 		A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccessLinkUITests.swift; sourceTree = "<group>"; };
@@ -900,6 +902,7 @@
 				A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */,
 				A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */,
 				A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */,
+				A1BB00000000000000000042 /* ToastSlotAccessibilityUITests.swift */,
 				A1CAB7000000000000000001 /* CaptureRigUITests.swift */,
 				A1F000000000000000000107 /* ComposerParityUITests.swift */,
 				A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */,
@@ -1328,6 +1331,7 @@
 				A1BB0000000000000000003D /* AvatarBackSwipeUITests.swift in Sources */,
 				A1MN00000000000000000012 /* MessagedNoticeNavUITests.swift in Sources */,
 				A1BB00000000000000000041 /* TranscriptFirstFrameUITests.swift in Sources */,
+				A1BB00000000000000000043 /* ToastSlotAccessibilityUITests.swift in Sources */,
 				A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */,
 				A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */,
 				A1A1300000000000000000C2 /* AgentAccessLinkUITests.swift in Sources */,
