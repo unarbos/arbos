@@ -201,8 +201,8 @@ enum DebugHooks {
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
     /// `matte | glass`: the surface for one launch, same precedence.
     static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
-    /// `translucent`: the composer field pill as a no-blur translucent fill instead of the
-    /// system glass ([feedback iphone-composer-glass-2026-10-28] rig).
+    /// `translucent`: the Glass pills as a no-blur translucent fill instead of the system glass
+    /// (mock for Jacob, [feedback iphone-composer-glass-2026-10-28] rig).
     static var pillStyle: String? { value("ARBOS_PILL_STYLE") }
     /// `offline | relay-down | reconnecting | syncing | restart-soon`: the open chat's link state for the
     /// header's connection pill; `ARBOS_LINK_CLEARS_MS=<ms>` sets it back to live after that long.

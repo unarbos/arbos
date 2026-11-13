@@ -98,12 +98,20 @@ final class ComposerParityTests: XCTestCase {
                              "and the wash under the finger still has to be the brightest part")
     }
 
-    /// The composer field pill is the system's glass, as Home's search capsule is; the flat
-    /// fill of [feedback iphone-composer-less-opaque-2026-11-11] is the rig only.
-    func testTheFieldPillIsTheSystemGlassUnlessTheRigAsksForTheFlatFill() {
-        XCTAssertTrue(PillSurface<Capsule>.systemGlass(style: nil))
-        XCTAssertTrue(PillSurface<Capsule>.systemGlass(style: "glass"))
-        XCTAssertFalse(PillSurface<Capsule>.systemGlass(style: "translucent"))
-        XCTAssertEqual(PillSurface<Capsule>.translucentAlpha, 0.12, accuracy: 0.001)
+    /// [feedback iphone-composer-less-opaque-2026-11-11] — Jacob on TestFlight
+    /// AN3UriU0uCgR4fM7ShS16cc: "Make the chat bars less opaque this is too opaque". The shot
+    /// is the composer field pill (`PillSurface`), not the header name pill (`GlassPill`).
+    /// `0.22` still read as a dark plate; `0.12` is the lighter fill that must not creep back.
+    func testTheFieldPillLetsTheTranscriptThrough() {
+        // Jacob, 2026-11-09: Grok shows chat text through the composer and ours did not.
+        // There was nothing left to turn down on the system path — `Glass.clear` is already
+        // the clearest variant and we add no tint — so what remained was its blur, and a blur
+        // is the one thing that stops text being read through. Hence a plain low fill.
+        XCTAssertEqual(PillSurface<Capsule>.translucentAlpha, 0.12, accuracy: 0.001,
+                       "0.22 still read as too opaque on the phone; keep the lighter fill")
+        XCTAssertLessThan(PillSurface<Capsule>.translucentAlpha, 0.3,
+                          "lighter than the rig that only had to be legible as an alternative")
+        XCTAssertGreaterThan(PillSurface<Capsule>.translucentAlpha, 0,
+                             "and still a pill rather than nothing at all")
     }
 }

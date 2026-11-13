@@ -898,6 +898,8 @@ struct ControlSurface<S: InsettableShape>: View {
     var body: some View {
         ZStack {
             if theme.isGlass {
+                // Not `PillSurface`: that one is now the see-through field pill, and a button
+                // flattened to a 12 % fill would be a change nobody asked for.
                 SystemPillGlass(shape: shape)
             } else {
                 shape.fill(theme.field)
@@ -933,8 +935,9 @@ struct ComposerDisc: View {
     }
 }
 
-/// The system's own clear material in the pill's shape, with no tint of ours on it: the
-/// composer pill and the family's buttons.
+/// The system's own clear material in the pill's shape, with no tint of ours on it. What the
+/// composer pill used until Jacob's 2026-11-09 comparison, and still what the family's buttons
+/// use — a button has nothing behind it to read through, so the blur costs it nothing.
 struct SystemPillGlass<S: InsettableShape>: View {
     let shape: S
 
@@ -947,30 +950,41 @@ struct SystemPillGlass<S: InsettableShape>: View {
 
 /// The pill's surface on Glass. On Matte: the field colour.
 ///
-/// The system's clear glass, the same surface Home's search capsule and the family's buttons
-/// stand on (`ControlSurface`), so the composer is one material with the bars around it.
+/// Three cuts, and the third is here because the first two each answered a question the next
+/// one asked. [feedback iphone-composer-glass-2026-10-28] started from a `0.55` `field` tint,
+/// which read as a near-opaque dark fill on the phone, and replaced it with the system's own
+/// clear material and nothing of ours on it — clear Liquid Glass on iOS 26, plain frost
+/// before. Jacob's Grok comparison on 2026-11-09 says that is still not it: Grok's composer
+/// shows chat text through the pill and ours does not.
 ///
-/// It was a flat `field` fill with no material for a few days ([feedback
-/// iphone-composer-glass-2026-10-28] follow-up of 2026-11-09, then `0.12` under [feedback
-/// iphone-composer-less-opaque-2026-11-11]): the aim was Grok's composer, read as "chat text
-/// shows through the pill". Grok's pill is glass — what is behind it is softened, which is what
-/// keeps its placeholder and the typed line readable over a transcript — and a flat 12 % fill
-/// left the rows behind ours sharp enough to fight the placeholder on the same line
-/// (Doug, 2026-11-12, against Grok on the phone). The flat fill stays as the rig
-/// (`ARBOS_PILL_STYLE=translucent`, Debug) so the two can be put side by side.
+/// There is nothing left to turn down on the system path. `Glass.clear` is already the most
+/// transparent variant the API offers and we add no tint to it, so what remains between the
+/// transcript and the eye is the system's blur, which `Glass` does not expose. Reading text
+/// through a blur is the one thing a blur prevents.
+///
+/// So the default is now the no-blur alternative this file has carried as a rig since October
+/// for exactly this doubt — "if the system glass still smears the text on the phone": the
+/// field colour at `translucentAlpha`, the family's rim for the glass edge, and no material at
+/// all. The transcript reads through because nothing is standing in front of it. The system
+/// path has not been deleted; it is now the rig (`ARBOS_PILL_STYLE=glass`, Debug), so the next
+/// capture can put the two side by side rather than argue about them.
 struct PillSurface<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
     let shape: S
-    /// The rig's flat fill: how much of `field` sits over the transcript.
+    /// How much of `field` sits over the transcript. Lower than the `0.22` that still read as
+    /// too opaque on the phone ([feedback iphone-composer-less-opaque-2026-11-11], TestFlight
+    /// AN3UriU0uCgR4fM7ShS16cc), and lower than the `0.3` the rig used — the rig only had to be
+    /// *legible* as an alternative; this has to let text through.
+    ///
+    /// Scoped to this surface (the composer field pill). The chat header's name pill is
+    /// `GlassPill` / `HeaderGlassBackground` Liquid Glass, not this fill — same complaint
+    /// does not move that path.
     static var translucentAlpha: Double { 0.12 }
-
-    /// The system's glass unless the rig asks for the flat fill.
-    static func systemGlass(style: String?) -> Bool { style != "translucent" }
 
     var body: some View {
         if !theme.isGlass {
             shape.fill(theme.field)
-        } else if Self.systemGlass(style: DebugHooks.pillStyle) {
+        } else if DebugHooks.pillStyle == "glass" {
             SystemPillGlass(shape: shape)
         } else {
             shape.fill(theme.field.opacity(Self.translucentAlpha))
