@@ -770,6 +770,7 @@ mod tests {
             false,
             &c
         )));
+        let _ = bob;
     }
 
     /// Finding 3: the kind of a push is decided from what it carries. A push with a message of
@@ -1281,7 +1282,6 @@ mod tests {
                 Some("bad_vote")
             );
         }
-        let _ = bob;
     }
 
     #[test]
