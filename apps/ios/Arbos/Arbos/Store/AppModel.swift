@@ -4114,20 +4114,20 @@ final class AppModel: ObservableObject {
         chatId: String, text: String, replyTo: String?, address: String? = nil,
         chipMentions: [String] = [], attachments: [PendingAttachment] = [],
         forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
-        replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []
+        replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = [], poll: PollDraft? = nil
     ) {
         if let draft = draftDM, draft.id == chatId {
             sendDraftDM(draft) { [weak self] dmId in
                 self?.sendPeople(
                     chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
                     attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
-                    replyRef: replyRef, extraParts: extraParts)
+                    replyRef: replyRef, extraParts: extraParts, poll: poll)
             }
             return
         }
         if nativeRooms[chatId] != nil {
             // Text, files and an answer to a row of this chat go to the homeserver so far.
-            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
+            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty, poll == nil {
                 sendNativePeople(chatId: chatId, text: text, replyTo: replyTo, attachments: attachments)
             } else {
                 failRefused("send your message", Self.nativeTextOnly)
@@ -4210,7 +4210,7 @@ final class AppModel: ObservableObject {
             commitPeople(
                 chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                 mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
-                replyRef: replyRef, extraParts: extraParts)
+                replyRef: replyRef, extraParts: extraParts, poll: poll)
             return
         }
         guard let work = accountWork() else { return }
@@ -4243,16 +4243,21 @@ final class AppModel: ObservableObject {
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
                               forwardedFrom: String? = nil, replyRef: ReplyRef? = nil,
-                              extraParts: [[String: Any]] = []) {
+                              extraParts: [[String: Any]] = [], poll: PollDraft? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
             print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
         }
         do {
-            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
-                                      replyRef: replyRef)
+            if let poll {
+                try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
+                                          multiple: poll.multiple, deviceId: deviceId, author: author, mentions: mentions)
+            } else {
+                try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
+                                          author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
+                                          replyRef: replyRef)
+            }
             for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
@@ -4265,9 +4270,13 @@ final class AppModel: ObservableObject {
         #endif
         // Bubble at once — same as channels / optimistic new chats. onChange still
         // reconciles; live coalesce + async full re-reads must not gate the send.
-        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
-                              attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions, doc: doc, replyRef: replyRef)
+        // A poll is drawn from the doc's own row (its card needs the projected part), not painted
+        // ahead of it as a text bubble.
+        if poll == nil {
+            paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                                  attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
+                                  author: author, mentions: mentions, doc: doc, replyRef: replyRef)
+        }
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
@@ -6031,6 +6040,27 @@ final class AppModel: ObservableObject {
             Haptics.pick()
         } catch {
             fail("update the reaction", error)
+        }
+    }
+
+    /// Post a poll in a people chat (`docs/polls.md`). False when the fields are not a poll
+    /// within bounds, and nothing was sent.
+    @discardableResult
+    func sendPoll(chatId: Id, draft: PollDraft) -> Bool {
+        guard let text = pollText(question: draft.question, options: draft.options, multiple: draft.multiple) else { return false }
+        sendPeople(chatId: chatId, text: text, replyTo: nil, poll: draft)
+        return true
+    }
+
+    /// My vote on a poll: `selections` replaces whatever I held; empty retracts it.
+    func votePoll(chatId: Id, messageId: Id, selections: [String]) {
+        guard let me = myUserId, let doc = docs[chatId] else { return }
+        do {
+            try doc.setPollVote(messageId: messageId, sender: me, selections: selections)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail("cast your vote", error)
         }
     }
 

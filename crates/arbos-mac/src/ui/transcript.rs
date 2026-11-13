@@ -12159,6 +12159,26 @@ mod poll_rows_tests {
         );
     }
 
+    /// A build without polls reads the row as the doc stores it — no projection, so no poll
+    /// part — and gets an ordinary message whose text is the poll in plain words. The poll and
+    /// vote fields on the row are fields it does not know and skips.
+    #[test]
+    fn a_build_without_polls_reads_the_row_as_its_plain_text() {
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
+                .unwrap();
+            d.set_poll_vote("p1", "user:ana", &["2".into()]).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        assert!(row.get("poll").is_some() && row.get("vote|user:ana").is_some());
+        arbos_core::doc::project_reactions(&mut row);
+        let message: Message = serde_json::from_value(row).expect("the row still reads");
+        assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
+        assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
     #[test]
     fn a_click_swaps_or_retracts_a_single_choice_and_toggles_a_multiple_one() {
         let held = ["1".to_owned()];
