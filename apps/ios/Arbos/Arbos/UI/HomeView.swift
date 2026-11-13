@@ -767,10 +767,14 @@ struct HomeView: View {
                 .overlay {
                     // Between the account circle and the button, where nothing else lives.
                     if offlineHint {
-                        Text("Offline · showing saved chats")
+                        // The reload's own reason when there is one: with rows on screen the
+                        // list's error note never shows, and "Offline" alone hid a failing
+                        // reload on a phone that was online (2026-11-13). The raw detail while
+                        // this is a beta: it is what whoever reads the report needs.
+                        Text(model.registryError.map { $0.raw.isEmpty ? $0.sentence : $0.raw } ?? "Offline · showing saved chats")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
-                            .lineLimit(1)
+                            .lineLimit(2)
                             .minimumScaleFactor(0.8)
                             .transition(.opacity)
                             .accessibilityIdentifier("offline-hint")

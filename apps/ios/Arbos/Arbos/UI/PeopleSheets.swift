@@ -374,8 +374,9 @@ struct NewChatSheet: View {
         guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
+        // The page is a pushed route since 4ac61648c: opening replaces the stack, and a
+        // dismiss after it popped the chat it had just opened, leaving an empty page.
         model.open(project: p)
-        dismiss()
         opening = false
     }
 
@@ -783,8 +784,17 @@ struct CreateEntityView: View {
         let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
-            onDone()
+            creating = true
+            localError = nil
+            Task {
+                guard model.acceptsAccountWork(work) else { return }
+                let created = await model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
+                guard model.acceptsAccountWork(work) else { return }
+                if created {
+                    onDone()
+                }
+                creating = false
+            }
         case .group:
             next = true
         case .server:
