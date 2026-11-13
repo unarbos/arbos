@@ -137,6 +137,7 @@ struct AgentEditSheet: View {
                             .font(theme.font(24, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.6)
                         if !project.shared {
                             Image(systemName: "pencil").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted)
                         }
@@ -931,7 +932,7 @@ struct SessionLogRow: View {
                 .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
                 .monospacedDigit()
-                .frame(width: 66, alignment: .leading)
+                .frame(width: theme.pt(66), alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.isSession ? entry.sessionTitle : chatTitle)
                     .font(theme.font(Theme.body))

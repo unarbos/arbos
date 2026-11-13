@@ -19,7 +19,7 @@ struct InCallOverlay: View {
 
     @State private var pipOffset: CGSize = .zero
     @State private var pipDrag: CGSize = .zero
-    @State private var pillDrag: CGFloat = 0
+    @GestureState private var pillDrag: CGFloat = 0
 
     private var isVideo: Bool { calls.call?.kind == .video }
 
@@ -139,13 +139,16 @@ struct InCallOverlay: View {
                 .overlay(Capsule().strokeBorder(hairline, lineWidth: 1))
                 .contentShape(Capsule())
                 .onTapGesture { calls.restore() }
-                .offset(y: min(0, pillDrag))
+                // Follows a pull down (the direction that restores) with resistance; a pull up barely gives.
+                .offset(y: pillDrag * (pillDrag > 0 ? 0.5 : 0.15))
+                .animation(.spring(duration: 0.3), value: pillDrag == 0)
                 .gesture(
                     DragGesture(minimumDistance: 8)
-                        .onChanged { v in pillDrag = v.translation.height }
+                        // Gesture state: a cancelled drag lets the pill go too.
+                        .updating($pillDrag) { v, drag, _ in drag = v.translation.height }
                         .onEnded { v in
-                            withAnimation(.spring(duration: 0.3)) { pillDrag = 0 }
-                            if v.translation.height > 40 { calls.restore() }
+                            if v.translation.height > 40 || v.predictedEndTranslation.height > 120,
+                               v.translation.height > abs(v.translation.width) { calls.restore() }
                         }
                 )
                 .accessibilityElement(children: .combine)
@@ -157,7 +160,7 @@ struct InCallOverlay: View {
             .padding(.top, inline ? 0 : 56)
             Spacer(minLength: 0)
         }
-        .transition(.move(edge: .top).combined(with: .opacity))
+        .transition(.fromTop)
     }
 
     // MARK: Video picture-in-picture

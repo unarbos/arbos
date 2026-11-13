@@ -13,7 +13,7 @@ final class ChatSearchShortcutTests: XCTestCase {
 
     func testCommandFOpensAClosedBarAndFocusesIt() {
         let effect = ChatSearchShortcut.apply(open: false)
-        XCTAssertEqual(effect, .init(open: true, focus: true, animate: true))
+        XCTAssertEqual(effect, .init(open: true, focus: true))
     }
 
     /// Jacob 2026-10-27: "search should close with command F again" — a toggle,
