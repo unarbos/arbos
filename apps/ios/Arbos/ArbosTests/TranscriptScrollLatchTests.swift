@@ -92,6 +92,25 @@ final class TranscriptScrollLatchTests: XCTestCase {
                        "400 pt of transcript below them is still history")
     }
 
+    /// The keyboard rising under a reader at the end (TestFlight reports, 2026-11-13).
+    ///
+    /// The numbers are the simulator's: the sample for the rise has the container 301 pt
+    /// shorter and the offset where it was, so the distance reads 364 pt for a reader who was
+    /// 63 pt from the end and did not move. Reading that as "away" unpinned them on every
+    /// keyboard open — the chevron over the live bottom, and the last bubble left under the
+    /// composer by whatever changed next.
+    func testTheKeyboardRisingUnderAReaderAtTheEndKeepsThemThere() {
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 364, pinned: true),
+                       .stick,
+                       "they were following the end before the resize and still are")
+
+        // A reader who had gone up into history keeps their place through the same rise.
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 900, pinned: false),
+                       .reread(away: true))
+    }
+
     /// A sample where nothing moved must not disturb the latch — the reporter fires on every
     /// scroll sample, so "read it again" has to mean "when something moved it".
     func testASampleWithNothingMovingLeavesTheAnswerAlone() {
