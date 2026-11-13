@@ -1,4 +1,5 @@
 import XCTest
+import ArbosFFI
 @testable import Arbos
 
 /// Swift `toggleReaction` must match core `set_reaction` for flat keys.

@@ -12,6 +12,7 @@
 // and fades the others.
 
 import SwiftUI
+import ArbosFFI
 
 struct QuestionCard: View {
     @EnvironmentObject private var model: AppModel
