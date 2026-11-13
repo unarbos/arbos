@@ -29,6 +29,7 @@
 set -u
 D=$(cd "$(dirname "$0")" && pwd); K=${MERGE_KIT:-/tmp/k}
 source "$D/opread.sh"
+source "$D/tools.sh"
 source "$D/checks.sh"
 
 # --- setup preflight: everything that is MISSING rather than refused, named before anything is judged ------
@@ -48,13 +49,40 @@ elif [ ! -r "$K/merge-allow" ]; then
   echo "  This is a MISSING FILE, not a policy answer: nothing has been read, so no pull request has been"
   echo "  cleared or declined. Ask the coordinator which pull requests are cleared and write what they say."
   setup=1
+elif [ ! -r "$K/merge-ratified" ]; then
+  # The allow-list is a cache of the coordinator's authorizations, not a source of them, so it is
+  # audited against a ratified reference set before any pull request is judged. Without that
+  # reference nothing can be audited — which is a MISSING FILE, not a clean audit and not a
+  # refusal. Reported here so it can never be mistaken for either.
+  echo "SETUP: $K holds an allow-list but no readable ratified-token list at $K/merge-ratified."
+  echo "  This is a MISSING FILE, not a policy answer: the allow-list is a cache of the coordinator's"
+  echo "  authorizations and is audited against their ratified set, so with no reference set nothing"
+  echo "  has been checked and no token has been found good or bad. Ask the coordinator to ratify the"
+  echo "  current token set; do not ratify your own."
+  setup=1
 fi
+# tools_preflight runs first and reports the RESOLVED PATH and VERSION of op, gh and git, because on
+# 2026-11-06 four merges ran with op at 2.30.0 from an ad-hoc /tmp/opbin that a previous shell had put
+# on PATH, and the next shell's missing-op report could not say whether the binary had been deleted,
+# the host reimaged, or PATH simply changed. Those three call for three different actions. It also
+# keeps the last good reading on disk so the next failure has something to compare against.
+# op_preflight still runs after it: this says WHAT is wrong and WHY, that one covers the token and
+# says the vault is fine, and neither is a substitute for the other.
+tools_preflight || setup=1
 op_preflight || setup=1
 [ $setup -eq 0 ] || { echo "  Nothing was judged and nothing was merged. Fix the above, then run this command again."; exit 5; }
 # --- end setup preflight -----------------------------------------------------------------------------------
 
 [ $# -ge 2 ] || { echo "REFUSED: usage: merge.sh <pr> <pinned-head-sha> [accept-red=<id>[,<id>]] [accept-pending=<id>[,<id>]] [over-serialize=<fid>@<head8>]"; exit 2; }
 ALLOW=$(sed 's/#.*//' "$K/merge-allow" | tr -s ' \t\n' ' ' | sed 's/^ //; s/ $//')
+# The allow-list is a cache of the coordinator's authorizations, not a source of them, and it now
+# lives in a store other agents can write to. Audit the token set against the ratified reference
+# before any pull request is judged: an unexplained token halts the whole lane rather than only
+# the merge that happened to be asked for. See allow-audit.sh for why this is a set and not bytes.
+bash "$D/allow-audit.sh" "$K/merge-allow" || {
+  echo "  Nothing was judged and nothing was merged."
+  exit 3
+}
 PR=$1; SHA=$2; FLAKE=""; OVER=""; PEND=""
 for a in "${@:3}"; do case "$a" in accept-red=*) FLAKE=$a ;; over-serialize=*) OVER=${a#over-serialize=} ;; accept-pending=*) PEND=${a#accept-pending=} ;; *) echo "REFUSED: unknown argument $a"; exit 2;; esac; done
 R=unarbos/arbos
