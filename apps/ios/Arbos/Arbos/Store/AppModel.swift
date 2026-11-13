@@ -7826,29 +7826,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) {
-        guard let work = accountWork() else { return }
+    /// True once the relay made the agent; a refusal is the claimed failure on the Create page,
+    /// which stays open (a name already in use is the common one).
+    func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) async -> Bool {
+        guard let work = accountWork() else { return false }
         let api = work.api
-        Task {
-            guard accountLifetime.accepts(work.owner) else { return }
-            do {
-                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
-                guard accountLifetime.accepts(work.owner) else { return }
-                // The Create sheet's picture goes into the new agent's own slot first, so the
-                // list refresh already shows it.
-                if let picture, let id, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
-                    guard accountLifetime.accepts(work.owner) else { return }
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
-                        _ = try? await api.setProjectImageKey(id, key: key)
-                    }
+        do {
+            let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
+            guard accountLifetime.accepts(work.owner) else { return false }
+            // The Create sheet's picture goes into the new agent's own slot first, so the
+            // list refresh already shows it.
+            if let picture, let id, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
+                guard accountLifetime.accepts(work.owner) else { return false }
+                let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
+                    _ = try? await api.setProjectImageKey(id, key: key)
                 }
-                await refreshRegistry(expectedOwner: work.owner)
-                guard accountLifetime.accepts(work.owner) else { return }
-            } catch {
-                guard accountLifetime.accepts(work.owner) else { return };
-                fail("create the agent", error)
             }
+            await refreshRegistry(expectedOwner: work.owner)
+            return accountLifetime.accepts(work.owner)
+        } catch {
+            guard accountLifetime.accepts(work.owner) else { return false }
+            fail("create the agent", error)
+            return false
         }
     }
 

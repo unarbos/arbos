@@ -487,8 +487,9 @@ final class RelayAPI {
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         // Fork: relay copies the source agent's workspace (files + memory) into the new one.
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
-        let v = try await json("POST", "/projects", body: body)
-        return (v as? [String: Any])?["id"] as? String
+        let v = try await json("POST", "/projects", body: body) as? [String: Any]
+        // The relay answers `{project: {id, …}, …}`.
+        return (v?["project"] as? [String: Any])?["id"] as? String
     }
 
     // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
