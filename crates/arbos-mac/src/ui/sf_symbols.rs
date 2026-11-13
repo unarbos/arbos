@@ -309,7 +309,7 @@ mod mac {
     use gpui::{img, px, Hsla, ImageSource, Img, RenderImage, Styled};
     use objc2::AnyThread;
     use objc2_app_kit::{
-        NSBitmapFormat, NSBitmapImageRep, NSCalibratedRGBColorSpace, NSColor,
+        NSBitmapFormat, NSBitmapImageRep, NSCalibratedRGBColorSpace, NSColor, NSColorSpace,
         NSCompositingOperation, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold,
         NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSImageSymbolScale,
         NSRectFillUsingOperation,
@@ -453,6 +453,14 @@ mod mac {
                 0,
                 32,
             )?;
+            // GPUI composites this buffer as sRGB, so the rep has to be sRGB too.
+            // AppKit converts a colour into whatever space the rep is tagged with,
+            // and `NSCalibratedRGBColorSpace` is Apple Generic RGB at gamma 1.8 —
+            // left tagged that way, the sRGB tint set below is stored re-encoded
+            // and nothing downstream undoes it (#95959b lands as #838388). There is
+            // no colour-space *name* for sRGB, so the empty rep is retagged instead.
+            let rep =
+                rep.bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())?;
             let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
             let rect = NSRect::new(
                 NSPoint::new(0.0, 0.0),
