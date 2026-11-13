@@ -534,6 +534,9 @@ final class AppModel: ObservableObject {
     /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
     /// Set through `applyNativeRooms`.
     private(set) var nativeRooms: [Id: String] = [:]
+    /// My reactions on native chats' rows shown before the homeserver confirmed them, by chat
+    /// (`reactNativePeople`).
+    var heldReactions: [Id: [HeldReaction]] = [:]
     /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
     @Published var walletPrompt: WalletPrompt?
 
