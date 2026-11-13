@@ -3996,7 +3996,8 @@ impl Render for Transcript {
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
-                                    Animation::new(Duration::from_millis(180)),
+                                    Animation::new(Duration::from_millis(150))
+                                        .with_easing(crate::ui::motion::ease_out_cubic),
                                     |el, t| el.opacity(t),
                                 ),
                         ),

@@ -8907,7 +8907,7 @@ impl AppState {
                         .unwrap_or_else(|| "Direct message".into()),
                     crate::model::SpaceKind::Group => {
                         let n = p.people.len() + 1 + p.agents.len();
-                        format!("Group · {n} members")
+                        crate::palette::group_subtitle(n)
                     }
                     _ => "Agent".into(),
                 };

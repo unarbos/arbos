@@ -3573,7 +3573,10 @@ impl Composer {
                     div()
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
-                        .whitespace_nowrap()
+                        // Capped so a long name leaves the handle (what tells two people
+                        // apart) its room.
+                        .max_w(px(180.0))
+                        .truncate()
                         .child(match c.description {
                             Some(_) => format!("@{}", c.handle),
                             None => c.name.clone(),
@@ -3587,6 +3590,7 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
+                        .text_ellipsis()
                         .child(match c.description {
                             Some(d) => format!("· {d}"),
                             None => format!("@{}", c.handle),
@@ -3838,6 +3842,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .child(
                     div()
                         .text_size(px(TEXT_TINY))
@@ -3859,6 +3864,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 // The disc itself never fades: it is the same white circle in
                 // both states, so it holds still and only its mark changes.
                 .child(if crossfade {
