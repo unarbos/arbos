@@ -776,7 +776,6 @@ struct ChatSession: View {
         searchFocused = false
         guard scrollToTail, filtered else { return }
         pinnedToBottom = true
-        readerHeld = false
         // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
         // before the jump to the tail, or the view stays parked at the top of nothing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { guard account.accepts(model) else { return };
