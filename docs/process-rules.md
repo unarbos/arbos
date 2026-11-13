@@ -195,7 +195,10 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 
 ## Standing rules that this does not change
 
-- One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
+- One issue per release. The release fast path is for P0s only, and it is armed by `[release-now] `
+  at the very START of the merged commit's own subject — nothing else arms it, and it still waits
+  for that commit's own CI (P0 #1208; `release_marker()` in `scripts/release/auto-stable.sh`).
+  Under the merge method GitHub generates the subject, so expediting means squash-merging by hand.
 - Mockups before any new UI; the `mockups-first` label marks items that wait for them.
 - The malicious-intent screen, the kill switch and the CI gate stay as they are.
 - Image rolls pause after a failed canary until an operator lifts the hold; a commit subject never

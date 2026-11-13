@@ -4,18 +4,19 @@
 # .github/workflows/release.yml for every green push to main (workflow_run), by the 15-minute
 # schedule, and by `workflow_dispatch` with channel=auto. Prints the plan as key=value lines.
 #
-#   scripts/release/auto-stable.sh [--dry-run]      (env: GH_TOKEN or GITHUB_TOKEN, GITHUB_REPOSITORY,
-#                                                    ARBOS_RELEASE_DEBOUNCE_S=150, ARBOS_MAC_PATHS,
-#                                                    ARBOS_HOTFIX_ONLY=1 + ARBOS_PUSHED_SHA: the push-to-main
-#                                                    trigger — do nothing unless the pushed commit is a hotfix)
+#   scripts/release/auto-stable.sh [--dry-run | --self-test]
+#                                                   (env: GH_TOKEN or GITHUB_TOKEN, GITHUB_REPOSITORY,
+#                                                    ARBOS_RELEASE_DEBOUNCE_S=150, ARBOS_MAC_PATHS)
 #
 # What it does:
 #   1. waits ARBOS_RELEASE_DEBOUNCE_S so a batch of merges that lands within a few minutes shares
-#      one release (a fix is never held longer than that) — not when a hotfix sits at the head of main;
+#      one release (a fix is never held longer than that) — not when an unreleased commit on main
+#      carries the fast-path marker `[release-now] ` at the start of its own subject;
 #   2. target = the newest commit on origin/main whose CI run is green (commits whose CI is still
-#      running are left for the next run; a red one is skipped) — except a hotfix: a revert, or a
-#      commit marked `hotfix:` / `[hotfix]`, is released as soon as it is on main, ahead of its CI
-#      (P0 #1208: waiting for CI cost the crash fix two releases);
+#      running are left for the next run; a red one is skipped). A green CI run is the ONLY thing
+#      that can choose the target. While a marked commit's own CI is unfinished, nothing is
+#      released at all — not it, and not the green commit under it, which would otherwise ship a
+#      version that leaves the urgent fix out. See release_marker() for the marker and P0 #1208;
 #   3. nothing to do when the paths the Mac app is built from did not change since the last
 #      stable tag (scripts/release/mac-change.sh — a Cargo.lock that moved only our own crates'
 #      version numbers is not a change; any real dependency change is), or when a stable tag
@@ -86,93 +87,356 @@ else:
 EOF
 }
 
-is_hotfix() {
-  # A revert, or a commit marked `hotfix`, on main's first-parent line: its own subject, or (a merge)
-  # the subjects of the commits it brings in. Case-insensitive; `[hotfix]` anywhere in the message.
-  #
-  # Here-strings, not pipes: grep -q exits on its first match, and under the pipefail above the
-  # SIGPIPE'd git log would make the pipeline 141, so a marker that IS there reads as absent.
-  # The largest first-parent range on main is ~137 KB against a floor near 160 KB, so this is
-  # not firing today — it is one long commit message away from it. --self-test covers both ways.
-  local re='^(revert\b|hotfix\b)|\[hotfix\]'
-  grep -qiE "$re" <<<"$(git log --format='%s%n%b' "$1^1..$1" 2>/dev/null)" \
-    || grep -qiE "$re" <<<"$(git log -1 --format='%s%n%b' "$1" 2>/dev/null)"
+# ── the fast path's one entry point ────────────────────────────────────────────────────────────
+# `[release-now] ` at the very START of the subject of the commit that is ON main's first-parent
+# line, exact case, and nothing else. Never a body line. Never the subject or the body of a commit
+# that a merge brings in.
+#
+# P0 #1208: the predecessor matched `^(revert\b|hotfix\b)|\[hotfix\]` with `grep -iE` over
+# `%s%n%b` of the merge commit AND of every commit it brought in. grep is line-based and the
+# pattern anchored with `^`, so a body line reading "Revert the earlier approach" armed it; so did
+# a marked subject an author had written on another branch days earlier and never looked at again;
+# so did any case variant. And what it armed was a release AHEAD OF the commit's own CI. That
+# release is gone from this script (see the target loop below): the marker now buys priority and
+# nothing else. It changes what is released and when that becomes eligible, never whether it was
+# proven.
+#
+# Why this shape is right under all three merge methods the repository allows:
+#   merge   The subject is generated — `Merge pull request #N from <owner>/<branch>` — and the PR
+#           title goes in the BODY (merge_commit_title=MERGE_MESSAGE, merge_commit_message=PR_TITLE).
+#           The only author text in that subject is the branch name, and `git check-ref-format`
+#           rejects a `[` in a ref name, so no branch can carry the marker. This method therefore
+#           cannot arm the fast path at all — the fail-closed direction, and the method
+#           scripts/merge/merge.sh uses. Expediting a release means squash-merging by hand.
+#   squash  squash_merge_commit_title=COMMIT_OR_PR_TITLE: the subject is the single commit's own
+#           subject when the pull request has exactly one commit, and the PR TITLE otherwise. Both
+#           are author text typed for this merge, so this is the way in. GitHub also lists the
+#           brought-in subjects in the squash BODY, which this check does not read.
+#   rebase  No merge commit: every commit lands as its own first-parent commit and is judged on its
+#           own subject.
+# Prose cannot arm it either, under any method: the marker has to START the subject.
+RELEASE_MARKER='[release-now] '
+# A subject longer than this is not one a person typed, and the fast path is not granted from a
+# message this script cannot say it read whole. The longest subject anywhere on main is 1,249
+# bytes, so this sits above every real commit with room to spare, and far under any buffer.
+SUBJECT_MAX_B=8192
+
+release_marker() {
+  # The subject goes to a FILE — not a here-string, and not a pipe into grep. A here-string is
+  # buffered, and the buffer this script used to depend on sat near 160 KB with main's largest
+  # first-parent range already at ~137 KB; a buffer that silently truncates answers "no marker"
+  # for a message that has one. A pipe is worse: `grep -q` exits on its first match, the SIGPIPE'd
+  # `git log` makes the pipeline 141 under the `set -o pipefail` above, and a marker that IS there
+  # reads as absent. A file has neither failure — `git log` writes all of it or fails loudly — and
+  # `-1 --format=%s` makes the whole input one subject line.
+  local f n prefix
+  f="$(mktemp)" || return 1
+  if ! git log -1 --format=%s "$1" >"$f" 2>/dev/null; then
+    rm -f "$f"
+    echo "::warning::fast path: no readable subject for ${1:0:9}; it stays closed" >&2
+    return 1
+  fi
+  n="$(wc -c <"$f")"
+  prefix="$(head -c "${#RELEASE_MARKER}" "$f")"
+  rm -f "$f"
+  if (( n > SUBJECT_MAX_B )); then
+    # Fail closed and say so, rather than answer from a prefix of a message nobody can have meant.
+    echo "::warning::fast path: ${1:0:9} has a ${n}-byte subject, over the ${SUBJECT_MAX_B}-byte cap; it stays closed" >&2
+    return 1
+  fi
+  [[ "$prefix" == "$RELEASE_MARKER" ]]
 }
 
-# Both directions of is_hotfix, on a throwaway repo it builds itself, with a commit message over
-# the floor where a pipe into grep -q starts reporting a found marker as absent.
-self_test_hotfix() {
-  local d big yes_sha no_sha failed=0 saved=$PWD
-  d="$(mktemp -d /tmp/auto-stable-selftest.XXXXXX)"
-  git -C "$d" init -q
-  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  # ~200 KB, over the floor. Passed by file: a single argv entry caps at 128 KB on Linux.
-  big=$d/body.txt
-  head -c 200000 /dev/zero | tr '\0' 'y' | fold -w 100 >"$big"
-  # The marker sits in the subject, so grep matches at once while git log still has 200 KB to
-  # write. A marker at the END of the body would be found even by the piped form.
-  { echo "hotfix: urgent"; echo; cat "$big"; } >"$d/msg-yes.txt"
-  { echo "feat: ordinary"; echo; cat "$big"; } >"$d/msg-no.txt"
-  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -F "$d/msg-yes.txt"
-  yes_sha="$(git -C "$d" rev-parse HEAD)"
-  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -F "$d/msg-no.txt"
-  no_sha="$(git -C "$d" rev-parse HEAD)"
+newest_marked() {
+  # The newest commit on main's first-parent line, since the last release, whose own subject
+  # carries the marker — or nothing. Reads $tag_base, set in step 1 below, so that a marked commit
+  # which already shipped counts as history rather than as a pending release. `-n 25` matches the
+  # CI scan in step 2; a marker older than that has been overtaken anyway.
+  #
+  # Local, always: the fast path is decided from commit subjects this repository already has, never
+  # from an event payload and never from a sha an outside caller names.
+  local sha
+  for sha in $(git rev-list --first-parent "${tag_base:+$tag_base..}origin/main" -n 25); do
+    if release_marker "$sha"; then echo "$sha"; break; fi
+  done
+  return 0  # finding no marker is an answer, not a failure
+}
 
-  cd "$d"
-  echo "== self-test: first-parent message is $(git log --format='%s%n%b' "$yes_sha^1..$yes_sha" | wc -c) bytes"
-  if git log --format='%s%n%b' "$yes_sha^1..$yes_sha" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'; then
-    echo "   self-test INVALID: the piped form still finds the marker, so this fixture is under"
-    echo "                      the threshold and would pass against the unfixed code too."
-    failed=1
+# Both directions of release_marker(), on real commits and real merge commits in a throwaway
+# repository — one per merge method, because the subject is a different piece of text under each —
+# and then a read of this script's own source.
+#
+# Modelled on the deploy worker's agentd hold-file guard (scripts/deploy/arbos-deploy-worker,
+# `hold_cases`): that one asserts the states AND counts the lines allowed to delete the hold file,
+# so a second deleter fails the test the day it appears. The same split is the point here. The
+# cases say what the check answers today; the source reads at the end say what this script may
+# never do again. A case list on its own passes against the next widening, and the next widening
+# is the whole of #1208.
+self_test() {
+  local d sha long cap_ok saved=$PWD st_fail=0
+  st_ok()      { printf '   ok       %s\n' "$1"; }
+  st_bad()     { printf '   FAILED   %s\n' "$1" >&2; st_fail=1; }
+  st_arms()    { if release_marker "$1" 2>/dev/null; then st_ok "$2"; else st_bad "$2 — the marker did not arm it"; fi; }
+  st_refuses() { if release_marker "$1" 2>/dev/null; then st_bad "$2 — this armed the fast path"; else st_ok "$2"; fi; }
+
+  d="$(mktemp -d /tmp/auto-stable-selftest.XXXXXX)"
+  # The repository is a subdirectory, so the message files below sit OUTSIDE its work tree. Written
+  # inside it they are untracked changes, and `git checkout` refuses to move across them — which
+  # silently builds a different fixture from the one the case describes.
+  git init -q "$d/repo"
+  # `git init` names the first branch main or master depending on the host, and every fixture
+  # below branches off `main` by name.
+  git -C "$d/repo" symbolic-ref HEAD refs/heads/main
+  cd "$d/repo"
+  git config user.name t
+  git config user.email t@t
+  # A developer whose global config signs commits would otherwise pay an ssh-keygen per commit
+  # here, or fail outright without a key, for signatures nothing in this test reads.
+  git config commit.gpgsign false
+  git commit -q --allow-empty -m "base"
+
+  # st_msg writes a commit message: first argument the subject, the rest the body, exactly as
+  # GitHub lays one out.
+  st_msg() { printf '%s\n' "$@" >"$d/msg"; }
+  # One commit on <branch> (created off main when new) — also the rebase-method fixture when
+  # <branch> is main, because a rebase merge lands the author's own commit on the first-parent line.
+  st_work() {
+    local b="$1"; shift
+    if ! git checkout -q "$b" 2>/dev/null; then
+      git checkout -q -b "$b" main || { st_bad "could not build the fixture branch $b; the cases after this one describe commits that do not exist"; return 1; }
+    fi
+    echo "$RANDOM.$RANDOM" >file.txt
+    git add -A
+    st_msg "$@"
+    git commit -q -F "$d/msg"
+  }
+  # The merge method: a real two-parent merge commit on main, with the subject GitHub generates.
+  st_merge() {
+    local b="$1"; shift
+    git checkout -q main
+    st_msg "$@"
+    git merge -q --no-ff -F "$d/msg" "$b"
+    git rev-parse HEAD
+  }
+  # The squash method: one single-parent commit on main holding the branch's whole change.
+  st_squash() {
+    local b="$1"; shift
+    git checkout -q main
+    git merge -q --squash "$b" >/dev/null
+    st_msg "$@"
+    git commit -q -F "$d/msg"
+    git rev-parse HEAD
+  }
+
+  echo "== self-test: the fast path arms from one explicit subject marker and from nothing else"
+
+  # 1. The merge method, with the author's marker in every place that is NOT a subject on main's
+  #    first-parent line: the PR title (which this method puts in the BODY), and the subject and
+  #    body of both commits the branch brings in. One case, both of the widest routes in #1208.
+  st_work route-body "$RELEASE_MARKER fix(agentd): the busy reply lands" "" "$RELEASE_MARKER in the body too"
+  st_work route-body "fix(agentd): one more go" "" "$RELEASE_MARKER here as well"
+  sha="$(st_merge route-body "Merge pull request #1208 from unarbos/cursor/busy-reply-9f3c" \
+    "" "$RELEASE_MARKER fix(agentd): the busy reply lands")"
+  st_refuses "$sha" "merge method: marker in the body (the PR title) and in both brought-in commits"
+
+  # 2. The merge method's subject is machine text apart from the branch name. The assertion under
+  #    the case is WHY that is safe: if git ever accepted a bracket in a ref name, a branch name
+  #    would be the only author text left in that subject.
+  st_work route-branch "fix(sync): keep the cache key stable"
+  sha="$(st_merge route-branch "Merge pull request #1209 from unarbos/release-now/cache-key-4b1a" \
+    "" "fix(sync): keep the cache key stable")"
+  st_refuses "$sha" "merge method: the branch name reads release-now/…"
+  if git check-ref-format --branch "unarbos/$RELEASE_MARKER" 2>/dev/null; then
+    st_bad "git now accepts '$RELEASE_MARKER' in a branch name, so a branch name can reach the merge method's generated subject"
   else
-    echo "   threshold ok: the piped form reports the present marker as absent (this is the defect)"
+    st_ok "a ref name cannot hold the marker, so the merge method's generated subject cannot carry it"
   fi
-  if is_hotfix "$yes_sha"; then echo "   positive control: a hotfix behind a 200 KB body is still a hotfix"
-  else echo "   positive control FAILED: a hotfix read as ordinary"; failed=1; fi
-  if is_hotfix "$no_sha"; then echo "   negative control FAILED: an ordinary commit read as a hotfix"; failed=1
-  else echo "   negative control: an ordinary commit of the same size is not a hotfix"; fi
+
+  # 3. Squash, one commit: GitHub uses that commit's own subject. The intended way in — and the
+  #    case without which every assertion here would pass against a check that refuses everything.
+  st_work route-one "$RELEASE_MARKER fix(agentd): the busy reply lands"
+  sha="$(st_squash route-one "$RELEASE_MARKER fix(agentd): the busy reply lands")"
+  st_arms "$sha" "squash of one commit: the marker starts the subject"
+
+  # 4. Squash, two commits: GitHub uses the PR TITLE as the subject and lists the brought-in
+  #    subjects in the body.
+  st_work route-title "fix(agentd): the busy reply lands"
+  st_work route-title "fix(agentd): one more go"
+  sha="$(st_squash route-title "$RELEASE_MARKER fix(agentd): the busy reply lands (#1210)" \
+    "" "* fix(agentd): the busy reply lands" "* fix(agentd): one more go")"
+  st_arms "$sha" "squash of two commits: the marker starts the PR title"
+
+  # 5. The inverse of 4, and the case a body reader cannot survive behind 4: ordinary PR title,
+  #    marker in a brought-in subject, which GitHub copies into the squash body verbatim.
+  st_work route-listed "$RELEASE_MARKER fix(agentd): the busy reply lands"
+  st_work route-listed "fix(agentd): one more go"
+  sha="$(st_squash route-listed "fix(agentd): the busy reply lands (#1211)" \
+    "" "* $RELEASE_MARKER fix(agentd): the busy reply lands" "* fix(agentd): one more go")"
+  st_refuses "$sha" "squash of two commits: the body lists a marked brought-in subject"
+
+  # 6. Rebase: the author's commit IS the first-parent commit, so its own subject decides, and its
+  #    own body still does not.
+  st_work main "$RELEASE_MARKER fix(relay): drop the stale room"
+  st_arms "$(git rev-parse HEAD)" "rebase method: the marker starts the commit's own subject"
+  st_work main "fix(relay): drop the stale room" "" "$RELEASE_MARKER really, this one is urgent"
+  st_refuses "$(git rev-parse HEAD)" "rebase method: the marker is in the commit's own body"
+
+  # 7. Subjects that must not arm it: the case variants and the bare words the predecessor took,
+  #    a mention in prose rather than at the start, `git revert`'s own generated subject, and the
+  #    marker without the space that has to follow it.
+  local subject
+  for subject in "[Release-Now] fix(agentd): the busy reply lands" \
+                 "[RELEASE-NOW] fix(agentd): the busy reply lands" \
+                 "fix(release): narrow the ${RELEASE_MARKER% } handling" \
+                 "Revert \"fix(agentd): the busy reply lands\"" \
+                 "hotfix: the busy reply lands" \
+                 "${RELEASE_MARKER% }fix(agentd): no space after the marker"; do
+    st_work main "$subject"
+    st_refuses "$(git rev-parse HEAD)" "subject: $subject"
+  done
+
+  # 8. The size guard, both halves. The long subject carries the marker at the start, so length is
+  #    the only reason it is refused — and the same subject under the cap arms, which is what makes
+  #    this a case about the cap rather than about the marker.
+  long="$RELEASE_MARKER$(head -c $((SUBJECT_MAX_B + 512)) /dev/zero | tr '\0' y)"
+  if (( ${#long} <= SUBJECT_MAX_B )); then
+    st_bad "the long-subject fixture is ${#long} bytes, inside the ${SUBJECT_MAX_B}-byte cap, so case 8 proves nothing"
+  fi
+  st_work main "$long"
+  st_refuses "$(git rev-parse HEAD)" "a marked subject of ${#long} bytes, over the ${SUBJECT_MAX_B}-byte cap"
+  cap_ok="$RELEASE_MARKER$(head -c 200 /dev/zero | tr '\0' y)"
+  st_work main "$cap_ok"
+  st_arms "$(git rev-parse HEAD)" "the same marked subject at ${#cap_ok} bytes, inside the cap"
 
   cd "$saved"
-  # The live case: main's largest first-parent range, 137,260 bytes carrying one marker.
-  local live=5bbbe4fc5c75f895e0b67f6d0312a998649581cb
-  if git cat-file -e "$live^{commit}" 2>/dev/null; then
-    if is_hotfix "$live"; then echo "   live control: ${live:0:9} (137,260 B, 1 marker) still reads as a hotfix"
-    else echo "   live control FAILED: ${live:0:9} no longer reads as a hotfix"; failed=1; fi
+  rm -rf "$d"
+
+  # ── and what this script may never do again ───────────────────────────────────────────────────
+  # Every case above passes on a return code, so a widening that keeps today's answers passes all
+  # of them. These read the source instead. This is the half the cases cannot write, and the half
+  # modelled on the deploy worker's hold-file count.
+  #
+  # What they read: this script, minus its own self-test, minus every comment line. Both
+  # subtractions are load-bearing. These assertions quote the patterns they forbid, and the code
+  # they guard EXPLAINS the patterns it forbids, so a scan over the raw file reports the prose and
+  # never reaches the code.
+  local me="${BASH_SOURCE[0]}" shipped fn n
+  shipped="$(sed '/^self_test()/,/^}/d' "$me" | grep -v '^[[:space:]]*#')"
+  fn="$(printf '%s\n' "$shipped" | sed -n '/^release_marker()/,/^}/p')"
+  if [[ -z "$fn" ]]; then
+    st_bad "no release_marker() in this script — it was renamed, and every assertion below is reading nothing"
+    fn="(absent)"
+  fi
+  # And the subtraction took the self-test and nothing more. Deleting to the next `}` at column
+  # zero would swallow the decision path too if a stray one ever appeared inside the test, and the
+  # scans would then pass over a script that stops before it releases anything.
+  if printf '%s\n' "$shipped" | grep -q 'git push -q origin "refs/tags/v\$version"'; then
+    st_ok "the scans below read the whole decision path, with only the self-test removed"
+  else
+    st_bad "removing the self-test from the source also removed the release itself; the scans below are reading a fragment"
   fi
 
-  rm -rf "$d"
-  [[ $failed -eq 0 ]] || { echo "SELF-TEST FAILED"; return 1; }
+  n="$(printf '%s\n' "$shipped" | grep -c '%b' || true)"
+  if [[ "$n" == 0 ]]; then
+    st_ok "no line in this script reads a commit body"
+  else
+    st_bad "$n line(s) in this script read a commit body (%b); the fast path is decided from a subject"
+  fi
+
+  if printf '%s\n' "$fn" | grep -qE '\.\.|\^[0-9]'; then
+    st_bad "release_marker() reads a revision range, so a commit a merge brings in can arm the fast path again"
+  else
+    st_ok "release_marker() reads no revision range, so no brought-in commit reaches it"
+  fi
+
+  n="$(printf '%s\n' "$fn" | grep -c 'git log' || true)"
+  if [[ "$n" == 1 ]] && printf '%s\n' "$fn" | grep -q 'git log -1 --format=%s'; then
+    st_ok "release_marker() reads one subject, from one commit, with one git log"
+  else
+    st_bad "release_marker() has $n git log call(s) and not exactly one \`git log -1 --format=%s\`"
+  fi
+
+  if printf '%s\n' "$fn" | grep -q '<<<'; then
+    st_bad "release_marker() reads a here-string again; it is buffered, and a buffer that truncates answers 'no marker' for a message that has one"
+  elif printf '%s\n' "$fn" | grep -qE '(^|[^|])\|([^|]|$)'; then  # a lone pipe, not an `||`
+    st_bad "release_marker() pipes its input again; grep -q exits on its first match, the SIGPIPE'd git log makes the pipeline 141 under pipefail, and a marker that is there reads as absent"
+  else
+    st_ok "release_marker() reads a file: it can neither truncate nor lose its answer to a SIGPIPE"
+  fi
+
+  if printf '%s\n' "$fn" | grep -q 'grep'; then
+    st_bad "release_marker() matches a pattern again; it compares a fixed-length prefix, which no flag can make case-insensitive or line-based"
+  else
+    st_ok "release_marker() compares a fixed-length prefix, not a pattern"
+  fi
+
+  if printf '%s\n' "$shipped" | grep -q 'release_marker "\$sha"'; then
+    st_ok "the first-parent scan calls release_marker()"
+  else
+    st_bad "nothing in the decision path calls release_marker(), so the cases above test a function this script does not use"
+  fi
+
+  # The one assertion no state can make, and the reason #1208 was a P0 rather than a bug: exactly
+  # one line chooses what gets released, and a green CI run is the only thing that reaches it. The
+  # predecessor had a second such line in the arm for a commit whose CI had not finished.
+  n="$(printf '%s\n' "$shipped" | grep -c 'target="\$sha"' || true)"
+  if [[ "$n" == 1 ]] && printf '%s\n' "$shipped" | grep -qE '^ *success\) *target="\$sha"'; then
+    st_ok "one line chooses the release target, in the arm for a green CI run"
+  else
+    st_bad "$n line(s) in this script set the release target; exactly one may, and only for a CI state of success"
+  fi
+
+  [[ $st_fail -eq 0 ]] || { echo "SELF-TEST FAILED" >&2; return 1; }
   echo "   self-test passed"
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then self_test_hotfix; exit $?; fi
+if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi
 
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
-head_main="$(git rev-parse origin/main)"
-pushed="${ARBOS_PUSHED_SHA:-$head_main}"
-if [[ "${ARBOS_HOTFIX_ONLY:-0}" == 1 ]] && ! is_hotfix "$pushed"; then
-  emit_none "push ${pushed:0:8} to main is not a hotfix; it ships through the CI-green path"
-  exit 0
-fi
+
+# 1. the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its tag, see
+#    below) and the commit it was released from: a release commit touches only Cargo.toml and
+#    Cargo.lock, so its parent is what the Mac app was built from. Both come from
+#    scripts/release/stable-tag-base.sh, which the pre-merge release gate reads too. This is read
+#    before anything else because the marker scan below has to stop at the last release: a marked
+#    commit that already shipped is history, not a pending release.
+tag_info="$("$here/stable-tag-base.sh")"
+last_tag="$(sed -n 's/^tag=//p' <<< "$tag_info")"
+tag_base="$(sed -n 's/^base=//p' <<< "$tag_info")"
+
+marked="$(newest_marked)"
+
 if (( DEBOUNCE > 0 )) && ! $DRY_RUN; then
-  if is_hotfix "$head_main"; then
-    say "hotfix at the head of main: no debounce"
+  # The debounce exists so a batch of merges that lands within a few minutes shares one release.
+  # A marked commit does not wait for company: it ships the moment it is proven. This is the whole
+  # of what the marker buys on the clock, and it cannot shorten the wait for CI itself.
+  if [[ -n "$marked" ]]; then
+    say "marked commit ${marked:0:9} is unreleased: no debounce"
   else
     say "debounce: waiting ${DEBOUNCE}s for sibling merges"
     sleep "$DEBOUNCE"
     git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
+    # main moved while we waited, so the scan has to be redone: a commit that landed during the
+    # wait is exactly the one whose release must not be held behind the next debounce.
+    marked="$(newest_marked)"
   fi
 fi
 
 # 2. newest green commit on main — first-parent line only: a merged branch's own tip is reachable
 #    from main too, but lacks everything main had before the merge.
-#    Hotfix fast path (P0 #1208, 2026-10-21): a revert or a `hotfix`-marked commit whose CI is still
-#    running (or has not started) is released at once, ahead of the newest green commit — waiting for
-#    CI cost v0.6.91/v0.6.92 the crash fix. Everything else keeps the green-CI rule, and a hotfix whose
-#    CI already failed is skipped like any red commit. (If its CI goes red after the release, the
-#    feedback loop's "main is red" watcher raises it.)
+#
+#    A green CI run is the only thing that can choose the target. P0 #1208 (2026-10-21 to
+#    2026-11-06) had a second arm here that made a marked commit the target while its CI was still
+#    running, so the fast path released code nothing had proven — the same shape as a commit
+#    subject acting as deploy authority in the deploy worker, deleted there on 2026-11-05 after one
+#    recorded case rolled an unapproved image. What a marked commit gets instead is the arm below:
+#    while its own CI is unfinished, NOTHING is released — not it, and not the green commit under
+#    it either, because releasing that one would burn the next patch number on a build that leaves
+#    the urgent fix out. So the marker changes what is released and when that becomes eligible, and
+#    it never decides whether it was proven. A marked commit whose CI went red is skipped like any
+#    other red commit; the release then falls through to the newest green commit below it, and the
+#    feedback loop's "main is red" watcher raises the failure.
 target=""
-hotfix=false
 pending_seen=false
 for sha in $(git rev-list --first-parent origin/main -n 25); do
   state="$(ci_state "$sha")"
@@ -180,10 +444,9 @@ for sha in $(git rev-list --first-parent origin/main -n 25); do
     success) target="$sha"; break ;;
     failed) ;;
     *)
-      if is_hotfix "$sha"; then
-        target="$sha"; hotfix=true
-        say "hotfix ${sha:0:8} released ahead of its CI ($state)"
-        break
+      if [[ "$sha" == "$marked" ]]; then
+        emit_none "marked commit ${sha:0:8} is not proven yet (CI $state); nothing releases until it is"
+        exit 0
       fi
       pending_seen=true ;;
   esac
@@ -192,13 +455,7 @@ if [[ -z "$target" ]]; then
   emit_none "no commit on main with a green CI run among the last 25"
   exit 0
 fi
-# 3. the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its tag,
-#    see below) and the commit it was released from: a release commit touches only
-#    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from. Both come from
-#    scripts/release/stable-tag-base.sh, which the pre-merge release gate reads too.
-tag_info="$("$here/stable-tag-base.sh")"
-last_tag="$(sed -n 's/^tag=//p' <<< "$tag_info")"
-tag_base="$(sed -n 's/^base=//p' <<< "$tag_info")"
+# 3. is that commit already released, and did the Mac app change since the last stable tag?
 if [[ -n "$last_tag" ]]; then
   if [[ "$tag_base" == "$target" ]] || git merge-base --is-ancestor "$target" "$tag_base"; then
     emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
@@ -235,7 +492,8 @@ summary="$(git log --format=%s --no-merges "${last_tag:+$last_tag..}$target" -- 
   | awk '{ if (length($0) > 72) { s = substr($0, 1, 72); sub(/ [^ ]*$/, "", s); print s "…" } else print }' \
   | paste -sd ';' - | sed 's/;/; /g' || true)"
 [[ -n "$summary" ]] || summary="changes since ${last_tag:-the start}"
-if $hotfix; then summary="hotfix (released ahead of CI): $summary"; fi
+# No line here says "released ahead of CI" any more, because no release is. A marked commit's own
+# subject keeps its marker through the trim above, so the notes still say which release carried it.
 subject="release: $version — $summary"
 subject="${subject:0:480}"
 
