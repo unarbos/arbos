@@ -117,6 +117,11 @@ jobs:
           bash scripts/deploy/arbos-deploy-worker selftest
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
+      - name: Feedback loop tests
+        run: |
+          set -euo pipefail
+          python3 -c 'import cryptography' 2>/dev/null || sudo apt-get install -y -q python3-cryptography >/dev/null
+          python3 -m unittest discover -s scripts/feedback -p 'test_*.py'
 
       # Every ask Jacob has made is a row in docs/product/jacob-asks.md naming the test that
       # fails when the app stops doing it. A visual ask with no test is the one that regresses
