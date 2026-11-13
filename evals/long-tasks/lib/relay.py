@@ -173,6 +173,14 @@ def spent_today():
     return float(c.get("spent_today_usd") or 0.0), float(c.get("daily_cap_usd") or 0.0)
 
 
+def fleet_events_for(user, since_ms):
+    """The relay's fleet log lines for one user since a time (admin; newest 50 fleet-wide only)."""
+    st, v = admin("GET", "/admin/fleet")
+    if st != 200:
+        return []
+    return [e for e in (v or {}).get("events") or [] if (e.get("user_id") or "").lower() == user.lower() and (e.get("at") or 0) >= since_ms]
+
+
 def machine():
     st, v = relay("GET", "/machine")
     return v if st == 200 else {}

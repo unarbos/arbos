@@ -54,5 +54,5 @@
     "no_repeated_sentence": true,
     "no_truncated_reply": true
   },
-  "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355)"
+  "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355); run 15: busy probes at 5.12/7.41 s, then 7.43/7.75 s on a fresh box whose agentd idled at about 1.2 of its 2 CPUs with 17 agents"
 }

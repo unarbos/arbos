@@ -16,5 +16,5 @@
    "timeout_s": 900
   }
  ],
- "regression": "self-reference clone used for real work (bc-b07f76af); #1776 (prose dropped after the ack row)"
+ "regression": "self-reference clone used for real work (bc-b07f76af); #1776 (prose dropped after the ack row); run 15 part 2: 2 of 3 repeats passed; repeat 1 rubric 2/5 (the added test was not shown)"
 }

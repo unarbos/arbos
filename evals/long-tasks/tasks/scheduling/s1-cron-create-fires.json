@@ -15,5 +15,6 @@
       },
       "timeout_s": 300
     }
-  ]
+  ],
+  "regression": "run 15 part 2: not measured — the box died out of memory at 17:04:40 (#2302) with two light lanes active"
 }

@@ -19,7 +19,8 @@
         "criteria": "Judge the reply only; lane-b's real answer is checked programmatically on lane-b's side. Pass if the agent relays that lane-b confirmed (paraphrase allowed, extra detail from lane-b's reply is fine) or says plainly it has not answered yet; fail only if it invents a confirmation when none exists or says it cannot know. Judge only the wording of this reply against the chat shown: lane-b's confirmation row is checked programmatically in turn 1, so do not fail this turn for being 'unverifiable' — fail it only if the reply contradicts the chat, invents detail not in lane-b's row, or dodges the yes/no.",
         "min": 4
       },
-      "timeout_s": 180
+      "timeout_s": 180,
+      "judge_prior_rows": 4
     }
   ],
   "peer_lane_checks": {
@@ -27,5 +28,5 @@
     "expect_text": "91 %",
     "expect_reply_to": true
   },
-  "regression": "agent-to-agent send with the message quoted; reply-to on the receiving side (#2847ce852 case); run 12+13: the t2 judge failed 'can't verify' what the doc shows — rubric now says the row check is programmatic"
+  "regression": "agent-to-agent send with the message quoted; reply-to on the receiving side (#2847ce852 case); run 12+13: the t2 judge failed 'can't verify' what the doc shows — rubric now says the row check is programmatic; run 15: the t2 judge marked lane-b's relayed 'no delete without approval' as invented — it only saw the t2 rows, so t2 now shows the judge the rows before the question (judge_prior_rows)"
 }

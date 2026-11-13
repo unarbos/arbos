@@ -1,0 +1,20 @@
+{
+ "id": "c8-changelog-from-git",
+ "lane": "c",
+ "category": "coding",
+ "title": "Write a release changelog from the commits since the last tag, features and fixes only, without committing",
+ "turns": [
+  {
+   "prompt": "{D}/tally is a git repo. Write {D}/tally/CHANGELOG.md for release 1.4.0 from the commits since the v1.3.0 tag, with a 'Features' and a 'Fixes' section and one bullet per change in plain words. Leave out chores and docs-only commits. Don't commit or tag anything.",
+   "seed": "mkdir -p {D}/tally && cd {D}/tally && git init -q && G='git -c user.email=eval@arbos.life -c user.name=eval'; c(){ echo \"$2\" >> \"$1\"; $G add -A; $G commit -qm \"$3\"; }; c cli.py 'v1' 'feat: initial CLI'; c cli.py 'empty' 'fix: handle empty input'; $G tag v1.3.0; c cli.py 'json' 'feat: add --json output flag'; c config.py 'cfg' 'fix: crash when the config file is missing'; c requirements-dev.txt 'pytest==8.4' 'chore: bump dev dependencies'; c README.md 'typo' 'docs: fix typo in README'; c cli.py 'nocolor' 'feat: support the NO_COLOR environment variable'; c cli.py 'exit' 'fix: wrong exit code on timeout'; git log --oneline | wc -l",
+   "verify": "cd {D}/tally 2>/dev/null || { echo FAIL: repo gone; exit 0; }\nf=CHANGELOG.md; test -f $f || { echo FAIL: no CHANGELOG.md; exit 0; }\nn=$(git log --oneline | wc -l); tags=$(git tag | tr '\\n' ' '); sed 's/^/SHOW /' $f | head -30; echo \"SHOW commits=$n tags=$tags\"\npython3 - \"$f\" \"$n\" \"$tags\" <<'EOF'\nimport re, sys\nt = open(sys.argv[1]).read().lower()\nneed = {\"features heading\": re.search(r\"^#+\\s*features\", t, re.M), \"fixes heading\": re.search(r\"^#+\\s*fix\", t, re.M),\n        \"json\": \"json\" in t, \"no_color\": \"no_color\" in t, \"config\": \"config\" in t, \"timeout\": \"timeout\" in t}\nforbid = {k: k in t for k in (\"typo\", \"dependenc\", \"empty input\", \"initial cli\")}\nmiss = [k for k, v in need.items() if not v]\nbad = [k for k, v in forbid.items() if v]\nrepo_ok = sys.argv[2] == \"8\" and sys.argv[3].strip() == \"v1.3.0\"\nprint(\"PASS\" if not miss and not bad and repo_ok else f\"FAIL: missing={miss} should_be_left_out={bad} repo_unchanged={repo_ok}\")\nEOF",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if CHANGELOG.md has Features (--json output, NO_COLOR support) and Fixes (missing config crash, exit code on timeout) and nothing from before v1.3.0 or from the chore/docs commits, the repo has no new commit or tag, and the reply summarises the entries. Fail if pre-tag commits or chores appear, an entry is invented, or the agent commits or tags.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 15 (2026-10-30): a realistic ask a user gives an Arbos agent, graded by a programmatic check plus the rubric. Checks the tag range (two commits before v1.3.0 must stay out) and the no-commit instruction."
+}

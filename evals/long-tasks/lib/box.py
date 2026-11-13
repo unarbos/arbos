@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 
 from . import relay as rl
 
@@ -57,6 +58,14 @@ class Box:
             return self._exec_root(script, timeout)
         except subprocess.TimeoutExpired:
             return 124, "box exec timed out"
+
+    def boot_epoch(self):
+        """When the box last booted (local clock minus the box's uptime), or None when the exec fails."""
+        code, out = self.root("cat /proc/uptime", timeout=60)
+        try:
+            return time.time() - float(out.split()[0])
+        except (ValueError, IndexError):
+            return None
 
     def ws_user(self, project):
         code, out = self.root(f"stat -c %U /work/{project}")
