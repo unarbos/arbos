@@ -73,6 +73,8 @@ final class HeldFinger: ObservableObject {
     static let slack: CGFloat = 12
 
     private(set) var start: CGPoint?
+    /// Where the last touch in the window was (`TouchWatch`): where a hold begins.
+    var last: CGPoint?
     /// Where the finger is, once it has slid away from where it pressed.
     @Published private(set) var point: CGPoint?
     /// Where it lifted, if it had slid; consumed by the overlay.
@@ -87,9 +89,70 @@ final class HeldFinger: ObservableObject {
         if point != nil || hypot(p.x - start.x, p.y - start.y) > Self.slack { point = p }
     }
 
-    func lift() { lifted = point; start = nil; point = nil }
+    func lift() {
+        guard isDown else { return }
+        lifted = point; start = nil; point = nil
+    }
 
     func reset() { start = nil; point = nil; lifted = nil }
+}
+
+/// Reports every touch in its window to `HeldFinger` and takes none: the recognizer never
+/// leaves `.possible`, so it competes with no scroll, tap or long-press. A SwiftUI drag
+/// sequenced after the row's long-press did the same job and stopped the transcript
+/// scrolling from a bubble.
+struct TouchWatch: UIViewRepresentable {
+    func makeUIView(context: Context) -> Host { Host() }
+    func updateUIView(_ view: Host, context: Context) {}
+
+    final class Host: UIView {
+        private let watcher = Watcher(target: nil, action: nil)
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            watcher.view?.removeGestureRecognizer(watcher)
+            window?.addGestureRecognizer(watcher)
+            isUserInteractionEnabled = false
+        }
+    }
+
+    final class Watcher: UIGestureRecognizer {
+        override init(target: Any?, action: Selector?) {
+            super.init(target: target, action: action)
+            cancelsTouchesInView = false
+            delaysTouchesBegan = false
+            delaysTouchesEnded = false
+        }
+
+        // Neither side of the usual rule: another recognizer recognizing does not fail this
+        // one (it would stop hearing the touch the moment the long-press fired), and this
+        // one stops no other.
+        override func canBePrevented(by other: UIGestureRecognizer) -> Bool { false }
+        override func canPrevent(_ other: UIGestureRecognizer) -> Bool { false }
+
+        private func at(_ touches: Set<UITouch>) -> CGPoint? { touches.first?.location(in: nil) }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            HeldFinger.shared.last = at(touches)
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+            guard let p = at(touches) else { return }
+            HeldFinger.shared.last = p
+            HeldFinger.shared.move(to: p)
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+            HeldFinger.shared.lift()
+            state = .failed
+        }
+
+        /// A touch the system took back is not a choice.
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+            if HeldFinger.shared.isDown { HeldFinger.shared.reset() }
+            state = .failed
+        }
+    }
 }
 
 /// What a point in the actions overlay is over.
@@ -487,21 +550,16 @@ extension View {
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             // A hold on a chart plot reads a value instead (`ChartTouch`).
-            // The drag after the hold is the same finger, still down: it reports to
-            // `HeldFinger` so the hold can slide to a reaction or a menu row.
+            // The finger is still down when the menu opens: `TouchWatch` follows it from
+            // here, so the hold can slide to a reaction or a menu row.
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-                    .onChanged { value in
-                        guard case .second(true, let drag) = value, !ChartTouch.holding else { return }
-                        if !HeldFinger.shared.isDown {
-                            ChatGestures.heldIntoMenu = true
-                            HeldFinger.shared.press(at: drag?.startLocation ?? .zero)
-                            onLongPress()
-                        }
-                        if let drag { HeldFinger.shared.move(to: drag.location) }
-                    }
-                    .onEnded { _ in HeldFinger.shared.lift() },
+                    .onEnded { _ in
+                        guard !ChartTouch.holding else { return }
+                        ChatGestures.heldIntoMenu = true
+                        if let at = HeldFinger.shared.last { HeldFinger.shared.press(at: at) }
+                        onLongPress()
+                    },
                 enabled: ChatGestures.longPress
             )
             // Double-tap toggles a heart under the bubble (Telegram / iMessage;

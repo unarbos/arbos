@@ -2614,6 +2614,7 @@ struct ChatSession: View {
             // The finger that held a bubble into its menu may slide to a choice: the
             // transcript does not scroll under it.
             .scrollDisabled(actionsRow != nil)
+            .background(TouchWatch())
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
