@@ -1011,6 +1011,22 @@ type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 /// rule from #1365 / #1424). The bottom band stays over the list's end.
 pub const LIST_FADE_BAND: f32 = 14.0;
 
+/// A sidebar row's selected pill: 12 pt, measured off the approved mock
+/// (`docs/mac-design-rules.md` § Sidebar rows). It is the sidebar's own number
+/// rather than `PANEL_RADIUS - 4`, which palette and menu rows also take —
+/// softening the sidebar must not reshape every other list in the app.
+pub const ROW_RADIUS: f32 = 12.0;
+
+/// The vertical padding inside a sidebar row, which sets the row's pitch.
+///
+/// **This is the one value that decides how tall the rows are.** 11 pt gives a
+/// 69.5 pt pitch, which is what we ship; the approved mock measures 58 pt, so
+/// the mock is the *denser* of the two — about fourteen rows where we fit
+/// twelve. Jacob's brief asks for taller rows, which points the other way, so
+/// the number is kept here on its own rather than spread through the layout:
+/// settling the question costs one line.
+pub const ROW_PAD_Y: f32 = 11.0;
+
 /// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
 /// it stays bounded and scrolls. (#1497's first try used a block div here —
 /// the list took its content height and painted through the account row,
@@ -1582,8 +1598,8 @@ fn render_server_row(
         .items_center()
         .gap(px(identity::ROW_GAP))
         .px(px(12.0))
-        .py(px(11.0))
-        .rounded(px(PANEL_RADIUS - 4.0))
+        .py(px(ROW_PAD_Y))
+        .rounded(px(ROW_RADIUS))
         .map(|el| {
             if lifted {
                 highlight::lifted(el, theme)
@@ -2136,8 +2152,8 @@ fn render_row(
         .items_center()
         .gap(px(identity::ROW_GAP))
         .px(px(12.0))
-        .py(px(11.0))
-        .rounded(px(PANEL_RADIUS - 4.0))
+        .py(px(ROW_PAD_Y))
+        .rounded(px(ROW_RADIUS))
         .map(|el| {
             if lifted {
                 highlight::lifted(el, theme)
