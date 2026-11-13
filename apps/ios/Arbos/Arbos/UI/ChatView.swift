@@ -338,6 +338,12 @@ struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// The reader has touched the transcript since the app last put it on its end. The resize
+    /// anchor is given up from that touch, not from the 120 pt "away" line: iOS 27 re-applies
+    /// the bottom anchor when that setting changes, and changing it mid-drag threw the list
+    /// back to its end under the finger. At the touch the list is still on its end, so the
+    /// same re-apply moves nothing.
+    @State private var readerHeld = false
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
     /// The transcript has been put on its newest row once. A page pushed over the chat (a
@@ -754,17 +760,23 @@ struct ChatSession: View {
     private func closeSearch(scrollToTail: Bool = true) {
         guard account.accepts(model) else { return }
         guard showSearch || !searchText.isEmpty || searchFocused else { return }
+        // A bar nothing was typed into filtered nothing: the list and the reader's place in it
+        // are as they were, so only the bar goes.
+        let filtered = !searchText.isEmpty
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
             showSearch = false
             searchText = ""
-            windowSkipEnd = 0
-            windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+            if filtered {
+                windowSkipEnd = 0
+                windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+            }
         }
         searchFocused = false
-        guard scrollToTail else { return }
+        guard scrollToTail, filtered else { return }
         pinnedToBottom = true
+        readerHeld = false
         // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
         // before the jump to the tail, or the view stays parked at the top of nothing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { guard account.accepts(model) else { return };
@@ -1263,6 +1275,9 @@ struct ChatSession: View {
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
                         guard account.accepts(model) else { return .handled }
+                        // The lift after a hold that opened the message menu is not a tap on
+                        // the link (or chip) under the finger.
+                        if ChatGestures.tapEndsHold() { return .handled }
                         // Inside a search result the row owns the tap: the reveal is what the
                         // reader asked for, so the chip and the spoiler stand down while a
                         // keyword filters the list (`ChatSearchClose.rowOwnsInnerTap`). A link
@@ -1489,7 +1504,8 @@ struct ChatSession: View {
                                                 hasPreview: model.linkPreviews && messageById[row.messageId]?.linkPreview != nil,
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
-                                                inPrivateChat: people?.isGroup != true),
+                                                inPrivateChat: people?.isGroup != true,
+                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -2370,6 +2386,7 @@ struct ChatSession: View {
         guard account.accepts(model) else { return }
         jumpBackTo = nil
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         let landing = Self.windowAfterJump(count: windowCount, skipEnd: windowSkipEnd)
@@ -2399,6 +2416,7 @@ struct ChatSession: View {
     /// After a send: stick to the end now and again once the optimistic row has height.
     private func scrollAfterSend() {
         guard account.accepts(model) else { return }
+        readerHeld = false
         scroller?.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { guard account.accepts(model) else { return }; scroller?.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { guard account.accepts(model) else { return };
@@ -2610,7 +2628,7 @@ struct ChatSession: View {
             .defaultScrollAnchor(.bottom)
             // A reader who has left the end keeps their offset through a resize; everyone
             // else is still carried to it.
-            .modifier(TranscriptResizeAnchor(away: awayFromBottom))
+            .modifier(TranscriptResizeAnchor(away: awayFromBottom || readerHeld))
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
@@ -2638,7 +2656,7 @@ struct ChatSession: View {
                     }
                 }
             )
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom, held: $readerHeld) {
                 // Streaming / new-row growth while pinned: re-stick without animation so
                 // each delta glides with layout instead of fighting a scroll animation.
                 proxy.scrollTo("bottom", anchor: .bottom)
@@ -2721,6 +2739,7 @@ struct ChatSession: View {
                 guard focused else { return }
                 jumpBackTo = nil
                 pinnedToBottom = true
+                readerHeld = false
                 awayFromBottom = false
                 newBelowCount = 0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
@@ -2895,6 +2914,7 @@ struct ChatSession: View {
     private func settleToBottom(_ proxy: ScrollViewProxy) {
         guard account.accepts(model) else { return }
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
@@ -3315,6 +3335,9 @@ struct ChatSession: View {
             guard let m = messageById[row.messageId] else { return }
             let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
             Task { guard account.accepts(model) else { return }; await model.copyMessage(m, slot: slot, isCurrent: { account.accepts(model) }) }
+        case .copyLink:
+            guard let link = ChatMedia.links(in: m_text(row)).first else { return }
+            UIPasteboard.general.url = link
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -3852,6 +3875,7 @@ struct ChatSession: View {
                 Haptics.send()
                 jumpBackTo = nil
                 pinnedToBottom = true
+                readerHeld = false
                 awayFromBottom = false
                 newBelowCount = 0
                 model.sendMedia(chatId: chatId, pick: pick)
@@ -4361,6 +4385,7 @@ struct ChatSession: View {
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         jumpBackTo = nil
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
@@ -5045,11 +5070,12 @@ enum TranscriptScrollLatch {
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
+    @Binding var held: Bool
     var onStick: () -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, onStick: onStick))
+            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, held: $held, onStick: onStick))
         } else {
             content
         }
@@ -5060,6 +5086,7 @@ private struct AwayFromBottomReporter: ViewModifier {
 private struct AwayFromBottomReporterModern: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
+    @Binding var held: Bool
     var onStick: () -> Void
     /// The finger (or its deceleration) is moving the scroll view right now.
     @State private var userDriven = false
@@ -5094,6 +5121,8 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                 case .idle, .animating: userDriven = false
                 @unknown default: userDriven = false
                 }
+                // The reader has taken hold: see `TranscriptResizeAnchor`.
+                if userDriven { held = true }
             }
             .scrollPosition($position)
             .onScrollGeometryChange(for: Sample.self) { g in
@@ -5153,6 +5182,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                                                      distance: new.distance, pinned: pinned) {
                 case .stick:
                     away = false
+                    held = false
                     onStick()
                 case .reread(let isAway):
                     away = isAway

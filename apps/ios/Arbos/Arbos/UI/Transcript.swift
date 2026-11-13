@@ -3827,10 +3827,9 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
-            Button {
-                guard !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
-                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-            } label: {
+            // Not a Button, as the picture tile above: a Button counts a back swipe that starts
+            // on the card as a tap when the finger lifts, and the file opened under the pop.
+            Group {
                 // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
                 // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
                 HStack(spacing: 14) {
@@ -3849,8 +3848,11 @@ struct FileCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(item.blobRef == nil)
+            .onTapGesture {
+                guard item.blobRef != nil, !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            }
+            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
                 Text(captionText)

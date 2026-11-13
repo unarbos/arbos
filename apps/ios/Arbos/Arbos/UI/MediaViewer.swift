@@ -275,7 +275,7 @@ struct MediaViewer: View {
     var body: some View {
         let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
         ZStack {
-            Color.black.opacity(1 - Double(dismissProgress) * 0.65).ignoresSafeArea()
+            Color.black.opacity(max(0, 1 - Double(dismissProgress) * 0.65)).ignoresSafeArea()
             if album.count > 1 {
                 TabView(selection: $index) {
                     ForEach(Array(album.enumerated()), id: \.element.id) { i, item in
@@ -666,6 +666,8 @@ private struct DismissDrag: ViewModifier {
     let onClose: () -> Void
     var enabled: Bool = true
     @State private var offset: CGFloat = 0
+    /// The progress at which the viewer's backdrop (`1 - progress * 0.65`) is fully clear.
+    static let gone: CGFloat = 1 / 0.65
 
     func body(content: Content) -> some View {
         content
@@ -736,7 +738,19 @@ private struct VerticalDismissProbe: UIViewRepresentable {
                 // flick closes from a shorter pull.
                 let vy = pan.velocity(in: pan.view).y
                 if dragOffset > 120 || (pan.state == .ended && dragOffset > 24 && vy > 800) {
-                    onClose()
+                    // A swiped-away page leaves by itself: it keeps falling and the backdrop
+                    // clears in place, then the cover goes with no slide. The cover is clear
+                    // (the chat shows through the drag), so the system slide would show what
+                    // is left of the tint falling after the picture.
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = pan.view?.bounds.height ?? 900
+                        progress.wrappedValue = DismissDrag.gone
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [onClose] in
+                        var cut = Transaction()
+                        cut.disablesAnimations = true
+                        withTransaction(cut) { onClose() }
+                    }
                 } else {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                         offset.wrappedValue = 0
@@ -801,9 +815,11 @@ private struct VerticalDismissProbe: UIViewRepresentable {
             pan = gr
         }
 
-        /// First ancestor large enough to be the page (the probe is zero-sized).
+        /// First ancestor large enough to be the page, past the probe's own SwiftUI host:
+        /// that host fills the background behind the page and never takes a touch, so a
+        /// recognizer on it never begins.
         private static func pageHost(from view: UIView) -> UIView? {
-            var node: UIView? = view.superview
+            var node: UIView? = view.superview?.superview
             while let current = node {
                 if current.bounds.width > 100, current.bounds.height > 100 { return current }
                 node = current.superview
@@ -841,6 +857,9 @@ private struct ZoomableImagePage: View {
                 if let image {
                     PlayingImage(image: image)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        // The picture is a UIImageView, which takes no touches by itself:
+                        // without a shape of its own the pinch and the double tap never begin.
+                        .contentShape(Rectangle())
                         .scaleEffect(scale)
                         .offset(offset)
                         .gesture(magnify(in: geo.size))

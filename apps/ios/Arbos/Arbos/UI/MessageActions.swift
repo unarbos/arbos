@@ -81,6 +81,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
+    /// The capsule and the menu grow out of the held bubble as the overlay arrives.
+    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
@@ -115,6 +118,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 capsule
                     .frame(width: width, alignment: mine ? .trailing : .leading)
                     .offset(y: layout.capsuleY)
+                    .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .bottomTrailing : .bottomLeading)
                     .accessibilityIdentifier("message-actions-capsule")
                 bubble()
                     .frame(width: width)
@@ -125,10 +129,14 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 menu
                     .frame(width: width, alignment: mine ? .trailing : .leading)
                     .offset(y: layout.menuY)
+                    .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .topTrailing : .topLeading)
                     .accessibilityIdentifier("message-actions-menu")
             }
             .animation(.easeOut(duration: 0.2), value: layout)
-            .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+            .onAppear {
+                if pressedFrame == nil { pressedFrame = frame }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { shown = true }
+            }
         }
         .ignoresSafeArea()
         .overlay {
