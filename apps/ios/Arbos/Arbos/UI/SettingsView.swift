@@ -287,7 +287,8 @@ struct SettingsView: View {
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
-        if model.credentials != nil {
+        // The wallet comes with encrypted people chats (`ensureKeys`), not before them.
+        if model.credentials != nil, model.peopleNative {
             account.append(AnyView(NavigationLink { WalletPage() } label: {
                 SettingsRow(icon: "wallet.bifold.fill", title: "Wallet")
             }))

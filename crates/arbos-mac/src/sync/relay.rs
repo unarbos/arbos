@@ -3533,7 +3533,12 @@ async fn native_delete(shared: Arc<Shared>, chat_id: Id, message_id: Id) {
 async fn report_backup(shared: Arc<Shared>, client: Arc<MatrixClient>) {
     while matrix_client(&shared).is_some_and(|c| Arc::ptr_eq(&c, &client)) {
         if let Ok(backup) = client.backup().await {
-            let _ = shared.events.send(SyncEvent::MatrixBackup(backup));
+            // Only with encrypted people chats on for this account: without them nobody is
+            // asked for a recovery phrase. Read once per client start; an account switched
+            // on later is asked at its next start.
+            if shared.people_native.load(Ordering::Relaxed) {
+                let _ = shared.events.send(SyncEvent::MatrixBackup(backup));
+            }
             return;
         }
     }

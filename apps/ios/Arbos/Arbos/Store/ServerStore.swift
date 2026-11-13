@@ -879,7 +879,9 @@ extension AppModel {
             await refreshNativeRooms(expectedOwner: owner.account)
             guard acceptsMatrix(owner) else { return }
             // Waits for the first sync's word on the key backup; never holds up the start.
-            Task { await ensureKeys(client) }
+            // Only with encrypted people chats on for this account: without them nothing is
+            // encrypted, and no one is handed a recovery phrase for chats they do not have.
+            if peopleNative { Task { await ensureKeys(client) } }
         } catch {
             matrixLog.notice("matrix start failed: \(error.localizedDescription, privacy: .public)")
         }
