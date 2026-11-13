@@ -1810,6 +1810,16 @@ pub enum Part {
         #[serde(flatten)]
         preview: Box<LinkPreview>,
     },
+    /// A poll (`docs/polls.md`) as `arbos_core::doc::project_poll` folds it: the options and
+    /// who holds each. The message's text part is the same poll in plain words.
+    Poll {
+        id: Id,
+        question: String,
+        options: Vec<arbos_core::poll::PollOption>,
+        max: usize,
+        #[serde(default)]
+        votes: std::collections::BTreeMap<String, Vec<String>>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -2999,6 +3009,7 @@ impl Message {
                 | Part::Approval { .. }
                 | Part::SecretRedacted { .. }
                 | Part::Chart { .. }
+                | Part::Poll { .. }
                 | Part::LinkPreview { .. } => false,
             })
     }

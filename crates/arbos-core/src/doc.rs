@@ -347,21 +347,23 @@ pub fn project_poll(json: &mut Value) {
     let Some(poll) = obj.get(POLL_FIELD).and_then(Poll::parse) else {
         return;
     };
-    let mut votes = serde_json::Map::new();
+    // Sorted, so every reader lists an option's voters in the same order whatever order the
+    // doc's map hands its keys over in.
+    let mut votes: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
     for (key, value) in obj.iter() {
         let Some(sender) = key.strip_prefix(POLL_VOTE_PREFIX) else {
             continue;
         };
         for option in poll.selections(value).unwrap_or_default() {
-            if let Value::Array(who) = votes.entry(option).or_insert_with(|| Value::Array(vec![])) {
-                who.push(Value::from(sender));
-            }
+            votes.entry(option).or_default().push(sender);
         }
     }
+    votes.values_mut().for_each(|who| who.sort_unstable());
+    let votes = serde_json::json!(votes);
     let mut part = serde_json::to_value(&poll).unwrap_or_default();
     part["id"] = Value::from("poll");
     part["kind"] = Value::from("poll");
-    part["votes"] = Value::Object(votes);
+    part["votes"] = votes;
     if let Some(Value::Array(parts)) = obj.get_mut("parts") {
         parts.push(part);
     }

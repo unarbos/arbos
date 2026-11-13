@@ -7458,6 +7458,44 @@ impl AppState {
         cx.notify();
     }
 
+    /// Post a poll in a people chat (`docs/polls.md`). False when it is out of bounds —
+    /// no question, fewer than two options — and nothing was sent.
+    pub fn send_poll(
+        &mut self,
+        chat_id: Id,
+        question: &str,
+        options: &[String],
+        multiple: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(poll) = arbos_core::poll::Poll::new(question, options, multiple) else {
+            return false;
+        };
+        self.command(ClientCommand::SendPoll {
+            chat_id,
+            message_id: new_id(),
+            poll,
+        });
+        cx.notify();
+        true
+    }
+
+    /// My vote on a poll: `selections` replaces whatever I held; empty retracts it.
+    pub fn vote_poll(
+        &mut self,
+        chat_id: Id,
+        message_id: Id,
+        selections: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::VotePoll {
+            chat_id,
+            message_id,
+            selections,
+        });
+        cx.notify();
+    }
+
     /// Delete a message for everyone through the shared chat doc (the
     /// message menu's Delete, #1370; the iPhone's `deleteMessage`).
     pub fn delete_message(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {

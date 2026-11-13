@@ -12,7 +12,7 @@
 
 use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
 
-use crate::model::{Id, Message, Role, REACTION_PALETTE};
+use crate::model::{Id, Message, Part, Role, REACTION_PALETTE};
 use crate::ui::glass::{
     self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_DIVIDER_HEIGHT, MENU_GAP, MENU_ROW_HEIGHT,
 };
@@ -97,7 +97,9 @@ pub fn can_edit_message(me_id: &str, message: &Message) -> bool {
     let mine = message.sender == "user"
         || message.sender.is_empty()
         || message.sender == format!("user:{me_id}");
-    mine && !message.plain_text().trim().is_empty()
+    // A poll is not editable (`docs/polls.md`); its text is only the poll in plain words.
+    let poll = message.parts.iter().any(|p| matches!(p, Part::Poll { .. }));
+    mine && !poll && !message.plain_text().trim().is_empty()
 }
 
 /// The items for one bubble: Copy, Reply and Forward always; Reply in DM only

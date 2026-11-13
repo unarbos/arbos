@@ -49,6 +49,7 @@ use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 mod fun;
 /// The bundled starter stickers (generated).
 mod fun_starter;
+mod poll;
 
 actions!(
     composer,
@@ -2860,6 +2861,8 @@ pub struct Composer {
     rig_draft: Option<String>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
+    /// The poll form above the field, while it is open (`+` → Poll).
+    poll: Option<poll::PollDraft>,
     /// Where the trailing controls are between the empty field's mic + phone
     /// and the send arrow, so typing and clearing cross-fade them.
     send_swap: SendSwap,
@@ -2970,6 +2973,7 @@ impl Composer {
                 .ok()
                 .filter(|v| !v.is_empty()),
             fun: fun::FunState::new(fun_search),
+            poll: None,
             // A new composer starts on an empty field: mic + phone, settled.
             send_swap: SendSwap::settled(false, Instant::now()),
         }
@@ -4294,6 +4298,10 @@ impl Render for Composer {
         }
         if self.fun.open {
             field_wrap = field_wrap.child(above_field(self.render_fun(cx)));
+        }
+        if let Some(draft) = self.poll.take() {
+            field_wrap = field_wrap.child(above_field(self.render_poll(&draft, cx)));
+            self.poll = Some(draft);
         }
         column.child(field_wrap)
     }
@@ -7143,6 +7151,59 @@ mod overlay_tests {
         );
         let gap = f32::from(closed.field.top() - picker.bottom());
         assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
+    }
+
+    /// `+` offers Poll in a people chat only, and the form sends once it holds a poll the
+    /// relay would take: a question and two options.
+    #[gpui::test]
+    fn plus_offers_a_poll_in_a_people_chat_and_the_form_sends_a_valid_one(cx: &mut TestAppContext) {
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let none = gpui::Modifiers::default();
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Project);
+        composer.update(vcx, |c, cx| c.toggle_attach_menu(cx));
+        settle(&state, &shell, vcx);
+        assert!(vcx.debug_bounds("composer-attach-menu").is_some());
+        assert!(
+            vcx.debug_bounds("composer-attach-poll").is_none(),
+            "no polls in an agent's own chat"
+        );
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Group);
+        settle(&state, &shell, vcx);
+        let row = vcx
+            .debug_bounds("composer-attach-poll")
+            .expect("Poll is on the + menu in a group")
+            .center();
+        vcx.simulate_click(row, none);
+        settle(&state, &shell, vcx);
+        let send = vcx
+            .debug_bounds("composer-poll-send")
+            .expect("the form opens")
+            .center();
+
+        // Empty fields are not a poll: Send does nothing and the form stays.
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(composer.read_with(&*vcx, |c, _| c.poll.is_some()));
+
+        composer.update(vcx, |c, cx| {
+            c.fill_poll_for_test("Where?", &["Lisbon", "Berlin"], cx)
+        });
+        settle(&state, &shell, vcx);
+        let send = vcx.debug_bounds("composer-poll-send").unwrap().center();
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(
+            composer.read_with(&*vcx, |c, _| c.poll.is_none()),
+            "a valid poll is sent and the form closes"
+        );
     }
 
     #[gpui::test]
