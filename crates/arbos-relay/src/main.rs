@@ -38,6 +38,8 @@ mod export;
 mod features;
 mod feedback;
 mod fleet;
+#[cfg(test)]
+mod foreign_project_id_tests;
 mod gifs;
 mod goals;
 #[cfg(test)]
