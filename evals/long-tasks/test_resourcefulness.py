@@ -243,5 +243,113 @@ class NaNotZero(unittest.TestCase):
         self.assertTrue(any("Resourcefulness" in l for l in rf.section(block)))
 
 
+class SessionBundles(unittest.TestCase):
+    """`bundle_from_session` reads the raw pi session, so a transcript-derived bundle keeps the two
+    fields `bundle_from_run` drops: each call's error text and whether its result came back empty.
+    """
+
+    def session(self, prompt, calls):
+        """`calls` is `[(name, args, result_text, is_error)]`, in order."""
+        entries = [{"type": "message", "message": {
+            "role": "user", "content": [{"type": "text", "text": prompt}]}}]
+        for i, (name, args, result, is_error) in enumerate(calls):
+            entries.append({"type": "message", "message": {
+                "role": "assistant",
+                "content": [{"type": "toolCall", "name": name, "id": f"c{i}", "input": args}],
+            }})
+            entries.append({"type": "message", "message": {
+                "role": "toolResult", "toolCallId": f"c{i}",
+                "isError": is_error, "content": result,
+            }})
+        return entries
+
+    def affine(self):
+        return self.session("https://affine.io/ read this website", [
+            ("web_fetch", {"url": "https://affine.io/"},
+             "URL: https://affine.io/\nStatus: 200\n\n", False),
+            ("bash", {"command": "curl -s https://affine.io/k1.json"},
+             "curl: (35) SSL connect error", True),
+            ("bash", {"command": "curl -s https://affine.io/k1.json"},
+             '{"epoch": 661}', False),
+        ])
+
+    def test_the_error_and_the_empty_result_survive_into_the_bundle(self):
+        b = rf.bundle_from_session(self.affine(), "rs1", "Test4", "0.1.192")
+        self.assertTrue(b["tool_calls"][0]["output_empty"])
+        self.assertIn("(35)", b["tool_calls"][1]["error"])
+        self.assertFalse(b["tool_calls"][2]["output_empty"])
+        self.assertIsNone(b["tool_calls"][2]["error"])
+
+    def test_the_transient_error_is_scorable_where_bundle_from_run_loses_it(self):
+        """The defect this builder exists for: the same transcript through `bundle_from_run`
+        reports no transient error at all, so `retry` can only ever answer `n/a`."""
+        scored = rf.score(rf.bundle_from_session(self.affine(), "rs1", "Test4", "0.1.192"))
+        self.assertEqual(scored["items"]["retry"]["score"], 2)
+
+        lossy = rf.bundle_from_run(
+            [{"prompt": "https://affine.io/ read this website",
+              "tool_names": ["web_fetch", "bash", "bash"],
+              "tool_targets": ["https://affine.io/", "curl -s https://affine.io/k1.json",
+                               "curl -s https://affine.io/k1.json"],
+              "tool_results": [None, "curl: (35) SSL connect error", None]}],
+            [], "rs1", "Test4", "0.1.192")
+        self.assertEqual([c["error"] for c in lossy["tool_calls"]], [None, None, None])
+        self.assertIsNone(rf.score(lossy)["items"]["retry"]["score"])
+
+    def test_a_bot_wall_counts_as_the_empty_result_it_is(self):
+        """`web_fetch` reports a thin page rather than an empty one; it is still the dead end the
+        investigation item asks the agent to escalate from."""
+        b = rf.bundle_from_session(self.session("read it", [
+            ("web_fetch", {"url": "https://affine.io/"},
+             "URL: https://affine.io/\n\nthe page has almost no readable text "
+             "(bot wall or JavaScript-only)", False),
+        ]), "rs1", "Test4", "0.1.192")
+        self.assertTrue(b["tool_calls"][0]["output_empty"])
+        self.assertEqual(rf.score(b)["items"]["investigation"]["score"], 0)
+
+    def test_only_a_fetch_header_is_stripped_before_judging_emptiness(self):
+        """Stripping to the first blank line is right for `web_fetch`, whose header sits above
+        one, and wrong for anything else: a shell result whose output merely contains a blank
+        line is not an empty result."""
+        b = rf.bundle_from_session(self.session("read it", [
+            ("bash", {"command": "git log --stat"}, "commit abc\n\n 2 files changed", False),
+            ("web_fetch", {"url": "https://a.io/"}, "URL: https://a.io/\nStatus: 200\n\nreal text",
+             False),
+        ]), "rs1", "Test4", "0.1.192")
+        self.assertFalse(b["tool_calls"][0]["output_empty"])
+        self.assertFalse(b["tool_calls"][1]["output_empty"])
+
+    def test_the_words_and_the_turns_come_back_in_order(self):
+        entries = self.affine()
+        entries.append({"type": "message", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "Epoch 661."}]}})
+        entries.append({"type": "message", "message": {
+            "role": "user", "content": [{"type": "text", "text": "and the rest?"}]}})
+        b = rf.bundle_from_session(entries, "rs1", "Test4", "0.1.192")
+        self.assertEqual(b["user_messages"],
+                         ["https://affine.io/ read this website", "and the rest?"])
+        self.assertEqual(b["assistant_messages"], ["Epoch 661."])
+
+    def test_a_result_with_no_call_id_answers_the_newest_waiting_call(self):
+        entries = [
+            {"type": "message", "message": {"role": "user",
+                                            "content": [{"type": "text", "text": "read it"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [
+                {"type": "toolCall", "name": "web_fetch", "input": {"url": "https://a.io/"}}]}},
+            {"type": "message", "message": {"role": "toolResult", "content": ""}},
+        ]
+        b = rf.bundle_from_session(entries, "rs1", "Test4", "0.1.192")
+        self.assertTrue(b["tool_calls"][0]["output_empty"])
+
+    def test_the_hand_scored_fields_still_come_from_the_caller(self):
+        """Slot counts, contradictions and nudge labels are judgement, not transcript: the builder
+        passes them through rather than guessing them."""
+        b = rf.bundle_from_session(self.affine(), "rs1", "Test4", "0.1.192",
+                                   slots_filled=9, slots_total=12, nudge_labels=["nudge"],
+                                   contradictions=["'closed' against queue.enabled true"])
+        self.assertEqual(rf.score(b)["items"]["task_success"]["score"], 2)
+        self.assertEqual(rf.score(b)["items"]["no_confabulation"]["score"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
