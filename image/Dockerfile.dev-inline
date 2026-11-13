@@ -18,9 +18,15 @@ RUN printf '%s\n' '#!/bin/bash' 'set -e' \
   'until curl -fsSL -H "$H" "$ARBOS_RELAY_URL/bootstrap/arbos-agentd" -o /opt/arbos/arbos-agentd; do echo "waiting for relay bootstrap"; sleep 2; done' \
   'chmod +x /opt/arbos/arbos-agentd' \
   'curl -fsSL -H "$H" "$ARBOS_RELAY_URL/bootstrap/arbos-pi-ext.tar" | tar -x -C /opt/arbos' \
+  'EFFECT_VERSION="$(node -e '\''const v = require(process.argv[1]).dependencies?.effect; if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error("arbos-pi-ext requires an exact Effect version"); process.stdout.write(v)'\'' /opt/arbos/arbos-pi-ext/package.json)"' \
+  'if ! node -e '\''process.exit(require(process.argv[1]).version === process.argv[2] ? 0 : 1)'\'' /opt/arbos/pi-ext-runtime/node_modules/effect/package.json "$EFFECT_VERSION" 2>/dev/null; then' \
+  '  npm install --prefix /opt/arbos/pi-ext-runtime --ignore-scripts --no-package-lock --no-save --no-audit --no-fund "effect@$EFFECT_VERSION"' \
+  'fi' \
+  'rm -rf /opt/arbos/arbos-pi-ext/node_modules' \
   'mkdir -p /opt/arbos/arbos-pi-ext/node_modules' \
   'ln -sfn "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/typebox" /opt/arbos/arbos-pi-ext/node_modules/typebox' \
   'ln -sfn "$(npm root -g)/@earendil-works" /opt/arbos/arbos-pi-ext/node_modules/@earendil-works' \
+  'ln -sfn /opt/arbos/pi-ext-runtime/node_modules/effect /opt/arbos/arbos-pi-ext/node_modules/effect' \
   'export ARBOS_PI_EXT=/opt/arbos/arbos-pi-ext/index.ts ARBOS_PI_BIN=pi ARBOS_STATE_DIR=/work/.arbos ARBOS_WORK_DIR=/work ARBOS_PORT=7788' \
   'exec /opt/arbos/arbos-agentd boot' > /usr/local/bin/arbos-boot && chmod 755 /usr/local/bin/arbos-boot
 ENV PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR=/work/.arbos/pi HOME=/home/daytona

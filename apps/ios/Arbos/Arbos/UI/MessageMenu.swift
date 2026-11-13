@@ -9,6 +9,9 @@ import SwiftUI
 /// (#1871). Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
+    /// The message's text shares a link: put that address alone on the pasteboard
+    /// (the first one, where it shares several).
+    case copyLink
     case reply
     case viewThread
     case forward
@@ -22,6 +25,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
     var label: String {
         switch self {
         case .copy: return "Copy"
+        case .copyLink: return "Copy Link"
         case .reply: return "Reply"
         case .viewThread: return "View thread"
         case .forward: return "Forward"
@@ -35,6 +39,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
     var systemImage: String {
         switch self {
         case .copy: return "doc.on.doc"
+        case .copyLink: return "link.circle"
         case .reply: return "arrowshape.turn.up.left"
         case .viewThread: return "bubble.left.and.bubble.right"
         case .forward: return "arrowshape.turn.up.right"
@@ -68,12 +73,13 @@ enum MessageMenu {
     /// View thread when `hasReplies`; Edit only on the user's own text; Delete only
     /// when the relay would allow it (`MessageDeleteRule.mayDelete`); Remove preview only on a
     /// message that shows a link card (`hasPreview`) the user may delete. Reply in DM is
-    /// for group chats only — omit it in a private / 1:1 chat (`inPrivateChat`).
+    /// for group chats only — omit it in a private / 1:1 chat (`inPrivateChat`). Copy Link
+    /// sits under Copy when the text shares a link (`hasLink`).
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
                       hasReplies: Bool = false, hasPreview: Bool = false,
-                      inPrivateChat: Bool = false) -> [MessageMenuItem] {
+                      inPrivateChat: Bool = false, hasLink: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
-        var out: [MessageMenuItem] = [.copy, .reply]
+        var out: [MessageMenuItem] = hasLink ? [.copy, .copyLink, .reply] : [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
         out.append(.forward)
         if !inPrivateChat { out.append(.replyInDM) }

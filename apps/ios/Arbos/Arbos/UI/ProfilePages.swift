@@ -3,12 +3,31 @@
 // then the tab's list. Three pages share the scaffold: a person
 // (`UserProfileView`), a group chat (`GroupProfileView`, people groups and
 // shared project chats), and an agent (`AgentProfileView`, its own file).
-// `AppModel.showProfile(_:)` opens one from anywhere; the root presents it.
+// `AppModel.showProfile(_:)` opens one from anywhere; `ProfilePage` draws it, on the
+// navigation stack (Jacob, 2026-11-01) or inside the sheet a profile opened from
+// another sheet still uses.
 
 import ArbosFFI
 import PhotosUI
 import SwiftUI
 import UIKit
+
+/// One profile target as a page. Shared by the stack's `navigationDestination` and the
+/// sheet-local stack, so both routes draw the same page from the same switch.
+struct ProfilePage: View {
+    @EnvironmentObject private var model: AppModel
+    let target: ProfileTarget
+
+    var body: some View {
+        switch target {
+        case .user(let p): UserProfileView(person: p)
+        case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
+        case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
+        case .server(let sid): ServerProfileView(serverId: sid)
+        case .channel(let cid): ChannelProfileView(channelId: cid)
+        }
+    }
+}
 
 /// Who a user page is about — from a chat member, a search result or a sender row.
 struct ProfilePerson: Identifiable, Equatable, Hashable {
@@ -36,7 +55,7 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     case user(ProfilePerson)
     case group(chatId: String, projectId: String?)
     case agent(projectId: String)
-    /// D88: a server's details (Channels | Members; admin rows for owner/admin).
+    /// D88: a server's overview (Channels · Members · Settings rows; admin Edit).
     case server(serverId: String)
     /// D88 (#1317): a channel's own page — what the `# general` pill opens.
     case channel(channelId: String)
@@ -68,6 +87,8 @@ struct ProfileTopBar<Trailing: View>: View {
     /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
     /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
     var screen: ListTopFade.Screen = .agentPage
+    /// Optional XCTest id for the back chevron (New Message uses `new-message-back`).
+    var backIdentifier: String? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -79,16 +100,22 @@ struct ProfileTopBar<Trailing: View>: View {
 
     private var bar: some View {
         HStack {
-            Button { (onBack ?? { dismiss() })() } label: {
-                GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
+            backButton
             Spacer()
             trailing()
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
+    }
+
+    private var backButton: some View {
+        Button { (onBack ?? { dismiss() })() } label: {
+            GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        // Empty string when unset keeps the label-only lookup (`buttons["Back"]`) unchanged.
+        .accessibilityIdentifier(backIdentifier ?? "")
     }
 }
 
@@ -140,6 +167,37 @@ enum PaneLeading {
     case avatar(AnyView)
     /// A 36 pt box with a glyph in it (Add members, files).
     case glyph(String)
+}
+
+/// Apple's 30 pt icon tile, with the machine mark on its corner when one is given. Its own
+/// view so a row that lays its text out by hand still draws the one tile (`PaneRow` and the
+/// Agent access link rows, which carry a tag beside the name).
+struct PaneTile: View {
+    @Environment(\.theme) private var theme
+    let icon: String
+    var mark: StatusMark? = nil
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                .frame(width: PaneKit.tile, height: PaneKit.tile)
+                .overlay(
+                    Image(systemName: icon)
+                        .font(theme.font(15, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+            if let mark {
+                // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
+                ZStack {
+                    Circle().fill(theme.bubbleAssistant)
+                    StatusMarkView(mark: mark, size: 8)
+                }
+                .frame(width: 13, height: 13)
+                .offset(x: 3, y: 3)
+            }
+        }
+    }
 }
 
 /// The grouped card: one fill, one radius, hairlines inset under the label.
@@ -268,25 +326,7 @@ struct PaneRow: View {
         case .none:
             EmptyView()
         case .tile(let icon, let mark):
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
-                    .frame(width: PaneKit.tile, height: PaneKit.tile)
-                    .overlay(
-                        Image(systemName: icon)
-                            .font(theme.font(15, weight: .semibold))
-                            .foregroundStyle(.white)
-                    )
-                if let mark {
-                    // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
-                    ZStack {
-                        Circle().fill(theme.bubbleAssistant)
-                        StatusMarkView(mark: mark, size: 8)
-                    }
-                    .frame(width: 13, height: 13)
-                    .offset(x: 3, y: 3)
-                }
-            }
+            PaneTile(icon: icon, mark: mark)
         case .avatar(let view):
             view.frame(width: PaneKit.avatar, height: PaneKit.avatar)
         case .glyph(let icon):
@@ -352,20 +392,18 @@ enum PaneTabsMetrics {
     /// Between two capsules; half of it is hit area on either side so the row tiles.
     static let gap: CGFloat = 4
     /// Hit band above and below the capsule when the caller gives none: the whole tab is
-    /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
+    /// Apple's 44 pt tall.
     static let hitBand: CGFloat = 6
     static var hitHeight: CGFloat { pill + 2 * hitBand }
 }
 
-/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
-/// All | Agents | People | Servers).
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
 ///
 /// Every tab takes a tap over its WHOLE area — capsule, the band above and below it and half
-/// the gap to its neighbours — not only over the glyphs of its label. Jacob, 2026-10-28
-/// (TestFlight 202610281148575584): "can't click All". A `.plain` Button hit-tests only what
-/// its label draws: an unselected tab's capsule is `.clear`, so its hit area was the text's
-/// own box (≈ 22 × 20 pt for "All"); the selected one reached its 32 pt capsule. Now the
-/// label carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
+/// the gap to its neighbours — not only over the glyphs of its label. A `.plain` Button
+/// hit-tests only what its label draws: an unselected tab's capsule is `.clear`, so its hit
+/// area was the text's own box; the selected one reached its 32 pt capsule. Now the label
+/// carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
 struct PaneTabs: View {
     @Environment(\.theme) private var theme
     let tabs: [String]
@@ -380,12 +418,13 @@ struct PaneTabs: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { t in
-                Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
+                Button { selected = t } label: {
                     Text(t)
                         .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
                         .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
-                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
+                        // Only the pill fades; the pane under the tabs cuts.
+                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear).animation(.easeOut(duration: 0.15), value: selected))
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)
@@ -461,7 +500,10 @@ struct PaneHeader<Avatar: View>: View {
                 Button(action: subtitleAction) { subtitleText }
                     .buttonStyle(.plain)
                     .accessibilityHint("Edits the label")
-            } else {
+            } else if !subtitle.isEmpty {
+                // Grok-style overview heroes (avatar · name · Edit) carry no subtitle —
+                // skip the empty line so the Edit pill sits tight under the name
+                // ([feedback iphone-entity-profile-edit-2026-11-10]).
                 subtitleText
             }
             if let subtitleBelow {
@@ -480,6 +522,7 @@ struct PaneHeader<Avatar: View>: View {
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+                .minimumScaleFactor(0.6)
             if let badge {
                 Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
             }
@@ -591,7 +634,7 @@ extension View {
 
 /// Jacob, 2026-10-25: a tap on a profile picture opens it full-size in the media viewer chat
 /// photos use (tap / swipe-down closes, pinch zooms). With no picture (`url` empty — initials
-/// or a leaf) the content is just drawn: nothing to view. Panes whose picture opens the avatar
+/// or a disc) the content is just drawn: nothing to view. Panes whose picture opens the avatar
 /// picker instead get **View** inside the picker.
 struct ViewablePicture<Content: View>: View {
     @EnvironmentObject private var model: AppModel
@@ -602,8 +645,10 @@ struct ViewablePicture<Content: View>: View {
     @State private var viewer: MediaViewerState?
 
     var body: some View {
+        let work = model.accountWork()
         if let url, !url.isEmpty {
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
             } label: {
                 content().contentShape(Circle())
@@ -614,6 +659,7 @@ struct ViewablePicture<Content: View>: View {
             .onAppear {
                 if DebugHooks.viewPicture {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        guard model.acceptsAccountWork(work) else { return }
                         viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
                     }
                 }
@@ -679,7 +725,9 @@ func lastSeenLine(_ at: Int64?, online: Bool = false, now: Int64 = nowMs()) -> (
     if age < 3600 { return ("last seen \(age / 60) min ago", false) }
     if age < 86_400 {
         let d = Date(timeIntervalSince1970: Double(at) / 1000)
-        return ("last seen today at \(d.formatted(date: .omitted, time: .shortened))", false)
+        // Inside 24 hours is not always the same calendar day.
+        let day = Calendar.current.isDate(d, inSameDayAs: Date(timeIntervalSince1970: Double(now) / 1000)) ? "today" : "yesterday"
+        return ("last seen \(day) at \(d.formatted(date: .omitted, time: .shortened))", false)
     }
     if age < 7 * 86_400 { return ("last seen \(age / 86_400) day\(age / 86_400 == 1 ? "" : "s") ago", false) }
     return ("last seen a long time ago", false)
@@ -962,6 +1010,7 @@ struct UserProfileView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
@@ -1000,19 +1049,26 @@ struct UserProfileView: View {
         }
         .confirm(BlockRow.blockConfirm(handle: person.handle), isPresented: $confirmBlock) {
             // The pane stays open: the row flips to Unblock once the relay lists them.
+            guard model.acceptsAccountWork(work) else { return }
             if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
         }
         .confirm(BlockedState.unblockConfirm(handle: person.handle), isPresented: $confirmUnblock) {
             // The pane stays open: the chip and the row go once the relay's list comes back.
+            guard model.acceptsAccountWork(work) else { return }
             if let entry = blockedEntry { model.unblock(entry) }
         }
         .task {
+            guard model.acceptsAccountWork(work) else { return }
             // Rig: `ARBOS_PANEL_TAB=Groups` lands on that tab (screenshot rig, as the group page).
             if let t = DebugHooks.panelTab, PaneKinds.person.contains(t) { tab = t }
-            await model.refreshBlocks()
-            await model.refreshPeople()
+            await model.refreshBlocks(expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            await model.refreshPeople(expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
             let id = model.personId(handle: person.handle) ?? person.id
-            fresh = await model.fetchUser(id)
+            let received = await model.fetchUser(id, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            fresh = received
             let who = ProfilePerson(
                 id: fresh?.id ?? id,
                 handle: fresh?.handle ?? person.handle,
@@ -1022,7 +1078,9 @@ struct UserProfileView: View {
                 online: fresh?.online ?? person.online,
                 avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
             )
-            sharedProjects = await model.sharedProjects(with: who)
+            let shared = await model.sharedProjects(with: who, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            sharedProjects = shared
         }
     }
 
@@ -1030,12 +1088,14 @@ struct UserProfileView: View {
     /// through the same `POST /chats/dm` path the New Message sheet uses (`openDM`
     /// navigates and shows "You can't message this person." on a relay refusal).
     private var messageButton: some View {
-        PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
+        let work = model.accountWork()
+        return PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
+            guard model.acceptsAccountWork(work) else { return }
             if let dm {
                 dismiss()
                 model.open(peopleChat: dm)
             } else {
-                Task { if await model.openDM(handle: peerHandle) != nil { dismiss() } }
+                Task { guard model.acceptsAccountWork(work) else { return }; if await model.openDM(handle: peerHandle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() } }
             }
         }
     }
@@ -1056,6 +1116,7 @@ struct UserProfileView: View {
     }
 
     private var groupsSections: [PaneSection] {
+        let work = model.accountWork()
         let groups = sharedGroups
         if groups.isEmpty && sharedProjects.isEmpty {
             return [.empty("No groups in common yet.")]
@@ -1064,7 +1125,7 @@ struct UserProfileView: View {
         // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
-                Button { dismiss(); model.open(peopleChat: g) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(peopleChat: g) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
                         title: g.title,
@@ -1077,9 +1138,9 @@ struct UserProfileView: View {
         }
         rows += sharedProjects.map { p in
             AnyView(
-                Button { dismiss(); model.open(project: p) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(project: p) } label: {
                     PaneRow(
-                        leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true))),
+                        leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar))),
                         title: p.name,
                         subtitle: "shared project · @\(p.ownerHandle ?? model.user?.login ?? "")",
                         chevron: true
@@ -1112,20 +1173,41 @@ private func presentShareSheet(items: [Any]) {
 
 // MARK: - Group page
 
+/// A people group's (or shared project chat's) profile — Grok Bot's overview
+/// hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]): large avatar,
+/// name, Edit pill (owner/admin), then grouped rows (Members · Library ·
+/// Activity) that push further right. Edit pushes `GroupEditView`; Add members
+/// and avatar are further pushes. No tab pills; no bottom sheets on this path.
 struct GroupProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// A member row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let chatId: String
     /// nil for people groups; the project for a shared project chat.
     let projectId: String?
-    @State private var tab = "Members"
+
+    /// Which sub-page is pushed from the overview (nil = overview itself).
+    enum Subpage: String, Identifiable, Hashable {
+        case members, library, activity
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .members: return "Members"
+            case .library: return "Library"
+            case .activity: return "Activity"
+            }
+        }
+    }
+
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
-    /// Rig only: the avatar picker opened straight from the pane (users go through Edit group).
-    @State private var showAvatarPicker: AvatarPickerTab? = nil
-    @State private var showActivity = false
+    @State private var subpage: Subpage? = nil
+    /// Rig only: avatar picker tab when Edit opens straight onto the picker.
+    @State private var avatarTab: AvatarPickerTab = .bot
+    @State private var openAvatarOnEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
     /// Ban confirm (remove and block rejoin), same shape as server member ban.
@@ -1136,8 +1218,6 @@ struct GroupProfileView: View {
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    /// Mute notifications for 1 hour / 8 hours / until unmuted.
-    @State private var showMuteOptions = false
     /// People-group invite links (create / copy / share / revoke), same shape as server invites.
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
@@ -1244,34 +1324,30 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
-    /// Mute / Unmute above Leave — people groups only (relay `me.muted` + local duration).
-    private var muteFooter: [PaneSection] {
+    /// Notifications card on the overview — people groups only (relay `me.muted` + local duration).
+    private var notificationsSection: [PaneSection] {
+        let work = model.accountWork()
         guard people?.isGroup == true, projectId == nil else { return [] }
-        let muted = model.isPeopleChatMuted(chatId)
-        let row = AnyView(Button {
-            if muted { model.unmutePeopleChat(chatId) }
-            else { showMuteOptions = true }
-        } label: {
-            PaneRow(
-                leading: .tile(muted ? "bell" : "bell.slash"),
-                title: muted ? "Unmute notifications" : "Mute notifications",
-                subtitle: model.peopleMuteSubtitle(chatId)
-            )
-        }
-        .buttonStyle(.plain)
-        // A menu of durations on its own row: anchored to the control, so it stays a dialog.
-        .confirmationDialog("Mute notifications", isPresented: $showMuteOptions, titleVisibility: .visible) { // confirm: anchored
-            ForEach(ChatMuteDuration.allCases) { duration in
-                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+        let notified = Binding<Bool>(
+            get: { !model.isPeopleChatMuted(chatId) },
+            set: { on in
+                guard model.acceptsAccountWork(work) else { return }
+                if on { model.unmutePeopleChat(chatId) }
+                else { model.mutePeopleChat(chatId, for: .untilTurnedOn) }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("No banners from this group for the time you pick.")
-        })
-        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+        )
+        let caption = model.isPeopleChatMuted(chatId)
+            ? model.peopleMuteSubtitle(chatId)
+            : "Get notified when someone posts in this group"
+        return [
+            .card([AnyView(
+                PaneToggleRow(title: "Notifications", subtitle: caption, isOn: notified)
+                    .accessibilityIdentifier("group-notifications")
+            )]),
+        ]
     }
 
-    /// Footer on every tab for a people group: Leave group chat for members,
+    /// Footer on the overview for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
         guard let people, people.isGroup else { return [] }
@@ -1285,15 +1361,43 @@ struct GroupProfileView: View {
         })])]
     }
 
-    /// Split from `body` so the type checker finishes (swift-core-check / Xcode 26).
-    private var paneBodySections: [PaneSection] {
-        tab == "Members" ? membersSections + groupInviteSections : librarySections
-    }
-
-    private var paneFooterSections: [PaneSection] { muteFooter + leaveFooter }
-
     private var memberSubtitle: String {
         "\(memberCount) member\(memberCount == 1 ? "" : "s")"
+    }
+
+    var body: some View {
+        let work = model.accountWork()
+        withDialogs(mainStack)
+            .navigationDestination(isPresented: $showEdit) {
+                GroupEditView(chatId: chatId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+                    .onDisappear { openAvatarOnEdit = false }
+            }
+            .navigationDestination(item: $subpage) { page in
+                groupSubpage(page)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showAdd) {
+                addMembersPage
+                    .backSwipeToPop()
+            }
+            .task {
+                guard model.acceptsAccountWork(work) else { return }
+                if let projectId {
+                    let members = await model.projectMembers(projectId, expectedOwner: work?.owner)
+                    guard model.acceptsAccountWork(work) else { return }
+                    projectMembers = members
+                }
+                if projectId == nil, people?.kind == "group" {
+                    let invites = await model.groupInvites(chatId, expectedOwner: work?.owner)
+                    guard model.acceptsAccountWork(work) else { return }
+                    groupInvites = invites
+                }
+            }
+            .onAppear(perform: applyDebugHooks)
+            .accessibilityIdentifier("group-profile")
     }
 
     @ViewBuilder private var mainStack: some View {
@@ -1302,20 +1406,10 @@ struct GroupProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: PaneKit.pageTop)
-                    // The shared pane (D93): picture (crayon when a people group — it
-                    // opens the edit sheet), name, member count, Members | Library.
-                    // Leave / Delete group chat in the footer (same rule as the chat
-                    // list: members leave, owners delete).
-                    ProfilePane(
-                        hero: PaneHero(
-                            picture: .image(AnyView(heroPicture)),
-                            name: title,
-                            subtitle: memberSubtitle
-                        ),
-                        tabs: PaneKinds.group,
-                        selected: $tab,
-                        body: paneBodySections,
-                        footer: paneFooterSections
+                    ProfileOverview(
+                        hero: overviewHero,
+                        sections: overviewSections,
+                        footer: leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -1324,15 +1418,90 @@ struct GroupProfileView: View {
         }
     }
 
-    var body: some View {
-        // Modifiers live in a helper so `body` itself stays a small expression.
-        withSheets(withDialogs(mainStack))
+    private var overviewHero: PaneHero {
+        PaneHero(
+            picture: .image(AnyView(heroPicture)),
+            name: title,
+            // Edit pill under the name for owners/admins; members keep the count line.
+            subtitle: canEditGroupSettings ? "" : memberSubtitle,
+            action: canEditGroupSettings ? OverviewEdit.action { showEdit = true } : nil
+        )
     }
 
-    /// The confirms, centred alerts (`Confirm.swift`). The two menus — mute durations, a
-    /// member's actions — sit on their own rows (`muteFooter`, `memberRow`), anchored.
+    private var overviewSections: [PaneSection] {
+        var rows: [AnyView] = [
+            AnyView(overviewRow(icon: "person.2", title: "Members", value: "\(memberCount)", page: .members)),
+            AnyView(overviewRow(icon: "books.vertical", title: "Library", value: nil, page: .library)),
+        ]
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            rows.append(AnyView(overviewRow(icon: "list.bullet.rectangle", title: "Activity", value: nil, page: .activity)))
+        }
+        return [
+            .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
+        ] + notificationsSection
+    }
+
+    private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
+        let work = model.accountWork()
+        return Button { guard model.acceptsAccountWork(work) else { return }; subpage = page } label: {
+            PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("group-overview-\(page.rawValue)")
+    }
+
+    @ViewBuilder
+    private func groupSubpage(_ page: Subpage) -> some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .glyph(page == .library ? "books.vertical" : (page == .activity ? "list.bullet.rectangle" : "person.2")),
+                            name: page.title,
+                            subtitle: title
+                        ),
+                        tabs: [],
+                        selected: .constant(""),
+                        body: subpageSections(page)
+                    )
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .groupPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityIdentifier("group-subpage-\(page.rawValue)")
+    }
+
+    private func subpageSections(_ page: Subpage) -> [PaneSection] {
+        switch page {
+        case .members: return membersSections + groupInviteSections
+        case .library: return librarySections
+        case .activity: return [.custom(AnyView(GroupActivityEmbedded(chatId: chatId)))]
+        }
+    }
+
+    @ViewBuilder private var addMembersPage: some View {
+        if let project {
+            ProjectMembersSheet(project: project)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .toolbar(.hidden, for: .navigationBar)
+        } else {
+            NewGroupView(onDone: { showAdd = false }, addTo: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    /// The confirms, centred alerts (`Confirm.swift`). Member actions stay on their row.
     private func withDialogs<Content: View>(_ content: Content) -> some View {
-        content
+        let work = model.accountWork()
+        return content
             .confirm(ConfirmSpec(
                 title: pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
                 message: "They can be added again later.", action: "Remove"
@@ -1342,8 +1511,10 @@ struct GroupProfileView: View {
             )) {
                 if let id = pendingRemoveId {
                     if rows.first(where: { $0.id == id })?.agent != nil {
+                        guard model.acceptsAccountWork(work) else { return }
                         model.removeAgent(chatId: chatId, projectId: id)
                     } else {
+                        guard model.acceptsAccountWork(work) else { return }
                         model.removeMember(chatId: chatId, userId: id, ban: false)
                     }
                 }
@@ -1358,6 +1529,7 @@ struct GroupProfileView: View {
                 set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
             )) {
                 if let id = pendingBanId {
+                    guard model.acceptsAccountWork(work) else { return }
                     model.removeMember(chatId: chatId, userId: id, ban: true)
                 }
                 pendingBanId = nil
@@ -1365,79 +1537,78 @@ struct GroupProfileView: View {
             }
             .confirm(ConfirmSpec(title: "Leave \(title)?", message: "You leave the group. It stays for everyone else.",
                                  action: "Leave group chat"), isPresented: $confirmLeave) {
+                // No `dismiss()` on either: both take the path home, this page included.
+                guard model.acceptsAccountWork(work) else { return }
                 model.leavePeopleChat(chatId)
-                dismiss()
             }
             .confirm(ConfirmSpec(title: "Delete \(title)?", message: "Deletes the group for everyone in it.",
                                  action: "Delete group chat"), isPresented: $confirmDelete) {
+                guard model.acceptsAccountWork(work) else { return }
                 model.deletePeopleChat(chatId)
-                dismiss()
             }
     }
 
-    private func withSheets<Content: View>(_ content: Content) -> some View {
-        content
-            .sheet(isPresented: $showAdd) {
-                if let project {
-                    ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
-                } else {
-                    // The New group picker aimed at this group: its members show as
-                    // already in, Add puts the picks into it (not into a new group).
-                    // A sheet over the profile sheet, like GroupEditSheet: no
-                    // presentation / colour-scheme modifiers here — they unseat
-                    // the presenting sheet.
-                    NavigationStack {
-                        NewGroupView(onDone: { showAdd = false }, addTo: chatId)
-                    }
-                    .tint(theme.text)
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
-                }
+    private func applyDebugHooks() {
+        let work = model.accountWork()
+        // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
+        if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard model.acceptsAccountWork(work) else { return }
+                pendingRemoveId = r.person.id
+                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
             }
-            .sheet(isPresented: $showEdit) {
-                GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+        }
+        // Rig: former tab names open the matching pushed sub-page.
+        if let t = DebugHooks.panelTab {
+            switch t {
+            case "Members": subpage = .members
+            case "Library": subpage = .library
+            default: break
             }
-            .sheet(isPresented: $showActivity) {
-                // Admin-only activity log (joined / removed / left / deleted messages).
-                // A sheet over the profile sheet — no presentation modifiers here.
-                GroupActivityView(chatId: chatId)
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
+        }
+        // Rig: `ARBOS_SHOW=addmembers` lands on Members → Add members push.
+        if DebugHooks.show == "addmembers", project == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                subpage = .members
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAdd = true }
             }
-            .task {
-                if let projectId { projectMembers = await model.projectMembers(projectId) }
-                if projectId == nil, people?.kind == "group" {
-                    groupInvites = await model.groupInvites(chatId)
-                }
+        }
+        // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens Edit → avatar picker.
+        if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
+            avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+            openAvatarOnEdit = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard model.acceptsAccountWork(work) else { return }; showEdit = true }
+        }
+    }
+
+    /// The hero picture: the agent's disc for a shared project; the group's
+    /// cluster or picked image for a people group. Overview has no crayon —
+    /// Edit owns the pencil badge. Tap opens Edit for owners/admins; everyone
+    /// else gets the full-size view when there is a picture.
+    @ViewBuilder private var heroPicture: some View {
+        if let project {
+            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
             }
-            .onAppear {
-                // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
-                if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        pendingRemoveId = r.person.id
-                        pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
-                    }
-                }
-                // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
-                // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
-                if DebugHooks.show == "addmembers", project == nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
-                }
-                // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
-                if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
-                    }
-                }
-                if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
-            .sheet(item: $showAvatarPicker) { initial in
-                AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
+        } else {
+            Button { showEdit = true } label: {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit group")
+        }
     }
 
     /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.
     private var groupInviteSections: [PaneSection] {
+        let work = model.accountWork()
         guard projectId == nil, people?.kind == "group" else { return [] }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var rows: [AnyView] = []
@@ -1452,10 +1623,13 @@ struct GroupProfileView: View {
                         trailing: AnyView(HStack(spacing: 4) {
                             if inv.usable {
                                 Button {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     inviteCopied = true
                                     Task { @MainActor in
+                                        guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
+                                        guard model.acceptsAccountWork(work) else { return }
                                         inviteCopied = false
                                     }
                                 } label: {
@@ -1475,8 +1649,11 @@ struct GroupProfileView: View {
                                 }
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 Task {
-                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id) {
+                                    guard model.acceptsAccountWork(work) else { return }
+                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
+                                        guard model.acceptsAccountWork(work) else { return }
                                         groupInvites.removeAll { $0.id == inv.id }
                                     }
                                 }
@@ -1495,8 +1672,11 @@ struct GroupProfileView: View {
             AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
             AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
             AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 Task {
-                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse) {
+                    guard model.acceptsAccountWork(work) else { return }
+                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work?.owner) {
+                        guard model.acceptsAccountWork(work) else { return }
                         groupInvites.insert(inv, at: 0)
                     }
                 }
@@ -1512,47 +1692,23 @@ struct GroupProfileView: View {
         ]
     }
 
-    /// The hero picture: the agent's leaf for a shared project; the group's
-    /// cluster or picked image for a people group — tap → the edit sheet for the
-    /// owner and admins, full-size view (when there is a picture) for everyone else.
-    @ViewBuilder private var heroPicture: some View {
-        if let project {
-            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
-            }
-        } else if !canEditGroupSettings {
-            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
-                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-            }
-        } else {
-            Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
-                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-                    .paneCrayon()
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit group name, description and picture")
-        }
-    }
-
-    /// Members: Add members, Share invite link (people groups), Activity for
-    /// owners/admins, then every person (name, @handle) and agent as kit rows.
-    /// Banned people (owner/admin) sit under Banned with Unban.
+    /// Members sub-page: Add members, Share invite link (people groups), then
+    /// every person (name, @handle) and agent as kit rows. Banned people
+    /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.
     private var membersSections: [PaneSection] {
+        let work = model.accountWork()
         var list: [AnyView] = [
-            AnyView(Button { showAdd = true } label: {
+            AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showAdd = true } label: {
                 PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // People groups: description lives in Edit (pushed) for
         // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
             if canEditGroupSettings {
-                list.append(AnyView(Button { showEdit = true } label: {
+                list.append(AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showEdit = true } label: {
                     PaneRow(
                         leading: .glyph("text.alignleft"),
                         title: "Description",
@@ -1572,7 +1728,9 @@ struct GroupProfileView: View {
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
             list.append(AnyView(Button {
-                shareGroupInvite()
+                guard model.acceptsAccountWork(work) else { return }
+                guard let work, model.acceptsAccountWork(work) else { return }
+                shareGroupInvite(work: work)
             } label: {
                 PaneRow(
                     leading: .glyph("square.and.arrow.up"),
@@ -1582,14 +1740,6 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)
             .disabled(sharingInvite)
             .accessibilityLabel("Share invite link")))
-        }
-        // People groups only: the activity log is built from this chat's system lines.
-        if projectId == nil, people?.isGroup == true, canManageMembers {
-            list.append(AnyView(Button { showActivity = true } label: {
-                PaneRow(leading: .glyph("list.bullet.rectangle"), title: "Activity", chevron: true)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Group activity")))
         }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
@@ -1603,8 +1753,10 @@ struct GroupProfileView: View {
 
     /// A banned person: name, @handle · banned, Unban for whoever may mute/ban.
     private func bannedRow(_ r: Row) -> some View {
+        let work = model.accountWork()
         let unban: AnyView? = iCanMuteBan ? AnyView(
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 model.unbanMember(chatId: chatId, userId: r.person.id)
             } label: {
                 Text("Unban")
@@ -1615,7 +1767,8 @@ struct GroupProfileView: View {
             .accessibilityLabel("Unban @\(r.person.handle)")
         ) : nil
         return Button {
-            model.showProfile(.user(r.person))
+            guard model.acceptsAccountWork(work) else { return }
+            model.showProfile(.user(r.person), in: profileHost)
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))),
@@ -1627,11 +1780,13 @@ struct GroupProfileView: View {
         .buttonStyle(.borderless)
         .contextMenu {
             Button {
-                model.showProfile(.user(r.person))
+                guard model.acceptsAccountWork(work) else { return }
+                model.showProfile(.user(r.person), in: profileHost)
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if iCanMuteBan {
                 Divider()
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     model.unbanMember(chatId: chatId, userId: r.person.id)
                 } label: { Label("Unban", systemImage: "hand.raised.slash") }
             }
@@ -1641,25 +1796,25 @@ struct GroupProfileView: View {
     /// Reuse a usable invite URL, or mint one, then open the system share sheet.
     /// Pass the link as a `String`, not a `URL`: Telegram's share extension drops a
     /// bare URL activity item, so the recipient's chat gets an empty message.
-    private func shareGroupInvite() {
-        guard !sharingInvite else { return }
+    private func shareGroupInvite(work: AccountWork) {
+        guard model.acceptsAccountWork(work), !sharingInvite else { return }
         sharingInvite = true
         Task {
+            guard model.acceptsAccountWork(work) else { return }
+            defer { if model.accountLifetime.accepts(work.owner) { sharingInvite = false } }
             if let existing = groupInvites.first(where: { $0.usable }),
                URL(string: existing.url) != nil {
                 presentShareSheet(items: [existing.url])
-                sharingInvite = false
                 return
             }
-            if let inv = await model.createGroupInvite(
-                chatId, expires: inviteExpires, singleUse: inviteSingleUse
-            ) {
+            let created = await model.createGroupInvite(
+                chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work.owner
+            )
+            guard model.acceptsAccountWork(work) else { return }
+            if let inv = created {
                 groupInvites.insert(inv, at: 0)
-                if URL(string: inv.url) != nil {
-                    presentShareSheet(items: [inv.url])
-                }
+                if URL(string: inv.url) != nil { presentShareSheet(items: [inv.url]) }
             }
-            sharingInvite = false
         }
     }
 
@@ -1675,9 +1830,10 @@ struct GroupProfileView: View {
     }
 
     private func memberRow(_ r: Row) -> some View {
+        let work = model.accountWork()
         let isMe = r.agent == nil && r.person.id == model.user?.id
         let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
-        let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar, still: true)) }
+        let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar)) }
             ?? AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))
         let member = r.agent == nil ? people?.members.first(where: { !$0.isAgent && $0.id == r.person.id }) : nil
         let isSilenced = member?.isSilencedNow ?? false
@@ -1691,12 +1847,14 @@ struct GroupProfileView: View {
                     if canMuteBan(r) {
                         if isSilenced {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
                             } label: { Label("Unmute", systemImage: "speaker.wave.2") }
                         } else {
                             Menu {
                                 ForEach(MemberMuteDuration.allCases) { duration in
                                     Button(duration.title) {
+                                        guard model.acceptsAccountWork(work) else { return }
                                         model.setMemberSilenced(
                                             chatId: chatId, userId: r.person.id,
                                             silenced: true, duration: duration
@@ -1709,11 +1867,13 @@ struct GroupProfileView: View {
                     if isGroupOwner {
                         if r.role == "member" {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
                             } label: { Label("Make admin", systemImage: "person.badge.key") }
                         } else if r.role == "admin" {
                             let allowed = member?.canMuteBan ?? true
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberCanMuteBan(
                                     chatId: chatId, userId: r.person.id, canMuteBan: !allowed
                                 )
@@ -1724,6 +1884,7 @@ struct GroupProfileView: View {
                                 )
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
                             } label: { Label("Remove admin", systemImage: "person.badge.minus") }
                         }
@@ -1731,11 +1892,13 @@ struct GroupProfileView: View {
                     if canRemove(r) {
                         Divider()
                         Button(role: .destructive) {
+                            guard model.acceptsAccountWork(work) else { return }
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
                         } label: { Label("Remove", systemImage: "person.badge.minus") }
                         if canMuteBan(r) {
                             Button(role: .destructive) {
+                                guard model.acceptsAccountWork(work) else { return }
                                 pendingBanId = r.person.id
                                 pendingBanName = label
                             } label: { Label("Ban", systemImage: "hand.raised") }
@@ -1743,6 +1906,7 @@ struct GroupProfileView: View {
                     }
                 } else if canRemove(r) {
                     Button(role: .destructive) {
+                        guard model.acceptsAccountWork(work) else { return }
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
                     } label: { Label("Remove", systemImage: "person.badge.minus") }
@@ -1768,10 +1932,11 @@ struct GroupProfileView: View {
             }
         }()
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             if let a = r.agent {
-                model.showProfile(.agent(projectId: a.id))
+                model.showProfile(.agent(projectId: a.id), in: profileHost)
             } else if isMe {
-                model.showProfile(.user(r.person))
+                model.showProfile(.user(r.person), in: profileHost)
             } else {
                 // Offer Send private message alongside View profile (#1455).
                 memberActions = r.person
@@ -1790,14 +1955,17 @@ struct GroupProfileView: View {
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     let handle = r.person.handle
                     Task {
-                        if await model.openDM(handle: handle) != nil { dismiss() }
+                        guard model.acceptsAccountWork(work) else { return }
+                        if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                     }
                 } label: { Label("Send private message", systemImage: "bubble.left") }
             }
             Button {
-                if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+                guard model.acceptsAccountWork(work) else { return }
+                if let a = r.agent { model.showProfile(.agent(projectId: a.id), in: profileHost) } else { model.showProfile(.user(r.person), in: profileHost) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if showManage {
                 Divider()
@@ -1805,11 +1973,13 @@ struct GroupProfileView: View {
                     if canMuteBan(r) {
                         if isSilenced {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
                             } label: { Label("Unmute", systemImage: "speaker.wave.2") }
                         } else {
                             ForEach(MemberMuteDuration.allCases) { duration in
                                 Button("Mute · \(duration.title)") {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     model.setMemberSilenced(
                                         chatId: chatId, userId: r.person.id,
                                         silenced: true, duration: duration
@@ -1821,11 +1991,13 @@ struct GroupProfileView: View {
                     if isGroupOwner {
                         if r.role == "member" {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
                             } label: { Label("Make admin", systemImage: "person.badge.key") }
                         } else if r.role == "admin" {
                             let allowed = member?.canMuteBan ?? true
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberCanMuteBan(
                                     chatId: chatId, userId: r.person.id, canMuteBan: !allowed
                                 )
@@ -1836,17 +2008,20 @@ struct GroupProfileView: View {
                                 )
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
                             } label: { Label("Remove admin", systemImage: "person.badge.minus") }
                         }
                     }
                     if canRemove(r) {
                         Button(role: .destructive) {
+                            guard model.acceptsAccountWork(work) else { return }
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
                         } label: { Label("Remove from group", systemImage: "person.badge.minus") }
                         if canMuteBan(r) {
                             Button(role: .destructive) {
+                                guard model.acceptsAccountWork(work) else { return }
                                 pendingBanId = r.person.id
                                 pendingBanName = label
                             } label: { Label("Ban from group", systemImage: "hand.raised") }
@@ -1854,6 +2029,7 @@ struct GroupProfileView: View {
                     }
                 } else if canRemove(r) {
                     Button(role: .destructive) {
+                        guard model.acceptsAccountWork(work) else { return }
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
                     } label: { Label("Remove from group", systemImage: "xmark") }
@@ -1867,17 +2043,20 @@ struct GroupProfileView: View {
             set: { if !$0 { memberActions = nil } }
         ), titleVisibility: .visible) {
             Button("Send private message") {
+                guard model.acceptsAccountWork(work) else { return }
                 let handle = r.person.handle
                 memberActions = nil
                 Task {
-                    if await model.openDM(handle: handle) != nil { dismiss() }
+                    guard model.acceptsAccountWork(work) else { return }
+                    if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                 }
             }
             Button("View profile") {
-                model.showProfile(.user(r.person))
+                guard model.acceptsAccountWork(work) else { return }
+                model.showProfile(.user(r.person), in: profileHost)
                 memberActions = nil
             }
-            Button("Cancel", role: .cancel) { memberActions = nil }
+            Button("Cancel", role: .cancel) { guard model.acceptsAccountWork(work) else { return }; memberActions = nil }
         }
     }
 
@@ -1900,7 +2079,43 @@ struct GroupProfileView: View {
     private var librarySections: [PaneSection] {
         LibraryList.sections(items: items, empty: "Nothing shared here yet.")
     }
+}
 
+/// Activity list without its own SettingsPage chrome — drawn inside the group
+/// Activity sub-page's ProfilePane body.
+private struct GroupActivityEmbedded: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let chatId: String
+
+    private var events: [GroupActivity.Event] {
+        GroupActivity.events(from: model.messages(of: chatId))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if events.isEmpty {
+                Text("Joins, removals, leaves and deleted messages will show up here.")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PaneKit.inset)
+            } else {
+                ForEach(GroupActivity.Kind.allCases, id: \.self) { kind in
+                    let filtered = events.filter { $0.kind == kind }
+                    if !filtered.isEmpty {
+                        PaneSectionTitle(kind.title)
+                        PaneCard {
+                            ForEach(filtered) { event in
+                                GroupActivityRow(event: event)
+                            }
+                        }
+                        .padding(.horizontal, PaneKit.inset)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Group activity (admins)
@@ -1975,8 +2190,8 @@ enum GroupActivity {
     static func whenLabel(_ at: Int64, now: Int64 = nowMs()) -> String {
         guard at > 0 else { return "" }
         let date = Date(timeIntervalSince1970: Double(at) / 1000)
-        let age = max(0, now - at)
-        if age < 86_400_000 {
+        // A bare clock only for today's events; last night's carries its date.
+        if Calendar.current.isDate(date, inSameDayAs: Date(timeIntervalSince1970: Double(now) / 1000)) {
             return date.formatted(date: .omitted, time: .shortened)
         }
         return date.formatted(date: .abbreviated, time: .shortened)
@@ -2054,21 +2269,37 @@ private struct GroupActivityRow: View {
 
 // MARK: - Server page (D88)
 
-/// A server's details on the shared pane kit (rule 5): disc, name, member
-/// count, Channels | Members, the invite link (rule 6), then the one action at
-/// the end. Owners and admins get the admin rows (rename, add / rename /
-/// delete a channel, "Admins only post", roles, remove, ban, reset link);
-/// members see the same page read-only with Leave.
+/// A server's profile — Grok Bot's overview hierarchy ([feedback
+/// iphone-entity-profile-edit-2026-11-10]): large avatar, name, Edit pill
+/// (admin), then grouped rows (Channels · Members · Settings) that push further
+/// right. Edit pushes `ServerEditView`; New channel / Add members / avatar are
+/// further pushes. No tab pills; no bottom sheets on this path. Owners and
+/// admins still get the admin rows on the pushed pages; members see the same
+/// overview read-only with Leave.
 struct ServerProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// A member row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let serverId: String
-    @State private var tab = "Channels"
-    @State private var showRename = false
-    @State private var renameDraft = ""
-    @State private var showAvatarPicker = false
-    @State private var avatarPickerTab: AvatarPickerTab = .bot
+
+    enum Subpage: String, Identifiable, Hashable {
+        case channels, members, settings
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .channels: return "Channels"
+            case .members: return "Members"
+            case .settings: return "Settings"
+            }
+        }
+    }
+
+    @State private var showEdit = false
+    @State private var subpage: Subpage? = nil
+    @State private var openAvatarOnEdit = false
+    @State private var avatarTab: AvatarPickerTab = .bot
     @State private var showNewChannel = false
     @State private var renamingChannel: ServerChannel?
     @State private var channelDraft = ""
@@ -2077,7 +2308,6 @@ struct ServerProfileView: View {
     @State private var banningMember: ServerMember?
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    @State private var confirmReset = false
     @State private var copied = false
     @State private var loadedMembers = false
     @State private var showAddMembers = false
@@ -2091,29 +2321,50 @@ struct ServerProfileView: View {
     private var memberCount: Int { max(server?.memberCount ?? 0, server?.members.count ?? 0) }
 
     var body: some View {
+        let work = model.accountWork()
         serverDialogs(memberDialogs(channelDialogs(frame)))
-            .sheet(isPresented: $showNewChannel) {
-                NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
+            .navigationDestination(isPresented: $showEdit) {
+                ServerEditView(serverId: serverId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+                    .onDisappear { openAvatarOnEdit = false }
             }
-            .sheet(isPresented: $showAddMembers) {
-                // The groups' picker, people only; a sheet over the profile sheet (no
-                // presentation modifiers here — they unseat the presenting sheet).
-                NavigationStack {
-                    NewGroupView(onDone: { showAddMembers = false }, addToServer: serverId)
-                }
-                .tint(theme.text)
-                .environmentObject(model)
-                .environment(\.theme, theme)
+            .navigationDestination(item: $subpage) { page in
+                serverSubpage(page)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showNewChannel) {
+                NewChannelPage(serverId: serverId)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .backSwipeToPop()
+            }
+            .navigationDestination(isPresented: $showAddMembers) {
+                NewGroupView(onDone: { showAddMembers = false }, addToServer: serverId)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .backSwipeToPop()
             }
             .task {
-                if let t = DebugHooks.panelTab { tab = t }
-                await model.refreshServer(serverId)
+                guard model.acceptsAccountWork(work) else { return }
+                if let t = DebugHooks.panelTab {
+                    switch t {
+                    case "Channels": subpage = .channels
+                    case "Members": subpage = .members
+                    case "Settings": subpage = .settings
+                    default: break
+                    }
+                }
+                await model.refreshServer(serverId, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
                 loadedMembers = true
             }
+            .accessibilityIdentifier("server-profile")
     }
 
     /// The page without its dialogs: split out so the compiler type-checks each part alone.
-    /// Shared profile pane (D93): hero, Channels | Members | Settings, Leave / Delete in the footer.
     private var frame: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -2121,13 +2372,9 @@ struct ServerProfileView: View {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: PaneKit.pageTop)
                     if let server {
-                        ProfilePane(
-                            hero: hero(server),
-                            tabs: PaneKinds.server,
-                            selected: $tab,
-                            body: tab == "Channels" ? channelSections(server)
-                                : tab == "Members" ? memberSections(server)
-                                : settingsSections(server),
+                        ProfileOverview(
+                            hero: overviewHero(server),
+                            sections: overviewSections(server),
                             footer: [.card([AnyView(actions(server))])]
                         )
                     } else {
@@ -2142,37 +2389,89 @@ struct ServerProfileView: View {
         }
     }
 
-    private func hero(_ server: Server) -> PaneHero {
+    private func overviewHero(_ server: Server) -> PaneHero {
         let channels = server.liveChannels.count
+        let countLine = "\(memberCount) member\(memberCount == 1 ? "" : "s") · \(channels) channel\(channels == 1 ? "" : "s")"
         return PaneHero(
             picture: .image(AnyView(heroPicture(server))),
             name: server.name,
-            subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s") · \(channels) channel\(channels == 1 ? "" : "s")"
+            subtitle: isAdmin ? "" : countLine,
+            action: isAdmin ? OverviewEdit.action { showEdit = true } : nil
         )
+    }
+
+    private func overviewSections(_ server: Server) -> [PaneSection] {
+        var rows: [AnyView] = [
+            AnyView(overviewRow(icon: "number", title: "Channels", value: "\(server.liveChannels.count)", page: .channels)),
+            AnyView(overviewRow(icon: "person.2", title: "Members", value: "\(memberCount)", page: .members)),
+        ]
+        if isAdmin {
+            rows.append(AnyView(overviewRow(icon: "gearshape", title: "Settings", value: nil, page: .settings)))
+        }
+        return [.card(rows, separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
+    private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
+        Button { subpage = page } label: {
+            PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("server-overview-\(page.rawValue)")
+    }
+
+    @ViewBuilder
+    private func serverSubpage(_ page: Subpage) -> some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    if let server {
+                        ProfilePane(
+                            hero: PaneHero(
+                                picture: .glyph(page == .channels ? "number" : (page == .members ? "person.2" : "gearshape")),
+                                name: page.title,
+                                subtitle: server.name
+                            ),
+                            tabs: [],
+                            selected: .constant(""),
+                            body: subpageSections(page, server)
+                        )
+                    }
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .serverPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityIdentifier("server-subpage-\(page.rawValue)")
+    }
+
+    private func subpageSections(_ page: Subpage, _ server: Server) -> [PaneSection] {
+        switch page {
+        case .channels: return channelSections(server)
+        case .members: return memberSections(server)
+        case .settings: return settingsSections(server)
+        }
     }
 
     @ViewBuilder
     private func heroPicture(_ server: Server) -> some View {
-        Group {
-            if isAdmin {
-                // D92 amendment: the avatar picker (Bot | Generate | Upload) for the server's
-                // picture; Rename lives on the Settings tab.
-                Button { showAvatarPicker = true } label: {
-                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
-                        .paneCrayon()
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Change server picture")
-            } else {
-                ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
-                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
-                }
+        if isAdmin {
+            Button { showEdit = true } label: {
+                ServerAvatar(server: server, size: PaneKit.heroAvatar)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit server")
+        } else {
+            ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
+                ServerAvatar(server: server, size: PaneKit.heroAvatar)
             }
         }
     }
 
-    /// Footer (every tab): Leave server — or Delete server for the owner.
+    /// Footer (overview): Leave server — or Delete server for the owner.
     @ViewBuilder
     private func actions(_ server: Server) -> some View {
         if isOwner {
@@ -2182,16 +2481,11 @@ struct ServerProfileView: View {
         }
     }
 
-    /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (invite link).
-    /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (the
-    /// owner's invite links — demoted to a fallback on 2026-10-22; admins see none).
+    /// Settings sub-page: behaviour (Open server) → relations (invite links).
+    /// Rename / avatar live on Edit.
     private func settingsSections(_ server: Server) -> [PaneSection] {
         guard isAdmin else { return [.empty("Nothing to set up here yet.")] }
         var out: [PaneSection] = [
-            .card([AnyView(ProfileLinkRow(title: "Rename server") {
-                renameDraft = server.name
-                showRename = true
-            })]),
             .custom(AnyView(openCard(server))),
         ]
         if isOwner {
@@ -2203,6 +2497,7 @@ struct ServerProfileView: View {
     /// The owner's invite links: each with its terms, Copy / Share and revoke; then the two
     /// options and "New invite link".
     private func inviteSections(_ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var rows: [AnyView] = []
         if server.invites.isEmpty {
@@ -2216,10 +2511,13 @@ struct ServerProfileView: View {
                         trailing: AnyView(HStack(spacing: 4) {
                             if inv.usable {
                                 Button {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     copied = true
                                     Task { @MainActor in
+                                        guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
+                                        guard model.acceptsAccountWork(work) else { return }
                                         copied = false
                                     }
                                 } label: {
@@ -2239,7 +2537,8 @@ struct ServerProfileView: View {
                                 }
                             }
                             Button {
-                                Task { await model.revokeServerInvite(serverId, inviteId: inv.id) }
+                                guard model.acceptsAccountWork(work) else { return }
+                                Task { guard model.acceptsAccountWork(work) else { return }; await model.revokeServerInvite(serverId, inviteId: inv.id, expectedOwner: work?.owner) }
                             } label: {
                                 Image(systemName: "xmark.circle")
                                     .font(theme.font(17)).foregroundStyle(theme.muted)
@@ -2255,7 +2554,8 @@ struct ServerProfileView: View {
             AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
             AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
             AnyView(Button {
-                Task { await model.createServerInvite(serverId, expires: inviteExpires, singleUse: inviteSingleUse) }
+                guard model.acceptsAccountWork(work) else { return }
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.createServerInvite(serverId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work?.owner) }
             } label: {
                 PaneRow(leading: .glyph("plus"), title: "New invite link")
             }.buttonStyle(.plain)),
@@ -2264,26 +2564,20 @@ struct ServerProfileView: View {
             .title("Invite links"),
             .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
             .card(options),
-            .footnote("A fallback for people who are not on Arbos yet: the link opens Arbos and joins them. Add people who already have an account from the Members tab."),
+            .footnote("A fallback for people who are not on Arbos yet: the link opens Arbos and joins them. Add people who already have an account from Members."),
         ]
     }
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
-        v
-            .sheet(isPresented: $showAvatarPicker) {
-                AvatarPickerSheet(target: .server(serverId), initialTab: avatarPickerTab).environmentObject(model).environment(\.theme, theme)
-            }
+        let work = model.accountWork()
+        return v
             .onAppear {
-                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens the avatar picker on that tab.
+                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens Edit → avatar picker.
                 if let show = DebugHooks.show, show.hasPrefix("serveravatar") {
-                    avatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = true }
+                    avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                    openAvatarOnEdit = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard model.acceptsAccountWork(work) else { return }; showEdit = true }
                 }
-            }
-            .alert("Rename server", isPresented: $showRename) {
-                TextField("Server name", text: $renameDraft)
-                Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }
-                Button("Cancel", role: .cancel) { }
             }
             .alert("Rename channel", isPresented: Binding(
                 get: { renamingChannel != nil },
@@ -2293,62 +2587,60 @@ struct ServerProfileView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("Save") {
-                    if let c = renamingChannel { Task { await model.renameChannel(c, name: channelDraft) } }
+                    guard model.acceptsAccountWork(work) else { return }
+                    if let c = renamingChannel { Task { guard model.acceptsAccountWork(work) else { return }; await model.renameChannel(c, name: channelDraft, expectedOwner: work?.owner) } }
                     renamingChannel = nil
                 }
-                Button("Cancel", role: .cancel) { renamingChannel = nil }
+                Button("Cancel", role: .cancel) { guard model.acceptsAccountWork(work) else { return }; renamingChannel = nil }
             } message: {
                 Text("Letters, digits and dashes.")
             }
             .confirm(item: $deletingChannel, spec: { c in
                 ConfirmSpec(title: "Delete #\(c.name)?", message: "Its messages go for everyone in the server.", action: "Delete channel")
-            }) { c in
-                Task { await model.deleteChannel(c) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {c in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.deleteChannel(c, expectedOwner: work?.owner) }
             }
     }
 
     private func memberDialogs<V: View>(_ v: V) -> some View {
-        v
+        let work = model.accountWork()
+        return v
             .confirm(item: $removingMember, spec: { m in
                 ConfirmSpec(title: "Remove @\(m.handle)?", message: "They can join again with the invite link.", action: "Remove")
-            }) { m in
-                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {m in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.removeServerMember(serverId: serverId, userId: m.id, ban: false, expectedOwner: work?.owner) }
             }
             .confirm(item: $banningMember, spec: { m in
                 ConfirmSpec(title: "Ban @\(m.handle)?", message: "They are removed and the invite link no longer works for them.", action: "Ban")
-            }) { m in
-                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {m in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.removeServerMember(serverId: serverId, userId: m.id, ban: true, expectedOwner: work?.owner) }
             }
     }
 
     private func serverDialogs<V: View>(_ v: V) -> some View {
-        v
+        let work = model.accountWork()
+        return v
             .confirm(ConfirmSpec(title: "Leave \(server?.name ?? "this server")?", message: "You can come back with an invite link.",
                                  action: "Leave"), isPresented: $confirmLeave) {
-                Task {
-                    if await model.leaveServer(serverId) { dismiss() }
-                }
+                // No `dismiss()` on either: the model leaves every screen about the
+                // server, this page included, and popping as well would overshoot.
+                Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.leaveServer(serverId, expectedOwner: work?.owner) }
             }
             .confirm(ConfirmSpec(title: "Delete \(server?.name ?? "this server")?", message: "Every channel and message goes, for everyone.",
                                  action: "Delete server"), isPresented: $confirmDelete) {
-                Task {
-                    if await model.deleteServer(serverId) { dismiss() }
-                }
-            }
-            .confirm(ConfirmSpec(title: "Reset the invite link?", message: "The old link stops working. People already in stay.",
-                                 action: "Reset link"), isPresented: $confirmReset) {
-                Task { await model.resetServerInvite(serverId) }
+                Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.deleteServer(serverId, expectedOwner: work?.owner) }
             }
     }
 
     // MARK: Channels
 
     private func channelSections(_ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let inset = PaneKit.separatorInset(.glyph(""))
         var rows: [AnyView] = []
         if isAdmin {
             // Rule 7: owners/admins add channels; members never see this row.
-            rows.append(AnyView(Button { showNewChannel = true } label: {
+            rows.append(AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showNewChannel = true } label: {
                 PaneRow(leading: .glyph("plus"), title: "Add channel")
             }.buttonStyle(.plain)))
         }
@@ -2361,7 +2653,13 @@ struct ServerProfileView: View {
                 AnyView(PaneRow(leading: .glyph("archivebox"), title: c.name,
                                 subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
                                 trailing: AnyView(
-                                    Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
+                                    Button("Unarchive") {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        Task {
+                                            guard model.acceptsAccountWork(work) else { return }
+                                            await model.archiveChannel(c, false, expectedOwner: work?.owner)
+                                        }
+                                    }
                                         .font(theme.font(Theme.small, weight: .medium))
                                         .buttonStyle(.bordered)
                                         .tint(theme.muted)
@@ -2372,22 +2670,25 @@ struct ServerProfileView: View {
     }
 
     private func channelRow(_ c: ServerChannel, in server: Server) -> some View {
+        let work = model.accountWork()
         let restricted = model.channelRestricted(c)
         let isGeneral = c.id == server.generalChannelId || (server.generalChannelId == nil && c.name == "general")
         let menu: AnyView? = isAdmin ? AnyView(
             Menu {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     channelDraft = c.name
                     renamingChannel = c
                 } label: { Label("Rename", systemImage: "pencil") }
                 Button {
-                    Task { await model.setChannelRestricted(c, !restricted) }
+                    guard model.acceptsAccountWork(work) else { return }
+                    Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelRestricted(c, !restricted, expectedOwner: work?.owner) }
                 } label: {
                     Label("Admins only post", systemImage: restricted ? "checkmark" : "lock")
                 }
                 if !isGeneral {
                     Divider()
-                    Button(role: .destructive) { deletingChannel = c } label: { Label("Delete channel", systemImage: "trash") }
+                    Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; deletingChannel = c } label: { Label("Delete channel", systemImage: "trash") }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -2399,6 +2700,7 @@ struct ServerProfileView: View {
             .accessibilityLabel("Channel options")
         ) : nil
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             dismiss()
             model.open(channel: c)
         } label: {
@@ -2445,6 +2747,7 @@ struct ServerProfileView: View {
     }
 
     private func memberRow(_ m: ServerMember) -> some View {
+        let work = model.accountWork()
         let isMe = m.id == model.user?.id
         let title = isMe ? "\(m.displayName) (you)" : m.displayName
         // Owners manage everyone else; admins manage members only.
@@ -2453,18 +2756,30 @@ struct ServerProfileView: View {
             Menu {
                 if isOwner {
                     if m.role == "admin" {
-                        Button { Task { await model.setServerRole(serverId: serverId, userId: m.id, role: "member") } } label: {
+                        Button {
+                            guard model.acceptsAccountWork(work) else { return }
+                            Task {
+                                guard model.acceptsAccountWork(work) else { return }
+                                await model.setServerRole(serverId: serverId, userId: m.id, role: "member", expectedOwner: work?.owner)
+                            }
+                        } label: {
                             Label("Make member", systemImage: "person")
                         }
                     } else {
-                        Button { Task { await model.setServerRole(serverId: serverId, userId: m.id, role: "admin") } } label: {
+                        Button {
+                            guard model.acceptsAccountWork(work) else { return }
+                            Task {
+                                guard model.acceptsAccountWork(work) else { return }
+                                await model.setServerRole(serverId: serverId, userId: m.id, role: "admin", expectedOwner: work?.owner)
+                            }
+                        } label: {
                             Label("Make admin", systemImage: "person.badge.key")
                         }
                     }
                     Divider()
                 }
-                Button(role: .destructive) { removingMember = m } label: { Label("Remove", systemImage: "person.badge.minus") }
-                Button(role: .destructive) { banningMember = m } label: { Label("Ban", systemImage: "hand.raised") }
+                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; removingMember = m } label: { Label("Remove", systemImage: "person.badge.minus") }
+                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; banningMember = m } label: { Label("Ban", systemImage: "hand.raised") }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(theme.font(17))
@@ -2477,7 +2792,8 @@ struct ServerProfileView: View {
         let person = ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
                                    lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex)
         return Button {
-            model.showProfile(.user(person))
+            guard model.acceptsAccountWork(work) else { return }
+            model.showProfile(.user(person), in: profileHost)
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: PaneKit.avatar, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))),
@@ -2492,7 +2808,8 @@ struct ServerProfileView: View {
     // MARK: Open + invite (rule 6)
 
     private func openCard(_ server: Server) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let work = model.accountWork()
+        return VStack(alignment: .leading, spacing: 8) {
             PaneCard(header: "Discovery", footer: "When open, anyone on Arbos can find this server by name and join without an invite link.") {
                 PaneRow(
                     title: "Open server",
@@ -2500,7 +2817,7 @@ struct ServerProfileView: View {
                     trailing: AnyView(
                         Toggle("", isOn: Binding(
                             get: { server.isOpen },
-                            set: { on in Task { await model.setServerOpen(serverId, open: on) } }
+                            set: { on in guard model.acceptsAccountWork(work) else { return }; Task { guard model.acceptsAccountWork(work) else { return }; await model.setServerOpen(serverId, open: on, expectedOwner: work?.owner) } }
                         ))
                         .labelsHidden()
                         .tint(theme.online)
@@ -2511,7 +2828,6 @@ struct ServerProfileView: View {
         }
         .padding(.horizontal, PaneKit.inset)
     }
-
 }
 
 /// Finds the SwiftUI-hosted `UITextField` and makes a double-tap select the
@@ -2583,15 +2899,19 @@ private struct SelectAllOnDoubleTap: UIViewRepresentable {
 }
 
 /// Name the group, set an optional description, and optionally pick a picture.
-/// Saves with `PATCH /chats/{id}`.
-struct GroupEditSheet: View {
+/// Pushed from the group overview's Edit pill — Grok Bot Edit hierarchy
+/// ([feedback iphone-entity-profile-edit-2026-11-10]). Saves with `PATCH /chats/{id}`.
+struct GroupEditView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
+    var openAvatarOnAppear: Bool = false
+    var initialAvatarTab: AvatarPickerTab = .bot
+
     @State private var name = ""
     @State private var descriptionText = ""
-    @State private var showAvatarPicker = false
+    @State private var showAvatar = false
     @State private var saving = false
     @FocusState private var nameFocused: Bool
 
@@ -2609,82 +2929,307 @@ struct GroupEditSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 22) {
-                    // The picture: the avatar picker sheet (D92 amendment — Bot = the group's
-                    // leaf, Upload = a photo; changes apply on Set avatar).
-                    Button { showAvatarPicker = true } label: {
-                        ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
-                                .frame(width: 112, height: 112)
-                            GlassCircle(size: 36) { // control-size: exception rowIconTiles
-                                Image(systemName: "camera.fill")
-                                    .font(theme.font(14, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                            }
-                            .offset(x: 4, y: 4)
+        let work = model.accountWork()
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "Edit Group",
+                    doneTitle: saving ? "Saving…" : "Done",
+                    doneEnabled: !saving,
+                    onDone: { guard let work, model.acceptsAccountWork(work) else { return }; Task { await save(work: work) } }
+                )
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        EntityEditHero(onAvatar: { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }) {
+                            AvatarCluster(
+                                members: clusterMembers,
+                                size: 72,
+                                imageUrl: existingImageURL,
+                                discColor: people.flatMap { p in
+                                    p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil
+                                }
+                            )
                         }
+                        .padding(.top, 12)
+                        .id(people?.imageKey ?? people?.avatarDiscColor.map(String.init) ?? "auto")
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Name")
+                            PaneCard {
+                                EntityNameField(
+                                    text: $name,
+                                    placeholder: "Name this group",
+                                    focused: $nameFocused
+                                )
+                                .background(SelectAllOnDoubleTap())
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Description")
+                            PaneCard {
+                                TextField(
+                                    "",
+                                    text: $descriptionText,
+                                    prompt: Text("What this group is for").foregroundStyle(theme.placeholder),
+                                    axis: .vertical
+                                )
+                                .font(theme.font(Theme.body))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(3...6)
+                                .padding(.horizontal, PaneKit.inset)
+                                .padding(.vertical, 12)
+                                .onChange(of: descriptionText) { _, v in
+                                    if v.count > 200 { descriptionText = String(v.prefix(200)) }
+                                }
+                                .accessibilityIdentifier("group-description-field")
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Appearance")
+                            PaneCard {
+                                Button { guard model.acceptsAccountWork(work) else { return }; showAvatar = true } label: {
+                                    PaneRow(title: "Avatar", chevron: true)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("edit-avatar-row")
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
+                        Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 28)
+
+                        Color.clear.frame(height: 40)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Change group picture")
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Group name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        TextField("", text: $name, prompt: Text("Name this group").foregroundStyle(theme.placeholder))
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                            .autocorrectionDisabled()
-                            .focused($nameFocused)
-                            .background(SelectAllOnDoubleTap())
-                            .controlField()
-                    }
-                    .padding(.horizontal, 16)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(3...6)
-                            .controlFieldGrowing()
-                    }
-                    .padding(.horizontal, 16)
-
-                    Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.muted)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 28)
-
-                    Color.clear.frame(height: 24)
                 }
-                .padding(.top, 28)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .background(theme.bg)
-            .sheetHeader(title: "Edit group", onLeading: { dismiss() },
-                         action: saving ? "Saving…" : "Save", actionEnabled: !saving,
-                         onAction: { Task { await save() } })
-            .onAppear {
-                name = people?.title ?? ""
-                descriptionText = people?.description ?? ""
-                nameFocused = true
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("group-edit")
+        .onAppear {
+            name = people?.title ?? ""
+            descriptionText = people?.description ?? ""
+            if openAvatarOnAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }
             }
-            .sheet(isPresented: $showAvatarPicker) {
-                AvatarPickerSheet(target: .group(chatId)).environmentObject(model).environment(\.theme, theme)
-            }
+        }
+        .navigationDestination(isPresented: $showAvatar) {
+            AvatarPickerPage(target: .group(chatId), initialTab: initialAvatarTab)
+                .backSwipeToPop()
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.acceptsAccountWork(work) else { return }
         saving = true
+        defer { if model.accountLifetime.accepts(work.owner) { saving = false } }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
-        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
+        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc, expectedOwner: work.owner)
+        guard model.acceptsAccountWork(work) else { return }
+        if ok { dismiss() }
+    }
+}
+
+/// Server Edit page — name + avatar (pencil → AvatarPickerPage), matching
+/// `AgentEditView` / `GroupEditView` ([feedback iphone-entity-profile-edit-2026-11-10]).
+struct ServerEditView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let serverId: String
+    var openAvatarOnAppear: Bool = false
+    var initialAvatarTab: AvatarPickerTab = .bot
+
+    @State private var name = ""
+    @State private var showAvatar = false
+    @State private var saving = false
+    @FocusState private var nameFocused: Bool
+
+    private var server: Server? { model.server(serverId) }
+
+    var body: some View {
+        let work = model.accountWork()
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "Edit Server",
+                    doneTitle: saving ? "Saving…" : "Done",
+                    doneEnabled: !saving,
+                    onDone: { guard let work, model.acceptsAccountWork(work) else { return }; Task { await save(work: work) } }
+                )
+                ScrollView(showsIndicators: false) {
+                    if let server {
+                        VStack(alignment: .leading, spacing: 22) {
+                            EntityEditHero(onAvatar: { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }) {
+                                ServerAvatar(server: server, size: PaneKit.heroAvatar)
+                            }
+                            .padding(.top, 12)
+                            .id(server.imageKey ?? server.avatarColorIndex.map(String.init) ?? "auto")
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Name")
+                                PaneCard {
+                                    EntityNameField(
+                                        text: $name,
+                                        placeholder: "Server name",
+                                        focused: $nameFocused
+                                    )
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Appearance")
+                                PaneCard {
+                                    Button { guard model.acceptsAccountWork(work) else { return }; showAvatar = true } label: {
+                                        PaneRow(title: "Avatar", chevron: true)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("edit-avatar-row")
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                            }
+
+                            Color.clear.frame(height: 40)
+                        }
+                    } else {
+                        Text("This server is no longer available.")
+                            .foregroundStyle(theme.muted)
+                            .padding(.top, 120)
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("server-edit")
+        .onAppear {
+            name = server?.name ?? ""
+            if openAvatarOnAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }
+            }
+        }
+        .navigationDestination(isPresented: $showAvatar) {
+            AvatarPickerPage(target: .server(serverId), initialTab: initialAvatarTab)
+                .backSwipeToPop()
+        }
+    }
+
+    private func save(work: AccountWork) async {
+        guard model.acceptsAccountWork(work) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { dismiss(); return }
+        if trimmed == server?.name { dismiss(); return }
+        saving = true
+        let ok = await model.renameServer(serverId, name: trimmed, expectedOwner: work.owner)
+        guard model.acceptsAccountWork(work) else { return }
         saving = false
         if ok { dismiss() }
     }
 }
+
+/// New channel as a pushed page from the server Channels sub-page (same fields
+/// as `NewChannelSheet`, without sheet detents).
+struct NewChannelPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let serverId: String
+    @State private var name = ""
+    @State private var restricted = false
+    @State private var creating = false
+    @FocusState private var focused: Bool
+
+    private var slug: String { AppModel.channelSlug(name) }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: "New Channel",
+                    doneTitle: creating ? "Creating…" : "Create",
+                    doneEnabled: !slug.isEmpty && !creating,
+                    onDone: create
+                )
+                ScrollView {
+                    VStack(spacing: 22) {
+                        SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                            .padding(.horizontal, 16)
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Channel name")
+                            PaneCard {
+                                HStack(spacing: 6) {
+                                    Text("#").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.muted)
+                                    TextField("", text: $name, prompt: Text("announcements").foregroundStyle(theme.placeholder))
+                                        .font(theme.font(Theme.body))
+                                        .foregroundStyle(theme.text)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .focused($focused)
+                                        .submitLabel(.done)
+                                        .onSubmit { create() }
+                                }
+                                .padding(.horizontal, PaneKit.inset)
+                                .frame(minHeight: PaneKit.rowHeight)
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                            if !name.isEmpty, slug != name {
+                                Text(slug.isEmpty ? "Use letters, digits and dashes." : "Will be #\(slug)")
+                                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                                    .padding(.horizontal, PaneKit.inset * 2)
+                            }
+                        }
+                        .padding(.top, 12)
+
+                        PaneCard {
+                            PaneRow(
+                                title: "Admins only post",
+                                subtitle: restricted ? "Members read" : "Everyone posts",
+                                trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary))
+                            )
+                        }
+                        .padding(.horizontal, PaneKit.inset)
+
+                        Color.clear.frame(height: 40)
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
+        .accessibilityIdentifier("new-channel-page")
+        .onAppear { focused = true }
+        .claimFailures("new-channel", ["create the channel"])
+    }
+
+    private func create() {
+        guard !slug.isEmpty, !creating else { return }
+        creating = true
+        Task {
+            if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
+                dismiss()
+                model.open(channel: c)
+            }
+            creating = false
+        }
+    }
+}
+
 
 // MARK: - Shared profile pane (D93) — one component for every entity
 // (docs/group-chat-redesign.md § "Shared profile pane"; the Mac twin is profiles::pane).
@@ -2743,23 +3288,32 @@ enum PaneBlock: Equatable {
     case footer
 }
 
-/// The tab set of every kind, the same labels and order as the Mac page of
-/// that kind (`profiles/*.rs` `TABS`; the Mac's `pane::tests` holds the twin).
-/// Agent: Grok Bot's Details · Library · Computer (Jacob 2026-10-24, the Mac's #1679;
-/// iPhone [feedback iphone-agent-pane-tabs-2026-10-25]).
+/// Labels for every profile kind. Person / own / channel still use these as
+/// tab pills. Agent / group / server use them as **overview row** names under
+/// the Grok hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]) —
+/// Coding · Routines · Library · Computer for a native agent (tabs superseded;
+/// earlier [feedback iphone-agent-pane-tabs-2026-10-25]).
 enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
-    static let agent = ["Details", "Library", "Computer"]
-    /// A connected (outside) agent has no Arbos machine (#2142).
-    static let outsideAgent = ["Details", "Library"]
+    /// Overview rows on a native agent (Grok Bot profile).
+    static let agent = ["Coding", "Routines", "Library", "Computer"]
+    /// Overview rows on a connected (outside) agent — no Computer (#2142).
+    static let outsideAgent = ["Library", "Connection"]
+    /// Overview row labels (tabs superseded).
     static let group = ["Members", "Library"]
+    /// Overview row labels (tabs superseded).
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
-    static let all: [(String, [String])] = [
-        ("person", person), ("own profile", ownProfile), ("agent", agent),
-        ("group", group), ("server", server), ("channel", channel),
+    /// Kinds that still draw a tab pill on the profile landing.
+    static let tabbed: [(String, [String])] = [
+        ("person", person), ("own profile", ownProfile), ("channel", channel),
     ]
+    /// Kinds whose landing is the overview (no pill); rows push further right.
+    static let overview: [(String, [String])] = [
+        ("agent", agent), ("group", group), ("server", server),
+    ]
+    static let all: [(String, [String])] = tabbed + overview
 }
 
 struct ProfilePane: View {
@@ -2900,6 +3454,8 @@ struct ChannelProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// The server row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let channelId: String
     @State private var tab = "Profile"
     @State private var showRename = false
@@ -2913,6 +3469,7 @@ struct ChannelProfileView: View {
     private var isAdmin: Bool { server?.isAdmin ?? false }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
@@ -2943,27 +3500,30 @@ struct ChannelProfileView: View {
             ProfileTopBar(screen: .channelPage) { EmptyView() }
         }
         .task {
+                guard model.acceptsAccountWork(work) else { return }
             if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }
-            if let channel { await model.refreshServer(channel.serverId) }
+            if let channel { await model.refreshServer(channel.serverId, expectedOwner: work?.owner) }
         }
         .alert("Rename channel", isPresented: $showRename) {
             TextField("Channel name", text: $renameDraft)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Save") { if let c = channel { Task { _ = await model.renameChannel(c, name: renameDraft) } } }
+            Button("Save") { guard model.acceptsAccountWork(work) else { return }; if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.renameChannel(c, name: renameDraft, expectedOwner: work?.owner) } } }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Letters, digits and dashes.")
         }
         .alert("Topic", isPresented: $showTopic) {
             TextField("What this channel is for", text: $topicDraft)
-            Button("Save") { if let c = channel { Task { await model.setChannelTopic(c, topic: topicDraft) } } }
+            Button("Save") { guard model.acceptsAccountWork(work) else { return }; if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelTopic(c, topic: topicDraft, expectedOwner: work?.owner) } } }
             Button("Cancel", role: .cancel) { }
         }
         .confirm(ConfirmSpec(title: channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
                              message: "Deletes the channel and its messages for everyone in the server.", action: "Delete"),
                  isPresented: $confirmDelete) {
-            if let c = channel { Task { if await model.deleteChannel(c) { dismiss() } } }
+            // No `dismiss()`: the model leaves every screen about the channel itself,
+            // this page included. Dismissing as well would pop the channel list too.
+            if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.deleteChannel(c, expectedOwner: work?.owner) } }
         }
     }
 
@@ -2973,7 +3533,7 @@ struct ChannelProfileView: View {
 
     private func serverRow(_ server: Server) -> AnyView {
         AnyView(Button {
-            model.showProfile(.server(serverId: server.id))
+            model.showProfile(.server(serverId: server.id), in: profileHost)
         } label: {
             PaneRow(leading: .avatar(AnyView(
                 InitialsAvatar(name: server.name, handle: nil, id: server.id,
@@ -2983,10 +3543,11 @@ struct ChannelProfileView: View {
     }
 
     private func muteRow(_ channel: ServerChannel, title: String, subtitle: String?) -> AnyView {
-        AnyView(PaneRow(title: title, subtitle: subtitle, trailing: AnyView(
+        let work = model.accountWork()
+        return AnyView(PaneRow(title: title, subtitle: subtitle, trailing: AnyView(
             Toggle("", isOn: Binding(
                 get: { model.isChannelMuted(channel) },
-                set: { _ in model.toggleChannelMute(channel) }
+                set: { _ in guard model.acceptsAccountWork(work) else { return }; model.toggleChannelMute(channel) }
             )).labelsHidden().tint(theme.online)
         )))
     }
@@ -2997,7 +3558,7 @@ struct ChannelProfileView: View {
             about.append(AnyView(PaneTextRow(text: topic)))
         }
         about.append(AnyView(Button {
-            model.showProfile(.server(serverId: server.id))
+            model.showProfile(.server(serverId: server.id), in: profileHost)
         } label: {
             PaneRow(title: "Members", value: "\(count)", chevron: true)
         }.buttonStyle(.plain)))
@@ -3011,13 +3572,16 @@ struct ChannelProfileView: View {
     }
 
     private func settingsSections(_ channel: ServerChannel, _ server: Server, restricted: Bool) -> [PaneSection] {
+        let work = model.accountWork()
         var identity: [AnyView] = []
         if isAdmin {
             identity.append(AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 renameDraft = channel.name
                 showRename = true
             } label: { PaneRow(title: "Name", value: channel.name, chevron: true) }.buttonStyle(.plain)))
             identity.append(AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 topicDraft = channel.topic ?? ""
                 showTopic = true
             } label: { PaneRow(title: "Topic", value: channel.topic ?? "Add a topic", chevron: true) }.buttonStyle(.plain)))
@@ -3033,7 +3597,7 @@ struct ChannelProfileView: View {
             behaviour.append(AnyView(PaneRow(title: "Admins only post", subtitle: "Members read", trailing: AnyView(
                 Toggle("", isOn: Binding(
                     get: { restricted },
-                    set: { on in Task { await model.setChannelRestricted(channel, on) } }
+                    set: { on in guard model.acceptsAccountWork(work) else { return }; Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelRestricted(channel, on, expectedOwner: work?.owner) } }
                 )).labelsHidden().tint(theme.online)
             ))))
         } else {
@@ -3049,9 +3613,11 @@ struct ChannelProfileView: View {
     }
 
     private func footerSections(_ channel: ServerChannel, _ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let archived = channel.archived
         var rows: [AnyView] = [AnyView(Button {
-            Task { await model.archiveChannel(channel, !archived) }
+            guard model.acceptsAccountWork(work) else { return }
+            Task { guard model.acceptsAccountWork(work) else { return }; await model.archiveChannel(channel, !archived, expectedOwner: work?.owner) }
         } label: {
             PaneRow(leading: .tile(archived ? "tray.and.arrow.up" : "archivebox"),
                     title: archived ? "Unarchive channel" : "Archive channel",

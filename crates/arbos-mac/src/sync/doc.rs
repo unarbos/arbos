@@ -87,6 +87,7 @@ impl ChatDoc {
         let mut json = serde_json::to_value(map.get_deep_value()).ok()?;
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
+        arbos_core::doc::project_poll(&mut json);
         serde_json::from_value(json).ok()
     }
 
@@ -129,6 +130,7 @@ mod core_writer_tests {
         let mut json = row.clone();
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
+        arbos_core::doc::project_poll(&mut json);
         serde_json::from_value(json).expect("core row deserializes as Message")
     }
 
@@ -248,5 +250,75 @@ mod core_writer_tests {
         assert_eq!(commits.load(Ordering::SeqCst), 1);
         assert_eq!(mac.len(), 1);
         assert_eq!(mac.core.doc.get_list("commands").len(), 2);
+    }
+
+    /// #2894: a state only a newer agentd knows must not cost the user the message row.
+    ///
+    /// This runs through the real read path — a Loro doc, `read_all`, and the `.ok()?` in
+    /// `read_message` that is the actual drop site — rather than deserialising a hand-built
+    /// JSON row, so it cannot pass while the path that users hit stays broken. Before the
+    /// tolerant decode it returned no rows at all and the assistant's text with them.
+    ///
+    /// `closeReason` is here on purpose: an additive field does **not** rescue an unknown
+    /// value, so a bridge on the producer side cannot substitute for this fix. `Part` has no
+    /// `deny_unknown_fields` (the workspace's only one is in `arbos-core/src/chart.rs`), so the
+    /// extra key is ignored — and ignoring it is exactly why it cannot help.
+    ///
+    /// `cancelled` left this list in #2890, which made it a known state: a product word here
+    /// becomes a real variant later and silently halves the population while the test stays
+    /// green, so the values below are deliberately synthetic. `model.rs`'s own list still
+    /// carries `superseded`, and approval supersession is live work, so it will do this again.
+    #[test]
+    fn an_unknown_approval_state_does_not_cost_the_message_row() {
+        for state in ["something_from_2028", "a_state_from_a_newer_box"] {
+            let mac = ChatDoc::new("chat1", "proj1");
+            let part = mac.core.start_assistant_message("m1", "m0", "dev:box");
+            mac.core.append_text("m1", &part, "Stopping as you asked.");
+            mac.core.transact(|d| {
+                d.add_approval_part(
+                    "m1",
+                    "01TESTAPPROVALUNKNOWNSTATE",
+                    &arbos_core::approval::ApprovalRequest {
+                        title: "Run a destructive command (file-delete)?".into(),
+                        summary: "rm d*.html.bak".into(),
+                        risk: arbos_core::approval::Risk::Destructive,
+                        payload: serde_json::json!({ "command": "rm d*.html.bak" }),
+                    },
+                    Some(crate::model::now_ms() as i64 + 60_000),
+                );
+            });
+            mac.core.transact(|d| {
+                let m = d.find_message("m1").expect("the message");
+                let parts = match m.get("parts") {
+                    Some(ValueOrContainer::Container(Container::List(l))) => l,
+                    _ => panic!("parts"),
+                };
+                for ix in 0..parts.len() {
+                    if let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(ix) {
+                        if p.get("approvalId").is_some() {
+                            p.insert("state", state).ok();
+                            p.insert("closeReason", "cancelled").ok();
+                        }
+                    }
+                }
+            });
+
+            let rows = mac.read_all();
+            assert_eq!(rows.len(), 1, "`{state}` cost the whole message row");
+            assert_eq!(rows[0].plain_text(), "Stopping as you asked.");
+            let card = rows[0]
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    Part::Approval { state, .. } => Some(*state),
+                    _ => None,
+                })
+                .expect("the card survived with the row");
+            assert_eq!(
+                card,
+                crate::model::ApprovalState::Unknown,
+                "`{state}` was read as a state this build only thinks it knows"
+            );
+        }
     }
 }

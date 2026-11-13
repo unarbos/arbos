@@ -1,0 +1,9 @@
+{
+  "compile_exit": 0,
+  "exit_code": 1,
+  "seconds": 2.7235451670130715,
+  "server_source_sha256": "d6104f121739df0ac6d0dcb863e6f388feb2f62ad93a69d7733ae538c1ab080e",
+  "api_source_sha256": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+  "fixture_sha256": "ef89ceb76455c98c19982beeb271e7f13b05cbe0efa1f43f8c56101469499d94",
+  "output": "FAIL Matrix retired credential fetch cannot retry as B\nPASS Matrix same-account refresh and SDK start control\nRESULT tests=2 failed=1\n"
+}

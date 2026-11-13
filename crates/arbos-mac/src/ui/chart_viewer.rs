@@ -72,6 +72,7 @@ fn pill(
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
+        // glass-lint: allow (a pill on the viewer's own opaque panel)
         .map(|el| highlight::washed(el, theme.surface_1, theme))
         .text_size(px(12.5))
         .text_color(color)
@@ -215,6 +216,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             .cursor_pointer()
             .text_size(px(12.0))
             .when(on, |el| {
+                // glass-lint: allow (the Chart · Data switch sits on the viewer's own opaque panel)
                 el.bg(theme.bg)
                     .text_color(theme.text)
                     .font_weight(FontWeight::MEDIUM)
@@ -226,6 +228,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         .flex()
         .p(px(2.0))
         .rounded(px(8.0))
+        // glass-lint: allow (the switch's track, on the viewer's own opaque panel)
         .bg(theme.surface_2)
         .child(
             seg("chart-viewer-seg-chart", "Chart", !viewer.data_view, &theme).on_click(
@@ -274,6 +277,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         .h_full()
         .max_h(px(PANEL_MAX_H))
         .rounded(px(16.0))
+        // glass-lint: allow (a modal document panel over its own dimming scrim: the plot and the
+        // data table need a still ground, not a desktop moving under them)
         .bg(theme.bg)
         .border_1()
         .border_color(theme.border)
@@ -332,6 +337,7 @@ fn data_table(chart: &arbos_core::chart::Chart, theme: &Theme) -> AnyElement {
         .border_color(theme.border)
         .overflow_hidden()
         .debug_selector(|| "chart-viewer-table".into());
+    // glass-lint: allow (the data table's header band, on the viewer's own opaque panel)
     let mut head_row = div().flex().bg(theme.code_bg);
     for (i, h) in head.iter().enumerate() {
         head_row = head_row.child(cell(h.clone(), true, i, theme));

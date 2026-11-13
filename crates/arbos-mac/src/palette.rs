@@ -28,7 +28,7 @@
 //! chat's agent first. Picking one opens my pane on that page
 //! (`Shell::open_setting`).
 
-use arbos_core::search::{MatchField, MatchKind};
+use arbos_core::search::{match_text, MatchField, MatchKind};
 use arbos_core::settings_search::{self, Platform, SettingsItem, SettingsMatched};
 
 use crate::app::AgentPick;
@@ -223,7 +223,8 @@ pub struct AgentRow {
 }
 
 /// Which of the Mac's pages a shared index item is; `None` for the items the
-/// Mac does not list (the iPhone's Privacy, Text Size, Credits, Connected apps).
+/// Mac does not list (the iPhone's Privacy, Text Size, Credits; Connected apps
+/// is hidden on both until the feature ships).
 pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
     Some(match item {
         SettingsItem::Appearance | SettingsItem::AppearanceOpacity => {
@@ -251,6 +252,54 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
     })
 }
 
+/// A page this Mac has that the shared index does not carry.
+///
+/// `arbos_core::settings_search` is the index both apps read, so a page the
+/// iPhone has no screen for still costs an arm on its exhaustive route switch.
+/// Such a page lists here instead, with the shared entry's fields minus the
+/// platform list and the shared item id, and moves into the shared index when
+/// the iPhone's own page ships.
+struct MacOnlyPage {
+    page: SettingsPage,
+    title: &'static str,
+    path: &'static str,
+    keywords: &'static [&'static str],
+}
+
+impl MacOnlyPage {
+    /// The best way this page matches the normalized `q`: its title, else its
+    /// closest keyword. Same two fields, ranked the same way, as
+    /// `settings_search::match_entry` gives the shared pages.
+    fn hit(&self, q: &str) -> Option<(Match, Option<&'static str>)> {
+        let field = |kind, field| Match { kind, field };
+        let title = match_text(self.title, q).map(|k| (field(k, MatchField::Name), None));
+        let keyword = self
+            .keywords
+            .iter()
+            .filter_map(|kw| match_text(kw, q).map(|k| (field(k, MatchField::Title), Some(*kw))))
+            .min_by_key(|(m, _)| *m);
+        [title, keyword]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(m, _)| *m)
+    }
+}
+
+const MAC_ONLY: &[MacOnlyPage] = &[MacOnlyPage {
+    page: SettingsPage::AgentLinks,
+    title: "Agent access link",
+    path: "Settings",
+    keywords: &[
+        "agent access",
+        "agent link",
+        "read only",
+        "reply as me",
+        "share chats",
+        "give an agent access",
+        "revoke link",
+    ],
+}];
+
 /// The glyph for a built row (its target says which item it was).
 pub fn target_glyph(target: &SettingTarget) -> &'static str {
     match target {
@@ -265,7 +314,8 @@ pub fn target_glyph(target: &SettingTarget) -> &'static str {
         SettingTarget::Page(SettingsPage::Updates) => "arrow.down",
         SettingTarget::Page(SettingsPage::About) => "info.circle",
         SettingTarget::Page(SettingsPage::Credits) => "creditcard",
-        SettingTarget::Page(SettingsPage::Connectors) => "link",
+        SettingTarget::Page(SettingsPage::Connectors)
+        | SettingTarget::Page(SettingsPage::AgentLinks) => "link",
         SettingTarget::Page(
             SettingsPage::Root
             | SettingsPage::Routines
@@ -359,6 +409,23 @@ pub fn settings_entries(query: &str, agents: &[AgentRow]) -> Vec<Entry> {
             when: u64::MAX - out.len() as u64,
             rank,
             target: Target::Setting(target),
+        });
+    }
+    for page in MAC_ONLY {
+        let Some((matched, keyword)) = page.hit(query) else {
+            continue;
+        };
+        let subtitle = match keyword {
+            Some(kw) => format!("{} · {}", keyword_label(kw), page.path),
+            None => page.path.to_string(),
+        };
+        out.push(Entry {
+            kind: Kind::Setting,
+            title: page.title.to_string(),
+            subtitle,
+            when: u64::MAX - out.len() as u64,
+            rank: Rank::Direct(matched),
+            target: Target::Setting(SettingTarget::Page(page.page)),
         });
     }
     out
@@ -980,6 +1047,7 @@ mod tests {
             ThisMac,
             Secrets,
             Devices,
+            AgentLinks,
         ]
         .into_iter()
         .map(SettingTarget::Page)
@@ -1098,10 +1166,46 @@ mod tests {
             assert!(setting_target(item).is_none());
             assert!(settings_search::index(Platform::Mac).all(|e| e.item != item));
         }
+        // A Mac-only page is found the same way, by title and by keyword, and
+        // stays out of the shared index: listing it there would cost an arm on
+        // the iPhone's route switch for a page it has no screen for.
+        assert_eq!(
+            find("agent access link")[0],
+            Target::Setting(SettingTarget::Page(SettingsPage::AgentLinks))
+        );
+        assert_eq!(
+            find("reply as me")[0],
+            Target::Setting(SettingTarget::Page(SettingsPage::AgentLinks))
+        );
+        for page in MAC_ONLY {
+            let title = page.title;
+            assert!(
+                settings_search::INDEX.iter().all(|e| e.title != title),
+                "{title:?} is Mac-only but sits in the shared index"
+            );
+        }
         // Not indexed on purpose: Sign out, Pause all secrets.
         assert!(find("sign out").is_empty());
         assert!(find("pause").is_empty());
         // No query, no Settings rows (Recent stays chats and servers).
         assert!(settings_entries("", &agents()).is_empty());
+    }
+
+    /// Connected apps stays off the Settings list until the feature ships
+    /// ([feedback connected-apps-hidden-until-implemented-2026-11-10]). The
+    /// iPhone twin is `ConnectedAppsHiddenUITests`.
+    #[test]
+    fn connected_apps_stays_off_the_settings_list_until_implemented() {
+        assert!(
+            !SettingsPage::LISTED.contains(&SettingsPage::Connectors),
+            "Connected apps must not appear in Mac Settings until implemented"
+        );
+        assert!(setting_target(SettingsItem::ConnectedApps).is_none());
+        assert!(
+            settings_search::index(Platform::Mac).all(|e| e.item != SettingsItem::ConnectedApps)
+        );
+        assert!(
+            settings_entries(&crate::search::normalize_query("connected apps"), &[]).is_empty()
+        );
     }
 }

@@ -1,0 +1,37 @@
+{
+  "tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "generated": {
+    "arbos_ffi.swift": {
+      "sha256": "2917247857355c182bcb128e3a1c8a7801a20bbbf7bb40c0b316884847c91f68",
+      "bytes": 227522,
+      "baseline_identical": true
+    },
+    "arbos_ffiFFI.h": {
+      "sha256": "c25f12d11611f6160e59feba3ac33fc726222e8558cba620473e2ead146abc7e",
+      "bytes": 79184,
+      "baseline_identical": true
+    },
+    "arbos_ffiFFI.modulemap": {
+      "sha256": "cc6b494f28e241f7ae51782a867d66b7bb4bba1d0e4bd402f11cf59981ad2ec5",
+      "bytes": 134,
+      "baseline_identical": true
+    }
+  },
+  "C_exports": 280,
+  "header_declarations_match_all_C_exports": true,
+  "baseline_exports_identical": true,
+  "baseline_native_FFI_objects": 17,
+  "final_native_FFI_objects": 17,
+  "exports_sha256": "facb7be142c4f534ce7096d62ccd258f96a28ba045c9254ff6f776093e09e867",
+  "seconds": 0.9831615419825539,
+  "scope": "Exact Swift/header/modulemap and all declared C ABI exports from this crate native MachO objects; not Rust-internal symbols or runtime/app behavior.",
+  "whole_archive_nm_limit": "Apple nm17 rejects newer RustLLVM23 std bitcode in baseline too; own native FFI object inspection exits0 with complete header declaration coverage.",
+  "nm_logs_sha256": {
+    "baseline": "3f4c71ee5882af630ba316d9af2ccc48250257511bacf27f00fa16242be4b7ec",
+    "final": "72f2e822b6f0b62e612f37729a13fa148469ecf855ecfae6f35f92de09b3a455"
+  },
+  "symbol_lists_sha256": {
+    "baseline": "facb7be142c4f534ce7096d62ccd258f96a28ba045c9254ff6f776093e09e867",
+    "final": "facb7be142c4f534ce7096d62ccd258f96a28ba045c9254ff6f776093e09e867"
+  }
+}

@@ -50,7 +50,23 @@ enum Cmd {
         cmd: BoxCmd,
     },
     /// Today's and all-time metered usage.
-    Usage { project: String },
+    Usage {
+        project: String,
+        /// Logical session id (main agent: chat id; worker: subagent id).
+        #[arg(long, conflicts_with = "sessions")]
+        session: Option<String>,
+        /// List each session, including an unattributed historical/background bucket.
+        #[arg(long)]
+        sessions: bool,
+        #[arg(long, requires = "session")]
+        include_children: bool,
+        /// Inclusive Unix timestamp in milliseconds; requires --session or --sessions.
+        #[arg(long)]
+        from: Option<i64>,
+        /// Exclusive Unix timestamp in milliseconds; requires --session or --sessions.
+        #[arg(long)]
+        to: Option<i64>,
+    },
     /// Recorded timings (boot, wake, TTFT, cold start).
     Timings { project: String },
     /// The project's audit trail as mirrored on the relay (approvals, tool calls).
@@ -311,7 +327,7 @@ enum ProjectCmd {
         name: String,
         #[arg(long)]
         instructions: Option<String>,
-        /// Box provider: daytona (default when the relay has a key), process, docker.
+        /// Box provider: gvisor (the default on the arbos.life host), process, docker.
         #[arg(long)]
         provider: Option<String>,
         /// Shorthand for `--provider process` (runs agentd on the relay host).
@@ -895,8 +911,23 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Usage { project } => {
-            let v = relay.get(&format!("/projects/{project}/usage")).await?;
+        Cmd::Usage {
+            project,
+            session,
+            sessions,
+            include_children,
+            from,
+            to,
+        } => {
+            let path = usage_path(
+                &project,
+                session.as_deref(),
+                sessions,
+                include_children,
+                from,
+                to,
+            )?;
+            let v = relay.get(&path).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Timings { project } => {
@@ -1783,4 +1814,105 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
     let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
     Some((w, h))
+}
+
+/// Keep path-segment encoding and query construction identical for all usage scopes.
+fn usage_path(
+    project: &str,
+    session: Option<&str>,
+    sessions: bool,
+    include_children: bool,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<String> {
+    if !sessions && session.is_none() && (from.is_some() || to.is_some()) {
+        return Err(anyhow!("--from and --to require --session or --sessions"));
+    }
+    let mut url = reqwest::Url::parse("http://relay.invalid/")?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow!("invalid usage URL"))?;
+        path.extend(["projects", project]);
+        match session {
+            Some(id) => {
+                path.extend(["sessions", id, "usage"]);
+            }
+            None if sessions => {
+                path.extend(["sessions", "usage"]);
+            }
+            None => {
+                path.push("usage");
+            }
+        }
+    }
+    if session.is_some() {
+        url.query_pairs_mut().append_pair(
+            "include_children",
+            if include_children { "true" } else { "false" },
+        );
+    }
+    for (key, value) in [("from", from), ("to", to)] {
+        if let Some(value) = value {
+            url.query_pairs_mut().append_pair(key, &value.to_string());
+        }
+    }
+    Ok(match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod usage_cli_tests {
+    use super::*;
+
+    #[test]
+    fn usage_encodes_ids_and_builds_valid_queries_for_every_scope() {
+        assert_eq!(
+            usage_path("p", None, false, false, None, None).unwrap(),
+            "/projects/p/usage"
+        );
+        assert_eq!(
+            usage_path("a/b ?", None, true, false, Some(10), Some(20)).unwrap(),
+            "/projects/a%2Fb%20%3F/sessions/usage?from=10&to=20"
+        );
+        assert_eq!(
+            usage_path("p", Some("s/?"), false, true, Some(10), None).unwrap(),
+            "/projects/p/sessions/s%2F%3F/usage?include_children=true&from=10"
+        );
+        assert!(usage_path("p", None, false, false, Some(10), None).is_err());
+    }
+
+    #[test]
+    fn usage_accepts_old_and_session_forms_but_rejects_ambiguous_scopes() {
+        for args in [
+            vec!["arbosctl", "usage", "project"],
+            vec!["arbosctl", "usage", "project", "--sessions"],
+            vec![
+                "arbosctl",
+                "usage",
+                "project",
+                "--session",
+                "chat",
+                "--include-children",
+                "--from",
+                "100",
+                "--to",
+                "200",
+            ],
+        ] {
+            assert!(Args::try_parse_from(args).is_ok());
+        }
+        assert!(Args::try_parse_from([
+            "arbosctl",
+            "usage",
+            "p",
+            "--sessions",
+            "--session",
+            "chat"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from(["arbosctl", "usage", "p", "--include-children"]).is_err());
+    }
 }

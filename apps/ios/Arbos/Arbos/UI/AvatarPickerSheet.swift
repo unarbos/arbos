@@ -2,9 +2,9 @@
 // agent's picture — a tab pill Bot | Generate | Upload with Reset at the right, a body per tab,
 // and a footer Cancel | Set avatar. Nothing changes until "Set avatar".
 //
-// Bot: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the selected one
-// in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
-// automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
+// Bot: the ten D92 disc colours in two rows of five, with the picked one above them as a plain
+// filled circle — an agent's default picture has no mark on it. The per-id automatic default
+// stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
 // (images only), uploaded as the picture master on Set — `PictureMaster`: a 1024 px square,
 // PNG for a flat mark, JPEG q92 for a photo (Jacob, 2026-10-26: a 4000 px mark came out
@@ -12,9 +12,9 @@
 // three tabs (their own `/avatar/generate` route and blob slot).
 //
 // Grok's sizes from the 2x reference (612 × 794 px → 306 × 397 pt), inside the shipped
-// bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
-// 23 pt swatches on a 40 pt pitch, two equal footer pills 8 pt apart (44 pt tall here, the
-// touch minimum — the same deviation as the Create sheet).
+// bottom-sheet frame: a 44 pt bar with a hairline, an 84 pt preview disc, 44 pt swatches on a
+// 52 pt pitch, two equal footer pills 8 pt apart (44 pt tall here, the touch minimum — the same
+// deviation as the Create sheet).
 //
 // The Create sheets (`CreateEntityView`, Jacob 2026-10-25) draw the **same Generate and Upload
 // bodies** through `AvatarSourceBody` and `AvatarSourceState` — `Upload | Generate` only, no
@@ -57,7 +57,6 @@ enum AvatarSheetPalette {
     static let labelMuted = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0x9A / 255)
     static let pillBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
     static let mutedDisc = Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255)
-    static let mutedInk = Color(red: 0x8A / 255, green: 0x8A / 255, blue: 0x8A / 255)
     static let disabledBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
     static let disabledText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
     static let setBg = Color(white: 0xE5 / 255)
@@ -83,18 +82,23 @@ final class AvatarSourceState: ObservableObject {
 
     /// One generation: progress on, then the key or the (sentence, detail) of the failure.
     /// Both sheets call this so the wording is the same everywhere.
-    func run(_ work: @escaping () async throws -> String) {
-        guard !generating else { return }
+    func run(isCurrent: @escaping () -> Bool = { true }, _ work: @escaping () async throws -> String) {
+        guard isCurrent(), !generating else { return }
         generating = true
         startedAt = Date()
         error = nil
         detailsOpen = false
         Task { @MainActor in
+            guard isCurrent() else { return }
             do {
-                generatedKey = try await work()
+                let key = try await work()
+                guard isCurrent() else { return }
+                generatedKey = key
             } catch {
+                guard isCurrent() else { return }
                 self.error = Self.failure(error)
             }
+            guard isCurrent() else { return }
             generating = false
             startedAt = nil
         }
@@ -319,7 +323,6 @@ struct AvatarPickerSheet: View {
     var initialTab: AvatarPickerTab = .bot
 
     @State private var tab: AvatarPickerTab = .bot
-    @State private var pickedLeaf: Int?
     @State private var pickedColor: Int?
     @State private var reset = false
     @StateObject private var source = AvatarSourceState()
@@ -343,14 +346,13 @@ struct AvatarPickerSheet: View {
     private let labelMuted = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0x9A / 255)
     private let pillBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
     private let mutedDisc = Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255)
-    private let mutedInk = Color(red: 0x8A / 255, green: 0x8A / 255, blue: 0x8A / 255)
     private let disabledBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
     private let disabledText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
     private let setBg = Color(white: 0xE5 / 255)
     private let title = Color(white: 0xF5 / 255)
 
     /// The tabs per target: agents, groups and servers get all three (Jacob, 2026-10-24: the
-    /// group / server picker had lost Generate); my own picture has no leaf — people are D79
+    /// group / server picker had lost Generate); my own picture has no disc — people are D79
     /// coloured initials — so it gets Generate | Upload (Jacob, 2026-10-25). Reset sits beside
     /// them in the bar for every target.
     static func tabs(for target: AvatarTarget) -> [AvatarPickerTab] {
@@ -373,31 +375,31 @@ struct AvatarPickerSheet: View {
         }
     }
 
-    /// The entity's leaf + colour as it is now; the automatic pair under Reset.
-    private var currentPick: LeafPick {
+    /// The entity's disc colour as it is now; the automatic one under Reset.
+    private var currentPick: UInt8 {
         switch target {
         case .agent(let id):
-            if reset || project == nil { return LeafArt.pick(seed: id) }
-            return LeafArt.pick(project!)
+            if reset || project == nil { return DiscArt.pick(seed: id) }
+            return DiscArt.pick(project!)
         case .group(let id):
-            if reset { return LeafArt.pick(seed: id) }
-            return people?.leafPick ?? LeafArt.pick(seed: id)
+            if reset { return DiscArt.pick(seed: id) }
+            return people?.avatarDiscColor.map { UInt8(clamping: $0) } ?? DiscArt.pick(seed: id)
         case .server(let id):
-            if reset { return LeafArt.pick(seed: id) }
-            return server?.leafPick ?? LeafArt.pick(seed: id)
+            if reset { return DiscArt.pick(seed: id) }
+            return server?.avatarDiscColor.map { UInt8(clamping: $0) } ?? DiscArt.pick(seed: id)
         case .me:
-            // People have no leaf; the Bot tab never shows for me.
-            return LeafArt.pick(seed: model.user?.id ?? "me")
+            // People have no disc; the Bot tab never shows for me.
+            return DiscArt.pick(seed: model.user?.id ?? "me")
         }
     }
-    private var pick: LeafPick {
-        LeafPick(leaf: UInt8(pickedLeaf ?? Int(currentPick.leaf)), color: UInt8(pickedColor ?? Int(currentPick.color)))
+    private var pick: UInt8 {
+        pickedColor.map { UInt8(clamping: $0) } ?? currentPick
     }
     private var canReset: Bool {
         switch target {
-        case .agent: return project.map { $0.avatarLeaf != nil || $0.avatarLeafColor != nil || $0.imageKey != nil } ?? false
-        case .group: return people.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
-        case .server: return server.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
+        case .agent: return project.map { $0.avatarDiscColor != nil || $0.imageKey != nil } ?? false
+        case .group: return people.map { $0.avatarDiscColor != nil || $0.imageKey != nil } ?? false
+        case .server: return server.map { $0.avatarDiscColor != nil || $0.imageKey != nil } ?? false
         // Only an Arbos-uploaded picture resets (the GitHub one is already the default).
         case .me: return model.hasCustomAvatar
         }
@@ -405,7 +407,7 @@ struct AvatarPickerSheet: View {
     private var dirty: Bool {
         if reset { return true }
         switch tab {
-        case .bot: return pickedLeaf != nil || pickedColor != nil
+        case .bot: return pickedColor != nil
         case .generate: return generatedKey != nil
         case .upload: return uploadJpeg != nil
         }
@@ -413,17 +415,18 @@ struct AvatarPickerSheet: View {
     private var canSet: Bool { dirty && !generating && !saving }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
             bar
             ScrollView(showsIndicators: false) {
                 // The note first (Jacob 2026-10-26): under the bar, before the field; the body
                 // below moves down, the footer never moves.
-                AvatarSourceBody<EmptyView>.errorNote(source, generate: generate)
+                AvatarSourceBody<EmptyView>.errorNote(source, generate: { generate(work: work) })
                     .padding(.top, tab == .generate ? 12 : 0)
                 switch tab {
                 case .bot: botBody
                 case .generate, .upload:
-                    AvatarSourceBody(state: source, tab: tab, generate: generate) {
+                    AvatarSourceBody(state: source, tab: tab, generate: { generate(work: work) }) {
                         preview.padding(.top, tab == .upload ? 24 : 16).padding(.bottom, tab == .upload ? 16 : 0)
                     }
                     .padding(.top, tab == .generate ? 16 : 0)
@@ -441,10 +444,11 @@ struct AvatarPickerSheet: View {
             // Rig: a prefilled prompt runs Generate at once; `ARBOS_VIEW_PICTURE=1` presses View.
             if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
                 source.prompt = text
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate(work: work) }
             }
             if DebugHooks.viewPicture, let picture = Self.viewablePicture(target: target, model: model) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    guard model.acceptsAccountWork(work) else { return }
                     viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
                 }
             }
@@ -459,7 +463,7 @@ struct AvatarPickerSheet: View {
         }
     }
 
-    /// The target's current picture, when it has one — what View opens. Leaf / letter avatars
+    /// The target's current picture, when it has one — what View opens. Disc / letter avatars
     /// have nothing to view, so the bar shows no View.
     static func viewablePicture(target: AvatarTarget, model: AppModel) -> (name: String, url: String)? {
         switch target {
@@ -483,11 +487,13 @@ struct AvatarPickerSheet: View {
     // MARK: bar — Bot | Generate | Upload …… Reset
 
     private var bar: some View {
-        HStack(spacing: 2) {
+        let work = model.accountWork()
+        return HStack(spacing: 2) {
             AvatarTabPill(tabs: tabs, tab: $tab) { errorText = nil }
             Spacer()
             if let picture = Self.viewablePicture(target: target, model: model) {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
                 } label: {
                     Text("View")
@@ -501,8 +507,8 @@ struct AvatarPickerSheet: View {
                 .accessibilityIdentifier("avatar-view")
             }
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 reset = true
-                pickedLeaf = nil
                 pickedColor = nil
                 source.uploadJpeg = nil
                 source.uploadPreview = nil
@@ -526,60 +532,33 @@ struct AvatarPickerSheet: View {
 
     // MARK: Bot
 
-    /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs, only the selected one tinted; then the
-    /// ten colours in two rows of five on a 40 pt pitch (23 pt discs, a 31 pt ring on the pick).
-    /// The 4 × 4 leaf sheet (v2) on a 48 pt pitch — 30 pt discs, every leaf neutral and the
-    /// selected one in its hue — then the ten hues on a 36 pt pitch (21 pt discs, 29 pt ring).
+    /// The picked colour as an 84 pt plain disc, then the ten colours in two rows of five on a
+    /// 52 pt pitch (44 pt discs, a 52 pt ring on the pick).
     private var botBody: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 48 - 36) {
-                ForEach(0..<4, id: \.self) { r in
-                    HStack(spacing: 48 - 36) {
-                        ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
-                            let selected = Int(pick.leaf) == i
-                            Button {
-                                pickedLeaf = i
-                                reset = false
-                            } label: {
-                                ZStack {
-                                    Circle().fill(selected ? LeafArt.colors[Int(pick.color)] : mutedDisc)
-                                    LeafShape(index: i)
-                                        .fill(selected ? LeafArt.ink(pick.color) : mutedInk, style: FillStyle(eoFill: true))
-                                        .frame(width: 30 * LeafArt.scale, height: 30 * LeafArt.scale)
-                                }
-                                .frame(width: 30, height: 30)
-                                .frame(width: 36, height: 36)
-                                .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
-                                .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(LeafArt.names[i] + (selected ? ", selected" : ""))
-                        }
-                    }
-                }
-            }
-            .padding(.top, 84 - 44 - 18)
-            VStack(spacing: 36 - 29) {
+            DiscAvatar(color: pick, size: 84)
+                .padding(.top, 72 - 44)
+            VStack(spacing: 52 - 44) {
                 ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
-                    HStack(spacing: 36 - 29) {
+                    HStack(spacing: 52 - 44) {
                         ForEach(row, id: \.self) { i in
-                            let selected = Int(pick.color) == i
+                            let selected = Int(pick) == i
                             Button {
                                 pickedColor = i
                                 reset = false
                             } label: {
-                                Circle().fill(LeafArt.colors[i]).frame(width: 21, height: 21)
-                                    .frame(width: 29, height: 29)
+                                DiscAvatar(color: UInt8(clamping: i), size: 44)
+                                    .frame(width: 52, height: 52)
                                     .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
                                     .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel(LeafArt.colorNames[i] + (selected ? ", selected" : ""))
+                            .accessibilityLabel(DiscArt.colorNames[i] + (selected ? ", selected" : ""))
                         }
                     }
                 }
             }
-            .padding(.top, 282 - 228 - 18 - 14.5)
+            .padding(.top, 248 - 72 - 42 - 26)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 24)
@@ -587,18 +566,19 @@ struct AvatarPickerSheet: View {
 
     // MARK: Generate
 
-    private func generate() {
+    private func generate(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
         reset = false
         let target = target
         let model = model
-        source.run {
+        source.run(isCurrent: { model.acceptsAccountWork(work) }) {
             switch target {
-            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text)
-            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text)
-            case .server(let id): return try await model.generateServerAvatar(id, prompt: text)
-            case .me: return try await model.generateMyAvatar(prompt: text)
+            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text, expectedOwner: work?.owner)
+            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text, expectedOwner: work?.owner)
+            case .server(let id): return try await model.generateServerAvatar(id, prompt: text, expectedOwner: work?.owner)
+            case .me: return try await model.generateMyAvatar(prompt: text, expectedOwner: work?.owner)
             }
         }
     }
@@ -634,7 +614,7 @@ struct AvatarPickerSheet: View {
                          name: model.user?.name, id: model.user?.id,
                          colorIndex: model.user?.avatarColorIndexEffective)
         } else if reset {
-            LeafAvatar(pick: currentPick, size: 114)
+            DiscAvatar(color: currentPick, size: 114)
         } else {
             currentPicture
         }
@@ -646,9 +626,9 @@ struct AvatarPickerSheet: View {
         switch target {
         case .agent:
             if let project {
-                AgentAvatar(project: project, theme: theme, size: 114, still: true)
+                AgentAvatar(project: project, theme: theme, size: 114)
             } else {
-                LeafAvatar(pick: currentPick, size: 114)
+                DiscAvatar(color: currentPick, size: 114)
             }
         case .group(let id):
             if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
@@ -656,16 +636,16 @@ struct AvatarPickerSheet: View {
                     if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
                 }
                 .frame(width: 114, height: 114).clipShape(Circle())
-            } else if let leaf = people?.leafPick {
-                LeafAvatar(pick: leaf, size: 114)
+            } else if let color = people?.avatarDiscColor {
+                DiscAvatar(color: UInt8(clamping: color), size: 114)
             } else {
-                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+                DiscAvatar(color: currentPick, size: 114).opacity(0.55)
             }
         case .server:
             if let server {
                 ServerAvatar(server: server, size: 114)
             } else {
-                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+                DiscAvatar(color: currentPick, size: 114).opacity(0.55)
             }
         case .me:
             PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 114,
@@ -677,13 +657,14 @@ struct AvatarPickerSheet: View {
     // MARK: footer — Cancel | Set avatar
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        let work = model.accountWork()
+        return HStack(spacing: 8) {
             Button { dismiss() } label: {
                 Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(title)
                     .frame(maxWidth: .infinity).frame(height: 44).background(Capsule().fill(pillBg))
             }
             .buttonStyle(.plain)
-            Button(action: setAvatar) {
+            Button(action: { setAvatar(work: work) }) {
                 Text(saving ? "Saving…" : "Set avatar").font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(canSet ? Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255) : disabledText)
                     .frame(maxWidth: .infinity).frame(height: 44)
@@ -698,55 +679,58 @@ struct AvatarPickerSheet: View {
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
-    private func setAvatar() {
+    private func setAvatar(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canSet else { return }
         saving = true
         Task {
+            guard model.acceptsAccountWork(work) else { return }
             var ok = true
             switch target {
             case .agent(let id):
                 if reset {
-                    model.pickAvatarLeaf(id, leaf: nil, color: nil)
+                    model.pickAvatarDisc(id, color: nil)
                 } else {
                     switch tab {
-                    case .bot: model.pickAvatarLeaf(id, leaf: Int(pick.leaf), color: Int(pick.color))
-                    case .generate: if let generatedKey { ok = await model.setProjectImageKey(projectId: id, key: generatedKey) }
-                    case .upload: if let uploadJpeg { ok = await model.setProjectImage(projectId: id, jpeg: uploadJpeg) }
+                    case .bot: model.pickAvatarDisc(id, color: Int(pick))
+                    case .generate: if let generatedKey { ok = await model.setProjectImageKey(projectId: id, key: generatedKey, expectedOwner: work?.owner) }
+                    case .upload: if let uploadJpeg { ok = await model.setProjectImage(projectId: id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
                     }
                 }
             case .group(let id):
                 if reset {
-                    ok = await model.setGroupLeaf(chatId: id, pick: nil)
+                    ok = await model.setGroupDisc(chatId: id, color: nil, expectedOwner: work?.owner)
                 } else {
                     switch tab {
-                    case .bot: ok = await model.setGroupLeaf(chatId: id, pick: pick)
-                    case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey) }
+                    case .bot: ok = await model.setGroupDisc(chatId: id, color: pick, expectedOwner: work?.owner)
+                    case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             case .server(let id):
                 if reset {
-                    ok = await model.setServerLeaf(id, pick: nil)
+                    ok = await model.setServerDisc(id, color: nil, expectedOwner: work?.owner)
                 } else {
                     switch tab {
-                    case .bot: ok = await model.setServerLeaf(id, pick: pick)
-                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
+                    case .bot: ok = await model.setServerDisc(id, color: pick, expectedOwner: work?.owner)
+                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             case .me:
                 // Reset = the GitHub picture again (`DELETE /me/avatar`); a photo goes up as
                 // `PUT /me/avatar`; a generated preview is set by its key.
                 if reset {
-                    ok = await model.removeUserAvatar()
+                    ok = await model.removeUserAvatar(expectedOwner: work?.owner)
                 } else {
                     switch tab {
                     case .bot: break
-                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey) }
+                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             }
+            guard model.acceptsAccountWork(work) else { return }
             saving = false
             if ok { dismiss() }
         }

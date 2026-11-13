@@ -1,0 +1,11 @@
+{
+  "scope": "Literal P3 policy/source delta carried into P4, preserving account.accepts guard at entry and all Map6callback changes. Only method-entry context conflicted; remaining three files patch cleanly.",
+  "before_sha256": "19142cc76f8381f6114c0ab48ec9a2fff230b49d2eb63c7ca4e5f9f3d4237440",
+  "after_sha256": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+  "after_sources": {
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "60012311b2b41dc5583bed0fbf620ad3e5e7d524806d161fbf745805181f5aa8",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c",
+    "apps/ios/Arbos/ArbosTests/LinkPreviewCardTests.swift": "7884ca7d324820da9948a6c49b769fba5f44e89961d934f07c4ddd2858cd3db2"
+  }
+}

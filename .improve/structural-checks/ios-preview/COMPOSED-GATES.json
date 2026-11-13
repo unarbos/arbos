@@ -1,0 +1,60 @@
+{
+  "source": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "60012311b2b41dc5583bed0fbf620ad3e5e7d524806d161fbf745805181f5aa8",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c",
+    "apps/ios/Arbos/ArbosTests/LinkPreviewCardTests.swift": "7884ca7d324820da9948a6c49b769fba5f44e89961d934f07c4ddd2858cd3db2"
+  },
+  "row_checks": 12,
+  "pass": 12,
+  "fail": 0,
+  "compile_seconds": 1.541000625002198,
+  "run_seconds": 0.18850079097319394,
+  "helper": {
+    "failures": 0,
+    "succeeded": true,
+    "tests": 2
+  },
+  "helper_compile_seconds": 1.7604387920582667,
+  "helper_run_seconds": 0.2363633749773726,
+  "mutants": [
+    {
+      "name": "ignore-user-policy",
+      "detected": true,
+      "row_failures": 6,
+      "helper_failures": 0
+    },
+    {
+      "name": "ignore-cache-policy",
+      "detected": true,
+      "row_failures": 3,
+      "helper_failures": 0
+    },
+    {
+      "name": "mandatory-row-skips",
+      "detected": true,
+      "row_failures": 0,
+      "helper_failures": 1
+    }
+  ],
+  "fixture_delta_sha256": "2b9d569b7e604a77bdd115e1f4da38836d990fc78a56a6b05c5737372f14d3a6",
+  "composition": {
+    "root_refresh_equals_preview_plus_admission_guard": true,
+    "root_transcript_enum_equals_frozen_preview": true,
+    "calibration_declarations_identical": {
+      "static let runWindowMs:": [
+        "static let runWindowMs: Int64 = 2 * 60 * 1000"
+      ],
+      "static let runGap:": [
+        "static let runGap: CGFloat = 2"
+      ],
+      "static let turnGap:": [
+        "static let turnGap: CGFloat = 13"
+      ],
+      "static let systemGap:": [
+        "static let systemGap: CGFloat = 20"
+      ]
+    },
+    "scope": "exact preview/cache bodies and admission-guard placement; not ownership implementation, UIKit layout or SwiftUI scheduling proof"
+  }
+}

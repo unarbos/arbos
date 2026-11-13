@@ -46,7 +46,10 @@ class Config:
     duplex_idle_ask_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_IDLE_ASK_S", 180.0))
     duplex_idle_leave_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_IDLE_LEAVE_S", 240.0))
     group_idle_leave_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_GROUP_IDLE_LEAVE_S", 1200.0))
-    call_max_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_CALL_MAX_S", 3600.0))
+    # Leak guard, not a budget: a call whose room or socket is wedged after everyone has gone.
+    # What a call costs is bounded by the account's own limit, charged every `usage_every_s`, so
+    # this sits far above any real call and should never be what ends one.
+    call_leak_guard_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_CALL_LEAK_GUARD_S", 21600.0))
     # How long a spoken request waits for the agent before "working on it".
     tool_quick_wait_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_TOOL_QUICK_WAIT_S", 8.0))
     log_dir: str = field(default_factory=lambda: _env("ARBOS_VOICE_LOG_DIR", ""))

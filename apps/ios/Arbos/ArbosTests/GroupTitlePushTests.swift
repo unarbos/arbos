@@ -47,4 +47,74 @@ final class GroupTitlePushTests: XCTestCase {
         XCTAssertEqual(push.text, "ping")
         XCTAssertNil(push.groupImageUrl, "the extension never gets a tokenised URL")
     }
+
+    /// Phase 5: an alert for an end-to-end encrypted message says only that there is one and
+    /// carries the event; once the extension has read it, the words stand where that was.
+    func testAnEncryptedAlertCarriesItsEventAndShowsTheWordsOnceRead() throws {
+        func remote(_ matrix: [String: Any], title: String, body: String, group: String?) -> [AnyHashable: Any] {
+            var info: [AnyHashable: Any] = [
+                "aps": ["alert": ["title": title, "body": body], "category": "ARBOS_MESSAGE"] as [String: Any],
+                "chat_id": "c4", "project_id": "people", "text": "New message", "matrix": matrix,
+                "sender": ["kind": "user", "id": "u2", "name": "Sam", "handle": "sam"],
+            ]
+            if let group { info["chat_title"] = group }
+            return info
+        }
+        let event: [String: Any] = ["type": "m.room.encrypted", "event_id": "$e", "content": ["ciphertext": "AwgA"]]
+        var group = try XCTUnwrap(MessagePush(userInfo: remote(["room_id": "!r:hs", "event": event],
+                                                               title: "Research", body: "@sam: New message", group: "Research")))
+        let sealed = try XCTUnwrap(group.sealed)
+        XCTAssertEqual(sealed.roomId, "!r:hs")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(sealed.event.utf8)) as? NSDictionary, event as NSDictionary)
+        group.show("see you at noon")
+        XCTAssertEqual(group.body, "@sam: see you at noon")
+        XCTAssertEqual(group.text, "see you at noon")
+        var dm = try XCTUnwrap(MessagePush(userInfo: remote(["room_id": "!r:hs", "event": event],
+                                                            title: "@sam", body: "New message", group: nil)))
+        dm.show("see you at noon")
+        XCTAssertEqual(dm.body, "see you at noon")
+        // Not a room, or no event: an alert like any other.
+        for matrix in [["room_id": "r", "event": event], ["room_id": "!r:hs"], [:]] as [[String: Any]] {
+            XCTAssertNil(try XCTUnwrap(MessagePush(userInfo: remote(matrix, title: "@sam", body: "New message", group: nil))).sealed)
+        }
+    }
+
+    /// What the extension reads the message with is kept where both it and the app can reach
+    /// it (their App Group), and is gone once signed out. A build signed without the group
+    /// (CI's) keeps nothing.
+    func testThePreviewVaultIsSharedThroughTheAppGroupAndForgets() throws {
+        let kept = PreviewVault.load()
+        defer { PreviewVault.save(kept) }
+        let device = PreviewVault.Device(userId: "@gh_7:arbos.test", deviceId: "D1", storeKey: "k")
+        PreviewVault.save(device)
+        guard PreviewVault.storeRoot != nil else { return XCTAssertNil(PreviewVault.load()) }
+        XCTAssertEqual(PreviewVault.load(), device)
+        PreviewVault.save(nil)
+        XCTAssertNil(PreviewVault.load())
+    }
+
+    /// The Matrix store an earlier build kept in the app's own container is moved, whole, to
+    /// where the extension can read it, once; it is the device's only copy of its keys.
+    /// Without the App Group it stays where it was.
+    func testAnEarlierStoreIsMovedToTheAppGroupWhole() throws {
+        let fm = FileManager.default
+        let device = "TESTDEVICE-\(UUID().uuidString)"
+        let old = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("matrix").appendingPathComponent(device)
+        defer { try? fm.removeItem(at: old) }
+        try fm.createDirectory(at: old, withIntermediateDirectories: true)
+        try Data("keys".utf8).write(to: old.appendingPathComponent("matrix-sdk-crypto.sqlite3"))
+        guard let shared = PreviewVault.storeRoot?.appendingPathComponent(device) else {
+            XCTAssertEqual(WalletVault.storeDir(device: device), old.path)
+            XCTAssertEqual(try Data(contentsOf: old.appendingPathComponent("matrix-sdk-crypto.sqlite3")), Data("keys".utf8))
+            return
+        }
+        defer { try? fm.removeItem(at: shared) }
+        XCTAssertEqual(WalletVault.storeDir(device: device), shared.path)
+        XCTAssertEqual(try Data(contentsOf: shared.appendingPathComponent("matrix-sdk-crypto.sqlite3")), Data("keys".utf8))
+        XCTAssertFalse(fm.fileExists(atPath: old.path))
+        // Again, and for a device with no earlier store: the same place.
+        XCTAssertEqual(WalletVault.storeDir(device: device), shared.path)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: shared.path), ["matrix-sdk-crypto.sqlite3"])
+    }
 }

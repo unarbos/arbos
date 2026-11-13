@@ -12,11 +12,13 @@
 // and fades the others.
 
 import SwiftUI
+import ArbosFFI
 
 struct QuestionCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
 
+    let account: ChatAccountContext
     let rowId: String
     let chatId: Id
     /// nil for a legacy `waiting_user` status line: title only, the composer answers.
@@ -32,6 +34,10 @@ struct QuestionCard: View {
     var shellCard: Bool = false
     /// Secret hand-off request card: Name + masked Value + "Save to vault" instead of rows.
     var offer: SecretOffer? = nil
+    /// A poll (`docs/polls.md`): the same card, kept open. `picked` is my vote, a tap on a row
+    /// hands its id here instead of answering, and `foot` is the line under the rows.
+    var onPick: ((String) -> Void)? = nil
+    var foot: String? = nil
 
     @State private var dismissed = false
     @State private var selected: Set<String> = []
@@ -72,9 +78,9 @@ struct QuestionCard: View {
                     list
                 }
                 if open && !options.isEmpty {
-                    Text(shellCard
+                    Text(foot ?? (shellCard
                          ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
-                         : "Or answer in the chat below")
+                         : "Or answer in the chat below"))
                         .font(theme.font(Theme.small))
                         .foregroundStyle(palette.badgeInk)
                         .fixedSize(horizontal: false, vertical: true)
@@ -239,6 +245,7 @@ struct QuestionCard: View {
     }
 
     private func saveOffer() {
+        guard account.accepts(model) else { return }
         guard let offer, let questionId, let approvalId = questionId.stripping(prefix: "approval:") else { return }
         let value = offerValue
         let env = offerName.trimmingCharacters(in: .whitespaces).uppercased()
@@ -261,8 +268,9 @@ struct QuestionCard: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if offer == nil ? open : offerOpen {
+            if onPick == nil, offer == nil ? open : offerOpen {
                 Button {
+                    guard account.accepts(model) else { return }
                     withAnimation(.easeOut(duration: 0.15)) { dismissed = true }
                     // The request card's × declines: the agent learns "not saved", nothing else.
                     if offer != nil, let questionId, let approvalId = questionId.stripping(prefix: "approval:") {
@@ -288,7 +296,7 @@ struct QuestionCard: View {
                 if ix > 0 { hairline }
                 optionRow(ix: ix, option: option)
             }
-            if multi && open {
+            if multi && open && onPick == nil {
                 hairline
                 sendRow
             }
@@ -302,10 +310,15 @@ struct QuestionCard: View {
     }
 
     private func optionRow(ix: Int, option: ChoiceOption) -> some View {
-        let chosen = open ? selected.contains(option.id) : picked.contains(option.id)
+        let chosen = open && onPick == nil ? selected.contains(option.id) : picked.contains(option.id)
         let faded = !open && !chosen
         return Button {
             guard open else { return }
+            if let onPick {
+                guard account.accepts(model) else { return }
+                onPick(option.id)
+                return
+            }
             Haptics.pick()
             if multi {
                 if selected.remove(option.id) == nil { selected.insert(option.id) }
@@ -347,6 +360,7 @@ struct QuestionCard: View {
 
     private var sendRow: some View {
         Button {
+            guard account.accepts(model) else { return }
             let labels = options.filter { selected.contains($0.id) }.map(\.label)
             guard !labels.isEmpty else { return }
             answer(ids: options.map(\.id).filter { selected.contains($0) }, label: labels.joined(separator: ", "))
@@ -366,6 +380,7 @@ struct QuestionCard: View {
     }
 
     private func answer(ids: [String], label: String) {
+        guard account.accepts(model) else { return }
         guard let questionId else { return }
         let value: Any = multi ? ids : (ids.first ?? "")
         model.answerQuestion(chatId: chatId, questionId: questionId, value: value, label: label)
@@ -425,5 +440,74 @@ private struct RowPress: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(enabled && configuration.isPressed ? fill : .clear)
+    }
+}
+
+/// "+" → Poll in a people chat (`docs/polls.md`): a question, two to ten options, one switch.
+/// Send is live once `pollText` — the relay's own bounds — takes what the fields hold.
+struct SendPollSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let chatId: Id
+    @State private var draft = PollDraft(question: "", options: ["", ""], multiple: false)
+    @FocusState private var focused: Int?
+
+    /// The most options a poll holds (`arbos_core::poll::OPTIONS_MAX`).
+    static let optionsMax = 10
+
+    private var valid: Bool {
+        pollText(question: draft.question, options: draft.options, multiple: draft.multiple) != nil
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            SheetHeaderBar(title: "Poll", leading: .cancel, onLeading: { dismiss() },
+                           action: "Send", actionEnabled: valid, onAction: send)
+            ScrollView {
+                VStack(spacing: 10) {
+                    TextField("Ask a question", text: $draft.question)
+                        .focused($focused, equals: -1)
+                        .controlField()
+                        .accessibilityIdentifier("poll-question")
+                    ForEach(draft.options.indices, id: \.self) { ix in
+                        TextField("Option \(ix + 1)", text: $draft.options[ix])
+                            .focused($focused, equals: ix)
+                            .controlField()
+                            .accessibilityIdentifier("poll-option-\(ix + 1)")
+                    }
+                    if draft.options.count < Self.optionsMax {
+                        Button {
+                            draft.options.append("")
+                            focused = draft.options.count - 1
+                        } label: {
+                            Label("Add option", systemImage: "plus")
+                                .font(theme.font(Theme.body))
+                                .foregroundStyle(theme.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, Controls.textInset)
+                                .frame(height: Controls.height)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("poll-add-option")
+                    }
+                    Toggle("Allow multiple answers", isOn: $draft.multiple)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                        .tint(theme.accent)
+                        .padding(.horizontal, Controls.textInset)
+                        .accessibilityIdentifier("poll-multiple")
+                }
+            }
+        }
+        .padding(20)
+        .background(theme.bg)
+        .presentationBackground(theme.bg)
+        .onAppear { focused = -1 }
+    }
+
+    private func send() {
+        if model.sendPoll(chatId: chatId, draft: draft) { dismiss() }
     }
 }

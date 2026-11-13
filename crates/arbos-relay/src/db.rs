@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use arbos_core::ids::now_ms;
@@ -23,8 +23,16 @@ pub struct BoxAgentd {
     pub reported_at: i64,
 }
 
+/// The single writer, and read-only connections beside it ([`Db::read`]). The readers are empty
+/// for an in-memory database, which a second connection cannot see.
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db(Arc<Mutex<Connection>>, Arc<Vec<Mutex<Connection>>>);
+
+/// Read-only connections per relay. Reads hold one for a single query, so a handful covers many
+/// sockets; a read that finds them all busy waits for one rather than opening more.
+const READERS: usize = 4;
+
+const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -40,7 +48,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-  spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+  spend_cap_daily REAL NOT NULL DEFAULT -1.0,
   project_token_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (
@@ -55,7 +63,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER
 );
--- One Daytona computer per user (design change 2026-10-15): every project of a user is a workspace
+-- One computer per user (design change 2026-10-15): every project of a user is a workspace
 -- on that box. `sandboxes` above is the legacy per-project registry, kept for migration only.
 CREATE TABLE IF NOT EXISTS boxes (
   user_id TEXT PRIMARY KEY, provider TEXT NOT NULL, sandbox_id TEXT,
@@ -70,9 +78,9 @@ CREATE TABLE IF NOT EXISTS box_creates (
   user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
   replacing TEXT, started_at INTEGER NOT NULL
 );
--- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
--- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
--- it and recreating the box; no code change needed.
+-- Per-user box class: the snapshot a user's box is created from; NULL = the relay default
+-- (ARBOS_DAYTONA_SNAPSHOT, which keeps its name). Raise a user's class later by setting it and
+-- recreating the box; no code change needed.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, snapshot TEXT, spend_cap_usd REAL NOT NULL DEFAULT 25.0, created_at INTEGER NOT NULL
 );
@@ -86,6 +94,27 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+CREATE INDEX IF NOT EXISTS rows_room_activity ON rows(room, created_at);
+-- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
+-- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
+-- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
+-- compaction has wedged.
+--
+-- This table is deliberately OUTSIDE every read path over `rows`, and that is what it is FOR, not an
+-- oversight to tidy up. In particular `rooms::checkpoint_covers_store` must never union it. The
+-- wedge this table exists to fix is caused by a row that cannot be imported into any snapshot being
+-- counted as missing from it, forever; a validation walk that reads quarantine re-imports exactly
+-- those bytes, fails again, and restores the original bug in full. "While we are here, we should
+-- validate against everything we have stored" is the one change that must not be made.
+--
+-- `batch_id` is carried, and uniquely indexed, for a reason that outlives this table's own purpose:
+-- see `Db::row_seq_for_batch`.
+CREATE TABLE IF NOT EXISTS quarantine (
+  room TEXT NOT NULL, seq INTEGER NOT NULL, device TEXT NOT NULL, batch_id TEXT NOT NULL,
+  bytes BLOB NOT NULL, created_at INTEGER NOT NULL, quarantined_at INTEGER NOT NULL,
+  PRIMARY KEY (room, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS quarantine_batch ON quarantine(room, batch_id);
 CREATE TABLE IF NOT EXISTS checkpoints (
   room TEXT PRIMARY KEY, seq INTEGER NOT NULL, frontier BLOB NOT NULL, bytes BLOB NOT NULL,
   size INTEGER NOT NULL, created_at INTEGER NOT NULL
@@ -263,17 +292,19 @@ pub struct Project {
     /// Telegram-style initials colour override (D79), 0–6; `None` = derived from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
-    /// Leaf avatar (D92): the owner's shape pick, 0–8; `None` = derived from the id.
+    /// Dormant: the leaf avatars' shape pick. Kept so a relay on the previous binary still reads
+    /// this table; always written `None` and never read.
     #[serde(default)]
     pub avatar_leaf: Option<i64>,
-    /// Leaf avatar (D92): the owner's disc colour pick, 0–9; `None` = derived from the id.
+    /// Disc avatar: the owner's colour pick, 0–9; `None` = derived from the id. The column keeps
+    /// the old name — renaming it would rewrite the whole `projects` table.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
-    /// D92 amendment: an uploaded or generated picture (blob key in the project's own slot); wins
-    /// over the leaf. `None` = the leaf.
+    /// An uploaded or generated picture (blob key in the project's own slot); wins over the
+    /// disc. `None` = the disc.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// Stamp (ms) of the last avatar change (picture, leaf, colour); `0` = never changed.
+    /// Stamp (ms) of the last avatar change (picture, colour); `0` = never changed.
     /// Clients order their copies of the agent by it (`avatar::identity`).
     #[serde(default)]
     pub avatar_version: i64,
@@ -482,6 +513,59 @@ pub struct ChannelPairCode {
     pub expires_at: i64,
 }
 
+/// `AppState::allows` over a project-id column, as SQL: the projects a person owns plus the ones
+/// they were invited to (D72). `?1` is the user id. Same shape as `REACHABLE_SKILLS`.
+fn reachable_project(column: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM projects p
+                  WHERE p.id = {column} AND p.deleted_at IS NULL
+                    AND (p.user_id = ?1
+                         OR EXISTS (SELECT 1 FROM project_members m
+                                     WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))"
+    )
+}
+
+/// Whose channel rows a query is for. Every channels listing takes one and binds its
+/// [`ChannelScope::key`] as `?1`, so the scope is part of the query rather than a filter over its
+/// answer and a `LIMIT` counts rows the caller may see.
+#[derive(Debug, Clone)]
+pub enum ChannelScope {
+    /// The admin token.
+    Everything,
+    /// One person's devices: the channels of the projects that person can reach.
+    Reachable(String),
+}
+
+impl ChannelScope {
+    /// A predicate over a project-id column of the row a query selects.
+    fn predicate(&self, project_column: &str) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => reachable_project(project_column),
+        }
+    }
+
+    /// A predicate over a `channel_outbox` row aliased `o`. An outbox row belongs to whoever owns
+    /// the binding it was sent for; a row with no binding (a pairing hint to an unbound sender) is
+    /// nobody's, so only the admin reads it.
+    fn outbox_predicate(&self) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => format!(
+                "EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = o.binding_id AND {})",
+                reachable_project("b.project_id")
+            ),
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 /// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
 /// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
 /// Owned by one user: every read and write is scoped by `user_id`, and names are unique per user.
@@ -520,7 +604,7 @@ pub struct VaultRequest {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageTotals {
     pub input: i64,
     pub output: i64,
@@ -555,11 +639,15 @@ impl Db {
         c.execute_batch(
             // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
             // bytes behind in the file.
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
+            // busy_timeout: `flush_after_scrub`'s checkpoint waits for a reader mid-query
+            // instead of giving up on it.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        crate::usage::migrate(&c)?;
         c.execute_batch(crate::outside::SCHEMA)?;
         c.execute_batch(crate::outside_log::SCHEMA)?;
+        c.execute_batch(crate::agent_link::SCHEMA)?;
         for m in crate::outside::MIGRATIONS {
             let _ = c.execute(m, []);
         }
@@ -647,6 +735,7 @@ impl Db {
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
+        Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
@@ -658,6 +747,7 @@ impl Db {
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         c.execute_batch(crate::pins::PINS_SCHEMA)?;
+        c.execute_batch(crate::wallets::WALLETS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);
@@ -683,7 +773,19 @@ impl Db {
              CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
         )?;
         c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
-        Ok(Self(Arc::new(Mutex::new(c))))
+        // Opened after the schema is in place, so no reader ever sees a half-migrated file.
+        let readers = (0..READERS)
+            .map(|_| {
+                let r = Connection::open_with_flags(
+                    path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                r.execute_batch("PRAGMA busy_timeout=5000; PRAGMA mmap_size=1073741824;")?;
+                Ok(Mutex::new(r))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .with_context(|| format!("open readers on {}", path.display()))?;
+        Ok(Self(Arc::new(Mutex::new(c)), Arc::new(readers)))
     }
 
     /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so
@@ -753,6 +855,33 @@ impl Db {
     /// in thirteen stored `avatar_color = 'mono'` without anyone choosing it. Clear those once;
     /// NULL means "the (now always coloured) default" on every client. Later explicit `mono`
     /// picks stay: the `meta` flag makes this a one-shot.
+    /// Jacob, 2026-11-05: "Increase our agent caps to infinity", and all spending belongs in one
+    /// cap rather than one per app function. New accounts are unlimited; rows already carrying a
+    /// cap are lifted here, once. Two things are left alone on purpose: a `spend_cap_usd` of 0 is
+    /// an admin freezing an account (`PUT /admin/users/{id}/credits {"daily_cap_usd": 0}`), which
+    /// is an instruction, not a leftover default; and the per-project column, which nothing reads
+    /// any more. Guarded by `meta`, so an admin who sets a cap after this keeps it across restarts.
+    fn migrate_account_caps_to_unlimited(c: &Connection) -> Result<()> {
+        const KEY: &str = "account_caps_lifted";
+        let done: Option<String> = c
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![KEY], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        c.execute(
+            "UPDATE users SET cap_unlimited = 1 WHERE cap_unlimited = 0 AND spend_cap_usd > 0",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEY],
+        )?;
+        Ok(())
+    }
+
     fn migrate_mono_avatar_defaults(c: &Connection) -> Result<()> {
         const KEY: &str = "avatar_mono_defaults_cleared";
         let done: Option<String> = c
@@ -807,7 +936,7 @@ impl Db {
                    id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
                    instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0,
                    project_token_hash TEXT,
                    color TEXT NOT NULL DEFAULT '#8b7cf6',
                    user_id TEXT NOT NULL DEFAULT 'u_default',
@@ -839,9 +968,43 @@ impl Db {
         Ok(())
     }
 
+    #[track_caller]
     pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let c = self.0.lock().expect("db lock");
+        #[cfg(test)]
+        let _held = held::Held::by(std::panic::Location::caller());
         Ok(f(&c)?)
+    }
+
+    /// Run a read on a read-only connection, off the writer's lock: a history walk or an admin
+    /// scan no longer stands between a room PUSH and its ack.
+    ///
+    /// **Only for closures that read.** The connection is opened read-only, so a write here
+    /// fails loudly rather than racing the writer.
+    ///
+    /// What a caller may rely on is what `with` gave it:
+    /// - *Read-your-writes.* `with` returns after its commit, and in WAL a read that starts
+    ///   after a commit sees it. No reader holds a snapshot between calls.
+    /// - *One snapshot per closure.* Under the single lock no write could land between two
+    ///   statements of one closure; the read transaction keeps that true here
+    ///   (`room_state` reads the head, the checkpoint and the row count as one).
+    ///
+    /// A write still in progress on another task is not seen, exactly as if this read had won
+    /// the lock first.
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if self.1.is_empty() {
+            return self.with(f);
+        }
+        let c = match self.1.iter().find_map(|m| m.try_lock().ok()) {
+            Some(c) => c,
+            None => {
+                let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.1.len();
+                self.1[i].lock().expect("db reader lock")
+            }
+        };
+        let tx = c.unchecked_transaction()?;
+        Ok(f(&tx)?)
     }
 
     // ---- pairing and devices ------------------------------------------------------------------
@@ -857,7 +1020,13 @@ impl Db {
         })
     }
 
-    /// Consume a pairing code and register a device. Returns the device id.
+    /// Consume a pairing code and register a device. Returns whether the code was good.
+    ///
+    /// The device joins [`crate::auth::LEGACY_USER`], which is what a paircode relay means by
+    /// "the account": the operator mints the codes, one relay serves one person, and `projects`
+    /// defaults to the same id. Written out rather than left to the column default, because
+    /// account-wide operations key on this column and the default made the choice invisible —
+    /// `sign_out_everywhere` reads it and ends every session that shares it.
     pub fn redeem_pairing_code(
         &self,
         code: &str,
@@ -875,8 +1044,8 @@ impl Db {
                 return Ok(false);
             }
             c.execute(
-                "INSERT INTO devices(id, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![device_id, name, token_hash, now],
+                "INSERT INTO devices(id, name, token_hash, user_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![device_id, name, token_hash, crate::auth::LEGACY_USER, now],
             )?;
             Ok(true)
         })
@@ -917,17 +1086,6 @@ impl Db {
     }
 
     // ---- projects and chats -------------------------------------------------------------------
-
-    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
-    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
-                params![id, cap],
-            )
-            .map(|n| n > 0)
-        })
-    }
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
@@ -982,6 +1140,22 @@ impl Db {
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
+                Self::row_to_project,
+            )
+            .optional()
+        })
+    }
+
+    /// By id and nothing else. `project` also matches on `name`, which is fine for a path the
+    /// caller owns and wrong anywhere a hit tells the caller something about another owner.
+    pub fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                    Self::PROJECT_COLS
+                ),
+                params![id],
                 Self::row_to_project,
             )
             .optional()
@@ -1102,8 +1276,7 @@ impl Db {
         avatar_color: Option<Option<&str>>,
         description: Option<&str>,
         avatar_color_index: Option<Option<i64>>,
-        avatar_leaf: Option<Option<i64>>,
-        avatar_leaf_color: Option<Option<i64>>,
+        avatar_disc_color: Option<Option<i64>>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -1131,13 +1304,9 @@ impl Db {
                     params![id, idx],
                 )?;
             }
-            if let Some(leaf) = avatar_leaf {
-                c.execute(
-                    "UPDATE projects SET avatar_leaf = ?2 WHERE id = ?1",
-                    params![id, leaf],
-                )?;
-            }
-            if let Some(color) = avatar_leaf_color {
+            // `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
+            // companion `avatar_leaf` shape column is dormant and nothing reads it.
+            if let Some(color) = avatar_disc_color {
                 c.execute(
                     "UPDATE projects SET avatar_leaf_color = ?2 WHERE id = ?1",
                     params![id, color],
@@ -1146,8 +1315,7 @@ impl Db {
             let avatar_touched = avatar.is_some()
                 || avatar_color.is_some()
                 || avatar_color_index.is_some()
-                || avatar_leaf.is_some()
-                || avatar_leaf_color.is_some();
+                || avatar_disc_color.is_some();
             if avatar_touched {
                 Self::stamp_avatar_version(c, id)?;
             }
@@ -1190,7 +1358,7 @@ impl Db {
     /// Total rows ever appended to a room (`room_seq.head`): the relay's measure of how much a
     /// chat has been used (it never reads the rows themselves).
     pub fn room_head(&self, room: &str) -> Result<i64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT head FROM room_seq WHERE room = ?1",
                 params![room],
@@ -1379,10 +1547,10 @@ impl Db {
 
     /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
     /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
-    /// is refused with an error and the row stays as it was. Use
-    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
+    /// is refused with an error and the row stays as it was. A box whose sandbox is really gone
+    /// loses the whole row ([`Db::delete_box_row`]), so nothing needs to blank one in place.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
-        let written = self.write_box(s, false)?;
+        let written = self.write_box(s)?;
         if !written {
             tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
             anyhow::bail!(
@@ -1391,11 +1559,6 @@ impl Db {
             );
         }
         Ok(())
-    }
-
-    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
-    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
-        self.write_box(s, true).map(|_| ())
     }
 
     /// Write back a row read before a slow provider call (start, stop) only while the row still
@@ -1420,7 +1583,7 @@ impl Db {
         })
     }
 
-    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
+    fn write_box(&self, s: &Sandbox) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1431,12 +1594,11 @@ impl Db {
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
                     preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
-                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
+                 WHERE excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
                     serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
-                    may_clear_sandbox
                 ],
             )
             .map(|n| n > 0)
@@ -1669,63 +1831,24 @@ impl Db {
         })
     }
 
-    /// Legacy per-project sandboxes (pre one-box-per-user) that still hold a project's /work.
-    pub fn legacy_sandboxes(&self) -> Result<Vec<(String, Sandbox, Option<String>)>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT project_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
-                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_to
-                 FROM sandboxes",
-            )?;
-            let rows = st.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Sandbox {
-                        user_id: r.get(0)?,
-                        provider: r.get(1)?,
-                        sandbox_id: r.get(2)?,
-                        daytona_state: r.get(3)?,
-                        device_id: r.get(4)?,
-                        box_token_hash: r.get(5)?,
-                        mcp_token: r.get(6)?,
-                        snapshot: r.get(7)?,
-                        last_started_at: r.get(8)?,
-                        last_stopped_at: r.get(9)?,
-                        last_seen_at: r.get(10)?,
-                        box_url: r.get(11)?,
-                        preview_token: r.get(12)?,
-                        local_pid: r.get(13)?,
-                        migrated_from: Vec::new(),
-                    },
-                    r.get::<_, Option<String>>(14)?,
-                ))
-            })?;
-            rows.collect()
-        })
-    }
-
-    pub fn mark_legacy_migrated(&self, project_id: &str, user_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE sandboxes SET migrated_to = ?2, migrated_at = ?3 WHERE project_id = ?1",
-                params![project_id, user_id, now_ms()],
-            )
-            .map(|_| ())
-        })
-    }
-
     // ---- rooms --------------------------------------------------------------------------------
 
+    fn room_position_from(c: &Connection, room: &str) -> rusqlite::Result<(i64, i64)> {
+        c.query_row(ROOM_POSITION_SQL, params![room], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .map(|position| position.unwrap_or((0, 0)))
+    }
+
+    /// Stored room head and checkpoint floor; unknown rooms start at `(0, 0)`.
+    pub fn room_position(&self, room: &str) -> Result<(i64, i64)> {
+        self.read(|c| Self::room_position_from(c, room))
+    }
+
     pub fn room_state(&self, room: &str) -> Result<RoomState> {
-        self.with(|c| {
-            let (head, floor): (i64, i64) = c
-                .query_row(
-                    "SELECT head, floor FROM room_seq WHERE room = ?1",
-                    params![room],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?
-                .unwrap_or((0, 0));
+        self.read(|c| {
+            let (head, floor) = Self::room_position_from(c, room)?;
             let cp: Option<(i64, i64, Vec<u8>)> = c
                 .query_row(
                     "SELECT seq, size, frontier FROM checkpoints WHERE room = ?1",
@@ -1752,17 +1875,35 @@ impl Db {
         })
     }
 
-    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
-    /// gates (so a reconnect storm does not burn the message rate limit).
+    /// Seq of a batch id this room has already taken, if any — used to ACK a resent push as `dup`
+    /// before the people gates (so a reconnect storm does not burn the message rate limit).
+    ///
+    /// Reads `rows` **and** `quarantine`, and that second read is load-bearing rather than
+    /// bookkeeping. Before quarantine existed, the deepest layer of this defence was not this query
+    /// at all: it was the `rows_batch` UNIQUE index, so even with every lookup wrong SQLite itself
+    /// refused the duplicate insert. A row moved to `quarantine` leaves that index, and since SQLite
+    /// cannot express a unique index spanning two tables, the database-level guarantee silently stops
+    /// covering those bytes — no error and no diagnostic. This lookup is therefore the *only*
+    /// remaining defence for a quarantined batch, where for a stored one it is the outer of two.
+    ///
+    /// What it protects is not only unbounded storage. A re-pushed batch that is not recognised is
+    /// appended at a **new seq** and broadcast to every socket in the room, and the box's sync
+    /// bookkeeping is keyed on seq, so it cannot recognise bytes arriving at a seq it has never
+    /// seen. Relaxing this check corrupts another component's state machine.
     pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
-                params![room, batch_id],
-                |r| r.get(0),
-            )
-            .optional()
-        })
+        self.with(|c| Self::batch_seq_on(c, room, batch_id))
+    }
+
+    fn batch_seq_on(c: &Connection, room: &str, batch_id: &str) -> rusqlite::Result<Option<i64>> {
+        c.query_row(
+            "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                 UNION ALL
+                 SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                 LIMIT 1",
+            params![room, batch_id],
+            |r| r.get(0),
+        )
+        .optional()
     }
 
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
@@ -1775,19 +1916,22 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
-            let existing: Option<i64> = c
-                .query_row("SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2", params![room, batch_id], |r| r.get(0))
-                .optional()?;
-            if let Some(seq) = existing {
+            // The room position and its row commit together: an insert failure must not leave
+            // a head that promises bytes the relay never stored, and a reader beside the writer
+            // ([`Db::read`]) must never see the head moved to a seq whose row is not there yet.
+            let tx = c.unchecked_transaction()?;
+            if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
+                tx.commit()?;
                 return Ok((seq, true));
             }
-            c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
-            c.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
-            let seq: i64 = c.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
-            c.execute(
+            tx.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
+            tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
+            let seq: i64 = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
+            tx.execute(
                 "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![room, seq, device, batch_id, bytes, now],
             )?;
+            tx.commit()?;
             Ok((seq, false))
         })
     }
@@ -1799,7 +1943,7 @@ impl Db {
         exclude_device: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Row>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND (?3 IS NULL OR device != ?3)
                  ORDER BY seq LIMIT ?4",
@@ -1813,13 +1957,62 @@ impl Db {
 
     /// Rows with `after < seq <= upto`, oldest first (the checkpoint validation walk).
     pub fn rows_between(&self, room: &str, after: i64, upto: i64, limit: i64) -> Result<Vec<Row>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND seq <= ?3
                  ORDER BY seq LIMIT ?4",
             )?;
             let rows = st.query_map(params![room, after, upto, limit], |r| {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Move one row out of `rows` and into `quarantine`, keeping its seq and bytes. Returns false
+    /// when that seq is not in `rows` (already moved, or already covered by a checkpoint).
+    ///
+    /// A move, not a flag: every read path over `rows` — the catch-up walk, `room_health`,
+    /// `load_doc`, the row count and bytes in `room_state`, and the checkpoint validation walk — is
+    /// correct for the same single reason, that `put_checkpoint` has deleted everything at or below
+    /// the last checkpoint. Marking a row in place would break that one precondition for all of them
+    /// at once and leave six readers to patch; taking the row out of the table keeps every one of
+    /// them correct untouched.
+    pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
+        let now = now_ms();
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let moved = tx.execute(
+                "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
+                 SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
+                 WHERE room = ?1 AND seq = ?2",
+                params![room, seq, now],
+            )?;
+            if moved == 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            tx.execute("DELETE FROM rows WHERE room = ?1 AND seq = ?2", params![room, seq])?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// Quarantined rows for a room, oldest first. For operator inspection and recovery: the bytes
+    /// are retained precisely because the relay's inability to decode them is not proof they are
+    /// garbage — a replica on a newer encode version may read what this binary cannot.
+    pub fn quarantined_rows(&self, room: &str) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM quarantine WHERE room = ?1 ORDER BY seq",
+            )?;
+            let rows = st.query_map(params![room], |r| {
+                Ok(Row {
+                    seq: r.get(0)?,
+                    device: r.get(1)?,
+                    batch_id: r.get(2)?,
+                    bytes: r.get(3)?,
+                })
             })?;
             rows.collect()
         })
@@ -1846,6 +2039,9 @@ impl Db {
         bytes: &[u8],
     ) -> Result<bool> {
         self.with(|c| {
+            // One transaction, for the same reason as `append_row`: the checkpoint, the rows it
+            // replaces and the floor change together or not at all.
+            let c = c.unchecked_transaction()?;
             let floor: i64 = c
                 .query_row("SELECT floor FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))
                 .optional()?
@@ -1861,13 +2057,14 @@ impl Db {
             )?;
             c.execute("DELETE FROM rows WHERE room = ?1 AND seq <= ?2", params![room, seq_covered])?;
             c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, ?2, ?2) ON CONFLICT(room) DO UPDATE SET floor = ?2, head = MAX(head, ?2)", params![room, seq_covered])?;
+            c.commit()?;
             Ok(true)
         })
     }
 
     /// `(seq, created_at, bytes)` of the room's checkpoint.
     pub fn checkpoint_full(&self, room: &str) -> Result<Option<(i64, i64, Vec<u8>)>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT seq, created_at, bytes FROM checkpoints WHERE room = ?1",
                 params![room],
@@ -1900,7 +2097,7 @@ impl Db {
     }
 
     pub fn checkpoint_bytes(&self, room: &str) -> Result<Option<(i64, Vec<u8>)>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT seq, bytes FROM checkpoints WHERE room = ?1",
                 params![room],
@@ -1945,14 +2142,17 @@ impl Db {
         latency_ms: i64,
         ttfb_ms: Option<i64>,
     ) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO usage(project_id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![project_id, now_ms(), api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms],
-            )
-            .map(|_| ())
+        self.record_model_usage(crate::usage::UsageRecord {
+            project_id,
+            api,
+            model,
+            tokens: [input, output, cache_read, cache_write],
+            usd,
+            latency_ms,
+            ttfb_ms,
+            ..Default::default()
         })
+        .map(|_| ())
     }
 
     /// How many usage rows a project wrote since `since_ms` for one API whose model starts with
@@ -2420,6 +2620,15 @@ impl Db {
     const BINDING_COLS: &'static str =
         "id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at";
 
+    /// [`Self::BINDING_COLS`] for a query that aliases `channel_bindings` as `b`.
+    fn binding_cols_aliased() -> String {
+        Self::BINDING_COLS
+            .split(", ")
+            .map(|col| format!("b.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelBinding> {
         Ok(ChannelBinding {
             id: r.get(0)?,
@@ -2447,13 +2656,21 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// The scope's newest unused, unexpired code (so a client can show it again after a restart).
+    pub fn active_channel_pair_code(
+        &self,
+        scope: &ChannelScope,
+    ) -> Result<Option<ChannelPairCode>> {
         self.with(|conn| {
             conn.query_row(
-                "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
+                &format!(
+                    "SELECT c.code, c.project_id, c.chat_id, c.created_at, c.expires_at
+                     FROM channel_pair_codes c
+                     WHERE c.used_at IS NULL AND c.expires_at > ?2 AND ({})
+                     ORDER BY c.created_at DESC LIMIT 1",
+                    scope.predicate("c.project_id")
+                ),
+                params![scope.key(), now_ms()],
                 |r| {
                     Ok(ChannelPairCode {
                         code: r.get(0)?,
@@ -2545,13 +2762,14 @@ impl Db {
         })
     }
 
-    pub fn list_channel_bindings(&self) -> Result<Vec<ChannelBinding>> {
+    pub fn list_channel_bindings(&self, scope: &ChannelScope) -> Result<Vec<ChannelBinding>> {
         self.with(|conn| {
             let mut st = conn.prepare(&format!(
-                "SELECT {} FROM channel_bindings ORDER BY bound_at DESC",
-                Self::BINDING_COLS
+                "SELECT {} FROM channel_bindings b WHERE ({}) ORDER BY b.bound_at DESC",
+                Self::binding_cols_aliased(),
+                scope.predicate("b.project_id")
             ))?;
-            let rows = st.query_map([], Self::row_to_binding)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_binding)?;
             rows.collect()
         })
     }
@@ -2630,13 +2848,18 @@ impl Db {
         })
     }
 
-    pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+    pub fn channel_outbox(
+        &self,
+        scope: &ChannelScope,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|conn| {
-            let mut st = conn.prepare(
-                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
-                 FROM channel_outbox ORDER BY id DESC LIMIT ?1",
-            )?;
-            let rows = st.query_map(params![limit], |r| {
+            let mut st = conn.prepare(&format!(
+                "SELECT o.id, o.platform, o.external_chat_id, o.text, o.request_id, o.status, o.detail, o.binding_id, o.created_at
+                 FROM channel_outbox o WHERE ({}) ORDER BY o.id DESC LIMIT ?2",
+                scope.outbox_predicate()
+            ))?;
+            let rows = st.query_map(params![scope.key(), limit], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
                     "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
@@ -3632,6 +3855,244 @@ impl Db {
 }
 
 #[cfg(test)]
+mod append_row_tests {
+    use super::*;
+
+    fn with_db(f: impl FnOnce(&Db)) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        f(&db);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn reject_next_row(db: &Db) {
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER reject_row BEFORE INSERT ON rows
+             WHEN NEW.batch_id = 'reject'
+             BEGIN SELECT RAISE(ABORT, 'synthetic insert failure'); END;",
+            )
+        })
+        .unwrap();
+    }
+
+    fn allow_rows(db: &Db) {
+        db.with(|c| c.execute_batch("DROP TRIGGER reject_row"))
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicates_keep_original_seq_bytes_and_room_scope_after_quarantine() {
+        with_db(|db| {
+            assert_eq!(
+                db.append_row("a", "device", "batch", b"original").unwrap(),
+                (1, false)
+            );
+            assert_eq!(
+                db.append_row("a", "other", "batch", b"changed").unwrap(),
+                (1, true)
+            );
+            let rows = db.rows_after("a", 0, None, 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].device, "device");
+            assert_eq!(rows[0].bytes, b"original");
+            assert!(db.quarantine_row("a", 1).unwrap());
+            assert_eq!(db.row_seq_for_batch("a", "batch").unwrap(), Some(1));
+            assert_eq!(
+                db.append_row("a", "other", "batch", b"changed").unwrap(),
+                (1, true)
+            );
+            assert_eq!(db.room_state("a").unwrap().head, 1);
+            assert!(db.rows_after("a", 0, None, 10).unwrap().is_empty());
+            assert_eq!(db.quarantined_rows("a").unwrap()[0].bytes, b"original");
+            assert_eq!(
+                db.append_row("b", "other", "batch", b"independent")
+                    .unwrap(),
+                (1, false)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_first_append_leaves_no_room_position_and_can_retry() {
+        with_db(|db| {
+            reject_next_row(db);
+            assert!(db.append_row("new", "device", "reject", b"bytes").is_err());
+            let (positions, rows, autocommit): (i64, i64, bool) = db
+                .with(|c| {
+                    Ok((
+                        c.query_row(
+                            "SELECT COUNT(*) FROM room_seq WHERE room = 'new'",
+                            [],
+                            |r| r.get(0),
+                        )?,
+                        c.query_row("SELECT COUNT(*) FROM rows WHERE room = 'new'", [], |r| {
+                            r.get(0)
+                        })?,
+                        c.is_autocommit(),
+                    ))
+                })
+                .unwrap();
+            assert_eq!((positions, rows, autocommit), (0, 0, true));
+            assert_eq!(db.row_seq_for_batch("new", "reject").unwrap(), None);
+            allow_rows(db);
+            assert_eq!(
+                db.append_row("new", "device", "reject", b"bytes").unwrap(),
+                (1, false)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_append_preserves_existing_room_position_and_rows() {
+        with_db(|db| {
+            db.append_row("room", "first", "first", b"original")
+                .unwrap();
+            db.append_row("other", "other", "other", b"untouched")
+                .unwrap();
+            let before = db.room_state("room").unwrap();
+            reject_next_row(db);
+            assert!(db.append_row("room", "second", "reject", b"new").is_err());
+            let after = db.room_state("room").unwrap();
+            assert_eq!(
+                (after.head, after.floor, after.row_count, after.row_bytes),
+                (
+                    before.head,
+                    before.floor,
+                    before.row_count,
+                    before.row_bytes
+                )
+            );
+            let rows = db.rows_after("room", 0, None, 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                (rows[0].seq, rows[0].bytes.as_slice()),
+                (1, b"original".as_slice())
+            );
+            assert_eq!(db.room_state("other").unwrap().head, 1);
+            assert_eq!(db.row_seq_for_batch("room", "reject").unwrap(), None);
+            assert!(db.with(|c| Ok(c.is_autocommit())).unwrap());
+            allow_rows(db);
+            assert_eq!(
+                db.append_row("room", "second", "reject", b"new").unwrap(),
+                (2, false)
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod room_position_tests {
+    use super::*;
+
+    #[test]
+    fn position_and_statistics_track_appends_and_checkpoints() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)), Arc::default());
+        let check = |position, counts, checkpoint_seq| {
+            let state = db.room_state("project/chat").unwrap();
+            assert_eq!((state.head, state.floor), position);
+            assert_eq!(db.room_position("project/chat").unwrap(), position);
+            assert_eq!((state.row_count, state.row_bytes), counts);
+            assert_eq!(state.checkpoint_seq, checkpoint_seq);
+        };
+        check((0, 0), (0, 0), 0);
+        db.append_row("project/chat", "device", "batch1", b"abc")
+            .unwrap();
+        db.append_row("project/chat", "device", "batch2", b"12345")
+            .unwrap();
+        check((2, 0), (2, 8), 0);
+        assert!(db
+            .put_checkpoint("project/chat", 1, b"frontier", b"snapshot")
+            .unwrap());
+        check((2, 1), (1, 5), 1);
+        let checkpoint = db.room_state("project/chat").unwrap();
+        assert_eq!(checkpoint.checkpoint_size, 8);
+        assert_eq!(checkpoint.checkpoint_frontier, b"frontier");
+        db.append_row("project/chat", "device", "batch3", b"x")
+            .unwrap();
+        check((3, 1), (2, 6), 1);
+    }
+
+    #[test]
+    fn a_position_query_error_is_not_a_missing_room() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let db = Db(Arc::new(Mutex::new(c)), Arc::default());
+        db.with(|c| c.execute_batch("DROP TABLE room_seq")).unwrap();
+        assert!(db.room_state("project/chat").is_err());
+        assert!(db.room_position("project/chat").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    /// The split in one place: a read runs while the writer is held, sees every write that
+    /// returned before it, and cannot write.
+    #[test]
+    fn reads_run_beside_the_writer_and_see_what_it_committed() {
+        let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        assert_eq!(db.1.len(), READERS);
+        db.append_row("p/c", "dev", "b1", b"abc").unwrap();
+        db.append_row("p/c", "dev", "b2", b"de").unwrap();
+
+        // With one connection this would never return: the writer's lock is held.
+        let writer = db.0.lock().unwrap();
+        assert_eq!(db.room_head("p/c").unwrap(), 2);
+        assert_eq!(db.rows_after("p/c", 0, None, 10).unwrap().len(), 2);
+        let st = db.room_state("p/c").unwrap();
+        assert_eq!((st.head, st.row_count, st.row_bytes), (2, 2, 5));
+        drop(writer);
+
+        // Read-your-writes, row by row and across a checkpoint.
+        for n in 3..=20 {
+            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
+            assert_eq!(db.room_head("p/c").unwrap(), n);
+        }
+        assert!(db.put_checkpoint("p/c", 20, b"f", b"snap").unwrap());
+        assert_eq!(db.room_position("p/c").unwrap(), (20, 20));
+        assert!(db.rows_after("p/c", 0, None, 10).unwrap().is_empty());
+        assert_eq!(db.checkpoint_bytes("p/c").unwrap().unwrap().0, 20);
+
+        // A reader never sees the head ahead of its row: an append lands whole or not at all.
+        let appender = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for n in 0..300 {
+                    db.append_row("p/d", "dev", &format!("c{n}"), b"x").unwrap();
+                }
+            })
+        };
+        while !appender.is_finished() {
+            let st = db.room_state("p/d").unwrap();
+            assert_eq!(st.head, st.row_count);
+        }
+        appender.join().unwrap();
+
+        assert!(
+            db.read(|c| c.execute("DELETE FROM rows", [])).is_err(),
+            "a reader cannot write"
+        );
+        // The scrub's truncating checkpoint is not held up by idle readers.
+        db.flush_after_scrub().unwrap();
+        assert_eq!(db.room_head("p/c").unwrap(), 20);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod vault_scope_tests {
     use super::*;
 
@@ -3730,7 +4191,7 @@ mod vault_scope_tests {
                 "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'u_default',
                    icon TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL DEFAULT 0, last_active_at INTEGER NOT NULL DEFAULT 0,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
                    avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT, avatar_version INTEGER NOT NULL DEFAULT 0);
@@ -3769,6 +4230,88 @@ mod vault_scope_tests {
         drop(db);
         let db = Db::open(&path).expect("reopen");
         assert_eq!(db.list_vault_items("bob").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod account_cap_migration_tests {
+    //! The one ledger's one limit, on an existing relay database.
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbos-caps-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn limit_of(db: &Db, id: &str) -> Option<f64> {
+        db.user(id).unwrap().unwrap().daily_cap_usd
+    }
+
+    /// Opening an existing database lifts the caps already on it, leaves a deliberate freeze
+    /// alone, and does not undo a cap an admin sets afterwards.
+    #[test]
+    fn opening_lifts_the_caps_already_on_the_rows() {
+        let dir = temp_dir("lift");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        let db = Db::open(&path).expect("open");
+        for (id, cap) in [("u_capped", 25.0), ("u_other", 20.0), ("u_frozen", 0.0)] {
+            db.set_user_limits(id, Some(Some(cap)), None).unwrap();
+        }
+        // Rewind to a relay database from before this migration: the rows carry their caps and
+        // the marker is not set yet, which is what the next boot of the live relay will meet.
+        db.with(|c| c.execute("DELETE FROM meta WHERE key = 'account_caps_lifted'", []))
+            .unwrap();
+        drop(db);
+
+        let db = Db::open(&path).expect("reopen");
+        assert_eq!(limit_of(&db, "u_capped"), None, "a default cap is lifted");
+        assert_eq!(limit_of(&db, "u_other"), None, "a default cap is lifted");
+        assert_eq!(
+            limit_of(&db, "u_frozen"),
+            Some(0.0),
+            "an admin freezing an account is an instruction, not a leftover default"
+        );
+
+        // A cap set after the lift survives the next boot: the migration runs once.
+        db.set_user_limits("u_capped", Some(Some(3.0)), None)
+            .unwrap();
+        drop(db);
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(limit_of(&db, "u_capped"), Some(3.0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A project is not a ledger: a row that names no cap is stored with the unlimited sentinel.
+    #[test]
+    fn a_project_row_defaults_to_no_cap_of_its_own() {
+        let dir = temp_dir("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("relay.db")).expect("open");
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO projects(id, name, user_id, created_at, last_active_at) VALUES ('p1', 'Home', 'u1', 0, 0)",
+                [],
+            )
+        })
+        .unwrap();
+        let cap: f64 = db
+            .with(|c| {
+                c.query_row(
+                    "SELECT spend_cap_daily FROM projects WHERE id = 'p1'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -3904,7 +4447,7 @@ mod avatar_migration_tests {
             created + 5
         );
 
-        // Every change moves the stamp strictly forward — picture, reset to the leaf, picture
+        // Every change moves the stamp strictly forward — picture, reset to the disc, picture
         // again — so the states never share a stamp, even inside one millisecond.
         let mut seen = vec![legacy.avatar_version];
         db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
@@ -3925,7 +4468,6 @@ mod avatar_migration_tests {
             None,
             None,
             Some(Some(2)),
-            Some(Some(3)),
         )
         .unwrap();
         seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
@@ -3949,5 +4491,52 @@ mod avatar_migration_tests {
             before
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Who holds the writer's lock and for how long, by the line that asked for it. Tests only: the
+/// load gate prints the heaviest.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::collections::HashMap;
+    use std::panic::Location;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// Times held, milliseconds in all, the longest.
+    type Hold = (u64, f64, f64);
+    /// By call site.
+    static BY_SITE: Mutex<Option<HashMap<String, Hold>>> = Mutex::new(None);
+
+    pub(crate) struct Held(&'static Location<'static>, Instant);
+
+    impl Held {
+        pub(crate) fn by(site: &'static Location<'static>) -> Self {
+            Self(site, Instant::now())
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let ms = self.1.elapsed().as_secs_f64() * 1e3;
+            let site = format!("{}:{}", self.0.file(), self.0.line());
+            let mut by_site = BY_SITE.lock().unwrap();
+            let e = by_site.get_or_insert_with(HashMap::new).entry(site);
+            let e = e.or_insert((0, 0.0, 0.0));
+            *e = (e.0 + 1, e.1 + ms, e.2.max(ms));
+        }
+    }
+
+    /// Forget what was held so far, or take it, the most milliseconds in all first.
+    pub(crate) fn take() -> Vec<(String, Hold)> {
+        let mut all: Vec<_> = BY_SITE
+            .lock()
+            .unwrap()
+            .take()
+            .into_iter()
+            .flatten()
+            .collect();
+        all.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+        all
     }
 }

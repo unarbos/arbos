@@ -1,6 +1,6 @@
 //! Emoji · Stickers · GIFs picker (ARB-544, Jacob 2026-10-28, option B): the composer's `+`
-//! opens a two-row menu — "Photo or file…" (the file prompt) and "Emoji, stickers & GIFs" —
-//! and the second row opens this card above the composer, left-aligned to `+`, in the `@`
+//! opens a menu — "Photo or file…" (the file prompt), "Emoji, stickers & GIFs" and, in a
+//! people chat, "Poll" (`poll.rs`) — and the second row opens this card above the composer, left-aligned to `+`, in the `@`
 //! mention picker's card style. Mock: `media/feedback/emoji-sticker-gif/sheet-picker-mock-b.png`.
 //!
 //! - **Emoji** — search, Recents, one Unicode category at a time (strip at the bottom), a skin
@@ -178,6 +178,9 @@ pub enum PackSel {
 pub struct FunState {
     pub open: bool,
     pub menu_open: bool,
+    /// The pointer is on `+`: a press there is the button's own toggle, not a press outside
+    /// the menu.
+    pub plus_hovered: bool,
     pub tab: FunTab,
     /// The Emoji tab's search and the GIF tab's search share one field (the placeholder flips).
     pub search: Entity<ComposerInput>,
@@ -199,6 +202,7 @@ impl FunState {
         Self {
             open: false,
             menu_open: false,
+            plus_hovered: false,
             tab: FunTab::Emoji,
             search,
             category: 0,
@@ -422,6 +426,13 @@ impl Composer {
             // beneath.
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // A press anywhere else puts the menu away; `+` closes it itself.
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if !this.fun.plus_hovered {
+                    this.fun.menu_open = false;
+                    cx.notify();
+                }
+            }))
             .child(
                 row("attach-menu-file", "photo", "Photo or file…", &theme).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -442,7 +453,14 @@ impl Composer {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.open_fun(FunTab::Emoji, cx);
                 })),
-            );
+            )
+            .when(self.can_poll(cx), |menu| {
+                menu.child(
+                    row("attach-menu-poll", "text.alignleft", "Poll", &theme)
+                        .debug_selector(|| "composer-attach-poll".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.open_poll(window, cx))),
+                )
+            });
         menu.into_any_element()
     }
 

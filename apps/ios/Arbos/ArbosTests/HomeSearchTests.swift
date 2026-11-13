@@ -108,39 +108,28 @@ final class HomeSearchTests: XCTestCase {
     }
 }
 
-/// The home list filter — All · Agents · People · Servers (Mac parity,
-/// 2026-10-24; the Mac twin is `sidebar::strip_tests` in crates/arbos-mac).
-final class HomeListFilterTests: XCTestCase {
-    func testTheFourSegmentsInOrder() {
-        XCTAssertEqual(HomeListFilter.allCases.map(\.rawValue), ["All", "Agents", "People", "Servers"])
-    }
-
-    func testAllShowsEverything() {
-        XCTAssertTrue(HomeListFilter.all.showsProjects)
-        XCTAssertTrue(HomeListFilter.all.showsPeople)
-        XCTAssertTrue(HomeListFilter.all.showsServers)
-        XCTAssertTrue(HomeListFilter.all.admitsProject(shared: true))
-    }
-
-    func testAgentsShowsMyAgentsOnly() {
-        XCTAssertTrue(HomeListFilter.agents.admitsProject(shared: false))
-        XCTAssertFalse(HomeListFilter.agents.admitsProject(shared: true), "a shared-in agent stays out")
-        XCTAssertFalse(HomeListFilter.agents.showsPeople)
-        XCTAssertFalse(HomeListFilter.agents.showsServers)
-    }
-
-    func testPeopleShowsPeopleChatsOnly() {
-        XCTAssertTrue(HomeListFilter.people.showsPeople)
-        XCTAssertFalse(HomeListFilter.people.showsProjects)
-        XCTAssertFalse(HomeListFilter.people.admitsProject(shared: false))
-        XCTAssertFalse(HomeListFilter.people.showsServers)
-    }
-
-    func testServersShowsServersOnly() {
-        XCTAssertTrue(HomeListFilter.servers.showsServers)
-        XCTAssertFalse(HomeListFilter.servers.showsProjects)
-        XCTAssertFalse(HomeListFilter.servers.showsPeople)
-        XCTAssertEqual(HomeListFilter.servers.emptyCopy, "No servers yet")
+/// Home's chat list has no All · Agents · People · Servers selector
+/// ([feedback chat-list-no-filter-ios-2026-11-10]). The Mac twin ask
+/// ([feedback chat-list-no-filter-mac-2026-11-10]) is the same contract on the
+/// sidebar, guarded here so the register has an XCTest that names it; the Mac
+/// cargo test
+/// `sidebar::strip_tests::the_list_shows_agents_people_and_servers_together_with_no_filter`
+/// is the pixel-level twin.
+final class HomeChatListNoFilterTests: XCTestCase {
+    func testHomeSourceDropsTheFilterEnumAndBar() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // ArbosTests
+            .deletingLastPathComponent() // Arbos
+            .appendingPathComponent("Arbos/UI/HomeView.swift")
+        let src = try String(contentsOf: root, encoding: .utf8)
+        XCTAssertFalse(src.contains("enum HomeListFilter"), "HomeListFilter is gone")
+        XCTAssertFalse(src.contains("listFilterBar"), "the filter bar is gone")
+        XCTAssertFalse(src.contains("home-list-filter"), "the filter accessibility id is gone")
+        XCTAssertFalse(src.contains("PaneTabs(tabs:"), "Home no longer hosts PaneTabs for a filter")
+        XCTAssertTrue(src.contains("chat-list-no-filter-ios-2026-11-10"),
+                      "the ask tag stays on Home")
+        XCTAssertTrue(src.contains("barOnlyListTop"),
+                      "the list uses the bar-only top inset — no leftover filter band")
     }
 }
 
@@ -497,4 +486,40 @@ final class DraftDMTests: XCTestCase {
         XCTAssertEqual(model.path, [.chat(chatId: "fx-dm-unconst", projectId: peopleSlot)])
         XCTAssertNil(model.draftDM)
     }
+
+    func testFixtureFirstSendsStayInOrder() async throws {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        model.sendPeople(chatId: draft, text: "first", replyTo: nil)
+        model.sendPeople(chatId: draft, text: "second", replyTo: nil)
+        for _ in 0..<50 where model.draftDM != nil { try? await Task.sleep(for: .milliseconds(20)) }
+        let dm = try XCTUnwrap(dmWithMira(model))
+        XCTAssertEqual(model.messages(of: dm.id).suffix(2).map(\.plainText), ["first", "second"])
+    }
+
+    func testQueuedFixtureFirstSendIsRetiredWithTheAccount() async {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        model.sendPeople(chatId: draft, text: "retired", replyTo: nil)
+        model.unpair(forget: false)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(dmWithMira(model))
+        XCTAssertNil(model.draftDM)
+        XCTAssertTrue(model.peopleChats.isEmpty)
+        XCTAssertTrue(model.path.isEmpty)
+    }
+
+    func testAlreadyCancelledFixtureFirstSendIsNotAdmitted() async {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        let caller = Task { @MainActor in
+            model.sendPeople(chatId: self.draft, text: "cancelled", replyTo: nil)
+        }
+        caller.cancel()
+        await caller.value
+        XCTAssertNil(dmWithMira(model))
+        XCTAssertNotNil(model.draftDM)
+        XCTAssertFalse(model.draftDMSending)
+    }
+
 }

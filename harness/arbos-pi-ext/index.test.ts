@@ -10,7 +10,7 @@ process.env.ARBOS_STATE_DIR = mkdtempSync(join(tmpdir(), "arbos-pi-ext-test-"));
 process.env.ARBOS_HOOK_URL = "";
 process.env.ARBOS_SESSION_ROLE = "main";
 
-const { default: arbosPiExt, promisesMore, detachedShell } = await import("./index.ts");
+const { default: arbosPiExt, promisesMore, detachedShell, killsAProcess } = await import("./index.ts");
 
 type Handler = (event: any) => Promise<any> | any;
 
@@ -133,4 +133,97 @@ test("a detached script in the main turn is refused with the start_job hint (#17
   assert.match(verdict.reason, /start_job/);
   const fg = await emit("tool_call", { toolCallId: "b2", toolName: "bash", input: { command: "seq 1 10 > step1.txt" }, parentToolCallId: null });
   assert.equal(fg, undefined);
+});
+
+/** A tool exactly as pi puts it in the cached prefix: name, prose and schema, in order. */
+function toolPrefix(tools: Map<string, any>): string {
+  return JSON.stringify(
+    [...tools.entries()].map(([name, t]) => [name, t.label, t.description, t.promptSnippet, t.parameters, t.exposure]),
+  );
+}
+
+test("the tool set is byte-identical turn to turn, whatever the chat is doing", async () => {
+  // The tool definitions live inside the model's cached prefix — about 27,900 tokens of system
+  // prompt and tools on a real box. One tool appearing, disappearing or being reworded rewrites
+  // that prefix for the chat and for every later turn of it, at about $0.14 a time; the
+  // prompt-size measurement of 2026-11-05 found a request whose only change was `stop_job`
+  // moving, and it read nothing from cache. So the bar is identity, not presence: a tool that is
+  // merely still registered, reworded or in a different position, has already cost the cache.
+  const { emit, tools } = fakePi();
+  const before = toolPrefix(tools);
+  for (const name of ["route", "send_message", "start_job", "stop_job", "ask_user", "peek"]) {
+    assert.ok(tools.has(name), `the block under test is the real one: ${name} is missing`);
+  }
+
+  // A whole turn's worth of state change: the chat routes, starts a job, offloads a big result
+  // into a handle, has the job cancelled, settles, and has its window compacted.
+  const input = await emit("input", { text: "Start the long one, then cancel it.", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Starting it." });
+  await emit("tool_call", { toolCallId: "t1", toolName: "bash", input: { command: "ls" }, parentToolCallId: null });
+  await emit("tool_result", {
+    toolCallId: "t1",
+    toolName: "bash",
+    input: { command: "ls" },
+    parentToolCallId: null,
+    content: [{ type: "text", text: "x\n".repeat(5000) }],
+  });
+  await emit("agent_before_settle", { text: "done" });
+  await emit("agent_settled", { aborted: false });
+  await emit("session_compact", {});
+
+  assert.equal(
+    toolPrefix(tools),
+    before,
+    "a running job, a new handle and a compaction must leave the tool block alone",
+  );
+
+  // And a second load registers the same tools in the same order, so a restart on the same
+  // chat — an idle park, a prompt refresh — resumes on the prefix it left.
+  assert.equal(toolPrefix(fakePi().tools), before, "the tool block must not depend on load order");
+});
+
+test("a kill in the main turn is refused with the stop_job hint (Test5 round 6, bug S)", async () => {
+  // The round-6 command itself, and the shapes around it.
+  assert.ok(killsAProcess("bash", { command: "kill 14237" }));
+  assert.ok(killsAProcess("bash", { command: "kill -9 14237" }));
+  assert.ok(killsAProcess("bash", { command: "pkill -f 'sleep 20'" }));
+  assert.ok(killsAProcess("bash", { command: "ps aux | grep mersenne; killall python3" }));
+  assert.ok(killsAProcess("bash", { command: "pgrep -f mersenne | xargs kill" }));
+  assert.ok(killsAProcess("bash", { command: "sudo kill 14237" }));
+  assert.ok(killsAProcess("codemode", { code: "await tools.bash({command: 'kill 14237'}); return 'cancelled'" }));
+  // A word that only contains "kill" is not a signal.
+  assert.equal(killsAProcess("bash", { command: "tail -5 killed.log" }), null);
+  assert.equal(killsAProcess("bash", { command: "cargo test --features killswitch" }), null);
+  assert.equal(killsAProcess("bash", { command: "grep -c kill out/report.txt" }), null);
+  assert.equal(killsAProcess("read", { path: "/x" }), null);
+  const { emit, tools } = fakePi();
+  const input = await emit("input", { text: "cancel the Mersenne job", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Cancelling it." });
+  const verdict = await emit("tool_call", { toolCallId: "k", toolName: "bash", input: { command: "kill 14237" }, parentToolCallId: null });
+  assert.equal(verdict?.block, true);
+  assert.match(verdict.reason, /stop_job/);
+  assert.match(verdict.reason, /signal is not a cancel/);
+});
+
+test("a kill is refused when agentd cannot vouch for it, and the hint names the one exception (Test5 round 10, bug Z)", async () => {
+  // Whether a given kill is the allowed one is agentd's judgement — it is the only side that
+  // knows which pids a `stop_job` of this chat failed to reap — and it is tested there
+  // (`job_leftover_tests::a_kill_is_allowed_only_for_a_pid_a_cancel_of_this_chat_could_not_reap`).
+  // What belongs here is that the extension refuses unless agentd says yes.
+  //
+  // These tests run with ARBOS_HOOK_URL unset, so the hook answers `null`: no agentd, no
+  // vouching, no kill. That is also the production default for a local pi run, and it is the
+  // behaviour the guard shipped with — the exception widens nothing on its own.
+  const { emit, tools } = fakePi();
+  const input = await emit("input", { text: "that loop is still going, kill it", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Looking." });
+  const verdict = await emit("tool_call", { toolCallId: "k", toolName: "bash", input: { command: "kill 561" }, parentToolCallId: null });
+  assert.equal(verdict?.block, true);
+  // r10cancel's dead end: the hint said only "a signal is not a cancel" while stop_job had
+  // already run and the loop was still writing. It now names the way out.
+  assert.match(verdict.reason, /stop_job reports a pid it could NOT kill/);
+  assert.match(verdict.reason, /kills the processes the job started/);
 });

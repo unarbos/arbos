@@ -117,6 +117,7 @@ struct FirstLoginView: View {
 
     @ViewBuilder
     private func textBlock(state: FirstLogin, cardCenter: CGPoint) -> some View {
+        let work = model.accountWork()
         if state.stage == .failed {
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
@@ -131,7 +132,7 @@ struct FirstLoginView: View {
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
                 }
-                Button { model.retryFirstLogin() } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; model.retryFirstLogin() } label: {
                     Text("Retry")
                         .font(theme.font(Theme.small, weight: .semibold))
                         .foregroundStyle(theme.text)

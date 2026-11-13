@@ -1,0 +1,12 @@
+[
+  {
+    "name": "release-actual-method-typecheck",
+    "exit": 0,
+    "seconds": 0.9603154578944668
+  },
+  {
+    "name": "whole-candidate-source-parse",
+    "exit": 0,
+    "seconds": 0.23122824996244162
+  }
+]

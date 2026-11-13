@@ -1,16 +1,30 @@
+#[cfg(test)]
+mod ack_is_not_an_answer_tests;
 mod activity;
 mod agent;
 mod agent_messages;
+mod app;
 mod approval;
 mod attachments;
 mod budget;
+#[cfg(test)]
+mod cancel_handles_tests;
 mod channels;
 mod chart;
 mod config;
 mod connectors;
+#[cfg(test)]
+mod crash_loop_leftover_tests;
+#[cfg(test)]
+mod cross_workspace_auth_tests;
 mod disk;
 mod eval;
 mod feedback;
+mod forced_job;
+#[cfg(test)]
+mod forced_job_burst_tests;
+#[cfg(test)]
+mod forced_job_tests;
 mod goals;
 mod groups;
 mod handoff;
@@ -20,6 +34,49 @@ mod http;
 mod identity;
 mod inspect;
 mod isolation;
+#[cfg(test)]
+mod job_background_claim_tests;
+mod job_backgrounded;
+#[cfg(test)]
+mod job_cancel_real_worker_tests;
+#[cfg(test)]
+mod job_cancel_tests;
+#[cfg(test)]
+mod job_cancel_unconfirmed_tests;
+#[cfg(test)]
+mod job_cancel_window_tests;
+#[cfg(test)]
+mod job_correction_routing_tests;
+#[cfg(test)]
+mod job_finished_sweep_tests;
+#[cfg(test)]
+mod job_handoff_leak_tests;
+#[cfg(test)]
+mod job_leftover_tests;
+#[cfg(test)]
+mod job_list_cap_tests;
+#[cfg(test)]
+mod job_note_tests;
+#[cfg(test)]
+mod job_notice_tests;
+#[cfg(test)]
+mod job_one_file_per_ask_tests;
+#[cfg(test)]
+mod job_orphan_tests;
+#[cfg(test)]
+mod job_queued_cancel_tests;
+#[cfg(test)]
+mod job_reparent_tests;
+#[cfg(test)]
+mod job_requeue_order_tests;
+#[cfg(test)]
+mod job_result_budget_tests;
+#[cfg(test)]
+mod job_steer_inherit_tests;
+#[cfg(test)]
+mod job_steer_race_tests;
+#[cfg(test)]
+mod job_wait_tier_tests;
 mod jobs_view;
 mod llm;
 mod local;
@@ -27,26 +84,61 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+#[cfg(test)]
+mod model_switch_tests;
+#[cfg(test)]
+mod model_usage_tests;
 mod people;
+#[cfg(test)]
+mod pi_crash_loop_tests;
+mod pi_slot;
+#[cfg(test)]
+mod refusal_line_and_window_notice_tests;
+#[cfg(test)]
+mod refused_turn_window_tests;
 mod relay_error;
 mod reply;
 mod resources;
 mod responders;
+#[cfg(test)]
+mod room_marks_tests;
 mod routines;
+#[cfg(test)]
+mod rowless_cancel_entrypoint_tests;
+#[cfg(test)]
+mod rowless_cancel_evidence_tests;
+#[cfg(test)]
+mod rowless_cancel_tests;
 mod rpc_child;
 mod selfref;
+mod send_order;
+#[cfg(test)]
+mod send_order_tests;
 mod settings;
 mod silence;
 mod sites;
 mod skills;
+mod sleep;
 mod status;
+mod steer_gate;
 mod store;
+#[cfg(test)]
+mod sweep_contention_tests;
 mod sync;
 mod tree;
 mod truncate;
+#[cfg(test)]
+mod turn_end_race_tests;
+#[cfg(test)]
+mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;
+mod worker_lifetime;
+#[cfg(test)]
+mod worker_model_refusal_tests;
+#[cfg(test)]
+mod worker_retention_tests;
 mod workspace;
 
 use std::time::{Duration, Instant};
@@ -124,6 +216,17 @@ enum Cmd {
         #[arg(long)]
         slow: bool,
     },
+    /// Mark historical provider-refused user turns that predate live marking (#2925) and rebuild
+    /// the memory cards that summarised them, through the live mark/invalidate path. Mark-only:
+    /// never deletes or rewrites message content. Idempotent. No model calls.
+    BackfillRefused {
+        /// Path to the workspace's `agentd.db`.
+        #[arg(long)]
+        db: String,
+        /// Count what a live run would mark and change nothing. Report this first.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -184,7 +287,34 @@ async fn main() -> Result<()> {
             };
             eval_tree(db, query, chat, scorer, card_model, out, opts).await
         }
+        Cmd::BackfillRefused { db, dry_run } => backfill_refused(db, dry_run),
     }
+}
+
+/// Mark historical provider-refused turns and rebuild their cards (`Tree::backfill_refused`).
+/// Opens the store directly; no relay or model is needed, so the `Tree` carries a placeholder
+/// `Llm` the backfill never calls.
+fn backfill_refused(db: String, dry_run: bool) -> Result<()> {
+    let store = store::Store::open(std::path::Path::new(&db))?;
+    let llm = llm::Llm::with_endpoints("", "", "");
+    let tree = tree::Tree::with_ids(
+        "backfill",
+        "backfill",
+        settings::LiveModels::fixed("none"),
+        store,
+        std::sync::Arc::new(llm),
+    );
+    let r = tree.backfill_refused(dry_run)?;
+    println!(
+        "{}",
+        json!({
+            "dry_run": r.dry_run,
+            "found": r.found,
+            "marked": r.marked,
+            "rebuilt": r.rebuilt,
+        })
+    );
+    Ok(())
 }
 
 async fn eval_tree(
@@ -222,7 +352,13 @@ async fn eval_tree(
         }
     };
     let store = store::Store::open(std::path::Path::new(&db))?;
-    let tree = tree::Tree::with_ids("eval", "eval", &card_model, store, std::sync::Arc::new(llm));
+    let tree = tree::Tree::with_ids(
+        "eval",
+        "eval",
+        settings::LiveModels::fixed(&card_model),
+        store,
+        std::sync::Arc::new(llm),
+    );
     let report = tree.eval(&scorer, &chat, &query, opts).await?;
     let text = serde_json::to_string_pretty(&report)?;
     match out {
@@ -331,6 +467,10 @@ async fn resolve_relay_url() -> String {
 
 async fn boot() -> Result<()> {
     let t_boot = Instant::now();
+    // Taken first: until it is, SIGUSR1 is the default action, which ends the process.
+    let mut restored =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            .expect("sigusr1");
     let relay_url = resolve_relay_url().await;
     // Config reads the env; the resolved URL wins over whatever the sandbox was created with.
     std::env::set_var("ARBOS_RELAY_URL", &relay_url);
@@ -345,37 +485,15 @@ async fn boot() -> Result<()> {
     let sup = Supervisor::new(cfg.clone());
 
     // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview
-    // URL and the stale-box detector look here.
-    let main_l = tokio::net::TcpListener::bind(format!("{}:{}", cfg.bind, cfg.port))
-        .await
+    // URL and the stale-box detector look here. It runs on a runtime of its own, so a boot that
+    // holds this runtime for minutes cannot keep the health surface from answering (2026-11-09).
+    let main_l = std::net::TcpListener::bind(format!("{}:{}", cfg.bind, cfg.port))
         .context("bind main port")?;
-    let main_app = http::box_router(sup.clone());
-    tokio::spawn(async move { axum::serve(main_l, main_app).await.ok() });
+    http::serve_box(main_l, sup.clone()).context("serve box http")?;
 
     // Hello: one box per user; the answer lists every project as a workspace.
-    let http_client = reqwest::Client::new();
     let listing = loop {
-        let hello = http_client
-            .post(format!("{}/box/hello", cfg.relay_url))
-            .bearer_auth(&cfg.box_token)
-            .json(&json!({
-                "url": format!("http://127.0.0.1:{}", cfg.port),
-                "version": env!("CARGO_PKG_VERSION"),
-                "proto": arbos_core::PROTO_VERSION,
-                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
-                // box runs, so the relay admin can tell what is shipped.
-                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
-                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
-                // The pi-ext seed this box actually copies into its projects (#1708): on a host
-                // sandbox /etc is persisted, so it can lag behind the image.
-                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
-                    .ok()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty()),
-            }))
-            .send()
-            .await;
-        match hello {
+        match sup.hello().await {
             Ok(r) if r.status().is_success() => break r.json::<Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
                 let text = r.text().await.unwrap_or_default();
@@ -394,21 +512,33 @@ async fn boot() -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("u_default")
         .to_owned();
-    sup.apply_listing(&listing).await;
     // Calls Phase 2: the relay's voice link (tool calls and transcript rows from the voice worker).
     voice::spawn_voice_link(sup.clone());
-    let n = sup.list().await.len();
-    tracing::info!(
-        user = %user_id,
-        workspaces = n,
-        ms = t_boot.elapsed().as_millis() as i64,
-        "arbos-agentd booted"
-    );
-    if let Some(w) = sup.list().await.first() {
-        let _ = w
-            .agent
-            .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
-            .await;
+    // The first listing starts every workspace the relay named, and on a box with many projects
+    // that is minutes of work (2026-11-09). Nothing below needs it to have finished — the
+    // registry poll, the room ceiling and the keep-alive all read the workspace set as it
+    // stands — so it runs on its own task and the box says `initializing` until it lands.
+    // `apply_listing` takes at most one pass at a time, so the 3 s poll beside it leaves this
+    // one alone.
+    {
+        let sup = sup.clone();
+        let listing = listing.clone();
+        tokio::spawn(async move {
+            sup.apply_listing(&listing).await;
+            let n = sup.list().await.len();
+            tracing::info!(
+                user = %user_id,
+                workspaces = n,
+                ms = t_boot.elapsed().as_millis() as i64,
+                "arbos-agentd booted"
+            );
+            if let Some(w) = sup.list().await.first() {
+                let _ = w
+                    .agent
+                    .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
+                    .await;
+            }
+        });
     }
     // The read-only copy of Arbos's own source (/opt/arbos/src) follows main: refreshed now, in
     // the background, and every few hours after.
@@ -475,6 +605,21 @@ async fn boot() -> Result<()> {
             }
         });
     }
+    // Box-wide room ceiling (30 s): the per-workspace cap bounds each hub's rooms and nothing
+    // bounds their sum, so this is the only pass that can see a box over its CPU quota with
+    // every workspace inside its own cap. A box under the ceiling pays one cheap count for it.
+    //
+    // A sweep rather than a check on the open path, because the sum moves for reasons no single
+    // open knows about: a workspace being added puts the box over without any room opening.
+    {
+        let sup2 = sup.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                sup2.enforce_box_room_ceiling().await;
+            }
+        });
+    }
     // Idle keep-alive heartbeat (turn_running=false lets the relay restore auto-stop).
     {
         let sup2 = sup.clone();
@@ -483,6 +628,16 @@ async fn boot() -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let running = sup2.any_turn_running().await;
                 let _ = sup2.keepalive(running).await;
+            }
+        });
+    }
+    // SIGUSR1: the sandbox's supervisor restored it from a checkpoint. Every relay connection
+    // is dead on the wire, so they are dropped and dialed again (docs/box-scaling.md §4.3.1).
+    {
+        let sup2 = sup.clone();
+        tokio::spawn(async move {
+            while restored.recv().await.is_some() {
+                sup2.reconnect().await;
             }
         });
     }

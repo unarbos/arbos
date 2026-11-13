@@ -7,12 +7,13 @@
 //! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
 //! open from the sidebar row's control-click menu.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     actions, deferred, div, fill, img, point, prelude::*, px, relative, size, App, Bounds,
@@ -49,6 +50,7 @@ use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 mod fun;
 /// The bundled starter stickers (generated).
 mod fun_starter;
+mod poll;
 
 actions!(
     composer,
@@ -243,6 +245,14 @@ struct Layout {
     pill_mask: Bounds<Pixels>,
 }
 
+/// Half of the caret's blink: on this long, then off this long (macOS's own is about this).
+const CARET_BLINK_MS: u64 = 530;
+
+/// Is the caret drawn this long after it last moved? On for the first half-period.
+fn caret_lit(since_moved: Duration) -> bool {
+    (since_moved.as_millis() / CARET_BLINK_MS as u128) % 2 == 0
+}
+
 pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
@@ -255,6 +265,14 @@ pub struct ComposerInput {
     /// Every other move paints a boundary caret at the end of the row above,
     /// as NSTextView's upstream affinity does.
     caret_downstream: bool,
+    /// The caret blinks as the system's does: solid from the last time it moved or the text
+    /// changed (`caret_moved`, noticed at paint through `caret_seen`), then on and off every
+    /// [`CARET_BLINK_MS`]. A paint that has a caret to show sets `caret_live`, and the ticker
+    /// only redraws a field that set it, so a field without focus costs one idle wake.
+    caret_seen: Cell<(usize, usize)>,
+    caret_moved: Cell<Instant>,
+    caret_live: Cell<bool>,
+    _caret_ticker: gpui::Task<()>,
     layout: Option<Layout>,
     is_selecting: bool,
     /// The pointer over the committed chips (hover / pressed), by chip range.
@@ -327,6 +345,22 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             caret_downstream: false,
+            caret_seen: Cell::new((usize::MAX, 0)),
+            caret_moved: Cell::new(Instant::now()),
+            caret_live: Cell::new(false),
+            _caret_ticker: cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(CARET_BLINK_MS))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.caret_live.replace(false) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }),
             layout: None,
             is_selecting: false,
             chips: mention::ChipPointer::default(),
@@ -2242,7 +2276,16 @@ impl Element for InputElement {
         let mut cursor_quad = None;
         let mut selections = Vec::new();
         if content.is_empty() || selected_range.is_empty() {
-            if let Some(pos) = cursor_pos {
+            let input = self.input.read(cx);
+            let seen = (cursor, content.len());
+            if input.caret_seen.replace(seen) != seen {
+                input.caret_moved.set(Instant::now());
+            }
+            if input.focus_handle.is_focused(window) {
+                input.caret_live.set(true);
+            }
+            let lit = caret_lit(input.caret_moved.get().elapsed());
+            if let Some(pos) = cursor_pos.filter(|_| lit) {
                 cursor_quad = Some(fill(
                     Bounds::new(
                         point(bounds.left() + pos.x, bounds.top() + pos.y - dy + px(1.0)),
@@ -2860,6 +2903,8 @@ pub struct Composer {
     rig_draft: Option<String>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
+    /// The poll form above the field, while it is open (`+` → Poll).
+    poll: Option<poll::PollDraft>,
     /// Where the trailing controls are between the empty field's mic + phone
     /// and the send arrow, so typing and clearing cross-fade them.
     send_swap: SendSwap,
@@ -2970,6 +3015,7 @@ impl Composer {
                 .ok()
                 .filter(|v| !v.is_empty()),
             fun: fun::FunState::new(fun_search),
+            poll: None,
             // A new composer starts on an empty field: mic + phone, settled.
             send_swap: SendSwap::settled(false, Instant::now()),
         }
@@ -3121,7 +3167,8 @@ impl Composer {
             .gap(px(STAGED_GAP))
             .overflow_x_scroll()
             .px(px(12.0))
-            .pt(px(12.0));
+            .pt(px(12.0))
+            .map(crate::ui::back_swipe::mark_sideways_scroller);
         for (i, staged) in self.attachments.iter().enumerate() {
             strip = strip.child(self.staged_tile(i, staged, theme, cx));
         }
@@ -3385,7 +3432,7 @@ impl Composer {
                     name: a.name.trim().to_string(),
                     id: Some(format!("agent:{}", a.project_id)),
                     is_agent: true,
-                    picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                    picture: mention::agent_member_picture(state, Some(space), a),
                     tag: None,
                     description: None,
                 },
@@ -3440,7 +3487,7 @@ impl Composer {
                 name: a.name.trim().to_string(),
                 id: Some(format!("agent:{}", a.project_id)),
                 is_agent: true,
-                picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                picture: mention::agent_member_picture(state, Some(space), a),
                 tag: Some("the agent in this chat"),
                 description: None,
             });
@@ -3567,12 +3614,15 @@ impl Composer {
                         cx.notify();
                     }
                 }))
-                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
-                        .whitespace_nowrap()
+                        // Capped so a long name leaves the handle (what tells two people
+                        // apart) its room.
+                        .max_w(px(180.0))
+                        .truncate()
                         .child(match c.description {
                             Some(_) => format!("@{}", c.handle),
                             None => c.name.clone(),
@@ -3586,6 +3636,7 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
+                        .text_ellipsis()
                         .child(match c.description {
                             Some(d) => format!("· {d}"),
                             None => format!("@{}", c.handle),
@@ -3653,8 +3704,8 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match>
     search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
-/// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
-fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
+/// A picker row's picture as an element: photo, D79 initials or a D92 disc.
+fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
             .size(px(size))
@@ -3679,11 +3730,8 @@ fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui
             .text_color(gpui::white())
             .child(text.clone())
             .into_any_element(),
-        mention::Picture::Leaf(pick) => {
-            crate::ui::avatars::leaf_element(*pick, size).into_any_element()
-        }
-        mention::Picture::Neutral { name } => {
-            crate::ui::avatars::neutral_element(name, size, theme).into_any_element()
+        mention::Picture::Disc(color) => {
+            crate::ui::avatars::disc_element(*color, size).into_any_element()
         }
     }
 }
@@ -3840,6 +3888,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .child(
                     div()
                         .text_size(px(TEXT_TINY))
@@ -3861,6 +3910,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 // The disc itself never fades: it is the same white circle in
                 // both states, so it holds still and only its mark changes.
                 .child(if crossfade {
@@ -3988,6 +4038,8 @@ impl Render for Composer {
 
         let plus = div()
             .id("composer-attach")
+            .debug_selector(|| "composer-attach".into())
+            .on_hover(cx.listener(|this, hovered, _, _| this.fun.plus_hovered = *hovered))
             .size(px(PLUS_BUTTON))
             .flex_shrink_0()
             .rounded_full()
@@ -4294,6 +4346,10 @@ impl Render for Composer {
         }
         if self.fun.open {
             field_wrap = field_wrap.child(above_field(self.render_fun(cx)));
+        }
+        if let Some(draft) = self.poll.take() {
+            field_wrap = field_wrap.child(above_field(self.render_poll(&draft, cx)));
+            self.poll = Some(draft);
         }
         column.child(field_wrap)
     }
@@ -4857,6 +4913,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn the_caret_is_solid_after_a_move_then_blinks_on_the_half_period() {
+        let ms = Duration::from_millis;
+        assert!(caret_lit(ms(0)) && caret_lit(ms(CARET_BLINK_MS - 1)));
+        assert!(!caret_lit(ms(CARET_BLINK_MS)) && !caret_lit(ms(2 * CARET_BLINK_MS - 1)));
+        assert!(caret_lit(ms(2 * CARET_BLINK_MS)));
+    }
 
     fn image(format: gpui::ImageFormat, bytes: &[u8]) -> gpui::Image {
         let bytes = bytes.to_vec();
@@ -7143,6 +7207,93 @@ mod overlay_tests {
         );
         let gap = f32::from(closed.field.top() - picker.bottom());
         assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
+    }
+
+    /// `+` offers Poll in a people chat only, and the form sends once it holds a poll the
+    /// relay would take: a question and two options.
+    #[gpui::test]
+    fn plus_offers_a_poll_in_a_people_chat_and_the_form_sends_a_valid_one(cx: &mut TestAppContext) {
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let none = gpui::Modifiers::default();
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Project);
+        composer.update(vcx, |c, cx| c.toggle_attach_menu(cx));
+        settle(&state, &shell, vcx);
+        assert!(vcx.debug_bounds("composer-attach-menu").is_some());
+        assert!(
+            vcx.debug_bounds("composer-attach-poll").is_none(),
+            "no polls in an agent's own chat"
+        );
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Group);
+        settle(&state, &shell, vcx);
+        let row = vcx
+            .debug_bounds("composer-attach-poll")
+            .expect("Poll is on the + menu in a group")
+            .center();
+        vcx.simulate_click(row, none);
+        settle(&state, &shell, vcx);
+        let send = vcx
+            .debug_bounds("composer-poll-send")
+            .expect("the form opens")
+            .center();
+
+        // Empty fields are not a poll: Send does nothing and the form stays.
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(composer.read_with(&*vcx, |c, _| c.poll.is_some()));
+
+        composer.update(vcx, |c, cx| {
+            c.fill_poll_for_test("Where?", &["Lisbon", "Berlin"], cx)
+        });
+        settle(&state, &shell, vcx);
+        let send = vcx.debug_bounds("composer-poll-send").unwrap().center();
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(
+            composer.read_with(&*vcx, |c, _| c.poll.is_none()),
+            "a valid poll is sent and the form closes"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_outside_the_plus_menu_closes_it_and_plus_still_toggles(cx: &mut TestAppContext) {
+        let Mounted {
+            state, shell, vcx, ..
+        } = mount(cx);
+        let none = gpui::Modifiers::default();
+        settle(&state, &shell, vcx);
+        let plus = vcx
+            .debug_bounds("composer-attach")
+            .expect("+ is drawn")
+            .center();
+        let open = |vcx: &mut VisualTestContext| vcx.debug_bounds("composer-attach-menu");
+
+        vcx.simulate_mouse_move(plus, None, none);
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        let menu = open(vcx).expect("+ opens its menu");
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        assert!(
+            open(vcx).is_none(),
+            "a second + closes it, and does not reopen it"
+        );
+
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        assert!(open(vcx).is_some());
+        let elsewhere = gpui::point(menu.right() + px(40.0), menu.top() - px(40.0));
+        vcx.simulate_mouse_move(elsewhere, None, none);
+        vcx.simulate_click(elsewhere, none);
+        settle(&state, &shell, vcx);
+        assert!(open(vcx).is_none(), "a press outside the menu closes it");
     }
 
     /// The text row inside the pill — the one thing Jacob said must not move.

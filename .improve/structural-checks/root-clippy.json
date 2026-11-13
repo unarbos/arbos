@@ -1,0 +1,27 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1) (allow default) (deny network*)",
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-core",
+    "-p",
+    "arbos-client",
+    "-p",
+    "arbos-relay",
+    "-p",
+    "arbos-sidecar",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "exit_code": 0,
+  "seconds": 19.673270833096467,
+  "target": "unique phase3-isolated-target; all four workspace packages forcibly cleaned",
+  "scope": "combined Phase3 actual core/client/relay/sidecar all-targets; excludes GUI caller"
+}

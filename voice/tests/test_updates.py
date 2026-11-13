@@ -1,6 +1,10 @@
-"""#1860 — Jacob's rule: the main voice agent is the only speaker on a call. A job that finishes
-during the call produces no second speaker; its result goes into the voice agent's context and
-the voice agent says a short summary at the next pause, never over the person.
+"""Voice call hears background job results (#1832 follow-up).
+
+Jacob's rule: the main voice agent is the only speaker on a call. A job that finishes
+during the call produces no second speaker; its result goes into the voice agent's context
+and the voice agent says a short summary at the next pause — and while the call is still
+live it must speak that follow-up without waiting for the person to talk again. If the call
+has ended, the result stays in the chat as a normal message.
 
     source .venv/bin/activate && python -m pytest tests/test_updates.py -q
 """
@@ -11,7 +15,7 @@ import asyncio
 
 import pytest
 
-from arbos_voice.updates import PAUSE_S, CallUpdates, Update, context_item, note_for
+from arbos_voice.updates import FORCED_PAUSE_S, PAUSE_S, CallUpdates, Update, context_item, note_for
 
 pytest_plugins = ("pytest_asyncio",)
 
@@ -57,11 +61,12 @@ class FakeCall:
         )
 
 
-def job_done(message_id: str = "m1", kind: str = "job") -> Update:
+def job_done(message_id: str = "m1", kind: str = "job", text: str | None = None) -> Update:
     return Update(
         kind=kind,
         message_id=message_id,
-        text="Pizza Tomate delivers via WhatsApp +506 8992 4888, open until 10 p.m.; Muzza and Amici also deliver.",
+        text=text
+        or "Pizza Tomate delivers via WhatsApp +506 8992 4888, open until 10 p.m.; Muzza and Amici also deliver.",
         sender={"kind": "agent", "name": "Bubble", "handle": "bubble"},
     )
 
@@ -80,8 +85,36 @@ async def test_a_job_completion_during_a_call_is_one_voice_and_lands_in_context(
     # … and the voice agent (the only speaker) said one short summary at the pause.
     assert len(call.spoken) == 1
     assert "one or two short spoken sentences" in call.spoken[0]
-    assert "Do not read tables, links or phone numbers aloud" in call.spoken[0]
+    assert "Do not stay silent" in call.spoken[0]
     assert call.interrupts == 0
+    assert u.spoken == 1
+
+
+@pytest.mark.asyncio
+async def test_background_job_completes_later_and_agent_speaks_follow_up_without_user_talking(
+    monkeypatch,
+):
+    """Regression: person asked on the call, agent said it would report back, then waited.
+    The job finishes later; the voice session must speak the result on its own."""
+    monkeypatch.setattr("arbos_voice.updates.PAUSE_S", 0.05)
+    call = FakeCall()
+    u = call.updates()
+    # Call is idle — the person is waiting for the follow-up, not talking.
+    call.user_speaking = False
+    call.agent_speaking = False
+    assert await u.handle(
+        job_done(
+            "job-ls",
+            kind="job",
+            text="ls output:\nREADME.md\nCargo.toml\ncrates/\n",
+        )
+    )
+    await asyncio.sleep(0.25)
+    assert len(call.context) == 1
+    assert "ls output" in call.context[0]
+    assert len(call.spoken) == 1, "must speak the job result without the person talking again"
+    assert "without waiting for them to ask" in call.spoken[0]
+    assert "Do not stay silent" in call.spoken[0]
     assert u.spoken == 1
 
 
@@ -102,17 +135,39 @@ async def test_the_summary_waits_for_the_person_to_finish_and_never_interrupts(m
 
 
 @pytest.mark.asyncio
-async def test_no_pause_means_no_second_speaker_the_next_turn_has_it(monkeypatch):
-    monkeypatch.setattr("arbos_voice.updates.SPEAK_WAIT_S", 0.15)
+async def test_after_speak_wait_still_speaks_at_the_next_quiet_moment(monkeypatch):
+    """While the call is live, a long stretch of talking must not drop the follow-up."""
+    monkeypatch.setattr("arbos_voice.updates.SPEAK_WAIT_S", 0.12)
     monkeypatch.setattr("arbos_voice.updates.PAUSE_S", 0.05)
+    monkeypatch.setattr("arbos_voice.updates.FORCED_PAUSE_S", 0.05)
     call = FakeCall()
     call.user_speaking = True
     u = call.updates()
     await u.handle(job_done())
-    await asyncio.sleep(0.4)
-    assert call.spoken == []
+    await asyncio.sleep(0.25)
+    assert call.spoken == [], "still talking past SPEAK_WAIT: not yet"
     assert len(call.context) == 1
+    call.user_speaking = False
+    await asyncio.sleep(0.25)
+    assert len(call.spoken) == 1, "spoken at the next quiet moment after SPEAK_WAIT"
+    assert u.spoken == 1
+    assert FORCED_PAUSE_S > 0
+
+
+@pytest.mark.asyncio
+async def test_call_ended_before_speak_leaves_the_result_in_chat_only(monkeypatch):
+    """Call-ended fallback: context was added (chat already has the bubble); no spoken follow-up."""
+    monkeypatch.setattr("arbos_voice.updates.PAUSE_S", 0.05)
+    call = FakeCall()
+    call.user_speaking = True
+    u = call.updates()
+    await u.handle(job_done("late-job", kind="job", text="Cargo.toml\nREADME.md\n"))
+    assert len(call.context) == 1
+    call.leaving = True
+    await asyncio.sleep(0.2)
+    assert call.spoken == [], "call ended: do not speak into a dead session"
     assert u.spoken == 0
+    assert "Cargo.toml" in call.context[0]
 
 
 @pytest.mark.asyncio

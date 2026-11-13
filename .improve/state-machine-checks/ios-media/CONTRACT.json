@@ -1,0 +1,69 @@
+{
+  "scope": "Signature-only mandatory origin predicates; all four method bodies and all production callers unchanged. Historical GATES.json and SOURCE-FROZEN.json retain the earlier functional checkpoint; this record pins the subsequent required signatures.",
+  "before": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e"
+  },
+  "after": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2"
+  },
+  "inventory": {
+    "MediaFetch.bytes": 10,
+    "copyAttachment": 2,
+    "copyMessage": 1,
+    "private_copy": 2,
+    "missing_explicit_predicates": 0
+  },
+  "compiler_contract": {
+    "passed": 5,
+    "failed": 0,
+    "before_omissions_compiled": 4,
+    "after_omissions_rejected": 4,
+    "explicit_control_before_and_after": true,
+    "before_seconds": 0.6049616250675172,
+    "after_seconds": 0.6084307919954881,
+    "cases": [
+      {
+        "case": "explicit",
+        "compile_exit": 0,
+        "expected_missing_argument": false,
+        "fixture_sha256": "af2427956359223e701a263311e60e209e99ae82222e5d5885c2c15797b96990"
+      },
+      {
+        "case": "bytes",
+        "compile_exit": 1,
+        "expected_missing_argument": true,
+        "fixture_sha256": "68bce897230ef68232d9389bf18a927ea922a2cef9075edd4b21aa9aa4765b1c"
+      },
+      {
+        "case": "copyMessage",
+        "compile_exit": 1,
+        "expected_missing_argument": true,
+        "fixture_sha256": "b9bc7c2879cc09760d793284d6062afbfcec7d79efa44d709c29943bb469266e"
+      },
+      {
+        "case": "copyAttachment",
+        "compile_exit": 1,
+        "expected_missing_argument": true,
+        "fixture_sha256": "7efabe00e2ab91ce7acc19ace96e740981d079aba7f5e1b9182317b2d5de04c0"
+      },
+      {
+        "case": "copy",
+        "compile_exit": 1,
+        "expected_missing_argument": true,
+        "fixture_sha256": "f0ff482df3cffa7ca19b1dc8115053e13305a76d658935cc9c0d65bb3c77e977"
+      }
+    ],
+    "scope": "Exact production signature headers with inert fatalError bodies: compiler contract only, no runtime policy implementation or effects."
+  },
+  "functional_checks_unchanged": {
+    "media_cases": 80,
+    "media_passed": 80,
+    "media_seconds": 5.537360041984357,
+    "targeted_existing_fetch_copy_cases": 14,
+    "targeted_existing_fetch_copy_passed": 14,
+    "adapters_changed": []
+  },
+  "command": "python3 -I -B .improve/state-machine-checks/ios-media/check_required.py --tree . --expect-required --out /tmp/arbos-required-origins"
+}

@@ -28,7 +28,7 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 | --- | --- |
 | `crates/arbos-mac` | The Mac app (GPUI): agent and people list, chat with tabs, composer with voice and attachments, calls, approval cards, profile pages, Settings (Apple-style groups), machine status, in-app updates, Send feedback. Also builds on Linux. |
 | `apps/ios/Arbos` | The iPhone app (SwiftUI): one chat per agent over the relay, home with machine status, people chats and groups, calls, profile pages, attach sheet, voice memos, notifications, Settings. |
-| `crates/arbos-relay` | The one service outside the machines: sign-in, project registry and sync rooms (SQLite), machine lifecycle on Daytona, model proxy with per-project metering and spend caps, blob store, connectors/vault broker, routines, channels, group and people chats. |
+| `crates/arbos-relay` | The one service outside the machines: sign-in, project registry and sync rooms (SQLite), machine lifecycle on the host fleet, model proxy with per-project metering and spend caps, blob store, connectors/vault broker, routines, channels, group and people chats. |
 | `crates/arbos-agentd` | The machine daemon: one process per machine supervising one workspace per project — chat doc host, SQLite+FTS5 history and memory, project MCP server, the pi main-agent driver, the subagent harness registry, per-workspace isolation. |
 | `crates/arbosctl` | Headless client: projects, chats (send/stream/stop/answer), machine start/stop/status, routines, skills, channels, groups, blobs, admin. |
 | `crates/arbos-local` | Helper that runs on your own computer so an agent can run a command or read a file there, behind approval cards. |
@@ -44,7 +44,7 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 ## How it works
 
 - **Relay** (`arbos-relay`): the only internet-facing piece. Devices sign in with GitHub (or pair with a one-time code when you self-host) and talk to it over HTTPS/WebSocket; machines dial back to its public URL. It owns the chat rooms, wakes machines, forwards model calls with metering, and keeps every secret: provider keys, connector tokens, the vault.
-- **One machine per user**: a Daytona sandbox from the `arbos-agent` image (4 vCPU / 8 GiB / 10 GiB). Each project is a workspace on it: `/work/<project>` owned by its own Unix user, its own pi session, subagents, SQLite memory/history and cgroup slice. Machines stay on for signed-in users.
+- **One machine per user**: a gVisor sandbox on the relay host from the `arbos-agent` image (4 vCPU / 8 GiB / 10 GiB). Each project is a workspace on it: `/work/<project>` owned by its own Unix user, its own pi session, subagents, SQLite memory/history and cgroup slice. Machines stay on for signed-in users.
 - **Harness**: the main agent is **pi** with the `arbos-pi-ext` extension; every turn starts with a `route` call (`reply`, `act` with a few tool calls, or hand off to a subagent). Subagents run through the harness registry — **Prime Agent** by default, **pi**, or **Claude Code** — up to 4 per workspace and 8 per machine, and report back as a prose turn written by the main agent.
 - **Clients**: the Mac app, the iPhone app and `arbosctl` are peers of the same chat documents (Loro CRDT replicas), so a conversation continues on any device. On the iPhone each agent is one conversation; the Mac adds tabs for work that runs in parallel.
 - **Avatars**: agents and people get a coloured circle with their initials (a 7-colour palette, the colour derived from the stable id, the same on every device and on the relay at `GET /avatar-colors`); a GitHub photo replaces the circle.
@@ -66,6 +66,8 @@ cargo build --workspace
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 cd harness && pnpm install && pnpm -r typecheck
 ```
+
+On a bare Linux box those need system libraries first — `scripts/workspace-test-deps.sh` installs exactly what CI installs. The usual failure is `webrtc-sys` refusing to build against clang older than 21, not the missing fonts it is often blamed on, so reach for the script rather than narrowing to `cargo test -p <crate>`.
 
 Run the Mac app against the hosted relay, a fixture, or your own relay:
 

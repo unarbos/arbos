@@ -8,12 +8,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test": "node --test index.test.ts"
+    "test": "node --test *.test.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.2.0",
     "@types/node": "^22.10.0",
     "typebox": "^1.0.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "effect": "4.1.2"
   }
 }

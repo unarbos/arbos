@@ -21,6 +21,8 @@ struct LinkPreviewCard: View {
     let messageId: Id
     /// My own (grey) bubble: white ink, lighter muted tones.
     let own: Bool
+    var origin: MediaOrigin? = nil
+    @State private var capturedOrigin: MediaOrigin?
     @State private var picture: UIImage?
     /// The relay's `siteIcon` for the part, from the chat's blob slot.
     @State private var siteIcon: UIImage?
@@ -39,10 +41,10 @@ struct LinkPreviewCard: View {
     private var faint: Color { own ? theme.userText.opacity(0.5) : theme.placeholder }
 
     var body: some View {
-        Button {
-            guard let url = preview.openURL else { return }
-            openURL(url)
-        } label: {
+        let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
+        // Not a Button: a Button counts a back swipe that starts on the card as a tap when the
+        // finger lifts. The lift after a hold that opened the message menu is not a tap either.
+        Group {
             VStack(alignment: .leading, spacing: 0) {
                 if preview.expanded { media }
                 HStack(alignment: .top, spacing: 10) {
@@ -59,11 +61,16 @@ struct LinkPreviewCard: View {
             .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .onTapGesture {
+            guard !ChatGestures.tapEndsHold(), origin.allowsPrivate(model), let url = preview.openURL else { return }
+            openURL(url)
+        }
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("link-card")
         .accessibilityLabel(preview.oneLine)
         .accessibilityHint("Opens the link")
-        .task(id: preview.image?.ref) { await load() }
+        .onAppear { if capturedOrigin == nil { capturedOrigin = origin } }
+        .task(id: preview.image?.ref) { await load(origin: origin) }
     }
 
     // MARK: pieces
@@ -233,18 +240,24 @@ struct LinkPreviewCard: View {
 
     /// The preview picture is a blob in the chat's slot, loaded with the device bearer like
     /// an attachment (`MediaFetch`); nothing is fetched from the site itself.
-    private func load() async {
+    @MainActor
+    private func load(origin: MediaOrigin) async {
+        guard origin.allowsPrivate(model) else { return }
         if let icon = preview.siteIcon, !icon.ref.isEmpty, !preview.slot.isEmpty, LinkBrand.of(host: host) == nil {
             let item = MediaItem(id: "\(messageId)#li", name: icon.ref, mime: icon.mime, kind: .image,
                                  blobRef: icon.ref, slot: preview.slot, by: "", at: 0)
-            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+            let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })
+            guard origin.allowsPrivate(model) else { return }
+            if let (data, _) = bytes, let img = UIImage(data: data) {
                 siteIcon = img
             }
         }
         guard let image = preview.image, !image.ref.isEmpty, !preview.slot.isEmpty else { return }
         let item = MediaItem(id: "\(messageId)#lp", name: image.ref, mime: image.mime, kind: .image,
                              blobRef: image.ref, slot: preview.slot, by: "", at: 0)
-        if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+        let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })
+        guard origin.allowsPrivate(model) else { return }
+        if let (data, _) = bytes, let img = UIImage(data: data) {
             picture = img
         }
     }

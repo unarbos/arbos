@@ -1,0 +1,13 @@
+{
+  "relay_path": "crates/arbos-mac/src/sync/relay.rs",
+  "phase4_sha256": "4d5b0658245f0d4380eee7965de377ca479ce4ab60900a093f41125251add2eb",
+  "phase6_sha256": "5f0b53c5e1e93e3f310c247f4a568107d471972916c99de20ae55f825f1301d0",
+  "output_sha256": "781cdd41b95811d2d7063cef3debf535ba636263e00eb7abb0ceed336666f0e9",
+  "reviewed_measured_checkpoint_sha256": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+  "only_new_difference": "Byteidentical measured actualSDK/upload regression composition, then sole ui::attachments::open_with_system -> external_open::open_with_system owner move; underlying helper unchanged. FinalSDK/link required.",
+  "patch": "p6-relay.patch",
+  "patch_sha256": "2c55024507f0ff077c9ef71ed947936d9c6b0ba408add9d8f7ca9589ec64f967",
+  "patch_bytes": 17076,
+  "previous_standalone_phase6_sha256": "17f6e0d0f54ab902881e37f56ab7d59d8925d44dfdf738be30e105be0020590b",
+  "standalone_format_note": "84cb882 wraps only fetch_blob_response declaration; no body/caller/runtime change. Reviewed combined781cdd and resolution patch unchanged."
+}

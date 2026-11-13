@@ -12,7 +12,7 @@ use arbos_core::ids::now_ms;
 
 use super::client::{Client, MatrixError, MxResult};
 use super::db::MAX_ATTEMPTS;
-use super::{Job, Matrix};
+use super::{Job, Matrix, E2EE_MEMBER_CAP};
 use crate::people::PEOPLE_PROJECT;
 use crate::state::AppState;
 
@@ -360,6 +360,10 @@ impl Worker {
                 }
                 Ok(())
             }
+            Job::NativeMessage { .. }
+            | Job::NativeRemoval { .. }
+            | Job::NativeReaction { .. }
+            | Job::NativeCatchUp { .. } => super::native::apply(&self.state, job).await,
         }
     }
 
@@ -438,7 +442,13 @@ impl Worker {
         })
     }
 
-    async fn create_room(&self, spec: &RoomSpec) -> MxResult<String> {
+    /// Stage D: a people chat (DM or private group) small enough for Megolm is made end-to-end
+    /// encrypted. Project chats and anything over the cap stay plaintext.
+    fn encrypts(cfg: &super::Config, spec: &RoomSpec) -> bool {
+        cfg.e2ee && spec.project_id.is_none() && spec.members.len() <= E2EE_MEMBER_CAP
+    }
+
+    fn create_room_body(spec: &RoomSpec, encrypted: bool) -> Value {
         let invite: Vec<&str> = spec.member_mxids().filter(|m| *m != spec.creator).collect();
         let users_pl = spec.promoted_owners();
         let mut body = json!({
@@ -456,6 +466,28 @@ impl Worker {
         if let Some(n) = &spec.name {
             body["name"] = json!(n);
         }
+        if encrypted {
+            body["initial_state"]
+                .as_array_mut()
+                .expect("array")
+                .push(json!({
+                    "type": "m.room.encryption", "state_key": "",
+                    "content": { "algorithm": "m.megolm.v1.aes-sha2" },
+                }));
+        }
+        body
+    }
+
+    async fn create_room(&self, spec: &RoomSpec) -> MxResult<String> {
+        // Encrypted when the chat is one that is ([`Self::encrypts`]) and every person in it
+        // runs an app that decrypts; otherwise a room all of them can read, for good.
+        let people = spec
+            .members
+            .iter()
+            .filter_map(|m| m.member.strip_prefix("user:"));
+        let encrypted = Self::encrypts(&self.state.matrix.cfg, spec)
+            && super::clients_decrypt(&self.state, people);
+        let body = Self::create_room_body(spec, encrypted);
         let room_id = self.client.create_room(&spec.creator, &body).await?;
         self.state
             .db
@@ -464,9 +496,10 @@ impl Worker {
                 &room_id,
                 spec.project_id.as_deref(),
                 &spec.kind,
+                encrypted,
             )
             .map_err(|e| MatrixError::Shape(format!("db: {e}")))?;
-        for m in invite {
+        for m in spec.member_mxids().filter(|m| *m != spec.creator) {
             self.client.join(&room_id, m).await?;
         }
         Ok(room_id)
@@ -726,6 +759,14 @@ impl Worker {
         parts: Option<&Value>,
         ts: Option<i64>,
     ) -> MxResult<()> {
+        // Phase 3: a chat its members read on the homeserver (`people_native_room`) is still
+        // mirrored. A device that sends there writes no Loro row; the relay writes it
+        // (`native.rs`), under an event it has recorded first, so that row is not sent back
+        // here. What does arrive is from a member's device that still writes the Loro room,
+        // and dropping it would hide the message from the others.
+        // Owner decision: stop mirroring such a chat only once no shipped app writes its Loro
+        // room. The one thing never sent twice is a message id this chat already has an
+        // event for (below, and the transaction id).
         if self
             .state
             .db
@@ -743,6 +784,18 @@ impl Worker {
                 None => return Ok(()), // the chat is gone; nothing to mirror
             },
         };
+        // An encrypted room takes no mirror: the relay holds no keys, and plaintext written
+        // beside the members' ciphertext would be exactly what the room exists to prevent. A
+        // failed lookup retries rather than guessing "plaintext".
+        if self
+            .state
+            .db
+            .matrix_room(chat_id)
+            .map_err(|e| MatrixError::Shape(format!("db: {e}")))?
+            .is_some_and(|r| r.encrypted)
+        {
+            return Ok(());
+        }
         let cfg = &self.state.matrix.cfg;
         let spec = room_spec(&self.state, chat_id, project_id);
         let creator = spec.as_ref().map(|s| s.creator.clone());
@@ -865,6 +918,7 @@ pub fn spawn(state: AppState) {
         homeserver = %state.matrix.cfg.hs_url,
         "Matrix dual-write on"
     );
+    super::native::catch_up_once(&state);
     tokio::spawn(Worker::new(state).run());
 }
 
@@ -1023,6 +1077,246 @@ mod tests {
                 .is_some(),
             "the row is closed once the homeserver agrees"
         );
+    }
+
+    fn has_encryption(body: &Value) -> bool {
+        body["initial_state"]
+            .as_array()
+            .expect("initial_state")
+            .iter()
+            .any(|e| {
+                e["type"] == "m.room.encryption"
+                    && e["content"]["algorithm"] == "m.megolm.v1.aes-sha2"
+            })
+    }
+
+    #[test]
+    fn people_chats_are_encrypted_only_with_the_flag_and_under_the_cap() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1101);
+        let (bob, _) = person(&state, 1102);
+        let off = Config::off();
+        let on = Config {
+            e2ee: true,
+            ..Config::off()
+        };
+        let mut dm_spec = room_spec(&state, &dm(&state, &alice, &bob), None).expect("dm");
+        let group = crate::people::tests_support::group(&state, &[&alice, &bob]);
+        let group_spec = room_spec(&state, &group, None).expect("group");
+        let project = project_of(&state, &alice, "Research");
+        let pchat = state.db.list_chats(&project).expect("chats")[0].id.clone();
+        let project_spec = room_spec(&state, &pchat, Some(&project)).expect("project chat");
+
+        for spec in [&dm_spec, &group_spec, &project_spec] {
+            assert!(!Worker::encrypts(&off, spec), "flag off: {}", spec.kind);
+            assert!(!has_encryption(&Worker::create_room_body(spec, false)));
+        }
+        assert!(Worker::encrypts(&on, &dm_spec));
+        assert!(Worker::encrypts(&on, &group_spec));
+        assert!(!Worker::encrypts(&on, &project_spec), "project chats stay");
+        assert!(has_encryption(&Worker::create_room_body(&dm_spec, true)));
+
+        let one = dm_spec.members[0].clone();
+        dm_spec.members.resize(E2EE_MEMBER_CAP, one.clone());
+        assert!(Worker::encrypts(&on, &dm_spec), "the cap itself is allowed");
+        dm_spec.members.push(one);
+        assert!(!Worker::encrypts(&on, &dm_spec), "one over is plaintext");
+    }
+
+    /// Against a real homeserver (see `matrix::native::tests`), with the flag on: a DM and a
+    /// group of exactly the cap are created encrypted, a group of one more is not, and
+    /// neither is a DM one of whose people runs an app older than the minimum. What the room
+    /// is on the homeserver is what the relay recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rooms_are_created_encrypted_up_to_the_cap_and_only_for_apps_that_decrypt() {
+        let (Ok(hs_url), Ok(as_token)) = (
+            std::env::var("ARBOS_MATRIX_TEST_HS"),
+            std::env::var("ARBOS_MATRIX_TEST_AS_TOKEN"),
+        ) else {
+            return;
+        };
+        let cfg = Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url,
+            server_name: std::env::var("ARBOS_MATRIX_TEST_SERVER_NAME")
+                .unwrap_or_else(|_| "arbos.life".into()),
+            as_token_users: as_token.clone(),
+            as_token_agents: as_token.clone(),
+            as_token_bridges: as_token,
+            e2ee: true,
+            ..Config::off()
+        };
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(cfg.clone());
+        let first = 7_200_000_000 + i64::from(std::process::id()) * 1_000;
+        let people: Vec<String> = (0..=E2EE_MEMBER_CAP as i64)
+            .map(|i| person(&state, first + i).0)
+            .collect();
+        let ids: Vec<&str> = people.iter().map(String::as_str).collect();
+        let worker = Worker::new(state.clone());
+        let client = Client::new(state.http.clone(), cfg.clone());
+        // The room a chat gets: (the relay's record, what the homeserver holds).
+        let made = |state: AppState, chat: String| {
+            let (worker, client) = (Worker::new(state.clone()), client.clone());
+            async move {
+                let job = Job::SyncRoom {
+                    chat_id: chat.clone(),
+                    project_id: None,
+                };
+                worker.handle(&job).await.expect("the room is made");
+                let room = state.db.matrix_room(&chat).expect("row").expect("room");
+                let spec = room_spec(&state, &chat, None).expect("spec");
+                let on_hs = client
+                    .state(&room.room_id, &spec.creator, "m.room.encryption", "")
+                    .await
+                    .expect("state")
+                    .is_some_and(|c| c["algorithm"] == "m.megolm.v1.aes-sha2");
+                let joined = client
+                    .joined_members(&room.room_id, &spec.creator)
+                    .await
+                    .expect("members")
+                    .len();
+                (room.encrypted, on_hs, joined)
+            }
+        };
+        drop(worker);
+        let group = crate::people::tests_support::group;
+        assert_eq!(
+            made(state.clone(), dm(&state, ids[0], ids[1])).await,
+            (true, true, 2)
+        );
+        assert_eq!(
+            made(state.clone(), group(&state, &ids[..E2EE_MEMBER_CAP])).await,
+            (true, true, E2EE_MEMBER_CAP),
+            "the cap itself"
+        );
+        assert_eq!(
+            made(state.clone(), group(&state, &ids)).await,
+            (false, false, E2EE_MEMBER_CAP + 1),
+            "one over"
+        );
+
+        // With a minimum named, a chat is encrypted only once everyone in it runs it.
+        let mut gated = state.clone();
+        gated.matrix = Matrix::new(Config {
+            e2ee_min_clients: vec![("mac".into(), "0.6.420".into(), String::new())],
+            ..cfg
+        });
+        let device = |user: &str| {
+            let d = gated.db.devices_of_user(user).expect("devices");
+            d[0]["id"].as_str().expect("id").to_owned()
+        };
+        let runs = |user: &str, version: &str| {
+            gated
+                .db
+                .note_device_version(&device(user), user, "mac", version, "1", now_ms())
+                .expect("noted");
+        };
+        runs(ids[2], "0.6.420");
+        runs(ids[3], "0.6.419");
+        assert_eq!(
+            made(gated.clone(), dm(&gated, ids[2], ids[3])).await,
+            (false, false, 2),
+            "one of them cannot decrypt"
+        );
+        runs(ids[3], "0.6.421");
+        runs(ids[4], "0.6.420");
+        assert_eq!(
+            made(gated.clone(), group(&gated, &ids[2..5])).await,
+            (true, true, 3)
+        );
+    }
+
+    /// With the flag on, a message for an encrypted room is dropped before anything is sent:
+    /// the homeserver here does not exist, so reaching it would fail the job.
+    #[tokio::test]
+    async fn an_encrypted_room_gets_no_mirrored_message() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: "http://127.0.0.1:9".into(),
+            ..Config::off()
+        });
+        let (alice, _) = person(&state, 1201);
+        let (bob, _) = person(&state, 1202);
+        let message = |chat: &str| Job::Message {
+            chat_id: chat.to_owned(),
+            project_id: None,
+            message_id: "m1".into(),
+            sender: format!("user:{alice}"),
+            text: "secret".into(),
+            parts: None,
+            ts: None,
+        };
+        let worker = Worker::new(state.clone());
+
+        let sealed = dm(&state, &alice, &bob);
+        state
+            .db
+            .matrix_insert_room(&sealed, "!sealed:arbos.life", None, "dm", true)
+            .expect("room");
+        worker.handle(&message(&sealed)).await.expect("dropped");
+        assert_eq!(state.db.matrix_event(&sealed, "m1").expect("db"), None);
+
+        let plain = dm(&state, &alice, &bob);
+        state
+            .db
+            .matrix_insert_room(&plain, "!plain:arbos.life", None, "dm", false)
+            .expect("room");
+        worker
+            .handle(&message(&plain))
+            .await
+            .expect_err("a plaintext room is still written to");
+    }
+
+    /// Phase 3: a chat every member reads on the homeserver keeps its mirror (a member's
+    /// phone may still write the Loro room), and a message id the chat already has an event
+    /// for is not sent again. The homeserver here does not exist: reaching it fails the job.
+    #[tokio::test]
+    async fn a_native_chat_is_still_mirrored_and_no_message_twice() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: "http://127.0.0.1:9".into(),
+            ..Config::off()
+        });
+        let (alice, _) = person(&state, 1211);
+        let (bob, _) = person(&state, 1212);
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .matrix_insert_room(&chat, "!native:arbos.life", None, "dm", false)
+            .expect("room");
+        for u in [&alice, &bob] {
+            assert!(state.db.set_matrix_people_native(u, true).expect("flag"));
+        }
+        let chats = state
+            .db
+            .chats_of_member(&format!("user:{bob}"))
+            .expect("db");
+        assert_eq!(
+            crate::matrix::people_native_room(&state, &chats[0]).as_deref(),
+            Some("!native:arbos.life")
+        );
+        let message = |id: &str| Job::Message {
+            chat_id: chat.clone(),
+            project_id: None,
+            message_id: id.into(),
+            sender: format!("user:{bob}"),
+            text: "from the phone".into(),
+            parts: None,
+            ts: None,
+        };
+        let worker = Worker::new(state.clone());
+        worker
+            .handle(&message("m1"))
+            .await
+            .expect_err("written to the homeserver, which is not there");
+        state
+            .db
+            .matrix_insert_event(&chat, "m2", "$have", &format!("user:{bob}"), 1)
+            .expect("event");
+        worker.handle(&message("m2")).await.expect("not sent again");
     }
 
     #[test]

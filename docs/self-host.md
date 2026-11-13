@@ -5,8 +5,8 @@ Arbos has one server-side piece: the **relay** (`arbos-relay`). Everything else 
 Words used here:
 
 - **Relay**: the one internet-facing service. It holds the chat rooms, provider keys, connector tokens and the vault, meters model calls, and wakes machines.
-- **Machine** (also "box"): the user's cloud computer, one per user. By default a [Daytona](https://www.daytona.io) sandbox built from the `arbos-agent` image. Each project is a **workspace** on it.
-- **Process box**: the same machine, run as a child process of the relay on the relay host. No Daytona, no Docker. Good for a first run.
+- **Machine** (also "box"): the user's computer, one per user, built from the `arbos-agent` image. On a server it is a gVisor (`runsc`) sandbox on the relay host (§5). Each project is a **workspace** on it.
+- **Process box**: the same machine, run as a child process of the relay on the relay host. No sandbox, no Docker. Good for a first run.
 - **Public URL**: the `https://` address machines and devices dial back to. It must be stable for persistent projects.
 
 ## 1. Prerequisites
@@ -15,7 +15,7 @@ Words used here:
 - Node 22.19+ and pnpm 9 for `harness/` (pi needs zstd in `zlib`; 22.14 is too old).
 - `pi` 1.2.0 (`npm i -g @earendil-works/pi-coding-agent@1.2.0`) for a process box; `prime-agent` 0.10.0 plus its kernel venv (see `image/Dockerfile`) for Prime subagents. Without Prime, set `ARBOS_DEFAULT_HARNESS=pi`.
 - A model key: `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`). It lives on the relay host only; a machine never sees it.
-- For real machines: `DAYTONA_API_KEY`.
+- For real machines: Docker with the `runsc` (gVisor) runtime on the relay host (§5).
 - For the Mac app on Linux: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev` (and `mesa-vulkan-drivers` without a GPU). The iPhone app needs Xcode 16+ and fastlane.
 
 Build everything:
@@ -64,23 +64,27 @@ All optional unless noted.
 | Variable | Meaning |
 | --- | --- |
 | `ARBOS_RELAY_LISTEN` | bind address, default `127.0.0.1:7700`; use `0.0.0.0:7700` on a server |
-| `ARBOS_RELAY_PUBLIC_URL` | the URL machines and devices dial back (**required for Daytona machines**), e.g. `https://relay.example.com`; WebSockets must pass through |
+| `ARBOS_RELAY_PUBLIC_URL` | the URL machines and devices dial back (**required for sandbox machines**), e.g. `https://relay.example.com`; WebSockets must pass through |
 | `ARBOS_RELAY_DATA` | SQLite + blobs + local boxes, default `./.arbos-local/relay` |
 | `ARBOS_RELAY_ADMIN_TOKEN` | token for the admin endpoints (`/admin/*`, `POST /pair/new`); generated and logged when unset |
 | `ARBOS_RELAY_KEY` | the key-encryption key for connector tokens and secrets (each user's secret values are AES-256-GCM under a per-user key wrapped by this one); generated once into the `meta` table when unset — fine for a laptop, a loud boot warning in `github` mode: set it from the environment (for example `op run`) on a real server |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a machine) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `ARBOS_OPENAI_ROUTE`, `ARBOS_OPENAI_DIRECT_BASE` | where `openai/*` chat models go: `auto` (default — straight to OpenAI at `https://api.openai.com/v1` with `OPENAI_API_KEY` when that key exists, else OpenRouter), `direct`, or `openrouter`; usage is metered the same way (token prices from the relay table when the upstream reports no cost) |
-| `ARBOS_DECISION_SCORER` (`typesafe/jev-1.14`), `ARBOS_DECISION_THRESHOLD` (0.6) | agentd defaults (read in the box's environment; Daytona machines use the built-in values) for who replies in group chats: one judge call per human message to a decision model through the relay's `/proxy/decisions` (OpenRouter Decisions API, needs `OPENROUTER_API_KEY`) asking who the message is for — one agent, any one agent, several, all, or nobody — plus one yes/no per agent; an agent replies only when its verdict's probability reaches the threshold. No keyword rule runs before it. A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it names, whatever the judge says or when it fails — the woken agent may still post nothing when the line only names it; on a judge error unmentioned messages stay silent. An agent's own bubble never wakes another agent. Per project: `PATCH /projects/{id} {"models": {"decision_model": {"scorer": …, "threshold": 0.6}}}`. `ARBOS_DECISION_PROVIDER` is accepted for old configs and ignored (there is one judge). The relay serves an identical decision request made within 15 minutes from its cache, so every box in a room gets the same answer and the room pays once |
+| `ARBOS_DECISION_SCORER` (`typesafe/jev-1.14`), `ARBOS_DECISION_THRESHOLD` (0.6) | agentd defaults (read in the box's environment; image machines use the built-in values) for who replies in group chats: one judge call per human message to a decision model through the relay's `/proxy/decisions` (OpenRouter Decisions API, needs `OPENROUTER_API_KEY`) asking who the message is for — one agent, any one agent, several, all, or nobody — plus one yes/no per agent; an agent replies only when its verdict's probability reaches the threshold. No keyword rule runs before it. A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it names, whatever the judge says or when it fails — the woken agent may still post nothing when the line only names it; on a judge error unmentioned messages stay silent. An agent's own bubble never wakes another agent. Per project: `PATCH /projects/{id} {"models": {"decision_model": {"scorer": …, "threshold": 0.6}}}`. `ARBOS_DECISION_PROVIDER` is accepted for old configs and ignored (there is one judge). The relay serves an identical decision request made within 15 minutes from its cache, so every box in a room gets the same answer and the room pays once |
 | `ARBOS_OPENAI_AUDIO_BASE`, `ARBOS_VOICE_MOCK` | speech-to-text / text-to-speech upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_VOICE_MOCK=1` answers without a key |
 | `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MODEL`, `ARBOS_IMAGE_MOCK` | image generation upstream and model; `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG |
-| `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get process boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new machines (the current registered `arbos-agent-<version>`) |
-| `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (§6) |
+| `ARBOS_DEFAULT_PROVIDER` | where a user without a machine gets one: `gvisor` (a sandbox on this host, §5), `docker`, or `process`; unset = `process`. Daytona was retired as a provider on 2026-11-09 and is refused here |
+| `ARBOS_BOXD_URL`, `ARBOS_BOXD_TOKEN_FILE` | off unless set. The host's `arbos-boxd` daemon (`http://127.0.0.1:7790`, loopback only) and a mode-0600 file, readable by the relay's user, holding the daemon's token. With both, `boxd` is a provider (`ARBOS_DEFAULT_PROVIDER=boxd`, or one user through `PUT /admin/users/{id}/box`): such a box is slept after 15 idle minutes and woken on demand instead of being kept always on (`crates/arbos-boxd/README.md`). Its user is never waitlisted: at most `ARBOS_BOXD_MAX_RESIDENT` (default 160) of these boxes are awake at once, and one waking past that puts the least recently active idle one to sleep. The relay must listen where a box can reach it (the daemon's bridge, `ARBOS_RELAY_LISTEN=10.207.0.1:7700` with `ARBOS_RELAY_PUBLIC_URL` to match) and start after the daemon; no box is made under 80 GB of free disk, and none wakes under `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB` (default 64) of available memory, so set that on a smaller host (the README's "The relay beside it") |
+| `ARBOS_BOXD_NODES_FILE` | off unless set, and only with `ARBOS_BOXD_URL`. A JSON file only its owner can write, listing the `arbos-boxd` daemons of other hosts: for each an `id`, an `https://` `url`, a `token_file`, the `ca_file` its certificate must chain to, the relay's own `cert_file` and `key_file`, its `box_subnet`, and optionally `max_resident`. A new box goes to the node with the most free resident slots; `boxes.node_id` records it and every later call for the box goes there. A node that is down fails its own boxes' wakes and takes no new box; nothing is moved (the README's "More than one host") |
+| `ARBOS_DAYTONA_SNAPSHOT` | the image version new machines are made from (`arbos-agent-<version>`; the name is historical). The relay turns it into the image tag `…/arbos-agent:<version>` |
+| `ARBOS_HOST_MAX_BOXES`, `ARBOS_HOST_MIN_FREE_DISK_GB`, `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, `ARBOS_HOST_EVICT_MAX_SWAP_GB`, `ARBOS_HOST_EVICT_LOAD` | host fleet limits: resident sandboxes before sign-ups go on the waitlist, the disk floor, and the memory/swap/load triggers for eviction (§5) |
+| `ARBOS_BOX_CPUS`, `ARBOS_BOX_MEM_GB`, `ARBOS_BOX_WORK_GB`, `ARBOS_BOX_PIDS`, `ARBOS_BOX_NETWORK`, `ARBOS_BOX_DNS`, `ARBOS_BOX_RUNTIME`, `ARBOS_LOCAL_BOX_IMAGE` | per-sandbox spec and the container runtime (`runsc`) / image override (§5) |
+| `ARBOS_BOOTSTRAP_DIR` | directory served at `/bootstrap/{file}` to machines (the `arbos-agentd` binary, `arbos-pi-ext.tar`) |
 | `ARBOS_AUTH_MODE` | `github` or `paircode` (§3) |
 | `ARBOS_GITHUB_CLIENT_ID`, `ARBOS_GITHUB_CLIENT_SECRET`, `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` | GitHub OAuth app and the relay's public origin (§3) |
-| `ARBOS_AUTH_REDIRECTS` | comma-separated URL prefixes `/auth/github/start?redirect=…` may send the browser to, besides the apps' `arbos://auth/callback`, loopback and the relay's own origin — your site's welcome page, e.g. `https://arbos.life`; anything else answers 400 `bad_redirect` (`relay-server.sh` writes `ARBOS_SITE_URL` by default) |
-| `ARBOS_DEFAULT_GRANT_USD` (100), `ARBOS_DEFAULT_DAILY_CAP_USD` (20), `ARBOS_GLOBAL_DAILY_CAP_USD` (500) | inference credits: welcome grant, per-user daily cap, relay-wide daily cap that trips the kill switch (`PUT /admin/killswitch`) |
+| `ARBOS_AUTH_REDIRECTS` | comma-separated **origins** (`scheme://host[:port]`, no path) `/auth/github/start?redirect=…` may send the browser to, besides the apps' `arbos://auth/callback`, `http` loopback and the relay's own origin — your site, e.g. `https://arbos.life`; anything else answers 400 `bad_redirect` (`relay-server.sh` writes `ARBOS_SITE_URL` by default). Each entry is compared as a whole origin: any path on a listed origin is allowed, a different scheme, host or port is not, and a host that merely starts with a listed one (`arbos.life.example.com`) is not. An entry that is not an origin matches nothing; the relay warns about it at start |
+| `ARBOS_DEFAULT_GRANT_USD` (100), `ARBOS_DEFAULT_DAILY_CAP_USD` (unset = no limit), `ARBOS_GLOBAL_DAILY_CAP_USD` (500) | inference credits: welcome grant, the daily limit new accounts start with, relay-wide daily cap that trips the kill switch (`PUT /admin/killswitch`). An account carries one limit covering every spend source — model calls, decisions, memory passes, images, voice. Only a positive number limits anything: unset, empty, `none`/`off`/`unlimited`, `0` and anything unparseable all mean no limit, so a typo cannot stop spending. Per-account: `PUT /admin/users/{id}/credits {"daily_cap_usd": 5}`, or `null` for none |
 | `ARBOS_ALWAYS_ON` | machines stay on (default on in `github` mode): no auto-stop, a machine per signed-in user from sign-in; manual Stop and the kill switch are the only things that keep one down |
 | `ARBOS_MACHINE_USD_PER_HOUR` (0.332), `ARBOS_MACHINE_STOPPED_USD_PER_DAY` (0.013), `ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD` (400) | machine time is metered into its own ledger bucket, outside the grant and caps; the global machine cap only logs a warning |
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
@@ -104,31 +108,68 @@ ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com
 
 If the public URL changes, the relay writes the new one into every machine at the next wake (`/work/.arbos/relay-url`) and agentd prefers that file; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
 
-## 5. Real machines on Daytona
+Model usage is recorded once per upstream response on the relay, including failed responses
+whose usage is unknown. Use `arbosctl usage <project>`
+for today's and all-time project totals, or query individual agent sessions:
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a sandbox from `ARBOS_DAYTONA_SNAPSHOT` at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum; about $0.33 per active hour, $0.013 per stopped day). The relay must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).
+```bash
+arbosctl usage <project> --sessions
+arbosctl usage <project> --session <chat-id> --include-children
+arbosctl usage <project> --session <subagent-id> --from 1794412800000 --to 1794499200000
+```
+
+The corresponding endpoints are `GET /projects/{id}/sessions/usage` and
+`GET /projects/{id}/sessions/{session}/usage?include_children=true`. `from` and `to` are
+Unix milliseconds, inclusive/exclusive respectively. A main session uses its chat id;
+a worker uses its subagent id. Resuming preserves the logical session's totals, and context
+rotation is recorded as a separate `session_run_id` in request details (`inspect`).
+`include_children` adds workers attributed to that chat, counting each request once.
+
+`input`, `output`, `cache_read` and `cache_write` are disjoint token buckets; `total_tokens`
+is their sum. `actual_usd` sums only costs explicitly reported by the upstream and is `null`
+when none were reported; `reported_cost_calls` identifies how many calls that subtotal covers.
+`estimated_usd` and `estimated_cost_calls` describe the relay's local price estimates.
+`usd` retains the existing combined accounting amount. None of these fields represents an
+account's credit-ledger debit or a reconciled provider invoice. `unknown_cost_calls` and
+`incomplete_calls` expose missing provenance or incomplete streams, including cancellation.
+Historical calls, old harness processes during upgrades, and project-wide background work
+remain in the `session_id: null` bucket; dedicated image and voice endpoints retain their
+project-level accounting. Calls made by outside agents using their own provider
+credentials do not pass through this meter. Upgrade the relay before agentd; the relay migrates
+the existing database additively and agentd rewrites provider configuration at workspace start.
+
+## 5. Real machines: gVisor sandboxes on the relay host
+
+With `ARBOS_DEFAULT_PROVIDER=gvisor`, `project create` (without `--local-box`) gives the user a gVisor (`runsc`) container on the relay host, made from the image version in `ARBOS_DAYTONA_SNAPSHOT`, with the spec in `ARBOS_BOX_CPUS` / `ARBOS_BOX_MEM_GB` / `ARBOS_BOX_WORK_GB`. The relay needs Docker with the `runsc` runtime, and must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).
+
+Each user's `/work` and `$HOME` live on a per-user sparse ext4 image that stays on disk, so an evicted or re-created sandbox comes back with its files. The host holds `ARBOS_HOST_MAX_BOXES` sandboxes at a time; a sign-up past that goes on a FIFO waitlist, and sandboxes are evicted (never deleted) only under real memory, swap or load pressure.
 
 - One machine per user; every project is a workspace `/work/<project>` owned by its own Unix user at mode 700, with its own pi session, subagents, SQLite memory/history, blob dir, browser profile and cgroup slice. One `arbos-agentd` per machine supervises them; up to 4 subagents per workspace and 8 per machine run at once.
 - `GET /machine` shows state, spec, spend and workspace states; `POST /machine/start|stop` drives it; `arbosctl machine status|start|stop` from a terminal. Per-user snapshot override: `PUT /admin/users/{id}/box {"snapshot": "…"}` before the machine exists.
-- `cargo run -p arbos-relay -- daytona-smoke` runs the lifecycle check (`create → stop → start → archive → start → delete`) against the live API.
-- Older per-project sandboxes are copied into the user machine with `arbosctl migrate-to-user-box` (idempotent; old sandboxes are stopped and marked, never deleted).
+- A box row left on the retired Daytona provider is read-only. Every listing and status route shows it as it is, and nothing starts, stops, rolls or replaces it — including the always-on sweep and the deploy worker's roll, which leaves it out and names it in `status`. Deleting those sandboxes is an operator step outside the relay; the row is what names the sandbox to delete, so it stays until then.
 
 ## 6. The machine image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; otherwise run the script by hand). The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public) and smoke-tests it. The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
 
-Without CI, the same build runs on any Docker host and goes to Daytona's transient registry (tags are immutable: bump the version for every rebuild):
+Nothing registers a Daytona snapshot any more: Daytona is retired as a provider (2026-11-09), the key is not exposed to the workflow, and a host machine pulls the GHCR tag straight. `image/register-snapshot.sh` is still there, but neither CI nor the deploy worker's roll calls it; run it by hand for a Daytona sandbox that is still alive.
+
+Without CI, the same build runs on any Docker host; tags are immutable, so bump the version for every rebuild and point `ARBOS_LOCAL_BOX_IMAGE` at the result:
 
 ```bash
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
 docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:<v> .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-<v>
-docker tag arbos-agent:<v> cr.app.daytona.io/<project>/arbos-agent:<v> && docker push cr.app.daytona.io/<project>/arbos-agent:<v>
-image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-agent:<v> 4 8 10
 ```
 
-While no production snapshot is registered, point the relay at the dev image instead: `ARBOS_DAYTONA_DOCKERFILE=image/Dockerfile.dev-inline ARBOS_BOOTSTRAP_DIR=./dist ARBOS_DEFAULT_HARNESS=pi` (`dist/` holds the static agentd and `arbos-pi-ext.tar`; the machine fetches both at boot).
+The extension needs its `package.json` beside its TypeScript sources in `arbos-pi-ext.tar`,
+from the same checkout as agentd. The full image installs the manifest-pinned Effect
+runtime during its build; the dev image installs it once at boot and reuses a matching
+version. Both link the shared runtime into the extension so each project keeps links
+instead of a separate dependency tree. Starting the extension itself installs nothing.
+Run `python3 image/tests/test_runtime_packaging.py` to check packaging locally without
+building an image or contacting a registry; `pnpm install` in `harness/` also enables
+the check that imports the real Effect runtime through two workspace links.
 
 ## 7. Pointing the apps at your relay
 
@@ -210,6 +251,12 @@ Ring 0 runs [Synapse](https://github.com/element-hq/synapse) (community edition,
 | secrets | vault item **Arbos Matrix** (one field per `ARBOS_MATRIX_*` name); `relay-server.sh` carries the homeserver URL, server name and the six appservice tokens into `/etc/arbos/relay.env` | `ARBOS_MATRIX=off|dual|on` is an operator switch in `relay.env`, never read from the vault; default off |
 
 Checks after `setup.sh`: `curl http://127.0.0.1:7708/health` prints `OK`; `curl http://127.0.0.1:7708/_matrix/client/versions` lists the spec versions; `docker logs arbos-matrix-synapse` shows the three appservices; a `POST /_matrix/client/v3/register {type: m.login.application_service, username: gh_x}` with the users `as_token` returns a user id, token and device id.
+
+End-to-end encryption (stage D): `ARBOS_MATRIX_E2EE=on` in `relay.env` makes every DM and private group of up to 200 members created from then on encrypted (`m.room.encryption`, Megolm), and the relay stops mirroring messages into those rooms; an encrypted chat refuses a 201st member, by invitation or by link, and says so (a bigger group is a new one; a room cannot drop its encryption, so nothing is converted). While such a chat is read on the homeserver (below), it also refuses an agent and any person whose apps do not read it there (`encrypted_chat_members`): they would send every member back to a Loro room that has none of what was said. A group made with more than 200 members, channels, project chats and existing rooms are unchanged: nothing already there is migrated. An older app can neither read nor post in an encrypted room, and a room never goes back, so name the oldest app of each platform that decrypts: `ARBOS_MATRIX_E2EE_MIN_CLIENTS="mac/0.6.420, ios/1.0.0 (202611200000)"` (what the apps send as `X-Arbos-Client`; the build in brackets is optional). A chat is then created encrypted only when every person in it has a signed-in device and each of their devices seen in the last 30 days (or, with none, the one seen last) last reported at least that; otherwise it is created unencrypted and stays so. A value that does not read as `platform/version (build)` stops the relay at start. Unset, nobody is checked: turn the switch on without it only once every shipped app decrypts. The apps keep their keys per device and back them up to the homeserver under the person's recovery passphrase (their wallet phrase), so the relay and Synapse only ever hold ciphertext. The iPhone app makes that phrase and sets the keys up; the Mac app has no wallet, so it only asks for the phrase once a phone has, and until then it reads and sends nothing encrypted.
+
+People chats read from the homeserver (phase 3, first step): `PUT /admin/matrix/people/{user_id} {"on": true}` (admin token) sets `users.matrix_people_native` for one person, off by default; `GET /admin/matrix/status` lists who has it as `people_native_users`. `GET /me/matrix` then answers `people_native: true` and the shared client lists that person's DMs and groups beside their servers and reads them as transcript rows (a row's author is the Matrix sender; a room counts only as the chat its create event names). Nothing is migrated. Rollback is the same call with `"on": false`; an app picks either up when it next asks for its session.
+
+Which chats that moves (phase 3): `GET /me/matrix/people` answers `{"rooms": {"<chat_id>": "<room_id>"}}` for the caller, naming a people chat only when every member is a flagged person (no agent, nobody unflagged) and the chat has an open room. The Mac and the iPhone read and write exactly those chats on the homeserver (text, files, replies, reactions, removing a message, read state; a file of an end-to-end encrypted chat is encrypted on the device and kept on the homeserver as ciphertext, any other file is a relay blob as in a Loro room) and opens no Loro room for them; every other chat stays its Loro room. Turning the flag off again loses nothing in a chat that is not end-to-end encrypted: the relay writes every message a device sends on the homeserver into the chat's Loro room as well (same id, sender, time, reply and parts; a message removed there is removed here), so flipping a member back, or adding an agent or an unflagged person, returns the chat to a Loro room that has it all. A reaction put on a message there is put on the Loro row too, and what was sent before the relay carried such things back is read from each room once, when the relay first starts with this build. One thing is not carried back: anything said in an end-to-end encrypted chat (`ARBOS_MATRIX_E2EE=on`), which the relay cannot read and is not handed; those messages stay on the homeserver and are read there again once every member is flagged. The other direction is the mirror that has run since stage A: a chat's earlier Loro history is in its room already (`POST /admin/matrix/backfill` fills a gap), except in an encrypted room, which takes no mirror, and except messages of people who have since left the chat, which the apps do not show under a name the room cannot prove. Those rows a member's device carries in: `GET /chats/{id}/matrix/history` hands a member of a chat read on the homeserver the next 50 missing rows, each signed with the relay's history key (Ed25519, derived from the relay key; its public half is `history_key` of `GET /me/matrix`, which an app pins the first time it is told) over the room, the chat and the row's id, sender, time and content; the device sends them into the room, encrypted where the room is, and reports the events (`POST`, recorded once the homeserver confirms the caller sent them there). The apps show a carried row as its signed sender's at its signed time, and only with that key's signature for that room, so no member can write history. One device carries a chat at a time; the relay first sets a push rule on every member's account so old history is neither counted unread nor announced. `GET /admin/matrix/shadow` lists the rows still waiting as `missing`. Changing `ARBOS_RELAY_KEY` changes the history key, and devices that pinned the old one show no carried row signed with the new. Pushes for a message sent on the homeserver go through its push gateway to every device of a member of such a chat (the `matrix_reads` flag is not needed for these chats). The alert of an end-to-end encrypted message names its sender and says "New message": the relay cannot read more. It carries the event as the homeserver holds it (when the alert stays under APNs' 4 kB), and the iPhone's notification extension reads the words from it with the device's own keys; that needs the app and the extension to share the App Group `group.com.unarbos.arbos`, and anything that fails leaves "New message". Reactions and carried history alert nobody.
 
 Kill switch for the relay side: `sudo touch /etc/arbos/matrix.disabled` stops dual-writes (the outbox keeps queueing); `sudo rm` it to resume.
 

@@ -1,9 +1,9 @@
 // One agent, one picture, one name — on every surface (#1592, Jacob 2026-10-23:
-// TestAgent's bubble drew a purple "T" while the working row drew its leaf and
+// TestAgent's bubble drew a purple "T" while the working row drew its disc and
 // said "testagent"). The rule lives in arbos-core (`avatar::identity`) and reaches
 // Swift through arbos-ffi (`resolveAgent`): a row's `sender` / `senderHandle` /
 // `senderName` against the open chat's roster, then my projects, then every other
-// roster; an agent no card knows gets the id-seeded leaf and the row's own name.
+// roster; an agent no card knows gets the id-seeded colour and the row's own name.
 // This file only gathers the cards and turns the answer into the `Project` the
 // avatar views draw — `AgentAvatar(project:)` everywhere, never a `PersonAvatar`
 // seeded by a handle for an agent.
@@ -31,8 +31,7 @@ extension AppModel {
             id: p.id,
             name: p.name,
             handle: agentSlug(name: p.name),
-            leaf: p.avatarLeaf.map { UInt8(clamping: $0) },
-            leafColor: p.avatarLeafColor.map { UInt8(clamping: $0) },
+            discColor: p.avatarDiscColor.map { UInt8(clamping: $0) },
             colorIndex: p.effectiveAvatarColorIndex.map { UInt8(clamping: $0) },
             imageKey: p.imageKey,
             avatarVersion: Int64(p.avatarVersion)
@@ -42,7 +41,7 @@ extension AppModel {
     static func agentCard(_ m: ChatMember) -> AgentCard? {
         guard m.isAgent else { return nil }
         guard let p = m.project else {
-            return AgentCard(id: m.id, name: m.name ?? "", handle: m.handle, leaf: nil, leafColor: nil,
+            return AgentCard(id: m.id, name: m.name ?? "", handle: m.handle, discColor: nil,
                              colorIndex: m.avatarColorIndex.map { UInt8(clamping: $0) }, imageKey: nil, avatarVersion: 0)
         }
         var card = agentCard(p)
@@ -57,7 +56,7 @@ extension AppModel {
         if resolved.known { return resolved }
         // A live row the box has not attributed yet (`sender: "agent"`, no handle, no name)
         // in a people chat with one agent is that agent — the same rule as the Mac (Jacob,
-        // 2026-10-26: the working row drew a seeded leaf while the finished bubbles had the
+        // 2026-10-26: the working row drew a seeded disc while the finished bubbles had the
         // photo). Several agents on the roster: nothing is safe to assume.
         let bare = agentSenderId(sender: sender).isEmpty || sender == "agent" || sender == "assistant"
         if bare, (handle ?? "").trimmingCharacters(in: .whitespaces).isEmpty,
@@ -69,8 +68,8 @@ extension AppModel {
     }
 
     /// The agent a people-chat row is drawn from, as every surface draws it: the roster's
-    /// (or my) project record carrying the resolved name, leaf and picture; a stand-in
-    /// `Project` when no card knows the agent (its id seeds the leaf, the row names it).
+    /// (or my) project record carrying the resolved name, colour and picture; a stand-in
+    /// `Project` when no card knows the agent (its id seeds the colour, the row names it).
     func agent(sender: String, handle: String?, name: String?, chatId: Id?) -> Project {
         agentProject(agentIdentity(sender: sender, handle: handle, name: name, chatId: chatId), chatId: chatId)
     }
@@ -86,12 +85,11 @@ extension AppModel {
     }
 
     /// `AgentIdentity` → the `Project` the views draw. A known agent keeps its full record
-    /// (model, state, owner…) with the identity's name, leaf and picture written over it.
+    /// (model, state, owner…) with the identity's name, colour and picture written over it.
     func agentProject(_ a: AgentIdentity, chatId: Id?) -> Project {
-        // The resolver's `leaf` is the pair in effect (the automatic one for a neutral card, so
-        // an older client still draws something); the stored neutral pair (Jacob, 2026-10-25)
-        // is read off the card itself, so the initial-on-grey survives the round trip.
-        let neutral = a.known && agentCards(chatId: chatId).first { $0.id == a.id }?.leaf == UInt8(clamping: LeafArt.neutral)
+        // The resolver's `discColor` is the colour in effect, with a stored sentinel already
+        // resolved to the id's own. No default is grey (Jacob, 2026-11-06), so the card's raw
+        // value no longer needs reading back out.
         var p = knownProject(a.id, chatId: chatId) ?? Project(
             id: a.id,
             name: a.name,
@@ -108,10 +106,7 @@ extension AppModel {
             avatarColor: nil
         )
         p.name = a.name
-        // A neutral card (Create sheet, nothing picked — Jacob 2026-10-25) keeps its stored pair,
-        // so `AgentAvatar` draws the initial on grey, never the automatic leaf.
-        p.avatarLeaf = neutral ? LeafArt.neutral : Int(a.leaf.leaf)
-        p.avatarLeafColor = neutral ? LeafArt.neutral : Int(a.leaf.color)
+        p.avatarDiscColor = Int(a.discColor)
         p.avatarColorIndexEffective = Int(a.colorIndex)
         p.imageKey = a.imageKey
         p.avatarVersion = Int(a.avatarVersion)
@@ -131,19 +126,17 @@ extension AppModel {
     /// What an agent's avatar is made of, with the relay's stamp of its last change.
     struct AgentAvatarFacts: Equatable {
         var imageKey: String?
-        var avatarLeaf: Int?
-        var avatarLeafColor: Int?
+        var avatarDiscColor: Int?
         var version: Int
 
-        init(imageKey: String?, avatarLeaf: Int?, avatarLeafColor: Int?, version: Int) {
+        init(imageKey: String?, avatarDiscColor: Int?, version: Int) {
             self.imageKey = imageKey.flatMap { $0.isEmpty ? nil : $0 }
-            self.avatarLeaf = avatarLeaf
-            self.avatarLeafColor = avatarLeafColor
+            self.avatarDiscColor = avatarDiscColor
             self.version = version
         }
 
         init(_ p: Project) {
-            self.init(imageKey: p.imageKey, avatarLeaf: p.avatarLeaf, avatarLeafColor: p.avatarLeafColor, version: p.avatarVersion)
+            self.init(imageKey: p.imageKey, avatarDiscColor: p.avatarDiscColor, version: p.avatarVersion)
         }
     }
 
@@ -180,8 +173,7 @@ extension AppModel {
         func write(_ p: inout Project) {
             guard force || facts.version >= p.avatarVersion else { return }
             p.imageKey = facts.imageKey
-            p.avatarLeaf = facts.avatarLeaf
-            p.avatarLeafColor = facts.avatarLeafColor
+            p.avatarDiscColor = facts.avatarDiscColor
             p.avatarVersion = facts.version
             p.imageURL = agentPictureURL(id: projectId, imageKey: facts.imageKey, version: facts.version)
         }
@@ -212,12 +204,12 @@ extension AppModel {
         }
     }
 
-    /// The picture only (the push carries no leaf picks): a newer stamp from the relay lands in
-    /// place at once; the leaf picks come with the re-read that follows.
+    /// The picture only (the push carries no colour pick): a newer stamp from the relay lands in
+    /// place at once; the colour pick comes with the re-read that follows.
     func applyAgentAvatarPush(projectId: Id, imageKey: String?, version: Int) {
-        let base = newestAgentAvatar(projectId) ?? AgentAvatarFacts(imageKey: nil, avatarLeaf: nil, avatarLeafColor: nil, version: 0)
+        let base = newestAgentAvatar(projectId) ?? AgentAvatarFacts(imageKey: nil, avatarDiscColor: nil, version: 0)
         guard version >= base.version else { return }
-        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: imageKey, avatarLeaf: base.avatarLeaf, avatarLeafColor: base.avatarLeafColor, version: version))
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: imageKey, avatarDiscColor: base.avatarDiscColor, version: version))
     }
 
     /// The full record behind an id: mine first, then the roster rows (someone else's agent).

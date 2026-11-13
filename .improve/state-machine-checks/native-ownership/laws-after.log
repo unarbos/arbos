@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: swift lifetime never revives an old or foreign ticket: 256 seeded cases
+ok 1 - swift lifetime never revives an old or foreign ticket: 256 seeded cases
+  ---
+  duration_ms: 471.109625
+  type: 'test'
+  ...
+# Subtest: swift old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+ok 2 - swift old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+  ---
+  duration_ms: 37.283708
+  type: 'test'
+  ...
+# Subtest: rust lifetime never revives an old or foreign ticket: 256 seeded cases
+ok 3 - rust lifetime never revives an old or foreign ticket: 256 seeded cases
+  ---
+  duration_ms: 24.295875
+  type: 'test'
+  ...
+# Subtest: rust old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+ok 4 - rust old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+  ---
+  duration_ms: 27.712042
+  type: 'test'
+  ...
+# Subtest: Swift snapshot rejects disposed owners/docs and preserves same-doc first paint: 256 seeded cases
+ok 5 - Swift snapshot rejects disposed owners/docs and preserves same-doc first paint: 256 seeded cases
+  ---
+  duration_ms: 36.946875
+  type: 'test'
+  ...
+# Subtest: Rust UI session rejects stale controls/data while current adoption progresses: 256 seeded cases
+ok 6 - Rust UI session rejects stale controls/data while current adoption progresses: 256 seeded cases
+  ---
+  duration_ms: 33.171833
+  type: 'test'
+  ...
+# Subtest: Rust retired task owner rejects late effects and repeat retirement is empty: 256 seeded cases
+ok 7 - Rust retired task owner rejects late effects and repeat retirement is empty: 256 seeded cases
+  ---
+  duration_ms: 26.652875
+  type: 'test'
+  ...
+# Subtest: native observation boundary rejects bad frames and recovers
+ok 8 - native observation boundary rejects bad frames and recovers
+  ---
+  duration_ms: 112.755333
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4664.977083

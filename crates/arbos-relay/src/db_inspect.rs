@@ -17,9 +17,11 @@ impl Db {
         after_ms: i64,
         limit: i64,
     ) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
-                "SELECT id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms
+                "SELECT id, at, api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms,
+                 request_id, session_id, session_run_id, parent_session_id, chat_id, turn_id, job_id,
+                 upstream_id, provider, actual_usd, cost_source, metering_status
                  FROM usage WHERE project_id = ?1 AND at > ?2 ORDER BY at ASC, id ASC LIMIT ?3",
             )?;
             let rows = st.query_map(params![project_id, after_ms, limit], |r| {
@@ -28,6 +30,12 @@ impl Db {
                     "model": r.get::<_, String>(3)?, "input": r.get::<_, i64>(4)?, "output": r.get::<_, i64>(5)?,
                     "cache_read": r.get::<_, i64>(6)?, "cache_write": r.get::<_, i64>(7)?, "usd": r.get::<_, f64>(8)?,
                     "latency_ms": r.get::<_, i64>(9)?, "ttfb_ms": r.get::<_, Option<i64>>(10)?,
+                    "request_id": r.get::<_, Option<String>>(11)?, "session_id": r.get::<_, Option<String>>(12)?,
+                    "session_run_id": r.get::<_, Option<String>>(13)?, "parent_session_id": r.get::<_, Option<String>>(14)?,
+                    "chat_id": r.get::<_, Option<String>>(15)?, "turn_id": r.get::<_, Option<String>>(16)?,
+                    "job_id": r.get::<_, Option<String>>(17)?, "upstream_id": r.get::<_, Option<String>>(18)?,
+                    "provider": r.get::<_, Option<String>>(19)?, "actual_usd": r.get::<_, Option<f64>>(20)?,
+                    "cost_source": r.get::<_, String>(21)?, "metering_status": r.get::<_, String>(22)?,
                 }))
             })?;
             rows.collect()
@@ -42,7 +50,7 @@ impl Db {
         after_ms: i64,
         limit: i64,
     ) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT a.call_id, a.joined_at, a.left_at, c.chat_id, c.kind, c.started_by, c.started_at, c.ended_at, c.end_reason
                  FROM call_agents a LEFT JOIN calls c ON c.id = a.call_id
@@ -67,7 +75,7 @@ impl Db {
         after_ms: i64,
         limit: i64,
     ) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT r.id, r.routine_id, t.name, t.chat_id, r.started_at, r.finished_at, r.status, r.message_id, r.note
                  FROM routine_runs r JOIN routines t ON t.id = r.routine_id
@@ -87,7 +95,7 @@ impl Db {
     /// Newest app version seen per device of a user (`device_versions`): `device_id →
     /// {platform, app_version, build, first_seen_at, last_seen_at}`.
     pub fn device_versions_of_user(&self, user_id: &str) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT device_id, platform, app_version, build, first_seen_at, last_seen_at FROM device_versions
                  WHERE user_id = ?1 ORDER BY last_seen_at DESC",
@@ -105,7 +113,7 @@ impl Db {
 
     /// Device ids of a user with a message-push registration, and with a VoIP one.
     pub fn push_registrations_of_user(&self, user_id: &str) -> Result<(Vec<String>, Vec<String>)> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare("SELECT device_id FROM push_tokens WHERE user_id = ?1")?;
             let push: Vec<String> = st
                 .query_map(params![user_id], |r| r.get(0))?
@@ -122,7 +130,7 @@ impl Db {
     /// (`chat_user_cursor`), the per-user event mark unread is counted from (`chat_user_reads`),
     /// and every device's older per-device mark (`people_reads`).
     pub fn read_state(&self, user_id: &str, chat_id: &str, device_ids: &[String]) -> Result<Value> {
-        self.with(|c| {
+        self.read(|c| {
             let cursor: Option<(i64, i64)> = c
                 .query_row(
                     "SELECT seq, at FROM chat_user_cursor WHERE user_id = ?1 AND chat_id = ?2",
@@ -164,7 +172,7 @@ impl Db {
 
     /// The last `limit` announced message events of a chat (what unread is counted over).
     pub fn chat_events_tail(&self, chat_id: &str, limit: i64) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT id, message_id, sender_user, created_at, project_id FROM chat_events WHERE chat_id = ?1 ORDER BY id DESC LIMIT ?2",
             )?;
@@ -190,7 +198,7 @@ impl Db {
         after_ms: i64,
         limit: i64,
     ) -> Result<Vec<Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT id, kind, entry, at FROM audit WHERE project_id = ?1 AND at > ?2 ORDER BY at ASC, id ASC LIMIT ?3",
             )?;

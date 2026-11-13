@@ -1,0 +1,133 @@
+{
+  "tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "gates": [
+    {
+      "label": "clean-all-12",
+      "command": [
+        "cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-core",
+        "-p",
+        "arbos-client",
+        "-p",
+        "arbos-matrix",
+        "-p",
+        "arbos-ffi",
+        "-p",
+        "arbos-relay",
+        "-p",
+        "arbos-agentd",
+        "-p",
+        "arbosctl",
+        "-p",
+        "arbos-acp",
+        "-p",
+        "arbos-sidecar",
+        "-p",
+        "arbos-local",
+        "-p",
+        "arbos-mac",
+        "-p",
+        "arbos-update"
+      ],
+      "exit": 0,
+      "seconds": 0.3067283749114722,
+      "source_unchanged": true,
+      "log_sha256": "0bdaeb2aa6a92a0fdfec2d2cc4d0ab71946de5d0654e08c526e4629130ae0f28"
+    },
+    {
+      "label": "clean-ios-sim-all-12",
+      "command": [
+        "cargo",
+        "clean",
+        "--locked",
+        "--offline",
+        "--target",
+        "aarch64-apple-ios-sim",
+        "-p",
+        "arbos-core",
+        "-p",
+        "arbos-client",
+        "-p",
+        "arbos-matrix",
+        "-p",
+        "arbos-ffi",
+        "-p",
+        "arbos-relay",
+        "-p",
+        "arbos-agentd",
+        "-p",
+        "arbosctl",
+        "-p",
+        "arbos-acp",
+        "-p",
+        "arbos-sidecar",
+        "-p",
+        "arbos-local",
+        "-p",
+        "arbos-mac",
+        "-p",
+        "arbos-update"
+      ],
+      "exit": 0,
+      "seconds": 0.14596737490501255,
+      "source_unchanged": true,
+      "log_sha256": "14bd5c603fbbaadeca823b3bfc40bbc2fc525a78f28092b064a273684eb5d09f"
+    },
+    {
+      "label": "ffi-ios-sim",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-ffi",
+        "--target",
+        "aarch64-apple-ios-sim"
+      ],
+      "exit": 0,
+      "seconds": 11.839696458075196,
+      "source_unchanged": true,
+      "log_sha256": "d83133ed79ed9c902c1b1fc74c2b67f7e87b197a60cf05b007e2fb5c0e6a2555"
+    },
+    {
+      "label": "generate-swift",
+      "command": [
+        "uniffi-bindgen",
+        "generate",
+        "--library",
+        "target-ios-sim/aarch64-apple-ios-sim/debug/libarbos_ffi.a",
+        "--language",
+        "swift",
+        "--out-dir",
+        "generated"
+      ],
+      "exit": 0,
+      "seconds": 1.6147860419005156,
+      "source_unchanged": true,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "create_xcframework": {
+    "command": [
+      "xcodebuild",
+      "-create-xcframework",
+      "-library",
+      "target-ios-sim/aarch64-apple-ios-sim/debug/libarbos_ffi.a",
+      "-headers",
+      "headers",
+      "-output",
+      "framework/ArbosFFIRust.xcframework"
+    ],
+    "exit": 0,
+    "seconds": 1.109576166025363,
+    "log_sha256": "3c9b27d0cad39206e4a3853f8db587a7c90cb2129a9aa5aa9003f40a05434883",
+    "source_unchanged": true
+  },
+  "isolation": "deny network*, locked/offline Cargo, fresh HOME/TMPDIR, explicit known public Cargo/Rustup cache, own APFS-cloned target only; all12workspace packages cleaned for host AND explicit ios-sim target; seeded old static library asserted absent before build",
+  "scope": "Compile/generate/package/ABI inspection only. No app, simulator, XCTest, signing, installer, provider or cloud execution."
+}

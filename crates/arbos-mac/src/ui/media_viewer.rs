@@ -237,10 +237,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // ----- the item --------------------------------------------------------
     let body: AnyElement = match kind {
         AttachmentKind::Image => match picture {
+            // With an id, so a GIF plays: GPUI keeps an `img`'s frame clock under its id.
             Some(image) => img(image)
                 .w_full()
                 .h_full()
                 .object_fit(ObjectFit::Contain)
+                .id("media-viewer-picture")
                 .into_any_element(),
             None if failed => placeholder("photo", "No preview", &item, &theme).into_any_element(),
             None => div()
@@ -612,6 +614,8 @@ fn forward_picker(
         .mx(px(12.0))
         .px(px(10.0))
         .rounded(px(8.0))
+        // glass-lint: allow (the viewer lays its own black 88 % matte over the whole window
+        // (BACKDROP), so this field sits on the matte and never on the window's glass)
         .bg(theme.surface_2)
         .cursor_text()
         .text_size(px(PICKER_FIELD_FONT))
@@ -712,6 +716,8 @@ fn forward_picker(
         .w(px(PICKER_WIDTH))
         .h(px(PICKER_HEIGHT))
         .rounded(px(14.0))
+        // glass-lint: allow (the forward picker opens on the viewer's black 88 % matte, not on
+        // the window's glass)
         .bg(theme.surface_1)
         .border_1()
         .border_color(theme.border_strong)

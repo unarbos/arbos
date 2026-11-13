@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::config::{BoxConfig, Config};
 use crate::isolation::Isolation;
 use crate::store::Store;
-use crate::sync::{Incoming, SyncHub};
+use crate::sync::{self, Incoming, SyncHub};
 use crate::{hooks, http, mcp, sites};
 
 /// Subagents running at once across the whole box (4 per workspace, see `agent.rs`).
@@ -83,6 +83,74 @@ where
     refresh.await;
 }
 
+/// How far the box is through its own boot, in atomics and nothing else (2026-11-09).
+///
+/// The box's health and status surfaces are read exactly while the box is starting — the
+/// relay's stale-box detector, the deploy worker's readback, a person waiting on a box that
+/// has just woken — and that is the one moment when every workspace is loading its chat
+/// documents and every lock in the supervisor is contended. So what those surfaces answer
+/// comes from here: three loads, no `.await`, no lock, no wait on anything a booting
+/// workspace holds.
+///
+/// It says what the box is *doing*, not whether it is well. `ready` means the first listing
+/// from the relay has been applied, so the workspace set is the one the relay named; until
+/// then the honest answer is `initializing` with the counts so far. A surface that cannot say
+/// "not finished yet" has to either lie or hang, and hanging is what this replaces.
+#[derive(Default)]
+pub struct BootProgress {
+    ready: std::sync::atomic::AtomicBool,
+    /// Workspaces the relay's latest listing named.
+    expected: std::sync::atomic::AtomicUsize,
+    /// Workspaces running right now.
+    started: std::sync::atomic::AtomicUsize,
+}
+
+impl BootProgress {
+    fn listing(&self, workspaces: usize) {
+        self.expected
+            .store(workspaces, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn listing_applied(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn workspace_started(&self) {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Called once per workspace that [`Self::workspace_started`] counted: `remove_workspace`
+    /// returns early when the registry held nothing for that project, so the two always pair.
+    fn workspace_stopped(&self) {
+        self.started
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `initializing` until the first listing is applied, `ready` after it.
+    pub fn state(&self) -> &'static str {
+        if self.ready() {
+            "ready"
+        } else {
+            "initializing"
+        }
+    }
+
+    /// The boot fields every status surface carries, so a reader meets one shape.
+    pub fn json(&self) -> Value {
+        json!({
+            "state": self.state(),
+            "ready": self.ready(),
+            "workspaces_expected": self.expected.load(std::sync::atomic::Ordering::Relaxed),
+            "workspaces_started": self.started.load(std::sync::atomic::Ordering::Relaxed),
+        })
+    }
+}
+
 pub struct Supervisor {
     pub cfg: BoxConfig,
     pub workspaces: RwLock<HashMap<String, Arc<Workspace>>>,
@@ -91,9 +159,19 @@ pub struct Supervisor {
     pub box_slots: Arc<Semaphore>,
     pub booted_at: i64,
     pub isolation: Isolation,
+    /// What `/healthz` and `/box/state` answer while the workspaces are still starting.
+    pub boot: BootProgress,
     /// Result of the cross-workspace read check (`None` until two workspaces exist).
     pub cross_read_blocked: RwLock<Option<bool>>,
-    http: reqwest::Client,
+    http: sync::RelayHttp,
+    /// Woken by [`Supervisor::reconnect`] for the links that are not rooms (the voice link).
+    pub(crate) relinked: tokio::sync::Notify,
+    /// At most one listing is applied at a time. The first listing (`/box/hello`) now runs on
+    /// its own task so boot does not wait for every workspace to start, which puts it beside
+    /// the 3 s registry poll for as long as it takes; two passes starting the same project
+    /// would race for that workspace's loopback ports. A pass that finds one running leaves
+    /// the listing to it — the next poll, 3 s later, brings the list again.
+    listing_lock: tokio::sync::Mutex<()>,
     /// Next loopback port block; ports of removed workspaces are not reused within one boot.
     next_index: std::sync::atomic::AtomicU16,
 }
@@ -109,7 +187,10 @@ impl Supervisor {
             held: RwLock::new(std::collections::HashSet::new()),
             box_slots: Arc::new(Semaphore::new(BOX_MAX_SUBAGENTS)),
             booted_at: arbos_core::ids::now_ms(),
-            http: reqwest::Client::new(),
+            boot: BootProgress::default(),
+            http: sync::RelayHttp::default(),
+            relinked: tokio::sync::Notify::new(),
+            listing_lock: tokio::sync::Mutex::new(()),
             next_index: std::sync::atomic::AtomicU16::new(0),
         })
     }
@@ -120,6 +201,20 @@ impl Supervisor {
 
     pub async fn list(&self) -> Vec<Arc<Workspace>> {
         self.workspaces.read().await.values().cloned().collect()
+    }
+
+    /// How many rooms this box holds open. Cheap — no room's doc is read.
+    pub async fn room_count(&self) -> usize {
+        let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
+        sync::box_room_count(&hubs).await
+    }
+
+    /// Hold the box to [`sync::max_box_rooms`] rooms, closing the coldest that hold
+    /// no work wherever on the box they are. `workspaces` is the registry that makes it possible:
+    /// no hub can see its siblings, so no hub can enforce a bound on their sum.
+    pub async fn enforce_box_room_ceiling(&self) -> (usize, usize) {
+        let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
+        sync::enforce_box_room_ceiling(&hubs).await
     }
 
     /// The workspace whose store knows this chat (legacy `/history/{chat}` without a project).
@@ -136,12 +231,69 @@ impl Supervisor {
         self.list().await.iter().any(|w| w.agent.any_turn_running())
     }
 
+    /// `POST /box/hello`: the box announces itself, and the answer lists every project of its
+    /// user as a workspace.
+    pub async fn hello(&self) -> reqwest::Result<reqwest::Response> {
+        self.http
+            .get()
+            .post(format!("{}/box/hello", self.cfg.relay_url))
+            .bearer_auth(&self.cfg.box_token)
+            .json(&json!({
+                "url": format!("http://127.0.0.1:{}", self.cfg.port),
+                "version": env!("CARGO_PKG_VERSION"),
+                "proto": arbos_core::PROTO_VERSION,
+                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
+                // box runs, so the relay admin can tell what is shipped.
+                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                // The pi-ext seed this box actually copies into its projects (#1708): on a host
+                // sandbox /etc is persisted, so it can lag behind the image.
+                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
+            }))
+            .send()
+            .await
+    }
+
+    /// The sandbox was restored from a checkpoint and says so with SIGUSR1
+    /// (docs/box-scaling.md §4.3.1): every connection to the relay is dead on the wire, though
+    /// each still looks open from here. Drop them all and dial again now, without restarting —
+    /// the HTTP pools, every room socket, the voice link — then say hello, which is how the
+    /// relay learns the box is back and how the box learns what changed while it was frozen.
+    ///
+    /// A hello that fails is left to the 3 s registry poll, which brings the same listing.
+    pub async fn reconnect(self: &Arc<Self>) {
+        sync::drop_relay_http_pools();
+        self.relinked.notify_waiters();
+        let workspaces = self.list().await;
+        for w in &workspaces {
+            w.sync.kick();
+        }
+        tracing::info!(
+            workspaces = workspaces.len(),
+            "relay reconnect: every relay socket dropped and redialed"
+        );
+        match self.hello().await {
+            Ok(r) if r.status().is_success() => {
+                self.apply_listing(&r.json::<Value>().await.unwrap_or_default())
+                    .await;
+            }
+            Ok(r) => tracing::warn!(status = %r.status(), "relay reconnect: box hello refused"),
+            Err(e) => tracing::warn!(error = %e, "relay reconnect: box hello failed"),
+        }
+    }
+
     /// Box-level keep-alive: any workspace mid-turn keeps the box awake.
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
         self.http
+            .get()
             .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
+            // Bounded for the reason the push poll is (`routines.rs`): it runs in a loop.
+            .timeout(REGISTRY_CALL_TIMEOUT)
             .send()
             .await?;
         Ok(())
@@ -160,6 +312,14 @@ impl Supervisor {
             .context("project without id")?
             .to_owned();
         if let Some(w) = self.get(&project_id).await {
+            // A hello after a restore (`reconnect`) carries what the relay queued while the box
+            // was frozen, and the relay has taken it off its queue: this is the only delivery.
+            // A row that woke the box is among them, as the `chat_open` for its closed room.
+            // The 3 s registry poll carries none.
+            for p in pushes {
+                tracing::info!(project = %project_id, push = %p, "queued push delivered to a running workspace");
+                w.agent.dispatch_push(p.clone());
+            }
             if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
                 w.agent.people.set_project_owner(owner);
             }
@@ -277,14 +437,36 @@ impl Supervisor {
                 tracing::warn!(error = %e, id, source = src, "fork chat seed");
             }
         }
-        let known: Vec<String> = store.chats()?.into_iter().map(|c| c.id).collect();
+        let known = store.chats()?;
         let initial_chat = known
             .first()
-            .cloned()
+            .map(|c| c.id.clone())
             .unwrap_or_else(|| "default".to_owned());
+        // The project doc carries this workspace's status and settings, so it opens here; it
+        // closes when idle like any other room and its writers reopen it.
         sync.open_room(PROJECT_DOC_CHAT_ID).await?;
-        for id in &known {
-            sync.open_room(id).await?;
+        // The chat rooms do not (2026-11-09). Opening one reads that chat's document out of SQLite
+        // and decodes the Loro snapshot, which is where a loaded box's boot time goes: up to
+        // `max_open_rooms` of them per workspace, and the workspaces start one after another,
+        // so on a box with many projects this is minutes of solid CPU with the whole box's
+        // boot queued behind it. None of it is needed for the workspace to be running, and a
+        // row waiting in a room that is not open yet is not lost — the relay queues a
+        // `chat_open` push for it, as it already does for every chat past the boot budget.
+        {
+            let sync2 = sync.clone();
+            let rooms = boot_rooms(&known);
+            let project = project_id.clone();
+            tasks.push(tokio::spawn(async move {
+                let t = Instant::now();
+                let n = rooms.len();
+                for id in rooms {
+                    if let Err(e) = sync2.open_room(&id).await {
+                        tracing::warn!(error = %e, chat = %id, "boot: open room");
+                    }
+                }
+                let ms = t.elapsed().as_millis() as i64;
+                tracing::info!(project = %project, rooms = n, ms, "boot rooms open");
+            }));
         }
         // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
         // and on the `skills_changed` push.
@@ -367,16 +549,9 @@ impl Supervisor {
                 }
             }));
         }
-        // Approval cards expire 24 h after they were posted (feature `approve`).
-        {
-            let agent2 = agent.clone();
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    agent2.expire_approvals().await;
-                }
-            }));
-        }
+        // No approval sweep: a card is answerable until it is answered (feature `approve`). The
+        // minute sweep that used to close cards past their deadline is gone with the deadline —
+        // it was the thing that made an unanswered card stop the work behind it.
         // Command loop. Each command runs on its own task: `send`/`answer` serialize on the
         // agent's turn lock (FIFO), while `stop`/`steer` (Guide) and settings changes land at
         // once, mid-turn.
@@ -392,8 +567,12 @@ impl Supervisor {
                                 let _ = agent.handle_command(&chat_id, cmd).await;
                             });
                         }
-                        Incoming::CaughtUp { chat_id, head_seq } => {
-                            tracing::info!(chat_id, head_seq, "room caught up");
+                        Incoming::CaughtUp {
+                            chat_id,
+                            head_seq,
+                            open_ms,
+                        } => {
+                            tracing::info!(chat_id, head_seq, open_ms, "room caught up");
                         }
                         Incoming::Status { chat_id, state } => {
                             tracing::debug!(chat_id, ?state, "relay status");
@@ -422,6 +601,7 @@ impl Supervisor {
             .write()
             .await
             .insert(project_id.clone(), ws.clone());
+        self.boot.workspace_started();
         tracing::info!(project = %project_id, ms = t0.elapsed().as_millis() as i64, "workspace running");
         self.check_isolation().await;
         Ok(ws)
@@ -452,6 +632,7 @@ impl Supervisor {
     pub async fn report_workspace_state(&self, project_id: &str, state: &str) {
         let _ = self
             .http
+            .get()
             .post(format!(
                 "{}/projects/{}/workspace",
                 self.cfg.relay_url, project_id
@@ -467,6 +648,7 @@ impl Supervisor {
         let Some(w) = self.workspaces.write().await.remove(project_id) else {
             return;
         };
+        self.boot.workspace_stopped();
         tracing::info!(project = %project_id, "stopping workspace");
         w.sync
             .write_status(&[(
@@ -486,11 +668,16 @@ impl Supervisor {
     /// Apply one `/box/hello` or `/box/projects` answer: start new workspaces, refresh the rest,
     /// drop the ones the relay no longer lists.
     pub async fn apply_listing(self: &Arc<Self>, listing: &Value) {
+        let Ok(_pass) = self.listing_lock.try_lock() else {
+            tracing::debug!("a listing is already being applied; leaving this one to it");
+            return;
+        };
         let entries = listing
             .get("workspaces")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        self.boot.listing(entries.len());
         let mut seen = Vec::new();
         let held = self.held.read().await.clone();
         for e in &entries {
@@ -579,6 +766,7 @@ impl Supervisor {
         for id in gone {
             self.remove_workspace(&id).await;
         }
+        self.boot.listing_applied();
     }
 
     /// Migration support: stop a workspace and keep it stopped while the relay replaces its files.
@@ -641,21 +829,53 @@ impl Workspace {
     /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
-            open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c).await;
+            open_listed_chat(
+                &self.cfg,
+                &self.store,
+                &self.sync,
+                &self.project_id,
+                c,
+                false,
+            )
+            .await;
         }
     }
+}
+
+/// Which chat rooms open at boot (#2367): the pinned chat and the chats most recently used,
+/// at most [`crate::sync::max_open_rooms`] of them — not every chat the box has ever had. A
+/// row waiting in any other chat reaches the box as a `chat_open` push, queued by the relay
+/// while no socket of this box was on the room, and `/box/hello` delivers those at boot.
+///
+/// "Used" is the chat's last turn (`last_message_at`), and its creation time until it has one.
+pub(crate) fn boot_rooms(chats: &[crate::store::ChatRow]) -> Vec<String> {
+    let mut by_use: Vec<&crate::store::ChatRow> = chats.iter().collect();
+    by_use.sort_by_key(|c| {
+        std::cmp::Reverse((c.is_pinned, c.last_message_at.unwrap_or(c.created_at)))
+    });
+    let cap = crate::sync::max_open_rooms();
+    if cap > 0 {
+        by_use.truncate(cap);
+    }
+    by_use.into_iter().map(|c| c.id.clone()).collect()
 }
 
 /// One chat as the relay lists it (`{id, title, is_pinned, created_at, forked_from?}`): record
 /// it and open its room unless the room is already open. Idempotent; shared by the registry
 /// pass and the relay's `chat_open` push (#2127), so a chat reaches the agent by whichever
 /// arrives first.
+///
+/// `open_now` is the push: rows are waiting in the room, or the chat was just created, so it
+/// opens whatever its history says. The 3 s registry pass passes `false` and so opens only a
+/// chat the box has never seen: reopening every listed chat is what kept 1,667 rooms alive on
+/// the lt-eval box (#2367).
 pub(crate) async fn open_listed_chat(
     cfg: &Config,
     store: &Store,
     sync: &SyncHub,
     project_id: &str,
     c: &Value,
+    open_now: bool,
 ) {
     let Some(id) = c.get("id").and_then(Value::as_str) else {
         return;
@@ -667,7 +887,10 @@ pub(crate) async fn open_listed_chat(
         c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
         c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
     );
-    if sync.host(id).await.is_some() {
+    if sync.is_open(id).await {
+        return;
+    }
+    if !(open_now || first_sight) {
         return;
     }
     if first_sight {
@@ -862,7 +1085,7 @@ fn clone_forked_workspace(
 }
 
 /// First-boot seeding of one workspace (sandbox-image.md §4 step 5): pi seed → state dir,
-/// AGENTS.md, mcp.json, the model stub as pi/Prime provider.
+/// mcp.json, the model stub as pi/Prime provider.
 pub fn seed_state(cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     std::fs::create_dir_all(cfg.pi_dir())?;
@@ -885,6 +1108,10 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     write_models_json(cfg, &cfg.talking_model, &cfg.subagent_model)?;
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
+        // Plain names *replace* pi's DEFAULT_TOOL_NAMES (read, bash, edit, write) rather than
+        // adding to them, so this list must name every tool the agent gets. `grep`, `find` and
+        // `ls` ship with pi but are not defaults, so they are off here; their schemas cost
+        // ~575 prefix tokens per call, which is a default-cost decision and Jacob's to make.
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
         "compaction": { "enabled": true, "reserveTokens": COMPACTION_RESERVE_TOKENS, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
@@ -895,7 +1122,13 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     )?;
     // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
     // The bearer is expanded by pi from the per-role env (main vs subagent token, D69).
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}" }, "exposure": "codemode" } } });
+    //
+    // `X-Arbos-Session` carries `ARBOS_SESSION_ID`, which `harness::PiAdapter::envs` sets for
+    // every pi child and which is the worker's subagent id. The bearer names a role and nothing
+    // finer — one subagent token is shared by every worker on the box — so without this header a
+    // job's `send_message` has no way to say which chat it runs beside (bug T). pi resolves
+    // `${VAR}` in any header value from the child's own environment.
+    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}", "X-Arbos-Session": "${ARBOS_SESSION_ID}" }, "exposure": "codemode" } } });
     std::fs::write(
         cfg.pi_dir().join("mcp.json"),
         serde_json::to_string_pretty(&mcp)?,
@@ -911,15 +1144,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
         &prime_settings_path,
         serde_json::to_string_pretty(&prime_settings)?,
     )?;
-    let agents_md = cfg.work_dir.join("AGENTS.md");
-    if !agents_md.exists() {
-        let src = std::path::Path::new("/etc/arbos/AGENTS.md");
-        if src.exists() {
-            std::fs::copy(src, &agents_md)?;
-        } else {
-            std::fs::write(&agents_md, include_str!("../../../image/AGENTS.md"))?;
-        }
-    }
+    retire_seeded_agents_md(&cfg.work_dir);
     if !cfg.work_dir.join(".git").exists() {
         let _ = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -975,11 +1200,11 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     }
     let mut models = json!({
         "providers": {
-            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
+            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": "ARBOS_MODEL_TOKEN" },
             "arbos-relay": {
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
-                "apiKey": cfg.box_token,
+                "apiKey": "ARBOS_MODEL_TOKEN",
                 "models": relay_models
             }
         }
@@ -989,6 +1214,10 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
         cfg.prime_dir().join("models.json"),
         serde_json::to_string_pretty(&models)?,
     )?;
+    // Prime 0.10 resolves a bare environment variable name; pi 1.2 uses ${VAR}.
+    for provider in ["openrouter", "arbos-relay"] {
+        models["providers"][provider]["apiKey"] = json!("${ARBOS_MODEL_TOKEN}");
+    }
     models["providers"]["openrouter"]["modelOverrides"] = Value::Object(window_overrides);
     std::fs::write(
         cfg.pi_dir().join("models.json"),
@@ -1100,12 +1329,236 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
     }
 }
 
+/// SHA-256 of every `AGENTS.md` Arbos ever seeded into a project folder, newest last. The list
+/// is closed: since the text moved to `image/pi-seed/AGENTS.md` nothing writes that path again,
+/// so no version can be added to what is already on disk out there.
+///
+/// Read from `main`'s history of `image/AGENTS.md`, one entry per distinct content:
+/// `git log --follow --format=%H origin/main -- image/AGENTS.md`, then
+/// `git show <sha>:image/AGENTS.md | sha256sum`. Deliberately a literal list rather than
+/// something derived at runtime: deleting a file in the user's folder should rest on a constant
+/// a reviewer can read, not on a computation they have to trust.
+const SEEDED_AGENTS_MD_SHA256: &[&str] = &[
+    "e92b893bc7176ba3d4edd649e533d1859680e61ff94c382b9612e95d19434845", // 2026-10-14 scaffold
+    "f334df7a6971d4d2e339c229680946739e8180527d9956edba698debc11843cd", // 2026-10-15 M1 backend
+    "808058c89d3ef2b1b03816c0ee4d549dbe4f8961d3c05812a4eeae42f7d787f1", // 2026-10-15 D70 work dir
+    "6e07ab799fee34dd6e82e41bbe29796ef640b8089d820f6a691a9b08945bcb10", // 2026-10-15 deliver_file
+    "71b05ae34c2541b175a9d457cd7d13ae2ac079fb5487b2baf7795fc23db3a9a9", // 2026-10-18 research first
+    "96402152e56dcf8fb3830af9b4729f946fc9d4eec8fd30582ca27288545edc39", // 2026-10-18 secret notes
+    "f0a5567f2eed790e6a6f732702da4ee7b8ff8564076905344e62c528b1446aa1", // 2026-10-18 act caps
+    "96b979740643c91151e7bc19e426d5ba683b14cc28c0390bc4809e45471fb047", // 2026-10-19 submit_feedback
+    "07789c29ded1916f085100066eea389c418720add22fe3add5ae4fa03ef1f356", // 2026-10-23 self-reference
+    "8fec4491974e97ffc4046b01e1913db45fa66894b82d179fa44b00401a36af98", // 2026-10-23 read-only rootfs
+    "c2999e4047f97f0c024f4a558f7e73cd6d2e152259ba172281dc1ad3ea2b5a44", // 2026-10-23 vague filing
+    "3c9bd6df649f2e9c82ae0dae7da2b651739d672fb36e3789c70a77019582107d", // 2026-10-23 cite paths
+    "5d134af724ead6fd08dd527dee6f902be98a5b327af3106489253d7133280e11", // 2026-10-26 post_chart
+    "6c518710d3a8fa1d7db127ebb2ba2f3c43083ea40b159503355384dbf20c34e3", // 2026-10-27 publish_site
+];
+
+/// Remove the `AGENTS.md` Arbos used to seed into the project folder, and only that.
+///
+/// The text it held is Arbos's own — the box boundary, the toolset, memory search, the browser,
+/// `submit_feedback`, `publish_site`, the secret-note policy — but it was written to a path the
+/// user and the agent may edit, under `if !exists`, so it was written once per project and never
+/// updated. It now ships as `image/pi-seed/AGENTS.md` into pi's agent directory, which agentd
+/// re-seeds from the image on every start; pi loads that file *in addition to* a project one
+/// (`loadProjectContextFiles` reads the agent dir first, and a project file cannot suppress it),
+/// so leaving the old copy in place would load two versions of the same guidance at once.
+///
+/// **This deletes a file inside the user's project folder**, so it does so only when the bytes
+/// match a version Arbos shipped: that is proof the file is still exactly as seeded and nobody
+/// edited it. Anything else — edited, partly edited, or a version not on the list — is left
+/// alone and the duplication is tolerated. A stale extra context file is a quality problem;
+/// deleting something the user wrote is a trust problem, and the second is much worse than the
+/// first.
+///
+/// Never fatal: a project that keeps its old copy still boots.
+fn retire_seeded_agents_md(work_dir: &std::path::Path) {
+    retire_seeded_agents_md_against(work_dir, SEEDED_AGENTS_MD_SHA256);
+}
+
+fn retire_seeded_agents_md_against(work_dir: &std::path::Path, known: &[&str]) {
+    use sha2::Digest;
+    let path = work_dir.join("AGENTS.md");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let sha = hex::encode(sha2::Sha256::digest(&bytes));
+    if !known.contains(&sha.as_str()) {
+        tracing::info!(
+            path = %path.display(),
+            %sha,
+            "AGENTS.md in the project folder is not one Arbos seeded; leaving it alone"
+        );
+        return;
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(
+            path = %path.display(),
+            "removed the seeded AGENTS.md; the text now comes from pi's agent directory"
+        ),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not remove the seeded AGENTS.md")
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{bounded, bounded_by, registry_pass, REGISTRY_CALL_TIMEOUT};
+    use super::{bounded, bounded_by, registry_pass, Supervisor, REGISTRY_CALL_TIMEOUT};
+
+    /// A supervisor with no workspaces, on a scratch work root. Everything the boot-state and
+    /// box-HTTP tests need: no relay is dialled until a listing names a project.
+    pub(crate) fn test_supervisor(work_root: &std::path::Path) -> Arc<Supervisor> {
+        std::fs::create_dir_all(work_root).expect("work root");
+        Supervisor::new(crate::config::BoxConfig {
+            user_id: Some("u-test".into()),
+            relay_url: "http://127.0.0.1:1".into(),
+            box_token: "test-token".into(),
+            mcp_token: "test-mcp".into(),
+            work_root: work_root.to_path_buf(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: "/nonexistent/pi".into(),
+            prime_bin: "/nonexistent/prime-agent".into(),
+            claude_bin: "/nonexistent/claude".into(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "mock-talking".into(),
+            default_subagent_model: "mock-sub".into(),
+            legacy_project_id: None,
+        })
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("arbos-{tag}-{}", arbos_core::ids::ulid()))
+    }
+
+    /// 2026-11-09: a box that has not finished starting its workspaces says so, rather than
+    /// answering as though the listing it has is the whole one.
+    #[tokio::test]
+    async fn the_box_says_initializing_until_the_first_listing_is_applied() {
+        let root = scratch("boot-state");
+        let sup = test_supervisor(&root);
+        assert_eq!(sup.boot.state(), "initializing");
+        assert!(!sup.boot.ready());
+        assert_eq!(sup.boot.json()["workspaces_expected"], serde_json::json!(0));
+
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert_eq!(sup.boot.state(), "ready");
+        assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The first listing now runs on its own task beside the 3 s registry poll (2026-11-09), so two
+    /// passes can be asked for at once. They must not both start the same project: each start
+    /// binds that workspace's loopback ports, and the second would fail on them. A pass that
+    /// finds one in flight leaves the listing to it — and says nothing about readiness, which
+    /// is the pass in flight's to report.
+    #[tokio::test]
+    async fn only_one_listing_is_applied_at_a_time() {
+        let root = scratch("one-listing");
+        let sup = test_supervisor(&root);
+        let in_flight = sup.listing_lock.lock().await;
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert!(
+            !sup.boot.ready(),
+            "the second pass returned without applying anything"
+        );
+        drop(in_flight);
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pushes a listing carries reach the workspace once each, whichever way it meets them.
+    /// The listing that starts a workspace hands them over at the end of the start. A later
+    /// hello (the one a restored box says on SIGUSR1) finds the workspace running, and used to
+    /// drop them: the relay had already taken them off its queue, so the `chat_open` for the
+    /// row that woke an idle-slept box never arrived and that message went unanswered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_push_is_delivered_once_at_the_start_and_once_to_a_running_workspace() {
+        let root = scratch("queued-push");
+        std::fs::create_dir_all(&root).unwrap();
+        // A pi that answers every command with success: the workspace only has to start.
+        let script = root.join("fake-pi.py");
+        std::fs::write(
+            &script,
+            "import sys, json\nfor line in sys.stdin:\n    try:\n        c = json.loads(line)\n    except ValueError:\n        continue\n    sys.stdout.write(json.dumps({'type': 'response', 'id': c.get('id'), 'command': c.get('type'), 'success': True}) + '\\n')\n    sys.stdout.flush()\n",
+        )
+        .unwrap();
+        let pi = root.join("fake-pi");
+        std::fs::write(
+            &pi,
+            format!("#!/bin/sh\nexec python3 {}\n", script.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The workspace's four loopback servers sit just above a port nothing holds right now.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port().min(u16::MAX - 100);
+        let mut cfg = test_supervisor(&root.join("work")).cfg.clone();
+        cfg.port = port;
+        cfg.pi_bin = pi.display().to_string();
+        let sup = Supervisor::new(cfg);
+
+        let project = "01JQUEUEDPUSH0000000000000";
+        let listing = |pushes: serde_json::Value| {
+            serde_json::json!({ "workspaces": [{
+                "project": { "id": project, "name": "queued", "user_id": "u-test" },
+                "chats": [], "pushes": pushes,
+            }] })
+        };
+        let push =
+            |n: u32| serde_json::json!({ "id": n, "kind": "test_note", "payload": { "n": n } });
+        // An unknown kind is written to the workspace's store, one row per delivery.
+        let delivered = |sup: Arc<Supervisor>| async move {
+            let w = sup.get(project).await.expect("the workspace started");
+            let mut seen: Vec<u64> = Vec::new();
+            for _ in 0..100 {
+                seen = w
+                    .store
+                    .t3_thread("projects", None, None, 100)
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.kind == "push")
+                    .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.text).ok())
+                    .filter_map(|v| v["payload"]["n"].as_u64())
+                    .collect();
+                seen.sort_unstable();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            seen
+        };
+
+        // The listing that starts the workspace.
+        sup.apply_listing(&listing(serde_json::json!([push(1)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1]);
+        // A hello after a restore: the workspace is running.
+        sup.apply_listing(&listing(serde_json::json!([push(2)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+        // The registry poll: no pushes, and nothing is delivered again.
+        sup.apply_listing(&serde_json::json!({ "workspaces": [{
+            "project": { "id": project, "name": "queued", "user_id": "u-test" }, "chats": [],
+        }] }))
+        .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+
+        sup.shutdown().await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// #2127: a refresh that stalls does not delay opening a new chat's room beyond one poll
     /// interval — the rooms open on their own task, the refresh is bounded.
@@ -1141,6 +1594,47 @@ mod tests {
         assert!(
             REGISTRY_CALL_TIMEOUT < Duration::from_secs(15),
             "bound stays well under the relay's stale-box window"
+        );
+    }
+
+    /// #2367: boot opens the pinned chat and the chats most recently used, at most
+    /// `max_open_rooms` of them — not a room for every chat the box has ever had.
+    #[test]
+    fn boot_opens_the_pinned_chat_and_the_most_recently_used_ones() {
+        let chat =
+            |id: &str, pinned: bool, created: i64, used: Option<i64>| crate::store::ChatRow {
+                id: id.to_owned(),
+                title: id.to_owned(),
+                is_pinned: pinned,
+                created_at: created,
+                last_message_at: used,
+                compaction_summary: None,
+                compacted_through: None,
+                compaction_version: 0,
+                pi_session_path: None,
+            };
+        let cap = crate::sync::max_open_rooms();
+        assert!(cap > 0, "the test needs a cap to exceed");
+        let mut chats = vec![
+            chat("pinned", true, 1, None),
+            chat("old-but-used", false, 2, Some(9_000)),
+            chat("new-unused", false, 5_000, None),
+        ];
+        // Far more chats than the cap, every one of them older than those three.
+        for i in 0..cap * 2 {
+            chats.push(chat(&format!("stale{i}"), false, 3, Some(100 + i as i64)));
+        }
+        let open = super::boot_rooms(&chats);
+        assert_eq!(open.len(), cap, "the room budget holds");
+        assert_eq!(open[0], "pinned", "the pinned chat first");
+        assert_eq!(
+            &open[1..3],
+            &["old-but-used".to_owned(), "new-unused".to_owned()],
+            "then by last use, newest first (creation time stands in until a chat has a turn)"
+        );
+        assert!(
+            !open.contains(&"stale0".to_owned()),
+            "the coldest chats get no room at boot; a row waiting in one reopens it"
         );
     }
 
@@ -1290,6 +1784,75 @@ mod tests {
             &dst.join("deny.ts")
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The text Arbos seeded into the project folder moved to pi's agent directory, so the old
+    /// copy has to go or pi loads both. It may only go when it is untouched: a byte match against
+    /// a version Arbos shipped is the proof, and anything else is the user's file. The list is
+    /// injected here so the test says what it means and does not drift when the shipped text is
+    /// edited again.
+    #[test]
+    fn the_seeded_agents_md_is_retired_and_an_edited_one_is_not() {
+        use sha2::Digest;
+        let root = std::env::temp_dir().join(format!("arbos-agentsmd-{}", std::process::id()));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let path = work.join("AGENTS.md");
+        let shipped = "# Arbos project box\n\nThe standard toolset is yours.\n";
+        let known = [hex::encode(sha2::Sha256::digest(shipped.as_bytes()))];
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+
+        // Nothing there: a no-op, not an error.
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert!(!path.exists());
+
+        // Exactly as Arbos seeded it: nobody touched it, so it goes.
+        std::fs::write(&path, shipped).unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert!(!path.exists(), "an untouched seeded copy is removed");
+
+        // The same file with one line of the user's own on the end is theirs now.
+        let edited = format!("{shipped}Run `make check` before you push.\n");
+        std::fs::write(&path, &edited).unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            edited,
+            "an edited AGENTS.md is never deleted"
+        );
+
+        // So is a file that was never ours.
+        std::fs::write(&path, "# my project\n").unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# my project\n");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The list must keep holding the last text that reached a project folder, or every project
+    /// seeded before the move keeps a second, stale copy of this guidance for good. That version
+    /// is `image/AGENTS.md` as it stood at the move — pinned here by hash, not read from the
+    /// tree, because the file it moved to is free to change afterwards and this boundary is not.
+    #[test]
+    fn the_last_seeded_agents_md_stays_on_the_retire_list() {
+        const LAST_SEEDED: &str =
+            "6c518710d3a8fa1d7db127ebb2ba2f3c43083ea40b159503355384dbf20c34e3";
+        assert_eq!(
+            super::SEEDED_AGENTS_MD_SHA256.last(),
+            Some(&LAST_SEEDED),
+            "the newest entry must stay the last version seeded into project folders"
+        );
+        let mut sorted = super::SEEDED_AGENTS_MD_SHA256.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            super::SEEDED_AGENTS_MD_SHA256.len(),
+            "no duplicates"
+        );
+        assert!(super::SEEDED_AGENTS_MD_SHA256
+            .iter()
+            .all(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())));
     }
 
     /// #1257: a session fork copies the transcript under the new chat id, leaves nothing for

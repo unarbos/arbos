@@ -25,7 +25,12 @@ use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{editable_name, hero_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
+/// Overview row labels (tabs superseded —
+/// [feedback iphone-entity-profile-edit-2026-11-10]).
 pub(super) const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
+pub(crate) const TAB_CHANNELS: usize = 0;
+pub(crate) const TAB_MEMBERS: usize = 1;
+pub(crate) const TAB_SETTINGS: usize = 2;
 
 /// The Members tab's one add row (people only — servers hold no agents).
 pub(crate) const ADD_MEMBERS_ID: &str = "server-add-members";
@@ -58,7 +63,7 @@ pub(super) fn page(
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let server = state.server(server_id)?.clone();
-    let tab = state.profile_tab;
+    let subpage = state.profile_subpage;
     let me_id = state.me_id();
     let can_admin = server.can_admin();
     let is_owner = server.is_owner();
@@ -125,13 +130,36 @@ pub(super) fn page(
         members.len()
     };
     let channels_n = server.channels.iter().filter(|c| !c.archived).count();
-    let subtitle = format!(
-        "{count} member{} · {channels_n} channel{}",
-        if count == 1 { "" } else { "s" },
-        if channels_n == 1 { "" } else { "s" }
-    );
+    let drilled = subpage.is_some();
+    let subtitle = if drilled {
+        server.name.clone()
+    } else {
+        format!(
+            "{count} member{} · {channels_n} channel{}",
+            if count == 1 { "" } else { "s" },
+            if channels_n == 1 { "" } else { "s" }
+        )
+    };
+    let name = if let Some(title) = match subpage {
+        Some(TAB_CHANNELS) => Some(TABS[TAB_CHANNELS]),
+        Some(TAB_MEMBERS) => Some(TABS[TAB_MEMBERS]),
+        Some(TAB_SETTINGS) => Some(TABS[TAB_SETTINGS]),
+        _ => None,
+    } {
+        pane::name(title, &theme)
+    } else {
+        name
+    };
     let hero = Hero {
-        picture: Picture::Element(avatar),
+        picture: if drilled {
+            Picture::Glyph(match subpage {
+                Some(TAB_CHANNELS) => "number",
+                Some(TAB_MEMBERS) => "person.2",
+                _ => "gearshape",
+            })
+        } else {
+            Picture::Element(avatar)
+        },
         name,
         badge: None,
         subtitle: Some(subtitle.into()),
@@ -142,9 +170,50 @@ pub(super) fn page(
         action: None,
     };
 
-    // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------
-    let body = match tab {
-        0 => channels_tab(
+    // Overview rows → drill-in (Channels · Members · Settings).
+    let body = match subpage {
+        None => {
+            let rows = vec![
+                kit::nav_row(
+                    "server-overview-channels",
+                    "number",
+                    TABS[TAB_CHANNELS],
+                    Some(channels_n.to_string()),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_CHANNELS), cx));
+                }))
+                .into_any_element(),
+                kit::nav_row(
+                    "server-overview-members",
+                    "person.2",
+                    TABS[TAB_MEMBERS],
+                    Some(count.to_string()),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_MEMBERS), cx));
+                }))
+                .into_any_element(),
+                kit::nav_row(
+                    "server-overview-settings",
+                    "gearshape",
+                    TABS[TAB_SETTINGS],
+                    None,
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_SETTINGS), cx));
+                }))
+                .into_any_element(),
+            ];
+            vec![Section::Card(rows)]
+        }
+        Some(TAB_CHANNELS) => channels_tab(
             &server,
             selected_channel.as_deref(),
             channel_rename.as_deref(),
@@ -152,7 +221,7 @@ pub(super) fn page(
             &theme,
             cx,
         ),
-        1 => members_tab(
+        Some(TAB_MEMBERS) => members_tab(
             &server,
             &members,
             &images,
@@ -163,7 +232,12 @@ pub(super) fn page(
         ),
         _ => settings_tab(&server, is_owner, shell, &theme, cx),
     };
-    let footer = leave_footer(&server, is_owner, leave_armed, &theme, cx);
+    // Leave / Delete stay on the overview (and settings drill-in).
+    let footer = if drilled && subpage != Some(TAB_SETTINGS) {
+        Vec::new()
+    } else {
+        leave_footer(&server, is_owner, leave_armed, &theme, cx)
+    };
 
     Some(pane::render(
         ProfilePane {
@@ -171,12 +245,13 @@ pub(super) fn page(
                 server_id: server.id.clone(),
             },
             hero,
-            tabs: &TABS,
-            selected: tab,
+            tabs: &[],
+            selected: 0,
             body,
             footer,
             done: None,
             share: None,
+            overview_back: drilled,
         },
         shell,
         cx,

@@ -201,6 +201,13 @@ pub struct EgressBody {
     /// Human directing this turn (`user_id`). Absent = owner / unknown.
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
+    /// The chat row `asked_by` was read out of, so the relay can check the claim against the
+    /// attested author of that row instead of believing it.
+    #[serde(default, alias = "askedByMessageId")]
+    pub asked_by_message_id: Option<String>,
+    /// The box asserting that this turn came from its own work and not from a chat document.
+    #[serde(default, alias = "askedByOwnWork")]
+    pub asked_by_own_work: bool,
 }
 
 /// `POST /egress` (box): perform an HTTP request on the box's behalf with placeholders swapped for
@@ -271,6 +278,7 @@ pub async fn egress(
         &host,
         chat_id,
         asked_by,
+        secrets::TurnAuthor::offered(b.asked_by_message_id.as_deref(), b.asked_by_own_work),
         &texts,
     )?;
     // Connected vaults: `op://…` references resolve on the relay too (Phase 2).
@@ -302,29 +310,6 @@ pub async fn egress(
         let t = substitute(t, &host, &plan.items, &mut sub);
         swap_refs(&t, &mut sub)
     });
-    for (s, allowed) in &plan.used {
-        if sub
-            .substituted
-            .iter()
-            .any(|k| k.starts_with(&format!("{}/", s.env)))
-        {
-            secrets::after_use(
-                &state,
-                s,
-                &project_id,
-                &host,
-                "header",
-                chat_id,
-                asked_by,
-                allowed,
-            );
-        }
-    }
-    for (r, allowed) in &op_plan.used {
-        if sub.substituted.contains(r) {
-            crate::vaults::after_op_use(&state, r, &project_id, &host, "header", chat_id, allowed);
-        }
-    }
     let mut redact = plan.redact;
     for v in &sub.secrets {
         if !redact.contains(v) {
@@ -350,13 +335,69 @@ pub async fn egress(
     if let Some(body) = body_out {
         req = req.body(body);
     }
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let mut v = json!({ "ok": false, "error": format!("{host}: {e}"), "substituted": sub.substituted, "refused": refused });
-            redact_value(&mut v, &redact);
-            return Ok((StatusCode::BAD_GATEWAY, Json(v)).into_response());
+    let failed = |error: reqwest::Error| {
+        let mut value = json!({ "ok": false, "error": format!("{host}: {error}"), "substituted": sub.substituted, "refused": refused });
+        redact_value(&mut value, &redact);
+        (StatusCode::BAD_GATEWAY, Json(value)).into_response()
+    };
+    // Finish local header/body validation before spending any authorization.
+    let request = match req.build() {
+        Ok(request) => request,
+        Err(error) => return Ok(failed(error)),
+    };
+    let grants = plan
+        .used
+        .iter()
+        .filter(|(secret, _)| {
+            sub.substituted
+                .iter()
+                .any(|key| key.starts_with(&format!("{}/", secret.env)))
+        })
+        .filter_map(|(_, allowed)| allowed.once.as_ref())
+        .chain(
+            op_plan
+                .used
+                .iter()
+                .filter(|(reference, _)| sub.substituted.contains(reference))
+                .filter_map(|(_, allowed)| allowed.once.as_ref()),
+        );
+    let receipt = secrets::claim_uses(&state, grants)?;
+    for (s, allowed) in &plan.used {
+        if sub
+            .substituted
+            .iter()
+            .any(|k| k.starts_with(&format!("{}/", s.env)))
+        {
+            secrets::note_use(
+                &state,
+                s,
+                &project_id,
+                &host,
+                "header",
+                chat_id,
+                asked_by,
+                allowed,
+                &receipt,
+            )?;
         }
+    }
+    for (r, allowed) in &op_plan.used {
+        if sub.substituted.contains(r) {
+            crate::vaults::note_op_use(
+                &state,
+                r,
+                &project_id,
+                &host,
+                "header",
+                chat_id,
+                allowed,
+                &receipt,
+            )?;
+        }
+    }
+    let resp = match state.http.execute(request).await {
+        Ok(response) => response,
+        Err(error) => return Ok(failed(error)),
     };
     let status = resp.status();
     let mut resp_headers = BTreeMap::new();
@@ -633,7 +674,11 @@ pub async fn create_request(
         use_kind: Some(b.use_kind),
         host: None,
         chat_id: b.chat_id,
+        // The F8 shape has no asker field, so there is no claim on anyone's authority here and
+        // nothing to check against the author record.
         asked_by: None,
+        asked_by_message_id: None,
+        asked_by_own_work: true,
     };
     let resp = secrets::box_request(State(state), principal, headers, Json(body)).await?;
     let v = response_json(resp).await?;

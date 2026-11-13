@@ -1006,7 +1006,7 @@ pub fn save_png(spec: &str, title: &str, state: &gpui::Entity<crate::app::AppSta
         match result {
             Ok(path) => {
                 s.push_notice(format!("Saved to {}", path.display()));
-                super::attachments::reveal(&path);
+                crate::external_open::reveal(&path);
             }
             Err(err) => s.push_failure(
                 crate::sync::user_error::UserError::classify("save the chart", &err),

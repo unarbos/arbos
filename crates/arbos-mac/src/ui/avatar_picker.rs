@@ -2,8 +2,8 @@
 //! agent's picture — a tab pill **Bot | Generate | Upload** with **Reset** at the right, a body
 //! per tab, and a footer **Cancel | Set avatar**. Nothing changes until "Set avatar".
 //!
-//! - **Bot**: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the
-//!   selected one in its hue (pastel disc, darker leaf); the ten hues in two rows of five.
+//! - **Bot**: the ten D92 disc colours in two rows of five, the picked one above them as a
+//!   plain filled circle at preview size — the agent's default picture has no mark on it.
 //!   The per-id automatic default stays: Reset goes back to it.
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
@@ -13,8 +13,8 @@
 //!   blob slot on Set.
 //!
 //! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
-//! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
-//! own blob slot).
+//! disc colour, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into
+//! their own blob slot).
 //!
 //! The Create sheets (`create_entity`, Jacob 2026-10-25) draw the **same Generate and Upload
 //! bodies** — [`tab_pill`], [`generate_body`], [`upload_body`], [`pending_preview`] — on a
@@ -39,7 +39,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::Project;
 use crate::sync::user_error::UserError;
-use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::avatars::{self, disc};
 use crate::ui::create_entity::{hex, palette, Palette};
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
@@ -52,16 +52,14 @@ const RADIUS: f32 = 16.0;
 const BAR_H: f32 = 44.0;
 const BAR_INSET: f32 = 12.0;
 const TAB_H: f32 = 28.0;
-/// The 4 × 4 leaf sheet (v2) on a 48 pt pitch, then the ten hues on a 36 pt pitch; the
-/// footer hairline stays at 340.5.
-const LEAF_ROWS: [f32; 4] = [84.0, 132.0, 180.0, 228.0];
-const LEAF_PITCH: f32 = 48.0;
-const LEAF_DISC: f32 = 30.0;
-const LEAF_RING: f32 = 36.0;
-const SWATCH_ROWS: [f32; 2] = [282.0, 318.0];
-const SWATCH_PITCH: f32 = 36.0;
-const SWATCH: f32 = 21.0;
-const SWATCH_RING: f32 = 29.0;
+/// The picked colour as a plain disc, then the ten colours in two rows of five on a 52 pt
+/// pitch; the footer hairline stays at 340.5.
+const HERO_TOP: f32 = 72.0;
+const HERO: f32 = 84.0;
+const SWATCH_ROWS: [f32; 2] = [248.0, 304.0];
+const SWATCH_PITCH: f32 = 52.0;
+const SWATCH: f32 = 44.0;
+const SWATCH_RING: f32 = 52.0;
 const FOOTER_H: f32 = 56.5;
 /// The body box between the bar and the footer (the tab bodies' absolute slots live in it).
 const BODY_H: f32 = HEIGHT - BAR_H - FOOTER_H;
@@ -82,8 +80,8 @@ pub enum Tab {
 impl Tab {
     /// The tabs a target gets: agents, groups and servers alike have all three (Jacob,
     /// 2026-10-24: the group / server picker had lost Generate), Reset beside them in the bar.
-    /// A Create sheet's draft (Jacob, 2026-10-25) has **Upload and Generate only** — no leaf
-    /// grid, no swatches, no Reset. My own picture (Jacob, 2026-10-25) has no leaf either —
+    /// A Create sheet's draft (Jacob, 2026-10-25) has **Upload and Generate only** — no
+    /// swatches, no Reset. My own picture (Jacob, 2026-10-25) has no disc colour either —
     /// people are D79 coloured initials — so it gets **Generate | Upload**, Reset in the bar.
     pub fn for_target(target: &Target) -> Vec<Tab> {
         match target {
@@ -112,10 +110,9 @@ pub type Target = crate::sync::PictureTarget;
 pub struct Picker {
     pub target: Target,
     pub tab: Tab,
-    /// Bot tab: the leaf / colour clicked here (`None` = as the entity has it).
-    pub leaf: Option<u8>,
+    /// Bot tab: the disc colour clicked here (`None` = as the entity has it).
     pub color: Option<u8>,
-    /// Reset pressed: back to the automatic leaf, no picture.
+    /// Reset pressed: back to the automatic colour, no picture.
     pub reset: bool,
     /// Upload tab: the file chosen in the panel.
     pub upload: Option<PathBuf>,
@@ -135,7 +132,6 @@ impl Picker {
         Picker {
             target,
             tab,
-            leaf: None,
             color: None,
             reset: false,
             upload: None,
@@ -174,38 +170,20 @@ impl Picker {
     pub fn dirty(&self) -> bool {
         self.reset
             || match self.tab {
-                Tab::Bot => self.leaf.is_some() || self.color.is_some(),
+                Tab::Bot => self.color.is_some(),
                 Tab::Generate => self.generated.is_some(),
                 Tab::Upload => self.upload.is_some(),
             }
     }
 
-    /// The leaf + colour the Bot tab shows: the sheet's clicks over the entity's current pair.
-    fn pick(&self, project: &Project) -> LeafPick {
+    /// The colour the Bot tab shows: the sheet's click over the entity's current one.
+    fn pick(&self, project: &Project) -> u8 {
         let current = if self.reset {
-            leaf::pick_for(&project.id, None, None)
+            disc::default_color(&project.id)
         } else {
-            avatars::project_leaf(project)
+            avatars::disc_color(&project.id, project.avatar_disc_color)
         };
-        LeafPick {
-            leaf: self.leaf.unwrap_or(current.leaf),
-            color: self.color.unwrap_or(current.color),
-        }
-    }
-}
-
-/// Unselected leaves in the grid: a neutral disc and a neutral leaf (Grok tints only the pick).
-fn muted_disc(theme: &Theme) -> Hsla {
-    match theme.appearance {
-        Appearance::Dark => hex(0x3A3A3A),
-        Appearance::Light => theme.field,
-    }
-}
-
-fn muted_ink(theme: &Theme) -> Hsla {
-    match theme.appearance {
-        Appearance::Dark => hex(0x8A8A8A),
-        Appearance::Light => theme.text_muted,
+        self.color.unwrap_or(current)
     }
 }
 
@@ -224,19 +202,6 @@ fn ring(size: f32, selected: bool, colour: Hsla) -> Div {
             gpui::transparent_black()
         })
         .cursor_pointer()
-}
-
-/// A leaf on a disc, both in any colour (the Bot grid tints only the selected one).
-fn leaf_on(leaf_index: u8, size: f32, disc: Hsla, ink: Hsla) -> Div {
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(disc)
-        .child(avatars::leaf_glyph_inked(leaf_index, size, 0.0, ink))
 }
 
 /// The pending choice as a round picture of `size`: the chosen file, or the generated picture
@@ -305,7 +270,7 @@ fn preview(picker: &Picker, project: &Project, state: &AppState, theme: &Theme) 
             .child(crate::ui::people::avatar(image, &person, PREVIEW, theme));
     }
     if picker.reset {
-        return avatars::leaf_element(leaf::pick_for(&project.id, None, None), PREVIEW);
+        return avatars::disc_element(disc::default_color(&project.id), PREVIEW);
     }
     crate::ui::groups::picture(project, state, PREVIEW, theme)
 }
@@ -366,6 +331,7 @@ pub(crate) fn tab_pill(
                 .when(!is_selected, |d| d.text_color(label_muted))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(pk) = this.pending_picker_mut() {
@@ -665,7 +631,7 @@ pub(crate) fn upload_body(
 }
 
 /// The target's picture as it is now — `(name, url)` — what the bar's View opens; `None` for a
-/// leaf / letter avatar (nothing to view) or an unknown target.
+/// disc / letter avatar (nothing to view) or an unknown target.
 pub(crate) fn viewable_picture(picker: &Picker, state: &AppState) -> Option<(String, String)> {
     let (name, url) = match &picker.target {
         Target::Agent(id) | Target::Group(id) => {
@@ -690,7 +656,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     let p = palette(&theme);
     let state = shell.state.read(cx);
     // Agents and groups are `Project`s; a server is a `ServerInfo` dressed as one for the preview
-    // (id, name, leaf pick and picture URL are all the sheet reads).
+    // (id, name, disc colour and picture URL are all the sheet reads).
     let project: Project = match &picker.target {
         Target::Agent(id) | Target::Group(id) => {
             match state.projects.iter().find(|x| &x.id == id) {
@@ -702,8 +668,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             Some(s) => Project {
                 id: s.id.clone(),
                 name: s.name.clone(),
-                avatar_leaf: s.avatar_leaf,
-                avatar_leaf_color: s.avatar_leaf_color,
+                avatar_disc_color: s.avatar_disc_color,
                 image_url: s.image_url.clone(),
                 avatar_version: 0,
                 ..Project::default()
@@ -728,18 +693,16 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         Appearance::Dark => hex(0x9A9A9A),
         Appearance::Light => theme.text_muted,
     };
-    // Reset has something to undo: a leaf / colour / picture on an entity; for me, only an
+    // Reset has something to undo: a colour or picture on an entity; for me, only an
     // Arbos-uploaded picture (the GitHub one is already the default).
     let can_reset = match &picker.target {
         Target::Me(_) => state.has_custom_avatar(),
         Target::Agent(_) | Target::Group(_) | Target::Server(_) | Target::Draft => {
-            project.avatar_leaf.is_some()
-                || project.avatar_leaf_color.is_some()
-                || project.image_url.is_some()
+            project.avatar_disc_color.is_some() || project.image_url.is_some()
         }
     };
     // View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer — only
-    // when there is a picture (a leaf / letter avatar has nothing to view).
+    // when there is a picture (a plain disc or letter avatar has nothing to view).
     let view_picture = viewable_picture(picker, state);
     // The Generate / Upload preview, built while `state` is borrowed (the bodies need `cx`).
     let tab_preview = preview(picker, &project, state, &theme);
@@ -772,10 +735,10 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .when(can_reset, |d| {
             d.cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(pk) = this.avatar_picker.as_mut() {
                         pk.reset = true;
-                        pk.leaf = None;
                         pk.color = None;
                         pk.upload = None;
                         pk.generated = None;
@@ -800,6 +763,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             .text_color(label_muted)
             .cursor_pointer()
             .hover(|s| s.opacity(0.85))
+            .active(|s| s.opacity(0.7))
             .child("View")
             .on_click(cx.listener(move |this, _, _, cx| this.view_picture(&name, &url, cx)))
     });
@@ -821,43 +785,17 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     match picker.tab {
         Tab::Bot => {
             let pick = picker.pick(&project);
-            for (r, top) in LEAF_ROWS.iter().enumerate() {
-                let leaves: Vec<u8> = (r as u8 * 4..r as u8 * 4 + 4).collect();
-                let mut row = div()
+            body.push(
+                div()
                     .absolute()
                     .left_0()
                     .right_0()
-                    .top(px(top - BAR_H - LEAF_RING / 2.0))
+                    .top(px(HERO_TOP - BAR_H))
                     .flex()
-                    .justify_center();
-                for index in leaves {
-                    let selected = pick.leaf == index;
-                    let (disc, ink) = if selected {
-                        (
-                            avatars::leaf_disc(pick.color),
-                            avatars::leaf_ink(pick.color),
-                        )
-                    } else {
-                        (muted_disc(&theme), muted_ink(&theme))
-                    };
-                    row = row.child(
-                        ring(LEAF_RING, selected, p.ring)
-                            .id(ElementId::Name(SharedString::from(format!(
-                                "avatar-leaf-{index}"
-                            ))))
-                            .mx(px((LEAF_PITCH - LEAF_RING) / 2.0))
-                            .child(leaf_on(index, LEAF_DISC, disc, ink))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(pk) = this.avatar_picker.as_mut() {
-                                    pk.leaf = Some(index);
-                                    pk.reset = false;
-                                }
-                                cx.notify();
-                            })),
-                    );
-                }
-                body.push(row.into_any_element());
-            }
+                    .justify_center()
+                    .child(avatars::disc_element(pick, HERO))
+                    .into_any_element(),
+            );
             for (r, top) in SWATCH_ROWS.iter().enumerate() {
                 let mut row = div()
                     .absolute()
@@ -869,17 +807,12 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 for j in 0..5u8 {
                     let index = r as u8 * 5 + j;
                     row = row.child(
-                        ring(SWATCH_RING, pick.color == index, p.ring)
+                        ring(SWATCH_RING, pick == index, p.ring)
                             .id(ElementId::Name(SharedString::from(format!(
                                 "avatar-colour-{index}"
                             ))))
                             .mx(px((SWATCH_PITCH - SWATCH_RING) / 2.0))
-                            .child(
-                                div()
-                                    .size(px(SWATCH))
-                                    .rounded_full()
-                                    .bg(avatars::leaf_disc(index)),
-                            )
+                            .child(avatars::disc_element(index, SWATCH))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(pk) = this.avatar_picker.as_mut() {
                                     pk.color = Some(index);
@@ -957,6 +890,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 .left(px(BAR_INSET))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(|this, _, _, cx| this.close_avatar_picker(cx))),
         )
         .child(if can_set {
@@ -964,6 +898,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 .right(px(BAR_INSET))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .on_click(cx.listener(|this, _, _, cx| this.set_avatar(cx)))
         } else {
             pill("avatar-set", "Set avatar", p.create_bg, p.create_text).right(px(BAR_INSET))
@@ -1041,7 +976,7 @@ mod tests {
     }
 
     /// Jacob, 2026-10-25: a Create sheet's draft offers Upload and Generate only — no Bot
-    /// tab (leaf grid + swatches), Upload first — and hands the create exactly what was
+    /// tab (the colour swatches), Upload first — and hands the create exactly what was
     /// picked: nothing (→ the neutral initial), the file, or the generated key.
     #[test]
     fn the_draft_offers_upload_and_generate_only_and_hands_over_its_pick() {
@@ -1074,11 +1009,11 @@ mod tests {
         );
     }
 
-    /// My own picture (Jacob, 2026-10-25): the same sheet without the leaf tab — Generate is
+    /// My own picture (Jacob, 2026-10-25): the same sheet without the Bot tab — Generate is
     /// the landing tab, Upload beside it, Reset in the bar; Set applies a generated key or a
     /// file, Reset means back to the GitHub picture.
     #[test]
-    fn my_profile_gets_generate_upload_and_reset_without_a_leaf_tab() {
+    fn my_profile_gets_generate_upload_and_reset_without_a_bot_tab() {
         let target = Target::Me("gh_1".into());
         assert_eq!(Tab::for_target(&target), [Tab::Generate, Tab::Upload]);
         let mut pk = Picker::new(target);
@@ -1098,7 +1033,7 @@ mod tests {
 #[cfg(test)]
 mod me_picker_tests {
     //! The real `Shell` headless over a real `AppState` with a signed-in account: the my-profile
-    //! pane's picture opens the avatar picker with Generate | Upload and Reset (no leaf tab);
+    //! pane's picture opens the avatar picker with Generate | Upload and Reset (no Bot tab);
     //! Generate sends `GenerateImage { Me }`; the relay's answer previews; Set sends
     //! `SetMyAvatarKey`; Reset + Set sends `RemoveMyAvatar`.
     use futures::future::BoxFuture;
@@ -1472,7 +1407,7 @@ mod me_picker_tests {
         assert!(vcx.debug_bounds("avatar-tab-upload").is_some());
         assert!(
             vcx.debug_bounds("avatar-tab-bot").is_none(),
-            "people have no leaf"
+            "people have no disc colour"
         );
         assert!(vcx.debug_bounds("avatar-reset").is_some());
         assert!(vcx.debug_bounds("avatar-generate-go").is_some());

@@ -1,0 +1,26 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "a6e8f876ca0e0a74ad6b55b1903525aedd8c61435e71d59cab27d9171cf7912c",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "devices-goals-cleared": true,
+      "draft-navigation-cleared": true,
+      "feedback-private-capture-cleared": true,
+      "ordinary-device-preferences-preserved": true,
+      "private-errors-actions-cleared": true,
+      "private-job-views-cleared": true,
+      "private-secrets-cleared": true,
+      "repeat-unpair-safe": true,
+      "rosters-pins-reload": true
+    },
+    "failed": 0,
+    "passed": 9
+  },
+  "duration_seconds": 0.8302686659153551
+}

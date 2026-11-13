@@ -243,8 +243,7 @@ extension AppModel {
     /// My owned agents as the Settings rows need them: the open chat's agent
     /// first, then by activity ([feedback search-settings-ios-2026-10-26]).
     func searchAgentRows() -> [GlobalSearch.AgentRow] {
-        var current: Id?
-        if case .chat(_, let pid)? = path.last { current = pid }
+        let current = openChat?.projectId
         let owned = projects.filter { !$0.shared && !isArchived($0.id) }
         let activity: (Project) -> Int64 = { p in self.chats(of: p.id).map(\.lastMessageAt).max() ?? 0 }
         let ordered = owned.sorted { a, b in
@@ -257,16 +256,16 @@ extension AppModel {
         }
     }
 
-    /// A Settings row tapped in search: Settings lands on the page (the
+    /// A Settings row tapped in search: my own pane pushes in landed on that page (the
     /// `ARBOS_SETTINGS_PAGE` word `SettingsView(landing:)` understands), the
     /// feedback sheet opens, or the agent's chat opens with its pane on the
     /// setting's picker.
     func open(settingsRoute route: GlobalSearch.SettingsRoute) {
         switch route {
         case .page(let page):
-            pendingSettingsLanding = page.rawValue
+            showOwnProfile(landing: page.rawValue)
         case .profile:
-            pendingSettingsLanding = "profile"
+            showOwnProfile(landing: "profile")
         case .feedback:
             FeedbackCenter.shared.open(screen: "search")
         case .agent(let projectId, let setting):

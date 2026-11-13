@@ -5,9 +5,11 @@
   "description": "Serves agent-hosted sites (*.arbos.life/<app>/) from R2 at the Cloudflare edge",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.40.0"
-  }
+  },
+  "type": "module"
 }

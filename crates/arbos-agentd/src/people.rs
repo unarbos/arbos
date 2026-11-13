@@ -842,6 +842,19 @@ impl Agent {
                 .insert(chat_id.clone(), info)
                 .is_none();
             keep.push(chat_id.clone());
+            // The relay listing this chat as ours is what proves the agent is a member again,
+            // and it is the only thing that lets writes open a chat it had left (#2367 against
+            // #1440). Two orderings matter here and both are load-bearing.
+            //
+            // It clears *before* the open below, and must stay that way: a window where the
+            // re-add has landed but the record still refuses is worse than no record, because
+            // it declines a chat the agent is a live member of and the reply is dropped.
+            // `open_room_named` enforces that by refusing while the record stands.
+            //
+            // And it clears here rather than inside the open, because `Agent::room` opens
+            // rooms: a clear in there would let the first refused write erase the record meant
+            // to refuse it. Membership is the relay's word; a write is only a request.
+            self.sync.mark_rejoined(&chat_id).await;
             if self.sync.host(&chat_id).await.is_none() {
                 let room = arbos_core::wire::room_name(PEOPLE_PROJECT, &chat_id);
                 match self
@@ -1261,7 +1274,7 @@ impl Agent {
             "at": now_ms(),
         });
         let url = format!("{}/box/people/{chat_id}/gate", self.cfg.relay_url);
-        let client = self.http_client().clone();
+        let client = self.http_client();
         let token = self.cfg.box_token.clone();
         let chat = chat_id.to_owned();
         tokio::spawn(async move {
@@ -2980,5 +2993,103 @@ mod gate_record_tests {
             ctx[2]["text"].as_str().unwrap().contains("TAIL_OK"),
             "the message being replied to is whole"
         );
+    }
+}
+
+#[cfg(test)]
+mod left_chat_tests {
+    //! #2367 against #1440: once rooms close, a write is the thing most likely to reopen one,
+    //! and a chat the agent was removed from must not be reopened by a write.
+
+    use arbos_core::ids::now_ms;
+    use serde_json::json;
+
+    use crate::status::tests::test_agent;
+
+    /// The ordering the registry lives or dies by. A re-add that lands before its refusal is
+    /// lifted is worse than having no registry at all: the chat is one the agent is a live
+    /// member of, and a writer that asks in that window is declined and its reply dropped.
+    ///
+    /// So the clear happens as the relay's list is taken, before any room it opens can be
+    /// observed, and `open_room_named` enforces it by refusing while the record stands. Move
+    /// the clear after the open and the rejoin cannot open its own room, which is what the
+    /// assertion below catches.
+    #[tokio::test]
+    async fn a_rejoin_lifts_the_refusal_before_the_room_it_opens_can_be_seen() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATREJOINED000001";
+        agent.sync.open_room(chat).await.unwrap();
+        agent.sync.close_room(chat).await;
+        assert!(
+            agent.room(chat).await.is_err(),
+            "premise: a write is refused while the agent is out of the chat"
+        );
+
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let listed = json!({
+            "id": chat,
+            "kind": "dm",
+            "members": [{
+                "member": me,
+                "joined_at": now_ms(),
+                "owner": "u-test",
+                "handle": "someone",
+                "settings": { "reply_policy": "mention" },
+            }],
+        });
+        agent
+            .note_people_chats(std::slice::from_ref(&listed), false)
+            .await;
+
+        assert!(
+            agent.sync.is_open(chat).await,
+            "the rejoin opened the room, which it cannot do while its own refusal still stands"
+        );
+        assert!(
+            agent.room(chat).await.is_ok(),
+            "and a writer resolving fresh gets a host again"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The writer no flag could reach. `Agent::room` resolves its host fresh, so for a chat
+    /// whose host `close_room` already removed there is no host to read at all — only the
+    /// hub's own record stands between the write and a relay that answers 403 every 16 s until
+    /// the box restarts.
+    ///
+    /// The clear is the relay's membership word and nothing else. A write must never lift its
+    /// own refusal, which is why `Agent::room` asks and `note_people_chats` answers.
+    #[tokio::test]
+    async fn a_write_does_not_reopen_a_people_chat_the_agent_left() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATLEFTFORGOOD0001";
+        agent.sync.open_room(chat).await.unwrap();
+        assert!(
+            agent.room(chat).await.is_ok(),
+            "premise: a write resolves a host while the agent is still in the chat"
+        );
+
+        agent.sync.close_room(chat).await;
+        assert!(
+            agent.sync.host(chat).await.is_none(),
+            "the fresh lookup has no handle, so nothing on the removed host can be read here"
+        );
+        let refused = agent.room(chat).await;
+        assert!(
+            refused.is_err(),
+            "a write reopened a chat the agent was removed from: {:?}",
+            refused.map(|_| "a host")
+        );
+        assert!(
+            !agent.sync.is_open(chat).await,
+            "and the refused write left no room open to redial the relay with"
+        );
+
+        agent.sync.mark_rejoined(chat).await;
+        assert!(
+            agent.room(chat).await.is_ok(),
+            "re-added to the chat, so a write may open its room again"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

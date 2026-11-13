@@ -1,0 +1,11 @@
+{
+  "parent": "ee1ee4abd0d5b96cd6a4c0990c67937135d8bc62",
+  "modified_source_sha256": {
+    "crates/arbos-agentd/src/agent.rs": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+    "crates/arbos-agentd/src/settings.rs": "87699e743e29e90204bf65b1ca5cfe5e4dbfff49e2d17942e29d5619eaeb816b",
+    "crates/arbos-relay/src/state.rs": "b610baa95f1b2a13dca5c2609709805bf2ef55f46acfbde0579322b41505b2b8",
+    "crates/arbos-relay/src/boxes.rs": "a59ee0c17b3fd2badeab886d79edd74f2cb90257a9c40e4be9c86c04647ee8f7",
+    "crates/arbos-relay/src/box_row_tests.rs": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c"
+  },
+  "full_rust_toml_source_manifest_sha256": "42efb006e158733eedaa4eeee7c9492491bddc92e913b6834c4db88d18abed33"
+}

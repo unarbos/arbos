@@ -1,0 +1,34 @@
+{
+  "canonical_commit": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "build": {
+    "exit_code": 0,
+    "wall_seconds": 13.604202250018716,
+    "variant_expected_sources_unchanged": true,
+    "FFI_bytes_unchanged": true,
+    "scope": "incremental actual Xcode all-target build-for-testing; one product line removed; all2689 canonical inputs present; no app/test launch"
+  },
+  "test": {
+    "exit_code": 0,
+    "wall_seconds": 77.05776583403349,
+    "variant_expected_sources_unchanged": true,
+    "exact_C19_FFI_unchanged": true,
+    "plan_sha256_unchanged": true,
+    "scope": "controlled existing five-case AvatarBackSwipe class on SAME owned iPhone17Pro/iOS26.2; no credentials/provisioning/signing/provider actions; verified relay endpoint127.0.0.1:1",
+    "runtime_network_limit": "Parent process deny-network is not a whole-simulator no-egress claim; all-host/UI-app verified relay plan and fresh owned data boundary remain required."
+  },
+  "xcresult": {
+    "result": "Passed",
+    "totalTestCount": 5,
+    "passedTests": 5,
+    "failedTests": 0,
+    "skippedTests": 0,
+    "expectedFailures": 0
+  },
+  "testcase_seconds": 46.416,
+  "no_performance_speedup_claim": true,
+  "full_corrected_unfiltered_suite_still_required": true,
+  "source_before_sha256": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+  "source_after_sha256": "ce7e5c6b54cefdf25c47236e81652e63770a03dcf55eb6d22a44b2b349167240",
+  "plan_sha256": "a063afcc584373b8eae77b613e53b31b205d3606d8b52d4934cb2bb4c01bd1d3",
+  "exact_FFI_library_sha256": "586da39d02f3bf42f30cd5fc4f6e9e7af403b5896786a0fac1150faa4f65cef6"
+}

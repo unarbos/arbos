@@ -5,7 +5,7 @@
 #
 #   ./scripts/avatar-lint.sh
 #
-# Mac (crates/arbos-mac/src/ui): the leaf/initials drawers `avatars::project(`, `avatars::agent(`
+# Mac (crates/arbos-mac/src/ui): the disc/initials drawers `avatars::project(`, `avatars::agent(`
 # and the raw `.image_url` of a Project / AgentMember may only appear in `ui/avatars.rs`; every
 # other surface calls `project_in` / `project_with` / `project_image` / `member_picture` /
 # `agent_identity` + `agent_picture`. iPhone (apps/ios/Arbos/Arbos): a `Project`'s `.imageURL`
@@ -63,7 +63,7 @@ if [[ -n "$ios_url" ]]; then
   report "iPhone: a surface reads a Project's .imageURL itself — draw AgentAvatar(project:) or ask model.projectImageURL(_:)" "$ios_url"
 fi
 
-ios_async=$(grep -rnE 'AsyncImage\(' apps/ios/Arbos/Arbos/UI/Avatar.swift apps/ios/Arbos/Arbos/UI/LeafAvatar.swift 2>/dev/null \
+ios_async=$(grep -rnE 'AsyncImage\(' apps/ios/Arbos/Arbos/UI/Avatar.swift apps/ios/Arbos/Arbos/UI/DiscAvatar.swift 2>/dev/null \
   | unmarked || true)
 if [[ -n "$ios_async" ]]; then
   report "iPhone: avatar pictures load through AvatarImageCache (cache-first, retried), not AsyncImage" "$ios_async"

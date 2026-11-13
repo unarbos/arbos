@@ -7,8 +7,11 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+use crate::call_attempt::CallAttempt;
+pub(crate) mod account_tasks;
 pub mod agent_avatar;
 pub mod avatar_master;
+mod call_requests;
 pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
@@ -16,14 +19,19 @@ pub mod doc;
 pub mod dto;
 pub mod fixture;
 pub mod relay;
+mod room_docs;
+pub(crate) mod session_events;
+pub(crate) mod session_scope;
 pub mod store;
+mod store_owner;
 pub mod user_error;
+pub(crate) mod work_lifetime;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arbos_matrix::{MessageRow, Snapshot};
+use arbos_matrix::{Backup, MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
@@ -179,6 +187,19 @@ impl PushRefusal {
 /// Something the source learned; the UI applies it to its mirror.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
+    /// Local ownership envelopes; never serialized onto the relay wire.
+    ForAccount {
+        owner: work_lifetime::WorkTicket,
+        event: Box<SyncEvent>,
+    },
+    ForCoordinator {
+        owner: work_lifetime::WorkTicket,
+        event: Box<SyncEvent>,
+    },
+    SessionStarted {
+        control: work_lifetime::WorkTicket,
+        account: work_lifetime::WorkTicket,
+    },
     /// No device token for this relay yet: show the pairing screen.
     NeedsPairing {
         relay_url: String,
@@ -272,13 +293,29 @@ pub enum SyncEvent {
     PeopleGroupCreated {
         chat_id: Id,
     },
+    /// Local backend owner for call commands. Refresh keeps the same ticket.
+    CallAccount(work_lifetime::WorkTicket),
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
     /// `created` = 201: this device started it and writes the system line;
     /// `reachable` (201 only) says per callee whether anyone can pick up.
     CallReady {
+        attempt: CallAttempt,
         call: Call,
         created: bool,
         reachable: Vec<Reachable>,
+    },
+    /// Local leave receipts are account-scoped, unlike global call-ended pushes.
+    CallLeft {
+        attempt: CallAttempt,
+        ended: CallEnded,
+    },
+    CallLeftInfo {
+        attempt: CallAttempt,
+        call: Call,
+    },
+    CallLeaveError {
+        attempt: CallAttempt,
+        error: UserError,
     },
     /// Someone else started a call in one of my chats (`call_started` push).
     CallStarted {
@@ -309,6 +346,7 @@ pub enum SyncEvent {
     },
     /// A call request failed; shown as an error toast and the call UI resets.
     CallError {
+        attempt: CallAttempt,
         chat_id: Id,
         error: UserError,
     },
@@ -529,6 +567,13 @@ pub enum SyncEvent {
     Secrets(SecretsView),
     /// Settings → Devices: this account's signed-in devices, or why they could not be read.
     Devices(Result<Vec<DeviceView>, UserError>),
+    /// Settings → Agent access link: every agent token of the account, or why
+    /// the list could not be read (`GET /me/agent-links`).
+    AgentLinks(Result<Vec<crate::model::AgentLinkView>, UserError>),
+    /// A link was minted: the copy sheet's one URL, carried exactly once.
+    /// `Err` leaves the page as it was with the reason on it, because a mint
+    /// that half-worked would show a sheet with nothing to copy.
+    AgentLinkMinted(Result<crate::model::AgentLinkReveal, UserError>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -609,6 +654,9 @@ pub enum SyncEvent {
     ChannelHistoryEnd {
         room_id: String,
     },
+    /// D88: where the account's key backup stands, once the homeserver has said (never sent
+    /// on a guess), and again as `On` when a recovery phrase opened it.
+    MatrixBackup(Backup),
     /// D88: homeserver connection state.
     MatrixConnection {
         connected: bool,
@@ -657,8 +705,8 @@ impl PictureTarget {
 
 /// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
 /// sheet offers Upload and Generate only; with neither the entity is stored neutral —
-/// `avatar_leaf` = `leaf::NEUTRAL`, the name's initial on a grey disc — never an automatic
-/// leaf).
+/// `avatar_disc_color` = `disc::NEUTRAL`, the name's initial on a grey disc — never an
+/// automatic colour).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPicture {
     /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
@@ -688,6 +736,16 @@ pub struct CopyBlob {
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
+    /// The initial UI/coordinator handshake exists only for account-scoped sources.
+    BindUi {
+        control: session_scope::UiControl,
+        owner: work_lifetime::WorkTicket,
+    },
+    Scoped {
+        control: work_lifetime::WorkTicket,
+        account: Option<work_lifetime::WorkTicket>,
+        command: Box<ClientCommand>,
+    },
     Pair {
         code: String,
     },
@@ -711,9 +769,9 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
-        /// D93 Create screen: the group's name and leaf pair, when it came through it.
+        /// D93 Create screen: the group's name and disc colour, when it came through it.
         title: Option<String>,
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        disc_color: Option<u8>,
         /// The Create screen's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
     },
@@ -768,33 +826,24 @@ pub enum ClientCommand {
         project_id: Id,
         user_id: String,
     },
-    /// `PUT /projects/{id}/message-access {grantee, enabled}` — "Who may message X"
-    /// (agent-to-agent messaging). `grantee` = `@handle`, `user:<id>` or `project:<id>`.
-    SetMessageGrant {
-        project_id: Id,
-        grantee: String,
-        enabled: bool,
-    },
-    /// `DELETE /projects/{id}/message-access/{grantee}`.
-    RemoveMessageGrant {
-        project_id: Id,
-        grantee: String,
-    },
     /// Fetch an avatar once (`SyncEvent::Avatar`).
     FetchAvatar {
         url: String,
     },
     /// Calls v1: `POST /chats/{id}/calls` (or the projects form) — start, or join the live one.
     StartCall {
+        attempt: CallAttempt,
         chat_id: Id,
         kind: CallKind,
     },
     /// `POST /calls/{id}/join` → a fresh token.
     JoinCall {
+        attempt: CallAttempt,
         call_id: String,
     },
     /// `POST /calls/{id}/leave` → `{ended, duration_s}`.
     LeaveCall {
+        attempt: CallAttempt,
         call_id: String,
     },
     /// `GET /calls/{id}` (the "On a call · Join" bar, a push with no detail).
@@ -831,6 +880,19 @@ pub enum ClientCommand {
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
+    },
+    /// Post a poll in a people chat (`docs/polls.md`): a message whose text is the poll in
+    /// plain words, with the poll on it.
+    SendPoll {
+        chat_id: Id,
+        message_id: Id,
+        poll: arbos_core::poll::Poll,
+    },
+    /// My vote on a poll, replacing any earlier one; empty retracts.
+    VotePoll {
+        chat_id: Id,
+        message_id: Id,
+        selections: Vec<String>,
     },
     /// Guide: inject `text` into the agent's currently running turn (`steer` command).
     /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
@@ -954,11 +1016,11 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
-    /// A group's leaf picture from the avatar picker: `PATCH /chats/{id} {avatar_leaf,
-    /// avatar_leaf_color, image_key: null}` (`None` = initials).
-    SetGroupLeaf {
+    /// A group's disc colour from the avatar picker: `PATCH /chats/{id}
+    /// {avatar_disc_color, image_key: null}` (`None` = initials).
+    SetGroupDisc {
         chat_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
+        color: Option<u8>,
     },
     /// Give a people group a picture: the file is uploaded to the chat's blob
     /// slot, then `PATCH /chats/{id} {image_key}`.
@@ -991,10 +1053,10 @@ pub enum ClientCommand {
         server_id: Id,
         source: PictureSource,
     },
-    /// A server's leaf picture (`None` = initials; clears the uploaded picture too).
-    SetServerLeaf {
+    /// A server's disc colour (`None` = initials; clears the uploaded picture too).
+    SetServerDisc {
         server_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
+        color: Option<u8>,
     },
     /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
@@ -1034,9 +1096,9 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
-        /// D92: the leaf + colour (forks copy the source's; the Create sheet sends the neutral
-        /// pair); `None` = automatic.
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        /// D92: the disc colour (forks copy the source's; the Create sheet sends the neutral
+        /// value); `None` = automatic.
+        disc_color: Option<u8>,
         /// The Create sheet's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
@@ -1144,11 +1206,10 @@ pub enum ClientCommand {
         enabled: bool,
         persist: bool,
     },
-    /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
+    /// Disc colour picker (D92): `PATCH /projects/{id} {avatar_disc_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).
-    SetAvatarLeaf {
+    SetAvatarDisc {
         project_id: Id,
-        leaf: Option<u8>,
         color: Option<u8>,
     },
     FetchBlob {
@@ -1252,6 +1313,21 @@ pub enum ClientCommand {
     DevicesRefresh,
     /// Settings → Devices: sign another device out (`DELETE /auth/devices/{id}`).
     DeviceRevoke {
+        id: Id,
+    },
+    /// Settings → Agent access link opened or asked for a refresh
+    /// (`GET /me/agent-links`).
+    AgentLinksRefresh,
+    /// Mint one link (`POST /me/agent-links`). The answer carries the URL
+    /// once; nothing stores it.
+    AgentLinkMint {
+        label: String,
+        /// `read` | `reply`.
+        scope: &'static str,
+        ttl_hours: i64,
+    },
+    /// Revoke one agent token of either origin (`DELETE /me/agent-links/{id}`).
+    AgentLinkRevoke {
         id: Id,
     },
     /// An agent's Secrets page opened.
@@ -1443,8 +1519,8 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
-        /// D93 Create screen: the server's leaf pair (the neutral pair since 2026-10-25).
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        /// D93 Create screen: the server's disc colour (the neutral value since 2026-10-25).
+        disc_color: Option<u8>,
         /// The Create screen's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
     },
@@ -1543,6 +1619,12 @@ pub enum ClientCommand {
     ChannelMarkRead {
         room_id: String,
     },
+    /// D88: open the account's key backup on this Mac with the recovery phrase the person
+    /// typed; answered by `MatrixBackup(On)` or a `ServerError`. The phrase is used and
+    /// dropped, never stored (`Seed`'s `Debug` prints none of it).
+    MatrixRestore {
+        seed: arbos_wallet::Seed,
+    },
 }
 
 /// Collective mentions (Jacob, 2026-10-24, after #1596): `@here` is everyone
@@ -1634,6 +1716,9 @@ pub fn claimed_handles(space: &Project, tokens: &[String]) -> HashSet<String> {
 }
 
 pub trait SyncSource: Send + 'static {
+    fn account_scoped(&self) -> bool {
+        false
+    }
     /// Short name shown in the settings popover ("fixture", "relay").
     fn name(&self) -> &'static str;
 

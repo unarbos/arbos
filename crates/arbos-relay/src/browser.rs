@@ -1,7 +1,7 @@
 //! `GET /projects/{id}/browser/stream` (WebSocket): the relay dials the box's `/browser/stream`
-//! (agentd's proxy of agent-browser's JPEG stream, S16) with the preview token a laptop never
-//! holds, and pipes frames to the device. Watch-only: client messages are forwarded too, so a
-//! later version can enable input.
+//! (agentd's proxy of agent-browser's JPEG stream, S16), which a laptop cannot reach itself, and
+//! pipes frames to the device. Watch-only: client messages are forwarded too, so a later version
+//! can enable input.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -20,13 +20,15 @@ pub async fn browser_stream(
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        _ => return (StatusCode::NOT_FOUND, "no such project").into_response(),
+    // `project_for` asks who is calling while it resolves, so an agent this device may not watch
+    // reads exactly like a name nobody holds (`api::no_such_project`, reported 2026-11-02). The
+    // refusal it hands back is plain text, which is what the error layer rewrites into the JSON
+    // envelope every other refusal in the API carries; the bare `FORBIDDEN` this replaces had no
+    // body for the layer to rewrite, and so no envelope.
+    let project = match crate::api::project_for(&state, &principal, &id) {
+        Ok(p) => p,
+        Err(refusal) => return refusal.into_response(),
     };
-    if !state.allows(&principal, &project.id) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let sb = match state.db.user_box(&project.user_id) {
         Ok(Some(s)) => s,
         _ => return (StatusCode::NOT_FOUND, "no sandbox").into_response(),
@@ -41,25 +43,16 @@ pub async fn browser_stream(
             .replacen("http://", "ws://", 1),
         project.id
     );
-    let token = crate::boxes::preview_token_for(&state, &sb).await;
     ws.max_message_size(32 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = pipe(socket, &upstream, token.as_deref()).await {
+            if let Err(e) = pipe(socket, &upstream).await {
                 tracing::debug!(error = %e, project = %project.id, "browser stream proxy closed");
             }
         })
 }
 
-async fn pipe(
-    client: WebSocket,
-    upstream: &str,
-    preview_token: Option<&str>,
-) -> anyhow::Result<()> {
-    let mut req = upstream.into_client_request()?;
-    if let Some(t) = preview_token {
-        req.headers_mut()
-            .insert("x-daytona-preview-token", t.parse()?);
-    }
+async fn pipe(client: WebSocket, upstream: &str) -> anyhow::Result<()> {
+    let req = upstream.into_client_request()?;
     let (up, _) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio_tungstenite::connect_async(req),

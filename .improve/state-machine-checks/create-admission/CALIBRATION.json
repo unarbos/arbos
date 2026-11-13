@@ -1,0 +1,12 @@
+{
+  "crates/arbos-relay/src/state.rs": {
+    "duration_calls_equal": true,
+    "before_count": 2,
+    "after_count": 2
+  },
+  "crates/arbos-relay/src/boxes.rs": {
+    "duration_calls_equal": true,
+    "before_count": 22,
+    "after_count": 22
+  }
+}

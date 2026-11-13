@@ -3,7 +3,7 @@ import ArbosFFI
 @testable import Arbos
 
 /// Jacob, 2026-10-25: "when talking to the agent sometimes it shows its old pfp, sometimes
-/// the new one switches in" — and a foreign agent drew the automatic leaf instead of the
+/// the new one switches in" — and a foreign agent drew the automatic disc instead of the
 /// picture its owner set. One copy of the avatar everywhere: after a change the header (my
 /// project record), the bubble (the open chat's roster through the resolver) and the presence
 /// row (the resolver by id) all resolve to the new key and the same stamp; a stale roster that
@@ -16,8 +16,7 @@ final class AgentAvatarFlipTests: XCTestCase {
             id: id, name: name, icon: "H", color: "#8b7cf6", state: .awake, stateSince: nil, stateDetail: nil,
             model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil
         )
-        p.avatarLeaf = 4
-        p.avatarLeafColor = 1
+        p.avatarDiscColor = 1
         p.imageKey = imageKey
         p.avatarVersion = version
         return p
@@ -79,15 +78,15 @@ final class AgentAvatarFlipTests: XCTestCase {
         XCTAssertEqual(s.presence.imageKey, "avatar-1700000099000.jpg")
         XCTAssertEqual(s.header.imageKey, "avatar-1700000099000.jpg")
 
-        // Reset to the leaf: the newest copy has no picture; the stale roster copy's picture
+        // Reset to the disc: the newest copy has no picture; the stale roster copy's picture
         // does not come back.
-        model.pickAvatarLeaf("01HEZ", leaf: 2, color: 3)
+        model.pickAvatarDisc("01HEZ", color: 3)
         s = surfaces(model, id: "01HEZ")
         XCTAssertNil(s.header.imageKey)
         XCTAssertNil(s.bubble.imageKey)
         XCTAssertNil(s.presence.imageKey)
-        XCTAssertEqual(LeafArt.pick(s.bubble), LeafPick(leaf: 2, color: 3))
-        XCTAssertEqual(LeafArt.pick(s.presence), LeafPick(leaf: 2, color: 3))
+        XCTAssertEqual(DiscArt.pick(s.bubble), 3)
+        XCTAssertEqual(DiscArt.pick(s.presence), 3)
     }
 
     func testARelayPushLandsInPlaceAndAnOlderPushIsIgnored() {
@@ -105,7 +104,7 @@ final class AgentAvatarFlipTests: XCTestCase {
         XCTAssertEqual(s.bubble.imageKey, "avatar-b.jpg")
         XCTAssertEqual(s.presence.imageKey, "avatar-b.jpg")
         XCTAssertEqual(s.header.avatarVersion, 200)
-        XCTAssertEqual(LeafArt.pick(s.bubble), LeafPick(leaf: 4, color: 1), "the leaf picks are kept until the re-read")
+        XCTAssertEqual(DiscArt.pick(s.bubble), 1, "the disc colour is kept until the re-read")
 
         // A push that was queued before the change (older stamp) changes nothing.
         model.applyAgentAvatarPush(projectId: "01HEZ", imageKey: "avatar-a.jpg", version: 150)
@@ -186,8 +185,8 @@ final class AgentAvatarFlipTests: XCTestCase {
     /// The resolver itself (shared with the Mac through the FFI) draws the newest copy whatever
     /// order a surface hands the cards in.
     func testTheSharedResolverDrawsTheNewestCopy() {
-        let stale = AgentCard(id: "01HEZ", name: "Hezbola", handle: "hezbola", leaf: 4, leafColor: 1, colorIndex: nil, imageKey: "avatar-a.jpg", avatarVersion: 100)
-        let fresh = AgentCard(id: "01HEZ", name: "Hezbola", handle: "hezbola", leaf: 4, leafColor: 1, colorIndex: nil, imageKey: "avatar-b.jpg", avatarVersion: 200)
+        let stale = AgentCard(id: "01HEZ", name: "Hezbola", handle: "hezbola", discColor: 1, colorIndex: nil, imageKey: "avatar-a.jpg", avatarVersion: 100)
+        let fresh = AgentCard(id: "01HEZ", name: "Hezbola", handle: "hezbola", discColor: 1, colorIndex: nil, imageKey: "avatar-b.jpg", avatarVersion: 200)
         for cards in [[stale, fresh], [fresh, stale]] {
             let r = resolveAgent(sender: "agent:01HEZ", handle: "hezbola", name: "Hezbola", cards: cards)
             XCTAssertEqual(r.imageKey, "avatar-b.jpg")

@@ -14,7 +14,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
-/// Where the checkout lives; the prompt (`prompts/core.md`) and `image/AGENTS.md` name it.
+/// Where the checkout lives; the prompt (`prompts/core.md`) and `image/pi-seed/AGENTS.md`
+/// name it.
 pub const SRC_DIR: &str = "/opt/arbos/src";
 const REMOTE_BRANCH: &str = "main";
 const REFRESH_EVERY: Duration = Duration::from_secs(6 * 60 * 60);

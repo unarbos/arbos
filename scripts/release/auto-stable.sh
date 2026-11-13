@@ -38,11 +38,17 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-unarbos/arbos}"
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
-# Everything the Mac binary and bundle are made from. Cargo.lock: a real dependency change ships
-# too — our own crates' version numbers moving does not (mac-change.sh).
-MAC_PATHS="${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
-# mac-change.sh reads the same list, so step 3 and the release notes always agree on it.
-export ARBOS_MAC_PATHS="$MAC_PATHS"
+# Everything the Mac binary and bundle are made from — the cargo closure of arbos-mac, plus what
+# bundles it; scripts/release/mac-paths.sh owns the list and says why each entry is on it.
+# Cargo.lock: a real dependency change ships too — our own crates' version numbers moving does not
+# (mac-change.sh).
+#
+# This copy writes the release notes. mac-change.sh asks mac-paths.sh for itself, so step 3 and
+# the notes agree because they read one file — not because this script hands the list down. An
+# `export ARBOS_MAC_PATHS` used to sit here doing the latter. It was a no-op once both callers
+# read mac-paths.sh (an operator's override reaches mac-change.sh on its own), and it read as
+# this script overriding the list when it was only echoing the list back at itself.
+MAC_PATHS="$("$here/mac-paths.sh")"
 
 say() { echo "::notice::$*" >&2; }
 
@@ -83,9 +89,63 @@ EOF
 is_hotfix() {
   # A revert, or a commit marked `hotfix`, on main's first-parent line: its own subject, or (a merge)
   # the subjects of the commits it brings in. Case-insensitive; `[hotfix]` anywhere in the message.
-  git log --format='%s%n%b' "$1^1..$1" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]' \
-    || git log -1 --format='%s%n%b' "$1" | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'
+  #
+  # Here-strings, not pipes: grep -q exits on its first match, and under the pipefail above the
+  # SIGPIPE'd git log would make the pipeline 141, so a marker that IS there reads as absent.
+  # The largest first-parent range on main is ~137 KB against a floor near 160 KB, so this is
+  # not firing today — it is one long commit message away from it. --self-test covers both ways.
+  local re='^(revert\b|hotfix\b)|\[hotfix\]'
+  grep -qiE "$re" <<<"$(git log --format='%s%n%b' "$1^1..$1" 2>/dev/null)" \
+    || grep -qiE "$re" <<<"$(git log -1 --format='%s%n%b' "$1" 2>/dev/null)"
 }
+
+# Both directions of is_hotfix, on a throwaway repo it builds itself, with a commit message over
+# the floor where a pipe into grep -q starts reporting a found marker as absent.
+self_test_hotfix() {
+  local d big yes_sha no_sha failed=0 saved=$PWD
+  d="$(mktemp -d /tmp/auto-stable-selftest.XXXXXX)"
+  git -C "$d" init -q
+  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  # ~200 KB, over the floor. Passed by file: a single argv entry caps at 128 KB on Linux.
+  big=$d/body.txt
+  head -c 200000 /dev/zero | tr '\0' 'y' | fold -w 100 >"$big"
+  # The marker sits in the subject, so grep matches at once while git log still has 200 KB to
+  # write. A marker at the END of the body would be found even by the piped form.
+  { echo "hotfix: urgent"; echo; cat "$big"; } >"$d/msg-yes.txt"
+  { echo "feat: ordinary"; echo; cat "$big"; } >"$d/msg-no.txt"
+  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -F "$d/msg-yes.txt"
+  yes_sha="$(git -C "$d" rev-parse HEAD)"
+  git -C "$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -F "$d/msg-no.txt"
+  no_sha="$(git -C "$d" rev-parse HEAD)"
+
+  cd "$d"
+  echo "== self-test: first-parent message is $(git log --format='%s%n%b' "$yes_sha^1..$yes_sha" | wc -c) bytes"
+  if git log --format='%s%n%b' "$yes_sha^1..$yes_sha" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'; then
+    echo "   self-test INVALID: the piped form still finds the marker, so this fixture is under"
+    echo "                      the threshold and would pass against the unfixed code too."
+    failed=1
+  else
+    echo "   threshold ok: the piped form reports the present marker as absent (this is the defect)"
+  fi
+  if is_hotfix "$yes_sha"; then echo "   positive control: a hotfix behind a 200 KB body is still a hotfix"
+  else echo "   positive control FAILED: a hotfix read as ordinary"; failed=1; fi
+  if is_hotfix "$no_sha"; then echo "   negative control FAILED: an ordinary commit read as a hotfix"; failed=1
+  else echo "   negative control: an ordinary commit of the same size is not a hotfix"; fi
+
+  cd "$saved"
+  # The live case: main's largest first-parent range, 137,260 bytes carrying one marker.
+  local live=5bbbe4fc5c75f895e0b67f6d0312a998649581cb
+  if git cat-file -e "$live^{commit}" 2>/dev/null; then
+    if is_hotfix "$live"; then echo "   live control: ${live:0:9} (137,260 B, 1 marker) still reads as a hotfix"
+    else echo "   live control FAILED: ${live:0:9} no longer reads as a hotfix"; failed=1; fi
+  fi
+
+  rm -rf "$d"
+  [[ $failed -eq 0 ]] || { echo "SELF-TEST FAILED"; return 1; }
+  echo "   self-test passed"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then self_test_hotfix; exit $?; fi
 
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
 head_main="$(git rev-parse origin/main)"
@@ -134,15 +194,12 @@ if [[ -z "$target" ]]; then
 fi
 # 3. the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its tag,
 #    see below) and the commit it was released from: a release commit touches only
-#    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from.
-last_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-tag_base=""
+#    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from. Both come from
+#    scripts/release/stable-tag-base.sh, which the pre-merge release gate reads too.
+tag_info="$("$here/stable-tag-base.sh")"
+last_tag="$(sed -n 's/^tag=//p' <<< "$tag_info")"
+tag_base="$(sed -n 's/^base=//p' <<< "$tag_info")"
 if [[ -n "$last_tag" ]]; then
-  tag_base="$(git rev-parse "$last_tag^{commit}")"
-  touched="$(git show --format= --name-only "$tag_base" | sort -u | tr '\n' ' ')"
-  if [[ "$touched" == "Cargo.lock Cargo.toml " || "$touched" == "Cargo.toml " ]]; then
-    tag_base="$(git rev-parse "$tag_base^")"
-  fi
   if [[ "$tag_base" == "$target" ]] || git merge-base --is-ancestor "$target" "$tag_base"; then
     emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
     exit 0

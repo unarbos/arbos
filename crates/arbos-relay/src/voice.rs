@@ -14,9 +14,14 @@
 //!   forwards tool calls and transcript rows over it and waits for results, the same shape as
 //!   the `arbos-local` helper link (`local.rs`).
 //!
-//! Cost rails: per-call cap (`ARBOS_VOICE_CALL_CAP_USD`, default $1.50), per-user daily voice cap
-//! (`ARBOS_VOICE_DAILY_CAP_USD`, default $5, `PUT /admin/users/{id}/voice` per user), the user's
-//! own credits/daily cap and the global kill switch. Owner setting per agent: chattiness
+//! Cost rails: voice has no limit of its own, and the one it spends against is cost-based
+//! (Jacob, 2026-11-05: "all limits should be cost based"). The worker reports usage every
+//! `ARBOS_VOICE_USAGE_EVERY_S` (30 s) to `POST /voice/calls/{id}/usage`, which debits the
+//! difference into the caller's account ledger there and then and answers `caps.stop`; the
+//! worker leaves the call on any stop. So a call is ended by the account's credits, its one
+//! daily limit or the kill switch, mid-call, within one reporting interval of the money
+//! running out. `CALL_LEAK_GUARD_MINUTES` is not a budget: it is the leak guard for a call
+//! nobody is on any more, set far above any real call. Owner setting per agent: chattiness
 //! (`quiet` | `balanced` | `chatty`), wake name and `vision_enabled` (may the agent see cameras),
 //! `GET/PUT /projects/{id}/voice`.
 //!
@@ -57,18 +62,17 @@ const TOOL_WAIT: Duration = Duration::from_secs(240);
 /// The context pack is cheap; a slow box must not delay the agent's first words.
 const CONTEXT_WAIT: Duration = Duration::from_secs(4);
 const FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Hard stop on one call with an agent in it (spec §6).
-pub const CALL_MAX_MINUTES: i64 = 60;
+/// Leak guard, not a budget: the ceiling that catches a call whose room or socket is stuck
+/// after everyone has gone, so a wedged call cannot bill forever. A call's cost is bounded by
+/// the account's own limit, charged every reporting interval, so this sits far above any real
+/// call (6 h) and should never be what ends one.
+pub const CALL_LEAK_GUARD_MINUTES: i64 = 360;
 
 /// Voice configuration from the environment.
 #[derive(Debug, Clone)]
 pub struct VoiceCfg {
     /// LiveKit agent name the worker registers with (`ARBOS_VOICE_AGENT_NAME`).
     pub agent_name: String,
-    /// `ARBOS_VOICE_DAILY_CAP_USD` (default 5.0): per user, over every agent they own.
-    pub daily_cap_usd: f64,
-    /// `ARBOS_VOICE_CALL_CAP_USD` (default 1.50): per agent per call.
-    pub call_cap_usd: f64,
     /// `ARBOS_VOICE=0` turns dispatch off while leaving people calls alone.
     pub enabled: bool,
     /// Speech model the worker is expected to use (for the admin view and the docs).
@@ -84,22 +88,12 @@ impl Default for VoiceCfg {
     fn default() -> Self {
         Self {
             agent_name: "arbos-voice".to_owned(),
-            daily_cap_usd: 5.0,
-            call_cap_usd: 1.5,
             enabled: true,
             model: "gpt-realtime-2.1".to_owned(),
             voices_dir: std::path::PathBuf::from("voices"),
             default_voice: "marin".to_owned(),
         }
     }
-}
-
-fn env_f64(k: &str, default: f64) -> f64 {
-    std::env::var(k)
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(default)
 }
 
 pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
@@ -119,8 +113,6 @@ pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
             .unwrap_or(d.agent_name),
-        daily_cap_usd: env_f64("ARBOS_VOICE_DAILY_CAP_USD", d.daily_cap_usd),
-        call_cap_usd: env_f64("ARBOS_VOICE_CALL_CAP_USD", d.call_cap_usd),
         enabled: std::env::var("ARBOS_VOICE")
             .map(|v| v != "0")
             .unwrap_or(true),
@@ -131,8 +123,8 @@ pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
             .unwrap_or(d.model),
     };
     tracing::info!(
-        agent = %cfg.agent_name, model = %cfg.model, daily_cap = cfg.daily_cap_usd,
-        call_cap = cfg.call_cap_usd, enabled = cfg.enabled, voices = %cfg.voices_dir.display(),
+        agent = %cfg.agent_name, model = %cfg.model,
+        enabled = cfg.enabled, voices = %cfg.voices_dir.display(),
         default_voice = %cfg.default_voice, "agent voice calls"
     );
     cfg
@@ -799,7 +791,7 @@ async fn dispatch_missing(
             recent.insert(key, now);
         }
         let payer = project.user_id.clone();
-        if let Err(stop) = stops_for(state, &payer, &call.id, &project.id) {
+        if let Err(stop) = stops_for(state, &payer) {
             tracing::info!(call = %call.id, project = %project.id, stop, "voice: agent not dispatched (cost stop)");
             continue;
         }
@@ -836,14 +828,9 @@ async fn dispatch_missing(
 
 // ---- cost stops ----------------------------------------------------------------------------------
 
-/// Why the agent must not (keep) talk(ing): `kill_switch`, `credits`, `daily_cap`,
-/// `voice_daily_cap`, `call_cap`. `Ok` while every rail has room.
-pub fn stops_for(
-    state: &AppState,
-    payer: &str,
-    call_id: &str,
-    project_id: &str,
-) -> Result<(), &'static str> {
+/// Why the agent must not (keep) talk(ing): `kill_switch`, `credits`, `daily_cap`. Voice spends
+/// the caller's account like any other source, so it has no cap of its own to check.
+pub fn stops_for(state: &AppState, payer: &str) -> Result<(), &'static str> {
     if crate::credits::check_read_only(state).is_err() {
         return Err("kill_switch");
     }
@@ -853,36 +840,10 @@ pub fn stops_for(
         Err(crate::db_accounts::DebitRefused::ReadOnly { .. }) => return Err("kill_switch"),
         Err(crate::db_accounts::DebitRefused::Insufficient { .. }) => return Err("credits"),
     }
-    if crate::credits::metered(state) {
-        let cap = state
-            .db
-            .voice_user_cap(payer)
-            .ok()
-            .flatten()
-            .unwrap_or(state.voice.daily_cap_usd);
-        let spent = state
-            .db
-            .voice_spent_since(payer, start_of_utc_day_ms())
-            .unwrap_or(0.0);
-        if spent >= cap {
-            return Err("voice_daily_cap");
-        }
-    }
-    if let Ok(Some(row)) = state.db.voice_call(call_id, project_id) {
-        if row.usage.usd >= state.voice.call_cap_usd {
-            return Err("call_cap");
-        }
-    }
     Ok(())
 }
 
 fn caps_json(state: &AppState, payer: &str, call_id: &str, project_id: &str) -> Value {
-    let cap = state
-        .db
-        .voice_user_cap(payer)
-        .ok()
-        .flatten()
-        .unwrap_or(state.voice.daily_cap_usd);
     let spent = state
         .db
         .voice_spent_since(payer, start_of_utc_day_ms())
@@ -895,13 +856,11 @@ fn caps_json(state: &AppState, payer: &str, call_id: &str, project_id: &str) -> 
         .map(|r| r.usage.usd)
         .unwrap_or(0.0);
     json!({
-        "call_cap_usd": state.voice.call_cap_usd,
         "call_spent_usd": call_usd,
-        "daily_cap_usd": cap,
         "daily_spent_usd": spent,
-        "call_max_minutes": CALL_MAX_MINUTES,
+        "call_leak_guard_minutes": CALL_LEAK_GUARD_MINUTES,
         "metered": crate::credits::metered(state),
-        "stop": stops_for(state, payer, call_id, project_id).err(),
+        "stop": stops_for(state, payer).err(),
     })
 }
 
@@ -1086,7 +1045,7 @@ pub async fn call_tool(
     if !call.active() {
         return api_error(StatusCode::GONE, "call_ended", "this call has ended");
     }
-    if let Err(stop) = stops_for(&state, &project.user_id, &call.id, &project.id) {
+    if let Err(stop) = stops_for(&state, &project.user_id) {
         return api_error(
             StatusCode::PAYMENT_REQUIRED,
             stop,
@@ -1269,11 +1228,62 @@ pub struct UsageBody {
     pub usage: VoiceUsage,
 }
 
-/// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. The relay
-/// debits the difference since the last report from the owner's ledger (`voice`,
-/// `ref = call:<id>`; the camera-vision part as its own line, `ref = call:<id>#vision`),
-/// mirrors it into the project's `usage` table (so the project's spend cap counts it), and
-/// answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`.
+/// Debit one usage report into the payer's account ledger and say what was charged.
+///
+/// This is where the money of a voice call is taken, and it runs on every report the worker
+/// sends — every `ARBOS_VOICE_USAGE_EVERY_S` (30 s) while the call is up, not only on the
+/// final one. Only the difference since the last report is charged, so the cumulative figures
+/// the worker sends are safe to replay. The camera-vision share goes in as its own line
+/// (`ref = call:<id>#vision`) so the breakdown survives.
+///
+/// Charging as the call runs is what lets the account's one limit end a call: the caller reads
+/// the stop straight after this and hands it to the worker. A call charged only at hang-up
+/// could not be stopped by any limit, however the limit was written.
+fn charge_report(
+    state: &AppState,
+    call_id: &str,
+    project_id: &str,
+    payer: &str,
+    started_at: i64,
+    usage: &VoiceUsage,
+    model: &str,
+) -> Result<f64, String> {
+    let billing = crate::db_voice::VoiceBilling {
+        metered: crate::credits::metered(state),
+        legacy: crate::db_accounts::LegacyCreditDefaults {
+            limit: state.cfg.default_account_limit,
+            grant_usd: state.cfg.default_grant_usd,
+        },
+    };
+    let settled = state
+        .db
+        .settle_voice_usage(call_id, project_id, payer, started_at, usage, &billing)
+        .map_err(|error| error.to_string())?;
+    if settled.reported_delta <= 0.000_001 {
+        return Ok(settled.reported_total);
+    }
+    for (usd, charge) in settled.charges {
+        crate::credits::note_postfact_charge(state, payer, usd, "voice", charge);
+    }
+    let _ = state.db.record_usage(
+        project_id,
+        "voice",
+        model,
+        usage.audio_in_tokens + usage.text_in_tokens,
+        usage.audio_out_tokens + usage.text_out_tokens,
+        usage.cached_tokens,
+        0,
+        settled.reported_delta,
+        (usage.seconds * 1000.0) as i64,
+        usage.ttfa_ms_p50,
+    );
+    Ok(settled.reported_total)
+}
+
+/// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. Debits the
+/// difference since the last report into the owner's account ledger ([`charge_report`]) and
+/// answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`. The worker leaves the
+/// call on any `stop`, so this is the path a cost limit ends a call through, mid-call.
 pub async fn call_usage(
     State(state): State<AppState>,
     principal: Principal,
@@ -1288,42 +1298,18 @@ pub async fn call_usage(
         Err(r) => return *r,
     };
     let payer = project.user_id.clone();
-    let row =
-        match state
-            .db
-            .voice_usage_upsert(&call.id, &project.id, &payer, call.started_at, &b.usage)
-        {
-            Ok(r) => r,
-            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-        };
-    let delta = row.usage.usd - row.usd_charged;
-    if delta > 0.000_001 {
-        let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
-        let voice_delta = delta - vision_delta;
-        let reference = format!("call:{}", call.id);
-        if voice_delta > 0.000_001 {
-            crate::credits::charge(&state, &payer, voice_delta, "voice", Some(&reference));
-        }
-        if vision_delta > 0.000_001 {
-            let vision_ref = format!("{reference}#vision");
-            crate::credits::charge(&state, &payer, vision_delta, "voice", Some(&vision_ref));
-        }
-        let _ = state
-            .db
-            .voice_charged(&call.id, &project.id, delta, vision_delta);
-        let _ = state.db.record_usage(
-            &project.id,
-            "voice",
-            &state.voice.model,
-            b.usage.audio_in_tokens + b.usage.text_in_tokens,
-            b.usage.audio_out_tokens + b.usage.text_out_tokens,
-            b.usage.cached_tokens,
-            0,
-            delta,
-            (b.usage.seconds * 1000.0) as i64,
-            b.usage.ttfa_ms_p50,
-        );
-    }
+    let charged = match charge_report(
+        &state,
+        &call.id,
+        &project.id,
+        &payer,
+        call.started_at,
+        &b.usage,
+        &state.voice.model,
+    ) {
+        Ok(v) => v,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e),
+    };
     if b.usage.ended {
         tracing::info!(
             call = %call.id, project = %project.id, seconds = b.usage.seconds, usd = b.usage.usd,
@@ -1349,7 +1335,7 @@ pub async fn call_usage(
     }
     Json(json!({
         "caps": caps_json(&state, &payer, &call.id, &project.id),
-        "usd_charged": row.usd_charged + delta.max(0.0),
+        "usd_charged": charged,
     }))
     .into_response()
 }
@@ -1404,21 +1390,27 @@ pub async fn put_agent_settings(
     Path(id): Path<String>,
     Json(b): Json<AgentSettingsBody>,
 ) -> Response {
-    let Some(p) = state.db.project(&id).ok().flatten() else {
-        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
-    };
-    let owner = match &principal {
+    // Someone else's agent reads exactly like one that is not there, so the pair of answers
+    // cannot be used to ask which names are taken (reported 2026-11-02). A name is matched
+    // against the caller's own agents first, because names are not unique across owners.
+    let own = |p: &Project| match &principal {
         Principal::Admin => true,
         Principal::Device { user_id, .. } => *user_id == p.user_id,
         Principal::Box { .. } => false,
     };
-    if !owner {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "only the agent's owner changes its voice settings",
-        );
-    }
+    let found = principal
+        .user_id()
+        .and_then(|u| {
+            state
+                .db
+                .project_of_user_by_name(u, id.trim())
+                .ok()
+                .flatten()
+        })
+        .or_else(|| state.db.project(id.trim()).ok().flatten());
+    let Some(p) = found.filter(own) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
+    };
     if let Some(c) = b.chattiness.as_deref() {
         if !CHATTINESS_LEVELS.contains(&c) {
             return api_error(
@@ -1447,42 +1439,6 @@ pub async fn put_agent_settings(
         Ok(s) => Json(settings_json(&s)).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
-}
-
-#[derive(Deserialize)]
-pub struct UserCapBody {
-    /// `null` returns the user to the relay default.
-    pub daily_cap_usd: Option<f64>,
-}
-
-/// `PUT /admin/users/{id}/voice {daily_cap_usd}` → `{ user_id, daily_cap_usd, default }`.
-pub async fn put_user_cap(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<UserCapBody>,
-) -> Response {
-    if !matches!(principal, Principal::Admin) {
-        return api_error(StatusCode::FORBIDDEN, "forbidden", "admin token required");
-    }
-    if let Some(c) = b.daily_cap_usd {
-        if !c.is_finite() || c < 0.0 {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "daily_cap_usd must be a non-negative number",
-            );
-        }
-    }
-    if let Err(e) = state.db.set_voice_user_cap(&id, b.daily_cap_usd) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
-    }
-    Json(json!({
-        "user_id": id, "daily_cap_usd": b.daily_cap_usd.unwrap_or(state.voice.daily_cap_usd),
-        "default": b.daily_cap_usd.is_none(),
-        "spent_today_usd": state.db.voice_spent_since(&id, start_of_utc_day_ms()).unwrap_or(0.0),
-    }))
-    .into_response()
 }
 
 /// `POST /voice/worker/hello {sha, version, model}` (admin token): the worker says which build
@@ -1558,9 +1514,7 @@ pub fn admin_json(state: &AppState) -> Value {
         "model": state.voice.model,
         "default_voice": state.voice.default_voice,
         "voices": voice_catalogue(state).len(),
-        "daily_cap_usd": state.voice.daily_cap_usd,
-        "call_cap_usd": state.voice.call_cap_usd,
-        "call_max_minutes": CALL_MAX_MINUTES,
+        "call_leak_guard_minutes": CALL_LEAK_GUARD_MINUTES,
         "boxes_linked": state.voice_conns.try_lock().map(|c| c.len()).unwrap_or(0),
         "vision": {
             "today": { "minutes": (vision_minutes_today * 100.0).round() / 100.0, "usd": vision_usd_today, "frames": frames_today },
@@ -1568,6 +1522,146 @@ pub fn admin_json(state: &AppState) -> Value {
         },
         "recent": recent,
     })
+}
+
+#[cfg(test)]
+mod cost_stop_tests {
+    //! What ends a call is the account's one cost-based limit, charged as the call runs. The
+    //! regression to guard: the mid-call charge must never end an unlimited account's call.
+
+    use crate::credits::SpendLimit;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::stops_for;
+
+    fn report(seconds: f64, usd: f64) -> crate::db_voice::VoiceUsage {
+        crate::db_voice::VoiceUsage {
+            seconds,
+            usd,
+            ..Default::default()
+        }
+    }
+
+    /// The money of a call is taken while the call is up, not at hang-up. Three interim reports
+    /// (`ended` false, as the worker sends them every 30 s) each leave their own ledger row for
+    /// the difference, and the stop the worker is handed flips as soon as the account's limit is
+    /// reached — which is the whole reason a cost limit can end a call at all.
+    #[test]
+    fn each_interim_report_is_charged_and_the_limit_bites_mid_call() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state.db.grant_credits("u_mid", 100.0, "t", "t").unwrap();
+        state
+            .db
+            .set_user_limits("u_mid", Some(SpendLimit::Daily(3.0).stored()), None)
+            .unwrap();
+
+        let mut charged = Vec::new();
+        for (secs, usd) in [(30.0, 1.0), (60.0, 2.0), (90.0, 3.5)] {
+            assert!(!report(secs, usd).ended, "an interim report, not the last");
+            charged.push(
+                super::charge_report(
+                    &state,
+                    "call_mid",
+                    "p_mid",
+                    "u_mid",
+                    0,
+                    &report(secs, usd),
+                    "test-model",
+                )
+                .expect("charged"),
+            );
+            if stops_for(&state, "u_mid").is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            charged,
+            vec![1.0, 2.0, 3.5],
+            "each report charges the difference as the call runs"
+        );
+
+        let by_kind = state.db.credits("u_mid", 0).unwrap().today_by_kind;
+        assert_eq!(by_kind.len(), 1, "one source: {by_kind:?}");
+        assert_eq!(by_kind[0].kind, "voice");
+        assert_eq!(by_kind[0].usd, 3.5);
+        assert_eq!(
+            by_kind[0].calls, 3,
+            "three ledger rows mid-call, not one at the end"
+        );
+        assert_eq!(
+            stops_for(&state, "u_mid"),
+            Err("daily_cap"),
+            "the worker's next report is answered with a stop and it leaves the call"
+        );
+    }
+
+    /// A long, expensive call on an unlimited account keeps going. Every pass of the worker's
+    /// usage loop asks this, so a limit that read an unset value as zero would hang up on the
+    /// first report instead of never.
+    #[test]
+    fn an_unlimited_account_is_never_hung_up_on() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits("u_voice", 1000.0, "test", "test")
+            .unwrap();
+        state
+            .db
+            .set_user_limits("u_voice", Some(SpendLimit::Unlimited.stored()), None)
+            .unwrap();
+        // Two hours of voice at the going rate, charged report by report as the call ran.
+        for _ in 0..240 {
+            state
+                .db
+                .debit("u_voice", 0.25, "voice", Some("call:c1"), 0)
+                .unwrap()
+                .expect("an unlimited account is charged, never refused");
+        }
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Ok(()),
+            "no limit means no reason to leave the call"
+        );
+    }
+
+    /// A limit set by hand does end the call, and voice counts against the same one limit as
+    /// every other source rather than one of its own.
+    #[test]
+    fn a_hand_set_limit_ends_the_call_mid_way() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits("u_voice", 1000.0, "test", "test")
+            .unwrap();
+        state
+            .db
+            .set_user_limits("u_voice", Some(SpendLimit::Daily(2.0).stored()), None)
+            .unwrap();
+        state
+            .db
+            .debit("u_voice", 1.0, "inference", None, 0)
+            .unwrap()
+            .expect("under the limit");
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Ok(()),
+            "half spent, the call carries on"
+        );
+        state
+            .db
+            .debit("u_voice", 1.0, "voice", Some("call:c1"), 0)
+            .unwrap()
+            .expect("still under at the moment of charging");
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Err("daily_cap"),
+            "the account's limit ends the call, reached by voice and inference together"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1701,8 +1795,7 @@ mod inbox_tests {
                 members: vec!["user2".into()],
                 agent_ids: vec![bubble.clone()],
                 title: Some("Pizza".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -1842,5 +1935,739 @@ mod inbox_tests {
             .0
             .is_empty());
         let _ = json!({});
+    }
+
+    /// Call-ended fallback: a job that finishes after the call is gone still announces into
+    /// the chat (push / unread), but nothing is queued for a voice session that is no longer live.
+    #[tokio::test]
+    async fn a_job_after_the_call_ends_stays_in_chat_and_does_not_reach_a_voice_inbox() {
+        let mut state = test_state(AuthMode::Github);
+        state.livekit = Some(crate::livekit::LiveKit::new(
+            "wss://lk.test",
+            "APIkey",
+            "secret123",
+            None,
+        ));
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, _) = person(&state, 2);
+        let bubble = project_of(&state, &alice, "Bubble");
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into()],
+                agent_ids: vec![bubble.clone()],
+                title: Some("Shell".into()),
+                avatar_disc_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        let chat_ref = ChatRef::people(&chat);
+        let agent = Sender::agent(&state, &state.db.project(&bubble).unwrap().unwrap());
+
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            HeaderMap::new(),
+            Some(Json(StartBody {
+                kind: Some("voice".into()),
+                ring: None,
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let call_id = body_json(r).await["call"]["call_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        state.db.call_agent_join(&call_id, &bubble).unwrap();
+        state.voice_inbox.close_call(&call_id).await;
+        // End the call row so active_call_in_chat is None (same as hang-up).
+        assert!(state.db.end_call(&call_id, "hangup").unwrap());
+
+        let body = notify(
+            "job-after",
+            "ls: README.md Cargo.toml",
+            Some("job"),
+            Some("ls: README.md Cargo.toml"),
+        );
+        // Chat path still records the announce (unread / push fan-out).
+        let event_id = crate::notify::announce_with(
+            &state,
+            &chat_ref,
+            &agent,
+            &body.message_id,
+            &body.text,
+            None,
+            &[],
+        )
+        .await;
+        assert!(
+            event_id.is_some(),
+            "job result still lands in the chat after the call"
+        );
+        // Voice path is a no-op: no live call to wake.
+        call_update(&state, &chat_ref, &agent, &body).await;
+        let (items, _) = state.voice_inbox.take(&call_id, &bubble, 0).await;
+        assert!(
+            items.is_empty(),
+            "ended call must not receive a spoken follow-up queue: {items:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod charge_receipt_regressions {
+    use crate::credits::SpendLimit;
+    use crate::db_voice::VoiceUsage;
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    const USER: &str = "fixture-voice-payer";
+    const CALL: &str = "fixture-voice-call";
+    const PROJECT: &str = "fixture-voice-project";
+
+    fn fixture() -> AppState {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits(USER, 100.0, "synthetic grant", "fixture")
+            .unwrap();
+        state
+            .db
+            .set_user_limits(USER, Some(SpendLimit::Unlimited.stored()), None)
+            .unwrap();
+        state
+    }
+
+    fn report(usd: f64, vision_usd: f64) -> VoiceUsage {
+        VoiceUsage {
+            seconds: usd * 30.0,
+            usd,
+            vision_usd,
+            ..Default::default()
+        }
+    }
+
+    fn charge(state: &AppState, usage: &VoiceUsage) -> Result<f64, String> {
+        super::charge_report(state, CALL, PROJECT, USER, 0, usage, "synthetic-model")
+    }
+
+    fn spent(state: &AppState) -> f64 {
+        state
+            .db
+            .credits(USER, 0)
+            .unwrap()
+            .today_by_kind
+            .iter()
+            .find(|row| row.kind == "voice")
+            .map_or(0.0, |row| row.usd)
+    }
+
+    fn skipped_legacy_metadata_remains_retryable(trigger_clause: &str) {
+        let mut state = test_state(AuthMode::Github);
+        let cfg = std::sync::Arc::get_mut(&mut state.cfg).unwrap();
+        cfg.default_account_limit = SpendLimit::Daily(0.5);
+        cfg.default_grant_usd = 100.0;
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(&format!(
+                    "CREATE TRIGGER skip_legacy_metadata {trigger_clause} ON users
+                 BEGIN SELECT RAISE(IGNORE); END;"
+                ))
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let user_after_failure = state.db.user(USER).unwrap();
+        let spent_after_failure = spent(&state);
+        let row_after_failure = state.db.voice_call(CALL, PROJECT).unwrap();
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER skip_legacy_metadata"))
+            .unwrap();
+        assert_eq!(charge(&state, &report(1.0, 0.0)).unwrap(), 1.0);
+        assert_eq!(charge(&state, &report(2.0, 0.0)).unwrap(), 2.0);
+        assert!(
+            first.is_err(),
+            "skipped required legacy metadata must fail settlement"
+        );
+        assert!(
+            user_after_failure.is_none(),
+            "legacy initialization must roll back"
+        );
+        assert!(
+            row_after_failure.is_none(),
+            "unsettled observation must roll back"
+        );
+        assert_eq!(spent_after_failure, 0.0);
+        assert_eq!(
+            state.db.user(USER).unwrap().unwrap().daily_cap_usd,
+            Some(0.5)
+        );
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "preserve the daily soft cap after successful retry"
+        );
+        assert_eq!(state.db.credits(USER, 0).unwrap().granted_usd, 100.0);
+    }
+
+    #[test]
+    fn skipped_legacy_cap_update_cannot_commit_a_charge() {
+        skipped_legacy_metadata_remains_retryable("BEFORE UPDATE OF spend_cap_usd");
+    }
+
+    #[test]
+    fn skipped_legacy_user_insert_cannot_commit_a_charge() {
+        skipped_legacy_metadata_remains_retryable("BEFORE INSERT");
+    }
+
+    #[test]
+    fn a_failed_charge_receipt_cannot_double_debit_a_replayed_report() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_receipt BEFORE UPDATE OF usd_charged ON voice_calls
+             BEGIN SELECT RAISE(ABORT, 'synthetic receipt failure'); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let after_failure = spent(&state);
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_receipt"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "replaying one cumulative dollar must debit one dollar total"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(first.is_err(), "failed durable settlement must be reported");
+        assert_eq!(
+            after_failure, 0.0,
+            "failed settlement must roll back its ledger debit"
+        );
+    }
+
+    #[test]
+    fn a_failed_ledger_write_cannot_mark_an_unpaid_report_settled() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_debit BEFORE INSERT ON credit_ledger
+             WHEN NEW.kind = 'voice' AND NEW.usd < 0
+             BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_debit"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "a retry must settle a report whose ledger debit failed"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(
+            first.is_err(),
+            "ledger failure must not look like a settled report"
+        );
+    }
+
+    #[test]
+    fn replayed_and_reordered_cumulative_reports_keep_voice_vision_totals() {
+        let state = fixture();
+        for usage in [
+            report(1.0, 0.25),
+            report(1.0, 0.25),
+            report(0.5, 0.1),
+            report(2.0, 0.5),
+        ] {
+            charge(&state, &usage).unwrap();
+        }
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!(spent(&state), 2.0);
+        assert_eq!(row.usd_charged, 2.0);
+        assert_eq!(row.vision_charged, 0.5);
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(
+            credits
+                .today_by_kind
+                .iter()
+                .find(|row| row.kind == "voice")
+                .unwrap()
+                .calls,
+            4
+        );
+    }
+
+    #[test]
+    fn the_existing_balance_clamp_keeps_reported_and_debited_amounts_distinct() {
+        let state = fixture();
+        assert_eq!(charge(&state, &report(150.0, 0.0)).unwrap(), 150.0);
+        assert_eq!(charge(&state, &report(150.0, 0.0)).unwrap(), 150.0);
+        assert_eq!(spent(&state), 100.0);
+        assert_eq!(
+            state
+                .db
+                .voice_call(CALL, PROJECT)
+                .unwrap()
+                .unwrap()
+                .usd_charged,
+            150.0
+        );
+        assert_eq!(state.db.credits(USER, 0).unwrap().balance_usd, 0.0);
+    }
+    #[test]
+    fn preserved_zero_delta_does_not_initialize_a_legacy_account() {
+        let state = test_state(AuthMode::Github);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(charge(&state, &report(0.0, 0.0)).unwrap(), 0.0);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
+    }
+
+    #[test]
+    fn preserved_unmetered_reports_settle_without_a_grant_or_ledger_debit() {
+        let state = test_state(AuthMode::Paircode);
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!((row.usd_charged, row.vision_charged), (1.0, 0.25));
+    }
+
+    #[test]
+    fn preserved_total_and_per_part_thresholds_initialize_only_chargeable_usage() {
+        for (usd, vision_usd, settled, chargeable) in [
+            (0.9e-6, 0.0, 0.0, false),
+            (1e-6, 0.0, 0.0, false),
+            (1.2e-6, 0.6e-6, 1.2e-6, false),
+            (2e-6, 1e-6, 2e-6, false),
+            (2.2e-6, 1.1e-6, 2.2e-6, true),
+        ] {
+            let state = test_state(AuthMode::Github);
+            assert_eq!(charge(&state, &report(usd, vision_usd)).unwrap(), settled);
+            assert_eq!(state.db.user(USER).unwrap().is_some(), chargeable);
+            assert_eq!(spent(&state), if chargeable { usd } else { 0.0 });
+        }
+    }
+
+    #[test]
+    fn preserved_first_metered_part_grants_a_legacy_account_only_once() {
+        let state = test_state(AuthMode::Github);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(credits.granted_usd, state.cfg.default_grant_usd);
+        assert_eq!(credits.balance_usd, state.cfg.default_grant_usd - 1.0);
+        assert_eq!(spent(&state), 1.0);
+    }
+
+    #[test]
+    fn preserved_zero_default_grant_creates_an_unfunded_legacy_account() {
+        let mut state = test_state(AuthMode::Github);
+        std::sync::Arc::get_mut(&mut state.cfg)
+            .unwrap()
+            .default_grant_usd = 0.0;
+        assert_eq!(charge(&state, &report(1.0, 0.0)).unwrap(), 1.0);
+        assert!(state.db.user(USER).unwrap().is_some());
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(
+            (credits.granted_usd, credits.balance_usd, spent(&state)),
+            (0.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            state
+                .db
+                .voice_call(CALL, PROJECT)
+                .unwrap()
+                .unwrap()
+                .usd_charged,
+            1.0
+        );
+    }
+
+    #[test]
+    fn preserved_voice_part_precedes_vision_at_the_daily_cap_boundary() {
+        let state = fixture();
+        state
+            .db
+            .set_user_limits(USER, Some(SpendLimit::Daily(1.0).stored()), None)
+            .unwrap();
+        assert_eq!(charge(&state, &report(1.25, 0.25)).unwrap(), 1.25);
+        // Voice reaches the soft cap first; vision is a policy refusal, not a failed Tx.
+        assert_eq!(spent(&state), 1.0);
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!((row.usd_charged, row.vision_charged), (1.25, 0.25));
+        assert_eq!(charge(&state, &report(1.25, 0.25)).unwrap(), 1.25);
+        assert_eq!(spent(&state), 1.0);
+    }
+
+    #[test]
+    fn concurrent_cumulative_reports_have_one_durable_settlement() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Condvar, Mutex};
+
+        struct Snapshots {
+            arrivals: Mutex<usize>,
+            ready: Condvar,
+            outside_reads: AtomicUsize,
+            timed_out: AtomicBool,
+        }
+        impl Snapshots {
+            fn meet(&self) {
+                let Ok(mut arrived) = self.arrivals.lock() else {
+                    self.timed_out.store(true, Ordering::Relaxed);
+                    return;
+                };
+                *arrived += 1;
+                if *arrived >= 2 {
+                    self.ready.notify_all();
+                    return;
+                }
+                match self.ready.wait_timeout_while(
+                    arrived,
+                    std::time::Duration::from_secs(2),
+                    |count| *count < 2,
+                ) {
+                    Ok((count, _)) if *count >= 2 => {}
+                    _ => self.timed_out.store(true, Ordering::Relaxed),
+                }
+            }
+        }
+
+        // SAFETY: SQLite owns the statement for this callback; registered Arc contexts
+        // stay alive until unregistered under their connection lock. No panic or write
+        // occurs in the callback. The rendezvous is bounded and only applies outside Tx.
+        unsafe extern "C" fn pause_unsettled_snapshot(
+            kind: u32,
+            context: *mut std::ffi::c_void,
+            statement: *mut std::ffi::c_void,
+            _elapsed: *mut std::ffi::c_void,
+        ) -> i32 {
+            if kind != rusqlite::ffi::SQLITE_TRACE_PROFILE
+                || context.is_null()
+                || statement.is_null()
+            {
+                return 0;
+            }
+            // SAFETY: PROFILE supplies its live sqlite3_stmt; context has Arc ownership below.
+            let (snapshot, statement) = unsafe {
+                (
+                    &*context.cast::<Snapshots>(),
+                    statement.cast::<rusqlite::ffi::sqlite3_stmt>(),
+                )
+            };
+            // SAFETY: querying the owning handle/autocommit and static SQL does not step or mutate it.
+            let (connection, sql) = unsafe {
+                (
+                    rusqlite::ffi::sqlite3_db_handle(statement),
+                    rusqlite::ffi::sqlite3_sql(statement),
+                )
+            };
+            if connection.is_null() || sql.is_null() {
+                return 0;
+            }
+            let needle = b"FROM voice_calls WHERE call_id = ?1 AND project_id = ?2";
+            // SAFETY: SQLite's returned SQL is NUL-terminated for the live statement.
+            let selected = unsafe { std::ffi::CStr::from_ptr(sql) }
+                .to_bytes()
+                .windows(needle.len())
+                .any(|part| part == needle);
+            // SAFETY: this is the callback's still-owned connection, not a new DB operation.
+            if selected
+                && unsafe { rusqlite::ffi::sqlite3_get_autocommit(connection) } != 0
+                && snapshot.outside_reads.fetch_add(1, Ordering::Relaxed) < 2
+            {
+                snapshot.meet();
+            }
+            0
+        }
+
+        struct Registration {
+            db: crate::db::Db,
+            _context: Arc<Snapshots>,
+        }
+        impl Registration {
+            fn install(db: &crate::db::Db, context: &Arc<Snapshots>) -> Self {
+                db.with(|connection| {
+                    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+                    // SAFETY: Registration retains both Db and Arc; Drop unregisters before either is released.
+                    let code = unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE,
+                            Some(pause_unsettled_snapshot),
+                            Arc::as_ptr(context).cast_mut().cast(),
+                        )
+                    };
+                    assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+                    Ok(())
+                })
+                .unwrap();
+                Self {
+                    db: db.clone(),
+                    _context: context.clone(),
+                }
+            }
+        }
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                let _ = self.db.with(|connection| {
+                    // SAFETY: Db lock waits for active callbacks; unregister before dropping Arc context.
+                    unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            0,
+                            None,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    Ok(())
+                });
+            }
+        }
+
+        for legacy in [false, true] {
+            let first = if legacy {
+                test_state(AuthMode::Github)
+            } else {
+                fixture()
+            };
+            let mut second = first.clone();
+            second.db = crate::db::Db::open(&first.cfg.data_dir.join("relay.db")).unwrap();
+            let snapshots = Arc::new(Snapshots {
+                arrivals: Mutex::new(0),
+                ready: Condvar::new(),
+                outside_reads: AtomicUsize::new(0),
+                timed_out: AtomicBool::new(false),
+            });
+            let registrations = [
+                Registration::install(&first.db, &snapshots),
+                Registration::install(&second.db, &snapshots),
+            ];
+            let start = Arc::new(Barrier::new(2));
+            let workers: Vec<_> = [first.clone(), second]
+                .into_iter()
+                .map(|state| {
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        charge(&state, &report(1.0, 0.0))
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap().unwrap())
+                .collect();
+            drop(registrations);
+            assert!(
+                !snapshots.timed_out.load(Ordering::Relaxed),
+                "native snapshot rendezvous timed out"
+            );
+            assert_eq!(outcomes, vec![1.0, 1.0]);
+            assert_eq!(
+                spent(&first),
+                1.0,
+                "one cumulative report, outside-Tx snapshots={}",
+                snapshots.outside_reads.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                first
+                    .db
+                    .voice_call(CALL, PROJECT)
+                    .unwrap()
+                    .unwrap()
+                    .usd_charged,
+                1.0
+            );
+            assert_eq!(charge(&first, &report(1.0, 0.0)).unwrap(), 1.0);
+            assert_eq!(spent(&first), 1.0);
+            assert_eq!(
+                first.db.credits(USER, 0).unwrap().granted_usd,
+                first.cfg.default_grant_usd,
+                "legacy grant must occur once"
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_receipt_write_cannot_double_debit_a_replayed_report() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_receipt BEFORE UPDATE OF usd_charged ON voice_calls
+             BEGIN SELECT RAISE(IGNORE); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let after_failure = spent(&state);
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_receipt"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "replaying one cumulative dollar must debit one dollar total"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(first.is_err(), "failed durable settlement must be reported");
+        assert_eq!(
+            after_failure, 0.0,
+            "failed settlement must roll back its ledger debit"
+        );
+    }
+
+    #[test]
+    fn ignored_ledger_write_cannot_mark_an_unpaid_report_settled() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_debit BEFORE INSERT ON credit_ledger
+             WHEN NEW.kind = 'voice' AND NEW.usd < 0
+             BEGIN SELECT RAISE(IGNORE); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_debit"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "a retry must settle a report whose ledger debit failed"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(
+            first.is_err(),
+            "ledger failure must not look like a settled report"
+        );
+    }
+    /// Finite generated execution of the actual transaction/helpers, not a policy model.
+    #[test]
+    fn generated_atomic_settlement_and_replay_laws() {
+        let mut seed = 0x5eed_5110_u64;
+        for case in 0..32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let clamped = case % 2 == 0;
+            let usd = if clamped {
+                101.0 + ((seed >> 8) % 64) as f64
+            } else {
+                0.25 * (1 + (seed >> 8) % 32) as f64
+            };
+            let usage = report(usd, usd * 0.25);
+            let state = fixture();
+            let trigger = match case % 4 {
+                0 => "CREATE TRIGGER fixture_fault BEFORE INSERT ON credit_ledger WHEN NEW.kind='voice' AND NEW.usd<0 BEGIN SELECT RAISE(ABORT,'synthetic ledger'); END",
+                1 => "CREATE TRIGGER fixture_fault BEFORE UPDATE OF usd_charged ON voice_calls BEGIN SELECT RAISE(ABORT,'synthetic receipt'); END",
+                2 => "CREATE TRIGGER fixture_fault BEFORE INSERT ON credit_ledger WHEN NEW.kind='voice' AND NEW.usd<0 BEGIN SELECT RAISE(IGNORE); END",
+                _ => "CREATE TRIGGER fixture_fault BEFORE UPDATE OF usd_charged ON voice_calls BEGIN SELECT RAISE(IGNORE); END",
+            };
+            state
+                .db
+                .with(|connection| connection.execute_batch(trigger))
+                .unwrap();
+            assert!(
+                charge(&state, &usage).is_err(),
+                "fault must not produce a receipt, case={case} seed={seed}"
+            );
+            assert_eq!(
+                spent(&state),
+                0.0,
+                "ledger rollback, case={case} seed={seed}"
+            );
+            assert!(
+                state.db.voice_call(CALL, PROJECT).unwrap().is_none(),
+                "observation/cursor rollback, case={case} seed={seed}"
+            );
+            state
+                .db
+                .with(|connection| connection.execute_batch("DROP TRIGGER fixture_fault"))
+                .unwrap();
+            assert_eq!(charge(&state, &usage).unwrap(), usd);
+            assert_eq!(
+                charge(&state, &report(usd * 0.5, usd * 0.125)).unwrap(),
+                usd
+            );
+            assert_eq!(charge(&state, &usage).unwrap(), usd);
+            assert_eq!(
+                spent(&state),
+                if clamped { 100.0 } else { usd },
+                "retry/replay conservation, case={case} seed={seed}"
+            );
+            let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+            assert_eq!((row.usd_charged, row.vision_charged), (usd, usd * 0.25));
+            assert_eq!(state.db.credits(USER, 0).unwrap().granted_usd, 100.0);
+        }
+    }
+
+    #[test]
+    fn actual_usage_protocol_rejects_wrong_shapes_without_creating_credit_authority() {
+        for raw in [
+            r#"{"usd":[]}"#,
+            r#"{"usd":{}}"#,
+            r#"{"usd":"NaN"}"#,
+            r#"{"usd":null}"#,
+            r#"{"usd":1e400}"#,
+            r#"{"project_id":[]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::UsageBody>(raw).is_err(),
+                "malformed synthetic usage accepted"
+            );
+        }
+        let state = test_state(AuthMode::Github);
+        let empty = serde_json::from_str::<super::UsageBody>("{}").unwrap();
+        assert_eq!(charge(&state, &empty.usage).unwrap(), 0.0);
+        // Negative cumulative input remains the existing MAX-at-zero observation policy.
+        let negative = serde_json::from_str::<super::UsageBody>(r#"{"usd":-1}"#).unwrap();
+        assert_eq!(charge(&state, &negative.usage).unwrap(), 0.0);
+        for amount in [f64::NAN, f64::INFINITY, -1.0] {
+            crate::credits::charge(&state, USER, amount, "voice", Some("synthetic-invalid"));
+            assert!(state.db.debit(USER, amount, "voice", None, 0).is_err());
+        }
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
     }
 }

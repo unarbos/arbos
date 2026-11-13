@@ -25,7 +25,7 @@ pub fn tool_specs() -> Vec<Value> {
     let chart_schema: Value = serde_json::from_str(chart::SCHEMA_JSON).expect("chart schema");
     vec![json!({
         "name": TOOL_NAME,
-        "description": "Post a chart into THIS chat as a real message (1:1, group, channel or DM alike): line, area, bar, scatter or pie, drawn natively on Mac and iPhone — the user can hover or touch for values, expand it, save it as a PNG and copy the data; older apps and notifications get a picture. Send the data, not an image: series with points ([x, y]; x a number or an ISO date) or categories + values, axis labels and units. Keep it small: at most 8 series, 500 points per series, 2 000 in total, 100 categories (pie: 12 slices, one series) and 32 KB — bigger data is a CSV through deliver_file. Returns posted: true with the message id; an error means the chart was NOT posted — then say so plainly instead of claiming it was.",
+        "description": "Post a chart into THIS chat as a real message (1:1, group, channel or DM alike): line, area, bar, scatter or pie, drawn natively on Mac and iPhone — the user can hover or touch for values, expand it, save it as a PNG and copy the data; older apps and notifications get a picture. Send the data, not an image: series with points ([x, y]; x a number or an ISO date) or categories + values, axis labels and units. Keep it small: at most 8 series, 500 points per series, 2 000 in total, 100 categories (pie: 12 slices, one series) and 32 KB — bigger data is a CSV through deliver_file. Returns posted: true with the message id; an error means the chart was NOT posted — then say so plainly instead of claiming it was. One whole bar call, to copy: post_chart({\"chart\": {\"kind\": \"bar\", \"title\": \"Spend by team\", \"categories\": [\"Eng\", \"Sales\"], \"series\": [{\"name\": \"Q3\", \"values\": [42, 31]}], \"y\": {\"label\": \"Spend\", \"unit\": \"USD\"}}, \"caption\": \"Engineering is the largest line.\"}) — the chart goes under `chart` (never spread across the top level), `categories` sits beside `kind` (never under `x`), and a bar series carries `values`, while line/area/scatter carry `points`.",
         "inputSchema": {
             "type": "object",
             "required": ["chart", "caption"],
@@ -89,7 +89,33 @@ pub async fn post(
                 chat_id: c.to_owned(),
                 ask_id: None,
                 main_turn: false,
+                job_id: None,
             };
+        }
+    }
+    // Same rules as `deliver_file`: a cancelled job puts nothing more in the chat (bug S), and a
+    // worker's post waits while a message of this chat is still being routed and is refused while
+    // a correction sits unread in its session (bug AB, `steer_gate.rs`).
+    if let Some(job_id) = target.job_id.as_deref() {
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled, so nothing more of it goes into the chat; the chart was NOT posted"
+            );
+        }
+        if !target.main_turn {
+            let hold = a
+                .steer_gate
+                .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+                .await;
+            if hold == crate::steer_gate::Hold::SteerFirst {
+                anyhow::bail!(crate::steer_gate::SteerFirst);
+            }
+            // Asked again after the wait, as in `media::deliver`: a cancel can land inside it.
+            if a.job_is_cancelled(job_id) {
+                anyhow::bail!(
+                    "this job was cancelled while the chart waited, so nothing more of it goes into the chat; the chart was NOT posted"
+                );
+            }
         }
     }
     let credit = PictureCredit {
@@ -97,10 +123,31 @@ pub async fn post(
     };
     let png = picture_png(&chart, &credit).map_err(|e| anyhow::anyhow!("fallback picture: {e}"))?;
     let png_len = png.len();
-    let key = media::upload(a, &target.chat_id, png, "image/png").await?;
-    let Some(host) = a.sync.host(&target.chat_id).await else {
-        anyhow::bail!("chat {} is not open on this box", target.chat_id);
-    };
+    let key = media::blob_key(&png);
+    media::upload(a, &target.chat_id, png, &key, "image/png").await?;
+    let host = a
+        .room(&target.chat_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
+    // Bug AB on the far side, as in `media::deliver`: the gate above decided before the picture
+    // was rendered, before it was uploaded and before this task queued for the room lock, and
+    // the row below is the only thing the user sees. This window is the longer of the two,
+    // because `picture_png` runs inside it.
+    let steer_gated = target.job_id.as_deref().filter(|_| !target.main_turn);
+    if let Some(job_id) = steer_gated {
+        let hold = a
+            .steer_gate
+            .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+            .await;
+        if hold == crate::steer_gate::Hold::SteerFirst {
+            anyhow::bail!(crate::steer_gate::SteerFirst);
+        }
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled while the chart waited, so nothing more of it goes into the chat; the chart was NOT posted"
+            );
+        }
+    }
     let msg_id = ulid();
     let att_id = ulid();
     let chart_id = ulid();
@@ -140,6 +187,10 @@ pub async fn post(
     });
     {
         let h = host.lock().await;
+        // The last moment before the row exists; the wait for this lock is part of the window.
+        if steer_gated.is_some_and(|job_id| a.steer_gate.steer_first_now(job_id)) {
+            anyhow::bail!(crate::steer_gate::SteerFirst);
+        }
         let ask = reply_to
             .map(str::trim)
             .filter(|r| !r.is_empty() && h.doc.message(r).is_some())
@@ -168,7 +219,7 @@ pub async fn post(
             .is_some();
         let chart_ok = h.doc.add_part_from_json(&msg_id, &chart_part).is_some();
         if !att_ok || !chart_ok {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!(
                 "message {msg_id} could not take the chart parts in chat {}",
                 target.chat_id
@@ -191,7 +242,7 @@ pub async fn post(
             has_png && has_chart && m.text() == caption
         });
         if !ok {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!("the chart row did not read back from the chat doc");
         }
     }
@@ -254,6 +305,9 @@ pub async fn post_chart(a: &Arc<Agent>, args: &Value) -> Value {
             })
             .to_string(),
         ),
+        // Same as `deliver_file`: the steer gate's refusal is an instruction about the correction
+        // waiting in this session, so it goes through unwrapped.
+        Err(e) if crate::steer_gate::is_steer_first(&e) => err_result(e.to_string()),
         Err(e) => err_result(format!(
             "NOT posted — the chart is not in the chat: {e}. Fix the chart and call post_chart again, or tell the user plainly that it could not be posted; do not say it was."
         )),

@@ -39,7 +39,6 @@ pub(crate) fn healthz_dto(state: &AppState) -> HealthDto {
         ok: true,
         proto: i64::from(arbos_core::PROTO_VERSION),
         devices,
-        daytona: state.daytona.is_some(),
         auth_mode: Some(state.cfg.auth_mode.as_str().to_owned()),
         auth: None,
         providers: HealthProvidersDto {
@@ -53,7 +52,7 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
     // The typeshared HealthDto is what the apps decode; the operational extras ride alongside as plain
     // JSON keys (Swift ignores unknown keys): `uptime_s` (a restart storm shows as a short uptime — four
     // restarts in 95 min put "Reconnecting…" banners in every chat on 2026-10-22), `rooms` (open sync rooms
-    // with live websocket sessions) and `snapshot` (the Daytona snapshot new boxes are made from right now).
+    // with live websocket sessions) and `snapshot` (the snapshot new boxes are made from right now).
     let mut v = serde_json::to_value(healthz_dto(&state))
         .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
     if let Some(obj) = v.as_object_mut() {
@@ -230,7 +229,7 @@ pub struct CreateProjectBody {
     pub instructions: Option<String>,
     #[serde(default)]
     pub models: Option<Value>,
-    /// `daytona` (default when a key exists), `process`, or `docker`.
+    /// `gvisor` (the default on the arbos.life host), `process`, or `docker`.
     #[serde(default)]
     pub provider: Option<String>,
     /// Tree avatar slug; default = the deterministic pick for the new id.
@@ -245,12 +244,9 @@ pub struct CreateProjectBody {
     /// Telegram-style initials colour (D79): 0–6. Omitted = automatic from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
-    /// Leaf avatar shape (D92): 0–8. Omitted = automatic from the id.
-    #[serde(default)]
-    pub avatar_leaf: Option<i64>,
-    /// Leaf avatar disc colour (D92): 0–9. Omitted = automatic from the id.
-    #[serde(default)]
-    pub avatar_leaf_color: Option<i64>,
+    /// Solid disc colour (D92): 0–9, or 255 for "no picture". Omitted = automatic from the id.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<i64>,
     /// Fork: copy the source project's workspace folder (files + memory) into the new agent.
     /// Own projects only; chat UI history is not copied (the new pinned chat stays empty).
     #[serde(default)]
@@ -306,13 +302,16 @@ pub async fn create_project(
     let provider = match b.provider.as_deref() {
         Some(p) => Provider::parse(p).ok_or((
             StatusCode::BAD_REQUEST,
-            "provider must be daytona|process|docker|gvisor".to_owned(),
+            format!("provider must be {}", Provider::NAMES),
         ))?,
         None => boxes::default_provider(&state),
     };
     let now = now_ms();
     let id = ulid();
-    let owner = principal.user_id().unwrap_or("u_default").to_owned();
+    let owner = principal
+        .user_id()
+        .unwrap_or(crate::auth::LEGACY_USER)
+        .to_owned();
     // Defaults are deduped within the user's (tree, colour) pairs so sibling tiles differ.
     let taken: Vec<(String, String)> = state
         .db
@@ -359,7 +358,7 @@ pub async fn create_project(
             ));
         }
     }
-    crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color)?;
+    crate::avatar::check_disc_color(b.avatar_disc_color)?;
     let project = Project {
         id,
         name: name.clone(),
@@ -369,18 +368,8 @@ pub async fn create_project(
         state: "hibernated_light".into(),
         created_at: now,
         last_active_at: now,
-        // An owner without a user cap gets no project caps either (Jacob, 2026-10-26).
-        spend_cap_daily: if state
-            .db
-            .user(&owner)
-            .ok()
-            .flatten()
-            .is_some_and(|u| u.daily_cap_usd.is_none())
-        {
-            crate::credits::PROJECT_CAP_UNLIMITED
-        } else {
-            25.0
-        },
+        // A project is not a ledger: it spends its owner's account, which carries the one limit.
+        spend_cap_daily: crate::credits::PROJECT_CAP_UNLIMITED,
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
         user_id: owner,
         workspace_state: "stopped".into(),
@@ -389,8 +378,8 @@ pub async fn create_project(
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
         primary_chat_id: None,
         avatar_color_index: b.avatar_color_index,
-        avatar_leaf: b.avatar_leaf,
-        avatar_leaf_color: b.avatar_leaf_color,
+        avatar_leaf: None,
+        avatar_leaf_color: b.avatar_disc_color,
         image_key: None,
         avatar_version: 0,
     };
@@ -567,14 +556,7 @@ pub async fn get_project(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let viewer = match &principal {
         Principal::Device { user_id, .. } => Some(user_id.clone()),
         Principal::Box { .. } | Principal::Admin => None,
@@ -637,9 +619,6 @@ pub struct PatchProjectBody {
     /// Merged slot by slot: `{ "talking_model": { "id": "...", "effort": "low" } }` leaves the other slots alone.
     #[serde(default)]
     pub models: Option<Value>,
-    /// Daily cap in USD; present-and-null means no project cap (stored as the sentinel).
-    #[serde(default, deserialize_with = "deserialize_double_option_f64")]
-    pub spend_cap_daily: Option<Option<f64>>,
     /// Tree avatar slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar: Option<Option<String>>,
@@ -658,12 +637,14 @@ pub struct PatchProjectBody {
     /// Telegram-style initials colour (D79): 0–6, or `null` to go back to the derived colour.
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub avatar_color_index: Option<Option<i64>>,
-    /// Leaf avatar shape (D92): 0–8, or `null` to go back to the derived leaf.
-    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
-    pub avatar_leaf: Option<Option<i64>>,
-    /// Leaf avatar disc colour (D92): 0–9, or `null` to go back to the derived colour.
-    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
-    pub avatar_leaf_color: Option<Option<i64>>,
+    /// Solid disc colour (D92): 0–9, 255 for "no picture", or `null` to go back to the
+    /// colour derived from the id.
+    #[serde(
+        default,
+        alias = "avatar_leaf_color",
+        deserialize_with = "deserialize_double_option_i64"
+    )]
+    pub avatar_disc_color: Option<Option<i64>>,
     /// D92 amendment: an uploaded / generated picture — a blob name in the project's own slot
     /// (`PUT /blob/{project}/{key}` or `POST /projects/{id}/avatar/generate`); `null` clears it.
     #[serde(default, deserialize_with = "deserialize_double_option")]
@@ -675,13 +656,6 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(d).map(Some)
-}
-
-fn deserialize_double_option_f64<'de, D>(d: D) -> Result<Option<Option<f64>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<f64>::deserialize(d).map(Some)
 }
 
 pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
@@ -699,14 +673,7 @@ pub async fn patch_project(
     Path(id): Path<String>,
     Json(b): Json<PatchProjectBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.owns(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_owned_by(&state, &principal, &id)?;
     if let Some(o) = b.models.as_ref().and_then(Value::as_object) {
         for (slot, v) in o {
             if !matches!(
@@ -779,7 +746,7 @@ pub async fn patch_project(
             ));
         }
     }
-    crate::avatar::check_leaf_pick(b.avatar_leaf.flatten(), b.avatar_leaf_color.flatten())?;
+    crate::avatar::check_disc_color(b.avatar_disc_color.flatten())?;
     if let Some(image) = &b.image_key {
         let key = image.as_deref().map(str::trim).filter(|k| !k.is_empty());
         if let Some(k) = key {
@@ -847,14 +814,12 @@ pub async fn patch_project(
             b.color.as_deref(),
             b.instructions.as_deref(),
             models.as_ref(),
-            b.spend_cap_daily
-                .map(|c| c.unwrap_or(crate::credits::PROJECT_CAP_UNLIMITED)),
+            None,
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
             b.avatar_color_index,
-            b.avatar_leaf,
-            b.avatar_leaf_color,
+            b.avatar_disc_color,
         )
         .map_err(internal)?;
     // A rename reaches the box at once (#1431): agentd refreshes the agent's identity (system
@@ -878,7 +843,7 @@ pub async fn patch_project(
         .project(&p.id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    // The avatar moved (picture, leaf or colour): every device that draws this agent learns
+    // The avatar moved (picture or colour): every device that draws this agent learns
     // the new stamp now — the agents' `profile_updated` (Jacob, 2026-10-25: the chat flipped
     // between the old and the new picture until a roster happened to refresh).
     if p.avatar_version != before_avatar {
@@ -921,10 +886,7 @@ pub async fn archive_project(
             "a signed-in device is required".into(),
         ));
     };
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let at = state
         .db
         .set_space_archived(user_id, &id, "project", b.archived)
@@ -953,10 +915,7 @@ pub async fn patch_chat(
     Path((id, chat)): Path<(String, String)>,
     Json(b): Json<PatchChatBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let ok = state
         .db
         .update_chat_title(&id, &chat, b.title.trim())
@@ -975,8 +934,9 @@ pub async fn delete_chat(
     principal: Principal,
     Path((id, chat)): Path<(String, String)>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) || principal.is_box() {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    // Closing a tab is a person's doing; a box keeps its own chats open.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     match state.db.close_chat(&id, &chat).map_err(internal)? {
@@ -1000,10 +960,7 @@ pub async fn chat_history(
     Path((id, chat)): Path<(String, String)>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let sb = state
         .db
         .box_for_project(&id)
@@ -1037,16 +994,79 @@ pub async fn chat_history(
     }
 }
 
-/// Accept a project id or name in the path and return the id.
-pub(crate) fn resolve_project_id(
+/// The one answer a project lookup gives when it does not hand a project back. A project that
+/// does not exist and a project the caller may not touch must be indistinguishable: while they
+/// differed, `GET /projects/{name}/pushes` told a caller which names were taken, and the names
+/// were all an attacker needed to reach other people's agents (reported 2026-11-02).
+pub(crate) fn no_such_project() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such project".to_owned())
+}
+
+/// Accept a project id or name in the path and return the row, without asking who wants it.
+/// Only for handlers that decide access on something wider than the project itself (a group's
+/// roster, say); they must refuse with [`no_such_project`] so the two cases stay identical.
+pub(crate) fn lookup_project(
     state: &AppState,
     id_or_name: &str,
-) -> Result<String, (StatusCode, String)> {
-    match state.db.project(id_or_name) {
-        Ok(Some(p)) => Ok(p.id),
-        Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
+) -> Result<Project, (StatusCode, String)> {
+    state
+        .db
+        .project(id_or_name.trim())
+        .map_err(internal)?
+        .ok_or_else(no_such_project)
+}
+
+/// Accept a project id or name in the path and return the row, as this caller. A project the
+/// caller may not act on answers exactly like one that is not there.
+pub(crate) fn project_for(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    let wanted = id_or_name.trim();
+    // A name is matched against the caller's own agents first. Names are not unique across
+    // owners and the plain lookup hands back whichever matching row was active last, so without
+    // this a caller's own `Lium` could resolve to a stranger's and then be refused.
+    if let Some(user_id) = principal.user_id() {
+        if let Some(p) = state
+            .db
+            .project_of_user_by_name(user_id, wanted)
+            .map_err(internal)?
+        {
+            return Ok(p);
+        }
+    }
+    match state.db.project(wanted) {
+        Ok(Some(p)) if state.allows(principal, &p.id) => Ok(p),
+        Ok(_) => Err(no_such_project()),
         Err(e) => Err(internal(e)),
     }
+}
+
+/// [`project_for`], narrowed to the project's owner. Routes that reshape a project or drive its
+/// box use this. The refusal below is not the one an outsider meets: [`project_for`] has already
+/// hidden the project from anyone outside it, so only an invited member — who can see the project
+/// anyway, and so learns nothing from the wording — can reach it.
+pub(crate) fn project_owned_by(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    let p = project_for(state, principal, id_or_name)?;
+    if !state.owns(principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    Ok(p)
+}
+
+/// [`project_for`], keeping only the id. Takes the principal so that no route can resolve a
+/// project without saying who is asking.
+pub(crate) fn resolve_project_id(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<String, (StatusCode, String)> {
+    project_for(state, principal, id_or_name).map(|p| p.id)
 }
 
 /// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
@@ -1062,7 +1082,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         .map(|u| u.usd)
         .unwrap_or(0.0);
     let voice_settings = state.db.voice_agent_settings(&p.id).ok();
-    let leaf = crate::avatar::effective_leaf(p);
+    let disc_color = crate::avatar::effective_disc(p);
     ProjectDto {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -1096,10 +1116,8 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
             &p.id,
             p.avatar_color_index,
         )),
-        avatar_leaf: p.avatar_leaf,
-        avatar_leaf_color: p.avatar_leaf_color,
-        avatar_leaf_effective: Some(i64::from(leaf.leaf)),
-        avatar_leaf_color_effective: Some(i64::from(leaf.color)),
+        avatar_disc_color: p.avatar_leaf_color,
+        avatar_disc_color_effective: Some(i64::from(disc_color)),
         image_key: p.image_key.clone(),
         avatar_version: Some(p.avatar_version),
         primary_chat_id: primary_chat_id(state, p),
@@ -1123,6 +1141,14 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
 pub(crate) fn project_owner_dto(state: &AppState, user_id: &str) -> ProjectOwnerDto {
     let s = crate::notify::Sender::user(state, user_id);
     let seen = state.db.user_last_seen(user_id).ok().flatten();
+    project_owner_from_sender(user_id, s, seen)
+}
+
+pub(crate) fn project_owner_from_sender(
+    user_id: &str,
+    s: crate::notify::Sender,
+    seen: Option<i64>,
+) -> ProjectOwnerDto {
     ProjectOwnerDto {
         kind: s.kind.to_owned(),
         id: s.id,
@@ -1187,11 +1213,6 @@ fn machine_dto(state: &AppState, user_id: &str, bs: BoxState, since: i64) -> Mac
     }
 }
 
-#[allow(dead_code)] // helper kept for wire/fixture tests; handlers use chat_dto
-pub(crate) fn chat_json(c: &Chat) -> Value {
-    serde_json::to_value(chat_dto(c)).expect("ChatDto")
-}
-
 pub(crate) fn chat_dto(c: &Chat) -> ChatDto {
     ChatDto {
         id: c.id.clone(),
@@ -1241,17 +1262,10 @@ pub async fn project_status(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let (bs, since) = state.box_state(&p.user_id).await;
     let mut provider = boxes::provider_status(&state, &p.user_id).await;
-    // Laptops cannot reach a Daytona preview URL without its token: hand them the relay's proxy instead.
+    // A box's own URL is not reachable from a laptop: hand them the relay's proxy instead.
     if let Some(tok) = principal.raw_token() {
         let ws = state
             .cfg
@@ -1288,25 +1302,17 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .and_then(|s| s.snapshot.clone())
         .or(state.db.user_snapshot(&user_id).map_err(internal)?)
         .unwrap_or_else(|| state.default_snapshot());
-    // Class from the snapshot when Daytona answers; the known default otherwise. A host sandbox
-    // (D89) reports the fleet caps.
+    // A host sandbox (D89) reports the fleet caps; a local box reports the class every box used to
+    // have. Nothing asks a provider for the figures any more — Daytona's snapshot endpoint was the
+    // only one that answered.
     let gvisor = sb.as_ref().is_some_and(|s| s.provider == "gvisor")
         || (sb.is_none() && boxes::default_provider(&state) == Provider::Gvisor);
-    let (mut cpu, mut mem, mut disk) = if gvisor {
+    let (cpu, mem, disk) = if gvisor {
         let f = &state.cfg.fleet;
         (f.box_cpus as i64, f.box_mem_gb as i64, f.box_work_gb as i64)
     } else {
         (4_i64, 8_i64, 10_i64)
     };
-    if !gvisor {
-        if let Some(dt) = &state.daytona {
-            if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
-                cpu = snap.cpu.unwrap_or(cpu);
-                mem = snap.mem.unwrap_or(mem);
-                disk = snap.disk.unwrap_or(disk);
-            }
-        }
-    }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
     let workspaces: Vec<MachineWorkspaceDto> = projects
         .iter()
@@ -1334,6 +1340,10 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .credits(&user_id, start_of_day())
         .map(|c| c.machine_today_usd)
         .unwrap_or(0.0);
+    // docs/box-scaling.md §3.3: where the daemon last left a `boxd` box, and the storage split
+    // of its last sleep, both from the row. Nothing here asks the box or the daemon, so the
+    // card of a sleeping or cold machine wakes and fetches nothing.
+    let lifecycle = state.db.box_lifecycle(&user_id).map_err(internal)?;
     Ok(Json(MachineStatusDto {
         user_id,
         state: bs,
@@ -1366,6 +1376,11 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         always_on: state.cfg.always_on,
         held,
         machine_today_usd,
+        lifecycle_state: lifecycle.as_ref().map(|l| l.1.clone()),
+        // Unreadable is absent: the card draws no numbers rather than wrong ones.
+        storage: lifecycle
+            .and_then(|l| l.2)
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
     .into_response())
 }
@@ -1425,11 +1440,28 @@ pub async fn machine_stop(
     }
     // A manual Stop holds the box down until the user starts it (or sends a message): the
     // always-on sweep leaves held boxes alone. It also pauses every secret (D83 decision 8).
+    let was_held = state.db.box_held(&user_id).unwrap_or(false);
+    let secrets = state.db.secrets_settings(&user_id).unwrap_or_default();
     let _ = state.db.set_box_held(&user_id, true);
     crate::secrets::set_paused(&state, &user_id, true, "stop_machine").await;
-    boxes::stop_box(&state, &user_id, q.force)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Err(e) = boxes::stop_box(&state, &user_id, q.force).await {
+        if e.to_string() != crate::boxd::BUSY {
+            return Err((StatusCode::BAD_GATEWAY, e.to_string()));
+        }
+        // agentd refused an unforced sleep (only a boxd box is asked) and the box runs on. It is
+        // not stopped, so it is not held down and its secrets are as they were before the Stop.
+        let _ = state.db.set_box_held(&user_id, was_held);
+        match secrets.paused_by.as_deref() {
+            Some(by) if secrets.paused => {
+                let _ = state.db.set_secrets_paused(&user_id, true, by);
+            }
+            _ => drop(crate::secrets::set_paused(&state, &user_id, false, "stop_refused").await),
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            "the machine is busy: a turn or a job is still running on it".into(),
+        ));
+    }
     let (bs, since) = state.box_state(&user_id).await;
     Ok(Json(MachineStateDto {
         state: bs,
@@ -1494,18 +1526,17 @@ pub async fn admin_delete_user_box(
         return Err((StatusCode::NOT_FOUND, "no box for that user".into()));
     };
     let mut deleted_sandbox = None;
-    if let (Some(dt), Some(sid)) = (&state.daytona, &sb.sandbox_id) {
-        if sb.provider == "daytona" {
-            let _ = dt.stop(sid, true).await;
-            match dt.delete(sid).await {
-                Ok(_) => deleted_sandbox = Some(sid.clone()),
-                Err(e) if e.to_string().contains("404") => deleted_sandbox = Some(sid.clone()),
-                Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("delete sandbox: {e}"))),
-            }
+    // A row left on the retired provider loses its row here and nothing else: deleting the
+    // sandbox itself is an operator step, outside the relay.
+    if sb.provider != boxes::RETIRED_PROVIDER {
+        let stopped = boxes::stop_box(&state, &id, true).await;
+        if sb.provider == Provider::Boxd.as_str() {
+            // Only the daemon can stop this box, and it finds it by the user id in this row: a
+            // box that did not stop keeps its row. Stopped, it holds no memory, no checkpoint
+            // and no loop device; its /work image stays on the host, as a gVisor box's does.
+            stopped.map_err(|e| (StatusCode::BAD_GATEWAY, format!("box stop: {e}")))?;
+            deleted_sandbox = sb.sandbox_id.clone();
         }
-    }
-    if sb.provider != "daytona" {
-        let _ = boxes::stop_box(&state, &id, true).await;
     }
     if sb.provider == "gvisor" {
         // The container goes; the user's /work image stays on disk (D89: never delete user data).
@@ -1566,37 +1597,10 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
         .into_response())
 }
 
-/// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the
-/// user box (D70). Idempotent; old sandboxes are stopped and marked, never deleted.
-pub async fn machine_migrate(
-    State(state): State<AppState>,
-    principal: Principal,
-    Query(q): Query<MigrateQuery>,
-) -> ApiResult {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
-        Principal::Admin => "u_default".to_owned(),
-        Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
-    };
-    let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(Json(crate::migrate::report_json(&user_id, &reports)).into_response())
-}
-
-#[derive(Deserialize)]
-pub struct MigrateQuery {
-    /// Only this project (id).
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Copy again even when the legacy sandbox is already marked migrated.
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: daytona|process|docker|gvisor|null}`:
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|boxd|null}`:
 /// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
-/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it.
+/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it. The
+/// retired provider is refused here, so no box can be sent back to it by hand.
 pub async fn admin_set_user_box(
     State(state): State<AppState>,
     principal: Principal,
@@ -1621,7 +1625,7 @@ pub async fn admin_set_user_box(
             Value::Null => None,
             Value::String(s) => Some(Provider::parse(s).ok_or((
                 StatusCode::BAD_REQUEST,
-                "provider must be daytona|process|docker|gvisor or null".to_owned(),
+                format!("provider must be {} or null", Provider::NAMES),
             ))?),
             _ => {
                 return Err((
@@ -1667,14 +1671,7 @@ pub async fn create_chat(
     Path(id): Path<String>,
     Json(b): Json<CreateChatBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let kind = match b.kind.as_deref() {
         None | Some("chat") => "chat",
         Some("projects") => "projects",
@@ -1792,14 +1789,7 @@ pub async fn list_chats(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let viewer = match &principal {
         Principal::Device { user_id, .. } => Some(user_id.clone()),
         Principal::Box { .. } | Principal::Admin => None,
@@ -1823,14 +1813,7 @@ pub async fn wake(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     boxes::ensure_awake(&state, &p.user_id, "api").await;
     let (bs, since) = state.box_state(&p.user_id).await;
     Ok(Json(json!({ "box": bs, "since": since })).into_response())
@@ -1841,12 +1824,9 @@ pub async fn start(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) || principal.is_box() {
+    let p = project_for(&state, &principal, &id)?;
+    // A box keeps the agent it serves running; this is a person's switch.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if state.upgrading.lock().await.contains_key(&p.user_id) {
@@ -1874,12 +1854,9 @@ pub async fn stop(
     Path(id): Path<String>,
     Query(q): Query<StopQuery>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.owns(&principal, &p.id) || principal.is_box() {
+    let p = project_owned_by(&state, &principal, &id)?;
+    // A box keeps the agent it serves running; this is a person's switch.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     boxes::stop_box(&state, &p.user_id, q.force)
@@ -1901,10 +1878,7 @@ pub async fn keepalive(
     Path(id): Path<String>,
     Json(b): Json<KeepaliveBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let owner = state
         .user_of(&id)
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
@@ -1958,9 +1932,7 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
         &p.id,
         p.avatar_color_index
     ));
-    let leaf = crate::avatar::effective_leaf(p);
-    project["avatar_leaf_effective"] = json!(leaf.leaf);
-    project["avatar_leaf_color_effective"] = json!(leaf.color);
+    project["avatar_disc_color_effective"] = json!(crate::avatar::effective_disc(p));
     // Always true for the box: agentd 0.1.16 (85fd0b4e) read this as "may I open my Projects ⇄
     // tab" and otherwise spilled agent-hosted group traffic into the owner's primary chat. The
     // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box
@@ -2003,9 +1975,9 @@ pub async fn box_hello(
     boxes::box_seen_http(&state, user_id).await;
     if let Some(url) = &b.url {
         if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
-            // Only a process box's own URL is reachable from the relay. Daytona boxes have a
-            // preview URL, container boxes (docker, gvisor) a published host port; the URL a
-            // container reports is its in-namespace address.
+            // Only a process box's own URL is reachable from the relay. Container boxes (docker,
+            // gvisor) have a published host port; the URL a container reports is its
+            // in-namespace address.
             if sb.provider == "process" {
                 sb.box_url = Some(url.clone());
                 let _ = state.db.upsert_box(&sb);
@@ -2122,18 +2094,10 @@ pub async fn push(
     Path(id): Path<String>,
     Json(b): Json<PushBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
     // The write side was open to any signed-in device or box until 2026-10-26 (#1951): a push is
-    // a message into that project's agent plus a wake of its box, so the caller must be allowed on
-    // the project — its owner's devices and boxes, or an invited member. Cross-user agent traffic
-    // goes through /agent-messages and its grants, never through here.
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    // a message into that project's agent plus a wake of its box. Cross-user agent traffic goes
+    // through /agent-messages and its grants, never through here.
+    let p = project_for(&state, &principal, &id)?;
     state
         .db
         .enqueue_push(&p.id, &b.kind, &b.payload)
@@ -2150,10 +2114,7 @@ pub async fn take_pushes(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let pushes = state.db.take_pushes(&id).map_err(internal)?;
     Ok(Json(
         pushes
@@ -2169,16 +2130,79 @@ pub async fn usage(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let today = state
         .db
         .usage_since(&id, start_of_day())
         .map_err(internal)?;
     let all = state.db.usage_since(&id, 0).map_err(internal)?;
     Ok(Json(json!({ "today": today, "all": all })).into_response())
+}
+
+#[derive(Default, Deserialize)]
+pub struct SessionUsageQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    #[serde(default)]
+    pub include_children: bool,
+}
+
+impl SessionUsageQuery {
+    fn window(&self) -> Result<(i64, i64), (StatusCode, String)> {
+        let (from, to) = (self.from.unwrap_or(0), self.to.unwrap_or(i64::MAX));
+        if from < 0 || to <= from {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "expected 0 <= from < to (Unix milliseconds)".into(),
+            ));
+        }
+        Ok((from, to))
+    }
+}
+
+pub async fn sessions_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    if q.include_children {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "include_children requires a session id".into(),
+        ));
+    }
+    let sessions = state
+        .db
+        .session_usage(&id, None, from, to, false)
+        .map_err(internal)?;
+    Ok(Json(json!({ "from": from, "to": to, "sessions": sessions })).into_response())
+}
+
+pub async fn session_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, session)): Path<(String, String)>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    let summary = state
+        .db
+        .session_usage(&id, Some(&session), from, to, q.include_children)
+        .map_err(internal)?;
+    let usage = summary
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| crate::usage::SessionUsage {
+            session_id: Some(session.clone()),
+            ..Default::default()
+        });
+    Ok(Json(json!({ "session_id": session, "from": from, "to": to,
+        "include_children": q.include_children, "usage": usage }))
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -2196,10 +2220,7 @@ pub async fn record_timing(
     Path(id): Path<String>,
     Json(b): Json<TimingBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     state
         .db
         .record_timing(&id, &b.kind, b.ms, b.detail.as_deref())
@@ -2225,10 +2246,7 @@ pub async fn set_activity(
     Path(id): Path<String>,
     Json(b): Json<ActivityBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let mut map = state.activity.lock().await;
     let jobs = b
         .jobs
@@ -2271,10 +2289,7 @@ pub async fn record_audit(
     Path(id): Path<String>,
     Json(entry): Json<Value>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let kind = entry
         .get("kind")
         .and_then(Value::as_str)
@@ -2299,10 +2314,7 @@ pub async fn list_audit(
     Path(id): Path<String>,
     Query(q): Query<AuditQuery>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let entries = state.db.audit(&id, limit).map_err(internal)?;
     Ok(Json(json!({ "project_id": id, "entries": entries })).into_response())
@@ -2478,9 +2490,15 @@ mod primary_chat_tests {
 
         // The first row lands before the box has a socket on the room: one `rows_pending`
         // push, not one per row; none once the box is in the room.
-        let room = state
-            .room(&arbos_core::wire::room_name(&project, &chat_id))
-            .await;
+        let room_name = arbos_core::wire::room_name(&project, &chat_id);
+        // Two rows are waiting in the room before any box has a socket on it.
+        for i in 0..2 {
+            state
+                .db
+                .append_row(&room_name, "dev-mac", &format!("b{i}"), b"x")
+                .unwrap();
+        }
+        let room = state.room(&room_name).await;
         let chat = crate::notify::ChatRef::project(&project, &chat_id);
         let agents = [boxes::ServingAgent {
             project_id: project.clone(),
@@ -2504,6 +2522,14 @@ mod primary_chat_tests {
             "the chat row rides along so the box does not reset it"
         );
         assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
+        // How far the room has got, so the box can tell how much it is behind and start the
+        // turn's slow half while it connects. Seqs only: no row content leaves the relay here.
+        assert_eq!(
+            pushes[0].2["head_seq"],
+            json!(2),
+            "the push says work is waiting: {:?}",
+            pushes[0].2
+        );
         room.box_joined(&alice);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
@@ -2511,7 +2537,7 @@ mod primary_chat_tests {
         );
         assert!(state.db.take_pushes(&project).unwrap().is_empty());
         room.box_left(&alice);
-        assert!(!room.has_box(&alice));
+        assert_eq!(room.box_count(&alice), 0);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
             1
@@ -2552,15 +2578,30 @@ mod primary_chat_tests {
             .unwrap();
         assert_eq!(row["archived_at"], json!(at));
         assert!(state.db.project(&project).unwrap().is_some());
-        // Bob's device cannot touch alice's project; alice unarchives and the flag is gone.
+        // Bob's device cannot touch alice's project, and is told only that there is no such
+        // project — the same words it gets for a project that truly is not there, so the
+        // route cannot be asked which ids and names are taken.
         let denied = archive_project(
             State(state.clone()),
-            bob_dev,
+            bob_dev.clone(),
             Path(project.clone()),
             Json(ArchiveBody { archived: true }),
         )
         .await;
-        assert_eq!(denied.err().map(|(s, _)| s), Some(StatusCode::FORBIDDEN));
+        let imaginary = archive_project(
+            State(state.clone()),
+            bob_dev,
+            Path("01JUNKJUNKJUNKJUNKJUNKJUNK".to_owned()),
+            Json(ArchiveBody { archived: true }),
+        )
+        .await;
+        assert_eq!(
+            denied.as_ref().err().map(|(s, _)| *s),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(denied.err(), imaginary.err());
+
+        // Alice unarchives and the flag is gone.
         archive_project(
             State(state.clone()),
             dev,
@@ -2681,22 +2722,20 @@ mod agent_avatar_version_tests {
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
-    fn leaf_patch(leaf: i64) -> PatchProjectBody {
+    fn disc_patch(color: i64) -> PatchProjectBody {
         PatchProjectBody {
             name: None,
             icon: None,
             color: None,
             instructions: None,
             models: None,
-            spend_cap_daily: None,
             avatar: None,
             avatar_color: None,
             description: None,
             voice: None,
             vision_enabled: None,
             avatar_color_index: None,
-            avatar_leaf: Some(Some(leaf)),
-            avatar_leaf_color: Some(Some(2)),
+            avatar_disc_color: Some(Some(color)),
             image_key: None,
         }
     }
@@ -2760,12 +2799,12 @@ mod agent_avatar_version_tests {
             "a fresh project is stamped at birth (its creation time), never 0"
         );
 
-        // Alice's phone picks a leaf.
+        // Alice's phone picks a colour.
         let r = patch_project(
             State(state.clone()),
             alice_phone.clone(),
             Path(project.clone()),
-            Json(leaf_patch(3)),
+            Json(disc_patch(3)),
         )
         .await
         .unwrap();
@@ -2816,7 +2855,7 @@ mod agent_avatar_version_tests {
             State(state.clone()),
             alice_phone.clone(),
             Path(project.clone()),
-            Json(leaf_patch(4)),
+            Json(disc_patch(4)),
         )
         .await
         .unwrap();
@@ -2824,9 +2863,8 @@ mod agent_avatar_version_tests {
         assert!(again.avatar_version > after.avatar_version);
 
         // A patch that leaves the avatar alone neither stamps nor pushes.
-        let mut rename = leaf_patch(0);
-        rename.avatar_leaf = None;
-        rename.avatar_leaf_color = None;
+        let mut rename = disc_patch(0);
+        rename.avatar_disc_color = None;
         rename.description = Some("A test agent".into());
         patch_project(
             State(state.clone()),
@@ -2842,7 +2880,7 @@ mod agent_avatar_version_tests {
     }
 
     /// The owner-set picture reaches a viewer who only shares a group with the agent (Jacob,
-    /// 2026-10-25: "Hezbola, run by @unarbos" drew the automatic leaf): `/blob/{project}/…`
+    /// 2026-10-25: "Hezbola, run by @unarbos" drew the automatic disc): `/blob/{project}/…`
     /// stays the owner's, `GET /projects/{id}/avatar.jpg` serves the current picture to anyone,
     /// 404 while there is none, and the push names the key the viewer should draw.
     #[tokio::test]
@@ -2876,9 +2914,8 @@ mod agent_avatar_version_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
-        let mut body = leaf_patch(0);
-        body.avatar_leaf = None;
-        body.avatar_leaf_color = None;
+        let mut body = disc_patch(0);
+        body.avatar_disc_color = None;
         body.image_key = Some(Some("avatar-1.png".into()));
         let r = patch_project(
             State(state.clone()),
@@ -2922,9 +2959,9 @@ mod agent_avatar_version_tests {
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         assert_eq!(&bytes[..], crate::image_sniff::samples::PNG);
 
-        // Reset to the leaf: the route is 404 again, so a viewer's fetch falls back to the leaf
-        // only when the owner really has none.
-        let mut body = leaf_patch(1);
+        // Reset to the disc: the route is 404 again, so a viewer's fetch falls back to the
+        // disc only when the owner really has none.
+        let mut body = disc_patch(1);
         body.image_key = Some(None);
         patch_project(
             State(state.clone()),

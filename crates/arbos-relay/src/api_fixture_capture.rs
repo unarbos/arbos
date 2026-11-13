@@ -464,7 +464,7 @@ async fn me_and_machine_unread_fixtures() {
                 avatar_url: None,
                 name: None,
             },
-            20.0,
+            crate::credits::SpendLimit::Unlimited,
         )
         .unwrap();
     fix_user_created_at(&state, &user.id);
@@ -550,7 +550,13 @@ async fn me_and_machine_unread_fixtures() {
     for mid in ["m1", "m2"] {
         state
             .db
-            .insert_chat_event("people_dm", None, mid, Some(&alice))
+            .insert_chat_event(
+                "people_dm",
+                None,
+                mid,
+                Some(&alice),
+                &format!("user:{alice}"),
+            )
             .unwrap();
     }
     let unread =
@@ -632,7 +638,7 @@ async fn token_and_refresh_grace_match_fixtures() {
                 avatar_url: None,
                 name: Some("Fixture User".into()),
             },
-            20.0,
+            crate::credits::SpendLimit::Unlimited,
         )
         .unwrap();
     state
@@ -755,8 +761,7 @@ fn fixture_sender() -> SenderDto {
         avatar_url: None,
         avatar_color_index: None,
         avatar_color_index_effective: 1,
-        avatar_leaf_effective: None,
-        avatar_leaf_color_effective: None,
+        avatar_disc_color_effective: None,
     }
 }
 
@@ -1293,8 +1298,7 @@ async fn create_project_accepts_avatar_color_index() {
             avatar_color: None,
             description: None,
             avatar_color_index: Some(4),
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             source_project_id: None,
         }),
     )

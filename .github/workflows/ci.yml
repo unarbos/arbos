@@ -11,7 +11,7 @@ on:
   push:
     # gate/** = the feedback loop's integration branches (current main + the ready
     # fix branches); this run is the Linux half of its pre-merge gate.
-    branches: [main, arbos-v2, "cursor/**", "gate/**"]
+    branches: [main, arbos-v2, "cursor/**", "gate/**", "improve/**"]
     # The phone app has its own workflow (ios.yml); an apps/ios-only push needs
     # no Rust gate and no Mac release.
     paths-ignore: ["apps/ios/**"]
@@ -20,10 +20,35 @@ on:
 permissions:
   contents: read
 
-# A newer push cancels an older run on a branch, but never on main: release.yml only runs after
-# a successful CI on main, and a cancelled run means no release.
+# Branches coalesce; main gets one group per commit. `cancel-in-progress` governs only the run that
+# is already RUNNING. A run still PENDING in a group is evicted the moment a newer run joins that
+# group, whatever the flag says, because GitHub keeps exactly one pending run per group —
+# release.yml and ios.yml both already state this. So `cancel-in-progress: false` never protected
+# main: it only made each push queue behind the last, and queueing is precisely what got it evicted.
+#
+# Measured on main 2026-11-04. Four pushes in 105 s — 54b199042 (15:51:19), f7763e33d (15:51:47),
+# b3d385c55 (15:52:25), ddb5ec06f (15:53:03) — all landed while dd0d8db10's run was still going.
+# Runs 41862032379, 41862100575 and 41862190973 ended `cancelled` holding ZERO jobs: they scheduled
+# nothing, so they tested nothing. Only the last push's run survived (41862282713), and it started
+# its first job at 15:54:39, three seconds after dd0d8db10's run finished — the group was
+# serialising, never protecting. Reproduced on a scratch workflow with an explicit
+# `cancel-in-progress: false` and a shared group: 41868187072 held the group, 41868295632 and
+# 41868354613 were cancelled with zero jobs, and 41868415687 stayed pending until the holder ended.
+#
+# The harm is three untested commits on main, not three lost runs. merge-window.sh reads a
+# zero-job cancellation as a CI refusal, so the faster main is drained the harder it stalls.
+# A per-commit group on main means no main commit can evict another's run. Its cost is concurrent
+# main runs: this workflow starts three jobs at once (Layout, rust, harness) and then one (image),
+# so the worst burst yet seen — four pushes inside one run — asks for 12 concurrent ubuntu-24.04
+# jobs, under the 20 even the smallest hosted allowance grants. Past that the runs QUEUE rather
+# than evict each other, which is the safe direction and the whole point of the change: a pending
+# run that is alone in its group waits, and then tests its commit.
+#
+# `cancel-in-progress` stays false on main. With a per-commit group the only way two main runs
+# share one is a workflow_dispatch on a sha whose push run is still going, and there the dispatch
+# should wait rather than kill a run that is testing that exact commit.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.sha) || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -37,6 +62,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Test isolation contracts
+        run: |
+          python3 -B scripts/ci/test_no_egress_runner.py -v
+          python3 -B scripts/ci/test_netns_smoke.py -v
+          python3 -B scripts/ci/test_xctestrun_env.py -v
       - name: The tree is the monorepo, and the old pipeline is gone
         run: |
           set -euo pipefail
@@ -59,35 +89,275 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
-          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
+          shellcheck -S warning scripts/*.sh scripts/ci/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
+          # One Glass-aware fill (#2801): no new opaque theme token is painted where the desktop
+          # shows through. Runs here rather than as a Rust test because the shape it guards is a
+          # source pattern, and Layout answers in seconds where the rust job takes tens of minutes.
+          ./scripts/glass-lint.sh
+          # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
+          ./scripts/merge/selftest.sh
+          # Gate 3: did a rebase preserve the patch. A separate harness because it performs real
+          # rebases in a scratch repository, which selftest.sh's "no git" contract forbids. It
+          # gates every rebase in a merge drain, so its own verdict must not rest on one machine.
+          # No network, no credentials, ~2s.
+          ./scripts/merge/rebase-preserved-selftest.sh
+          # AF-1475: the release artifact is verified ONCE per release rather than once per sample.
+          # A cache in front of a content check is a way to stop the check happening, so almost
+          # every case in here is a negative control, and the positive one is counted in downloads
+          # rather than asserted in words. A separate harness because it drives check3.sh against a
+          # fake gh and a fake curl on a sandbox PATH, which selftest.sh's contract does not cover.
+          # No network, no credentials, ~10s.
+          ./scripts/merge/verify-cache-selftest.sh
+          # The deploy worker's pure helpers, including the agentd roll hold: it lifts by hand only, and a
+          # commit subject never opens the lane. install-deploy-hook.sh runs the same selftest before it
+          # installs, but that is on the deploy host, after the merge — this runs it on the pull request.
+          shellcheck -S warning scripts/deploy/arbos-deploy-worker
+          bash scripts/deploy/arbos-deploy-worker selftest
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
+
+      # Every ask Jacob has made is a row in docs/product/jacob-asks.md naming the test that
+      # fails when the app stops doing it. A visual ask with no test is the one that regresses
+      # on an unrelated rebase and turns up in a screenshot weeks later, so an ask without a
+      # guard, or a guard that has been deleted or switched off, fails here. Reading sources,
+      # so it answers in seconds on Linux rather than spending an hour of the macOS job.
+      - name: Jacob's asks each have a test
+        run: python3 scripts/ci/jacob-asks-check.py
+
+      # Taking a guard off is a decision about whether Jacob still gets what he asked for.
+      # This one compares the branch with its base and wants that decision written down. Only
+      # on a pull request, which is the only place both a base and a description exist.
+      # Runs even when the step above failed: "an ask has no guard" and "this branch removes a
+      # guard" are different questions, and the first must not hide the second.
+      - name: No guard comes off without saying why
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          printenv PR_BODY > /tmp/pr-body.txt || : # an empty description signs nothing off
+          python3 scripts/ci/jacob-guard-gate.py --base-ref FETCH_HEAD --body-file /tmp/pr-body.txt
 
   rust:
     name: rust (fmt, clippy, test)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # `ubuntu-24.04` is two fleets, and one of them cannot hold this job. Measured over 40
+      # runners: 39 were Azure (`/dev/root`, 145 GB, 86 GiB free) and 1 was AWS us-west-2
+      # (`/dev/mapper/cow-root`, 72 GB, 13.1 GiB free) on the older 20261018 image. clippy plus
+      # the test build need ~19 GiB and the cache adds a few more, so on the small fleet the
+      # disk runs out during the first heavy write — the cache restore. The ENOSPC lands on the
+      # runner's own `_diag` log and kills its worker, so the job dies with no step output and
+      # no log, which is why this kept being read as a rust-cache flake. Reclaiming the image's
+      # unused SDKs wins back 28 GiB but costs about 90 seconds, so only pay it when the
+      # headroom is actually short.
+      - name: Make room on the short-disk fleet
+        run: |
+          set -euo pipefail
+          # FLOOR is what the job was measured to consume; RECLAIM_BELOW adds margin so the
+          # reclaim fires before the disk is actually tight. Reclaiming unconditionally would
+          # change every job's environment to help the 2.5% that need it.
+          FLOOR=25600
+          RECLAIM_BELOW=30720
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          if [ "$avail" -ge "$RECLAIM_BELOW" ]; then
+            echo "$avail MiB free on /; this job needs about $FLOOR MiB, so nothing is removed"
+            exit 0
+          fi
+          echo "$avail MiB free on / — short for a ~$FLOOR MiB job, reclaiming unused SDKs"
+          for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+                   /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$avail MiB free on / now"
+          # The defect this step exists to stop was a failure that destroyed its own evidence.
+          # If the reclaim did not win back enough, say so here, where it is readable, rather
+          # than walking into another ENOSPC that kills the runner and leaves no log.
+          if [ "$avail" -lt "$FLOOR" ]; then
+            echo "::error title=Short disk::Reclaimed what the image allows and only $avail MiB is free on /, under the $FLOOR MiB this job needs. Failing here so the reason is visible; an ENOSPC later kills the runner's worker and leaves no log at all."
+            df -h /
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      # rust-cache keys on every workspace Cargo.toml as well as Cargo.lock, but with
+      # `cache-workspace-crates: false` (its default, which this job keeps) the entry holds only
+      # *dependency* artifacts. Those are decided by the external dependency set and the compiler,
+      # so a manifest-only edit — adding a dev-dependency that Cargo.lock already pins, say — asks
+      # for a key nothing has ever written while the bytes it wants sit under the old one.
+      #
+      # The surplus key is unreachable, not merely cold. A `push` run on a feature branch saves
+      # into that branch's cache scope, and a `pull_request` run's scope is `refs/pull/N/merge`,
+      # which may read only the base branch and the default branch. Measured 2026-11-05: job
+      # 127046588316 (pull_request, b6d15de20) asked for `v0-rust-rust-Linux-x64-368c5654-09582842`
+      # while an entry under exactly that key existed on `refs/heads/cursor/one-fifo-per-chat-…`.
+      # It could not see it, and fell back to the main-scoped `…-5277baa8` with `full match: false`.
+      #
+      # A near miss is not a cheap miss here. On anything but a full match rust-cache runs
+      # `cleanTargetDir(target, [], true)`, which deletes every artifact older than a week — most
+      # of the dependency build. Same branch, same restored bytes: 2151 s on the push that missed,
+      # 354 s on the next push that matched.
+      #
+      # So key on what the entry actually holds. `source`/`checksum` are the lines Cargo.lock gives
+      # external packages; a workspace crate has neither, which keeps the continuous-delivery
+      # version bump (0.6.n → 0.6.n+1, rewriting a dozen `version =` lines) out of the key. Over
+      # the last 600 commits on main, rust-cache's key changed 20 times and this one changes twice.
+      #
+      # This cannot turn a wrong build green. The key only chooses which bytes to restore; cargo
+      # chooses what to reuse. Every artifact carries a fingerprint over the compiler, RUSTFLAGS,
+      # profile, features and dependency versions, and `--locked` refuses to build at all when the
+      # resolved graph disagrees with Cargo.lock. Anything that does not match is recompiled, and
+      # `-D warnings` applies to whatever is recompiled. A key that is too loose costs rebuild
+      # time, never a verdict.
+      - name: Cache key for the dependency build
+        id: cache-key
+        run: |
+          set -euo pipefail
+          rustc -vV
+          # The key is only as good as this grep. If Cargo.lock ever stops spelling external
+          # packages this way, say so here rather than hashing an empty string forever.
+          lines=$(grep -cE '^(source|checksum) = ' Cargo.lock)
+          if [ "$lines" -lt 100 ]; then
+            echo "::error title=Cache key::Cargo.lock yielded $lines source/checksum lines, too few to be the dependency set. The cache key no longer tracks what it caches."
+            exit 1
+          fi
+          echo "$lines external dependency lines in Cargo.lock"
+          deps=$(grep -E '^(source|checksum) = ' Cargo.lock | sha256sum | cut -c1-16)
+          # `rust-toolchain.toml` says `channel = "stable"`, so the file alone pins no compiler.
+          # `rustc -vV` carries the release and its commit hash. `.cargo/config.toml` does not
+          # exist today, but it is where a `[build] rustflags` would go, and an entry saved under
+          # one set of flags must not answer for another.
+          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; cat .cargo/config.toml 2>/dev/null || true; } | sha256sum | cut -c1-16)
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          add-rust-environment-hash-key: false
+          key: ${{ steps.cache-key.outputs.rust }}-${{ steps.cache-key.outputs.deps }}
+      # With the environment hash off, rust-cache's restore key equals its cache key, so it has no
+      # prefix left to fall back on — and its own fallback was the destructive one described above.
+      # When the dependency set really does change, start from the newest entry built by this same
+      # compiler instead of from nothing; cargo rebuilds the crates that moved and keeps the rest.
+      # This runs only when rust-cache restored nothing, so target/ is empty and no second archive
+      # is ever unpacked alongside the first — this job already runs close to the small fleet's
+      # disk limit. rust-cache's save step prunes whatever cargo did not use.
+      - name: Fall back to the newest cache for this compiler
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # No entry is named by the bare prefix, so the lookup always falls to `restore-keys`,
+          # which takes the most recent entry that shares the compiler.
+          key: v0-rust-${{ steps.cache-key.outputs.rust }}-
+          restore-keys: v0-rust-${{ steps.cache-key.outputs.rust }}-
       - name: Linux libraries for arbos-mac (GPUI)
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
       # Calls v1: the `livekit` crate links a prebuilt libwebrtc whose hermetic libc++
       # needs clang ≥ 21 to compile the cxx bridge (webrtc-sys refuses GCC / older clang).
+      # The runner image carries clang 16, 17 and 18 only, so the toolchain has to come from
+      # somewhere, and webrtc-sys 0.3.49's build.rs reads the floor out of the artifact's
+      # `__configuration/compiler.h` and panics below it: "the hermetic libc++ shipped with this
+      # libwebrtc requires clang 21 or later".
+      #
+      # This was `wget https://apt.llvm.org/llvm.sh && bash llvm.sh 21`, which put apt.llvm.org on
+      # the critical path of every rust job — once for the script, again for the packages. On run
+      # 41981350095 that host went away: wget exited 4, its network-failure code, three seconds in,
+      # the step died before any cargo command ran, and a pull request whose entire diff was this
+      # file went red for a reason nothing in the diff could cause.
+      #
+      # So take the toolchain from a host the job already cannot run without. `actions/checkout`,
+      # every `uses:` and this release asset all come from github.com, so a fetch that was a
+      # second single point of failure becomes one that fails only when the job was dead anyway.
+      # The release is pinned and the digest is the one the GitHub release API reports for the
+      # asset, so a changed byte is a failed checksum rather than a mystery compiler.
+      #
+      # The cost, measured on ubuntu-24.04 against the old step on the same fleet minutes apart:
+      # 54 s (1.88 GiB fetched and verified in 7, unpacked in 47) against 18 s, so +36 s on a job
+      # that runs for tens of minutes. Decompression is the bill, and it is already as cheap as
+      # it gets: the stream is 447 xz blocks, so `xz -T0` parallelises it; single-threaded the
+      # same unpack is 106 s.
+      #
+      # Zero Actions cache bytes, deliberately. The repository holds 10.60 GB of active cache
+      # against a 10 GB budget, 4 of its 5 entries being ~2.29 GB rust dependency caches that
+      # save minutes each, so an entry here would evict one of those. It would also be a lie:
+      # a cold key or an eviction would fall straight back to apt.llvm.org, leaving the fallback
+      # path both load-bearing and unobserved.
+      #
+      # The archive expands to 10.45 GiB, almost all of it static LLVM libraries nothing here
+      # links, and this job already reclaims disk to fit the small fleet. Extract four paths
+      # instead: the clang driver, its resource directory, and libclang.so, which is what
+      # `clang-sys` loads for the bindgen in this tree and what the apt layout put at this same
+      # path. 543 MiB lands on disk against the 923 MiB `clang-21 lldb-21 lld-21 clangd-21`
+      # reported, and the 1.88 GiB tarball is deleted in the same step, well before the ~19 GiB
+      # clippy and test peak this job's FLOOR is set for.
       - name: clang 21 for webrtc-sys
+        env:
+          # github.com/llvm/llvm-project/releases/tag/llvmorg-21.1.8, the last 21.x. The digest is
+          # the release API's own `assets[].digest` for this file, not one computed from a
+          # download, so it is an independent statement of what the asset should be.
+          LLVM_RELEASE: 21.1.8
+          LLVM_SHA256: b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b
         run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          sudo bash /tmp/llvm.sh 21 >/dev/null
-          echo "CC=/usr/lib/llvm-21/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=/usr/lib/llvm-21/bin/clang++" >> "$GITHUB_ENV"
-      - run: cargo fmt --all --check
+          set -euo pipefail
+          major="${LLVM_RELEASE%%.*}"
+          prefix="LLVM-${LLVM_RELEASE}-Linux-X64"
+          url="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_RELEASE}/${prefix}.tar.xz"
+          rc=0
+          for attempt in 1 2 3; do
+            rc=0
+            curl -fsSL --connect-timeout 20 --max-time 900 -o /tmp/llvm.tar.xz "$url" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+            echo "attempt $attempt of 3 for $url failed with curl exit $rc"
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 10))"
+            fi
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=clang 21::Could not fetch $url in three attempts (curl exit $rc). curl 22 means the pin names an asset that is not there; a network code means github.com itself is unreachable from this runner, which would have killed checkout too."
+            exit "$rc"
+          fi
+          echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c -
+          sudo mkdir -p "/usr/lib/llvm-${major}"
+          sudo tar -I 'xz -T0 -d' -xf /tmp/llvm.tar.xz --strip-components=1 \
+            -C "/usr/lib/llvm-${major}" --wildcards \
+            "${prefix}/bin/clang" \
+            "${prefix}/bin/clang++" \
+            "${prefix}/bin/clang-${major}" \
+            "${prefix}/lib/clang/${major}" \
+            "${prefix}/lib/libclang.so*"
+          rm -f /tmp/llvm.tar.xz
+          # build.rs decides with `-dM -E` on an empty translation unit, so ask the same question
+          # here. A toolchain that cannot answer it should fail in this step, where the log says
+          # which fetch produced which compiler, not a hundred lines into a libc++ header.
+          got=$("/usr/lib/llvm-${major}/bin/clang++" -dM -E -x c++ /dev/null | awk '$2 == "__clang_major__" {print $3}')
+          if [ "$got" != "$major" ]; then
+            echo "::error title=clang 21::$prefix unpacked to a compiler reporting __clang_major__ $got, not $major."
+            exit 1
+          fi
+          echo "$("/usr/lib/llvm-${major}/bin/clang++" --version | head -1), from $prefix"
+          echo "CC=/usr/lib/llvm-${major}/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-${major}/bin/clang++" >> "$GITHUB_ENV"
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - name: Full workspace tests with loopback-only networking
+        run: bash scripts/ci/run-tests-no-egress.sh
       # Shared client DTOs (arbos-core #[typeshare]) → packages/ArbosFFI RelayTypes.swift.
       - name: Generated Swift relay types are fresh
         run: |
@@ -108,6 +378,11 @@ jobs:
           set -euo pipefail
           deps=$(cargo tree -i arbos-matrix --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-matrix$' | sort -u)
           test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
+      - name: arbos-wallet dependents
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -i arbos-wallet --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-wallet$' | sort -u)
+          test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
 
   harness:
     name: harness (arbos-pi-ext typecheck + build + test)
@@ -123,12 +398,20 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: harness/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare native ownership-law dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --manifest-path .improve/state-machine-checks/pending-owners/native/Cargo.toml
+          cargo fetch --locked --manifest-path .improve/state-machine-checks/voice-settlement/native/Cargo.toml
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
         working-directory: harness
       - run: pnpm -r typecheck
         working-directory: harness
-      - run: pnpm -r build
-        working-directory: harness
+      # build is also tsc --noEmit; typecheck already covers it.
+      # Restore a separate build gate when the package starts emitting artifacts.
       - run: pnpm -r test
         working-directory: harness
 
@@ -136,7 +419,6 @@ jobs:
     name: image (dockerfile lint)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [rust, harness]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4

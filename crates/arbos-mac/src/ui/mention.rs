@@ -23,7 +23,7 @@ use gpui::{App, Entity, Hsla, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
-use crate::ui::avatars::{self, LeafPick};
+use crate::ui::avatars;
 use crate::ui::theme::Theme;
 
 /// The chip's geometry, Grok Bot's mention chip (Jacob's shot, Oct 23): the
@@ -249,12 +249,8 @@ pub enum Picture {
         top: Hsla,
         bottom: Hsla,
     },
-    /// D92 leaf disc.
-    Leaf(LeafPick),
-    /// The neutral disc (Jacob, 2026-10-25): the name's first letter on plain grey.
-    Neutral {
-        name: String,
-    },
+    /// D92 solid-colour disc.
+    Disc(u8),
 }
 
 pub struct Mention {
@@ -380,8 +376,8 @@ impl Mentions {
         );
         // Me, by handle like everyone else: a bubble that says `@<my handle>` is my
         // chip for me too, as it is for the other members (Scout's report, Oct 29: his
-        // own `@A` read as raw text). Before the chat people so a same-named directory
-        // result cannot take my name's chip.
+        // own `@A` read as raw text — [feedback typed-handle-mention-chip-2026-10-29]).
+        // Before the chat people so a same-named directory result cannot take my name's chip.
         let me = Person {
             id: s.me_id(),
             handle: s.me_handle(),
@@ -470,7 +466,7 @@ impl Mentions {
                             project_id: ident.id.clone(),
                         }),
                         name: ident.name.clone(),
-                        picture: identity_picture(s, &ident, theme),
+                        picture: identity_picture(s, &ident),
                         id: Some(format!("agent:{}", ident.id)),
                     },
                 );
@@ -501,16 +497,9 @@ impl Mentions {
             if slug.is_empty() {
                 continue;
             }
-            let picture = match (
-                avatars::leaf_avatars_on(),
-                server.avatar_leaf,
-                server.avatar_leaf_color,
-            ) {
-                (_, Some(avatars::leaf::NEUTRAL), _) => Picture::Neutral {
-                    name: server.name.clone(),
-                },
-                (true, Some(leaf), Some(color)) => Picture::Leaf(LeafPick { leaf, color }),
-                _ => initials(
+            let picture = match server.avatar_disc_color {
+                Some(_) => Picture::Disc(avatars::disc_color(&server.id, server.avatar_disc_color)),
+                None => initials(
                     &server.id,
                     &server.name,
                     server.avatar_color_index_effective,
@@ -801,10 +790,9 @@ pub fn agent_member_picture(
     s: &AppState,
     space: Option<&Project>,
     a: &crate::model::AgentMember,
-    theme: &Theme,
 ) -> Picture {
     let ident = avatars::member_identity(space, &s.projects, a);
-    identity_picture(s, &ident, theme)
+    identity_picture(s, &ident)
 }
 
 pub fn person_picture(s: &AppState, person: &Person, theme: &Theme) -> Picture {
@@ -819,48 +807,26 @@ pub fn person_picture(s: &AppState, person: &Person, theme: &Theme) -> Picture {
     }
 }
 
-/// The chip picture for a resolved agent: its uploaded picture, else its leaf (D92) or
-/// initials (D79) — the identity's own picks, never a guess from the handle.
-fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> Picture {
+/// The chip picture for a resolved agent: its uploaded picture, else its disc (D92) —
+/// the identity's own pick, never a guess from the handle.
+fn identity_picture(s: &AppState, a: &avatars::AgentIdentity) -> Picture {
     if let Some(image) = a.image_key.as_deref().and_then(|url| s.avatar(url)) {
         return Picture::Image(image);
     }
-    if a.neutral {
-        return Picture::Neutral {
-            name: a.name.clone(),
-        };
-    }
-    if avatars::leaf_avatars_on() {
-        Picture::Leaf(a.leaf)
-    } else {
-        initials(&a.id, &a.name, Some(a.color_index), theme)
-    }
+    Picture::Disc(a.disc_color)
 }
 
 fn project_picture(s: &AppState, p: &Project, theme: &Theme) -> Picture {
     if let Some(image) = avatars::project_image(s, p) {
         return Picture::Image(image);
     }
-    if avatars::leaf::is_neutral(p.avatar_leaf) {
-        return Picture::Neutral {
-            name: p.name.clone(),
-        };
-    }
     if p.is_people_group() {
-        return match (
-            avatars::leaf_avatars_on(),
-            p.avatar_leaf,
-            p.avatar_leaf_color,
-        ) {
-            (true, Some(leaf), Some(color)) => Picture::Leaf(LeafPick { leaf, color }),
-            _ => initials(&p.id, &p.name, p.avatar_color_index, theme),
+        return match p.avatar_disc_color {
+            Some(_) => Picture::Disc(avatars::disc_color(&p.id, p.avatar_disc_color)),
+            None => initials(&p.id, &p.name, p.avatar_color_index, theme),
         };
     }
-    if avatars::leaf_avatars_on() {
-        Picture::Leaf(avatars::project_leaf(p))
-    } else {
-        initials(&p.id, &p.name, p.avatar_color_index, theme)
-    }
+    Picture::Disc(avatars::disc_color(&p.id, p.avatar_disc_color))
 }
 
 #[cfg(test)]
@@ -1043,6 +1009,41 @@ pub(crate) mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
         assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
+    }
+
+    /// Scout, 2026-10-29: Affinity's "@A yo wassup" stayed raw text for Scout
+    /// because the viewer was only indexed by id, never by handle. With me in
+    /// the table by handle (as `from_state` adds me), `@A` is Scout's chip
+    /// ([feedback typed-handle-mention-chip-2026-10-29]).
+    #[test]
+    fn my_own_typed_handle_is_a_chip() {
+        let m = mentions(&[
+            (
+                "a",
+                "Scout",
+                ProfilePage::User {
+                    handle: "a".into(),
+                    space_id: None,
+                },
+            ),
+            (
+                "z",
+                "Affinity",
+                ProfilePage::User {
+                    handle: "z".into(),
+                    space_id: None,
+                },
+            ),
+        ]);
+        let text = m.display("@A yo wassup");
+        assert_eq!(text, format!("{CELL}Scout yo wassup"));
+        let chips = m.find(&text);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].1.id.as_deref(), Some("user:gh_a"));
+        assert!(
+            m.by_handle("A").is_some(),
+            "the viewer's handle must resolve"
+        );
     }
 
     /// Affinity, 2026-10-29: `@A` (Scout, a chat member with a photo) drew as

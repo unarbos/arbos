@@ -1,0 +1,37 @@
+{
+  "source_path": "apps/ios/Arbos/Arbos/UI/LibraryList.swift",
+  "snapshot": "baseline-date-methods.swift",
+  "snapshot_bytes": 1997,
+  "snapshot_sha256": "47654913021e020ae86dbfaac0d685ad7169f52c7c292377369f9c7e76a48f4c",
+  "methods": {
+    "dayLabel": "45da4a005309bc764d7d1316c058d691fc39a13426e2e273a572f6ddb549a0ba",
+    "stamp": "e0033958e8a858feb9929f17ac782d5caf8f7b503986b91f2865a9ec2c85516c"
+  },
+  "sources": {
+    "upstream": {
+      "commit": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "whole_file_sha256": "0247b5599d88076d7464cd91e8b4d21aadc8f44182b3b0f2ef792854c7ed3ffb",
+      "exact_method_sha256": {
+        "dayLabel": "45da4a005309bc764d7d1316c058d691fc39a13426e2e273a572f6ddb549a0ba",
+        "stamp": "e0033958e8a858feb9929f17ac782d5caf8f7b503986b91f2865a9ec2c85516c"
+      }
+    },
+    "phase3": {
+      "commit": "d40572b8fb43886fa784f6ac7579217fd23bb965",
+      "whole_file_sha256": "0247b5599d88076d7464cd91e8b4d21aadc8f44182b3b0f2ef792854c7ed3ffb",
+      "exact_method_sha256": {
+        "dayLabel": "45da4a005309bc764d7d1316c058d691fc39a13426e2e273a572f6ddb549a0ba",
+        "stamp": "e0033958e8a858feb9929f17ac782d5caf8f7b503986b91f2865a9ec2c85516c"
+      }
+    },
+    "phase4": {
+      "commit": "6247938b68aaef84fdfeb1768d0b7ac80e6e8b3e",
+      "whole_file_sha256": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+      "exact_method_sha256": {
+        "dayLabel": "45da4a005309bc764d7d1316c058d691fc39a13426e2e273a572f6ddb549a0ba",
+        "stamp": "e0033958e8a858feb9929f17ac782d5caf8f7b503986b91f2865a9ec2c85516c"
+      }
+    }
+  },
+  "scope": "Only the two original actual date method definitions are retained; no UI, MediaOrigin, imports or other product bodies copied."
+}

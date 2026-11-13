@@ -7,7 +7,7 @@ use serde_json::Value;
 const MAX_CHARS: usize = 48;
 
 /// `mcp__arbos__web_search` → `web_search`: project tools reach pi under the MCP server prefix.
-fn bare_tool_name(tool_name: &str) -> &str {
+pub(crate) fn bare_tool_name(tool_name: &str) -> &str {
     tool_name
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split_once("__"))
@@ -97,6 +97,22 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
         "submit_feedback" => Some("Filing your feedback".into()),
         "publish_site" | "unpublish_site" | "list_sites" => Some("Publishing the site".into()),
         "connector_call" | "connectors_list" => Some("Checking your connected accounts".into()),
+        "arbos_app" => Some(
+            match args
+                .get("cmd")
+                .and_then(Value::as_str)
+                .or_else(|| args.get("action").and_then(Value::as_str))
+            {
+                Some("create_group") => "Creating a group".into(),
+                Some("delete_group") => "Deleting a group".into(),
+                Some("add_members") | Some("remove_members") => "Updating group members".into(),
+                Some("search_messages") => "Searching messages".into(),
+                Some("send_message") => "Sending a message".into(),
+                Some("list_chats") | Some("list_contacts") => "Looking up chats".into(),
+                Some("list_commands") | Some("describe") => "Checking app commands".into(),
+                _ => "Updating the app".into(),
+            },
+        ),
         "local_run" | "local_read" | "local_list" | "local_devices" => {
             Some("Working on your computer".into())
         }

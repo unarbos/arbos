@@ -4,7 +4,7 @@ import ArbosFFI
 
 /// The avatar picker offers the same four controls to every target (Jacob, 2026-10-24: the
 /// group / server picker had only Bot / Upload / Reset). My own picture (Jacob, 2026-10-25)
-/// opens the same sheet without the leaf tab: Generate | Upload, Reset in the bar.
+/// opens the same sheet without the Bot tab: Generate | Upload, Reset in the bar.
 final class AvatarPickerTabsTests: XCTestCase {
     func testEveryTargetGetsBotGenerateUploadAndReset() {
         for target in [AvatarTarget.agent("a"), .group("g"), .server("s")] {
@@ -13,73 +13,76 @@ final class AvatarPickerTabsTests: XCTestCase {
         XCTAssertEqual(AvatarPickerTab.allCases.count, 3)
     }
 
-    func testMyProfileGetsGenerateAndUploadWithoutALeafTab() {
+    func testMyProfileGetsGenerateAndUploadWithoutABotTab() {
         let tabs = AvatarPickerSheet.tabs(for: .me)
         XCTAssertEqual(tabs, [.generate, .upload])
-        XCTAssertFalse(tabs.contains(.bot), "people are coloured initials, not leaves")
+        XCTAssertFalse(tabs.contains(.bot), "people are coloured initials, not solid discs")
         XCTAssertEqual(tabs.first, .generate, "Generate is the landing tab")
     }
 
     /// Jacob, 2026-10-25 ([feedback create-sheet-avatar-upload-generate-ios-2026-10-25]): the
     /// Create New Agent / Group / Server sheets offer Upload and Generate only — no Bot tab, so
-    /// no leaf grid and no pastel swatches — Upload first. The Mac twin is
+    /// no colour swatches — Upload first. The Mac twin is
     /// `crates/arbos-mac/src/ui/create_entity.rs` `tests`.
     func testTheCreateSheetOffersUploadAndGenerateOnly() {
         XCTAssertEqual(CreateEntityView.options, [.upload, .generate])
-        XCTAssertFalse(CreateEntityView.options.contains(.bot), "no leaf grid, no swatches")
+        XCTAssertFalse(CreateEntityView.options.contains(.bot), "no swatches")
         XCTAssertEqual(Set(CreateEntityView.options).count, 2)
     }
 
-    /// An entity created without a pick is stored with the neutral pair (255 / 255 — the relay's
-    /// `leaf::NEUTRAL`), never an automatic leaf; the apps draw it as the name's first letter on a
-    /// grey disc. Existing agents (nil = automatic leaf) are untouched.
-    func testANewEntityIsStoredNeutralNeverWithAnAutomaticLeaf() {
-        let stored = CreateEntityView.storedLeaf
-        XCTAssertEqual(Int(stored.leaf), LeafArt.neutral)
-        XCTAssertEqual(Int(stored.color), LeafArt.neutral)
-        XCTAssertEqual(LeafArt.neutral, 255)
-        XCTAssertTrue(LeafArt.isNeutral(255))
-        XCTAssertFalse(LeafArt.isNeutral(nil), "nil stays the automatic leaf")
-        XCTAssertFalse(LeafArt.isNeutral(3))
+    /// Jacob, 2026-11-06: no default avatar is grey. A new entity is stored with no colour at
+    /// all, and the colour follows from the id the relay assigns.
+    func testANewEntityStoresNoColourSoItsIdPicksOne() {
+        XCTAssertNil(CreateEntityView.storedDisc, "the sentinel is not stored any more")
         for seed in ["new-agent-0", "new-group-3", "new-server-1"] {
-            XCTAssertNotEqual(LeafArt.pick(seed: seed), stored, seed)
+            XCTAssertLessThan(DiscArt.pick(seed: seed), UInt8(DiscArt.colorCount), seed)
         }
-        // The shared resolver ignores the sentinel for the leaf in effect (an older client draws
-        // the automatic leaf); `agentProject` reads the neutral pair off the card instead.
+        // A card still carrying the old sentinel resolves to a real palette colour, so stored
+        // data needs no migration.
         let card = AgentCard(id: "01N", name: "Field notes", handle: "field-notes",
-                             leaf: UInt8(LeafArt.neutral), leafColor: UInt8(LeafArt.neutral), colorIndex: nil, imageKey: nil, avatarVersion: 0)
+                             discColor: UInt8(DiscArt.neutral), colorIndex: nil, imageKey: nil, avatarVersion: 0)
         let who = resolveAgent(sender: "agent:01N", handle: nil, name: nil, cards: [card])
         XCTAssertTrue(who.known)
-        XCTAssertLessThan(who.leaf.leaf, UInt8(LeafArt.count))
+        XCTAssertLessThan(who.discColor, UInt8(DiscArt.colorCount))
+        XCTAssertEqual(who.discColor, DiscArt.pick(seed: "01N"), "the id's own colour, not grey")
     }
 
     /// The letter on the neutral disc: the first letter or digit, upper-cased; `?` when empty.
     func testTheNeutralInitialIsTheFirstLetter() {
-        XCTAssertEqual(LeafArt.initial("Field notes"), "F")
-        XCTAssertEqual(LeafArt.initial("  @ops-bot"), "O")
-        XCTAssertEqual(LeafArt.initial("élan"), "É")
-        XCTAssertEqual(LeafArt.initial("42 things"), "4")
-        XCTAssertEqual(LeafArt.initial(""), "?")
-        XCTAssertEqual(LeafArt.initial("—"), "?")
+        XCTAssertEqual(DiscArt.initial("Field notes"), "F")
+        XCTAssertEqual(DiscArt.initial("  @ops-bot"), "O")
+        XCTAssertEqual(DiscArt.initial("élan"), "É")
+        XCTAssertEqual(DiscArt.initial("42 things"), "4")
+        XCTAssertEqual(DiscArt.initial(""), "?")
+        XCTAssertEqual(DiscArt.initial("—"), "?")
     }
 
-    /// A group or server whose stored pair is neutral draws no leaf (`leafPick` is nil) and says so.
-    func testNeutralGroupsAndServersDrawNoLeaf() {
+    /// The iPhone leg of the cross-surface vector, taken through the FFI so it exercises the
+    /// same compiled `disc::color_for` the relay and the Mac call. The relay asserts the same
+    /// id and index in `arbos-relay/src/avatar.rs`, the Mac in `ui/avatars.rs`. This fails if
+    /// any surface stops resolving the sentinel, or if the seed stops being the bare id.
+    func testAStoredNeutralResolvesToTheSameVividDiscAsTheOtherSurfaces() {
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT", color: DiscArt.neutral), 7)
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT"), 7)
+        XCTAssertNotEqual(DiscArt.pick(seed: "agent:01M5AGENT"), 7)
+    }
+
+    /// A group still carrying the old sentinel draws its id's colour, not a grey disc.
+    func testAGroupStoredNeutralDrawsItsIdsColour() {
         var chat = PeopleChat(id: "g1", kind: "group", createdBy: "u", createdAt: 0, title: "Launch crew", pending: false,
                               members: [], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0,
                               myRole: "owner", muted: false, silenced: false)
-        chat.avatarLeaf = LeafArt.neutral
-        chat.avatarLeafColor = LeafArt.neutral
-        XCTAssertTrue(chat.isNeutralAvatar)
-        XCTAssertNil(chat.leafPick)
-        chat.avatarLeaf = 4
-        chat.avatarLeafColor = 2
-        XCTAssertFalse(chat.isNeutralAvatar)
-        XCTAssertEqual(chat.leafPick, LeafPick(leaf: 4, color: 2))
+        chat.avatarDiscColor = DiscArt.neutral
+        let resolved = DiscArt.pick(seed: chat.id, color: chat.avatarDiscColor)
+        XCTAssertLessThan(resolved, UInt8(DiscArt.colorCount))
+        XCTAssertEqual(resolved, DiscArt.pick(seed: "g1"), "the sentinel falls through to the id")
+        // An explicit pick still wins.
+        chat.avatarDiscColor = 2
+        XCTAssertEqual(DiscArt.pick(seed: chat.id, color: chat.avatarDiscColor), 2)
     }
 
-    /// The Create sheet hands the create exactly what was picked: nothing (→ neutral), the photo
-    /// JPEG, or the generated key — never the other tab's choice.
+    /// The Create sheet hands the create exactly what was picked: nothing (→ no colour stored,
+    /// so the id picks one), the photo JPEG, or the generated key — never the other tab's choice.
     @MainActor
     func testTheDraftHandsOverItsPick() {
         let source = AvatarSourceState()

@@ -10,10 +10,23 @@ name: iPhone capture
 # `ARBOS_SHOT_DIR` is absent, so the `swift-core-check.yml` gate pays one skipped test case for it
 # and nothing else. Read its doc comment for the step vocabulary.
 #
+# Those variables reach the runner through the built `.xctestrun`, written by
+# `scripts/ci/xctestrun-env.py` between `build-for-testing` and the capture. They do NOT travel as
+# `TEST_RUNNER_<KEY>` build settings: that is the documented route, it silently does not work on
+# this image, and relying on it meant this workflow skipped its own rig on every run it ever made
+# while reporting `** TEST EXECUTE SUCCEEDED **`. If a leg ever skips again the capture step says
+# so in those words rather than leaving an empty directory to be misread.
+#
 #   gh workflow run ios-capture.yml \
 #     -f head_ref=cursor/my-fix -f base_ref=main \
 #     -f launch_env='ARBOS_FIXTURE=1;ARBOS_NO_STORE=1;ARBOS_OPEN_PEOPLE=fx-group-launch' \
 #     -f script='wait chat-back:fx-group-launch;sleep 4;shot transcript'
+#
+# Each leg is also filmed (`film-base` / `film-head`), because a still cannot show a
+# transition. And `holddrag` is the step for a claim about what happens *during* a gesture:
+# it holds the finger down and shoots while it is still there, which is the only way a
+# before/after pair can separate a screen that follows the finger from one that jumps when
+# the finger is lifted. Both legs end up in the same place, so an end-state pair says nothing.
 #
 # ──────────────────────────────────────────────────────────────────────────────────────────────
 # READ THIS BEFORE YOU CHOOSE WHERE TO SHOOT
@@ -43,6 +56,12 @@ name: iPhone capture
 #    so treat a strange result as the image's fault until you have ruled it out; the advisory lane
 #    is advisory for exactly that reason. And pin the Xcode: the image's own default is 27.1, which
 #    is not what testers install, and a wrong pin is invisible in the picture.
+#
+#    `xcode:` now pins the simulator runtime too, not just the toolchain. The image carries iOS
+#    27.0 and 27.1, and it offers `iPhone 17` only on 27.0, so the old "newest runtime" rule both
+#    failed outright and, on any device where it had not, would have shot an OS no tester runs.
+#    The runtime matching the pin is tried first, the rest in descending order after it, and a
+#    shoot that lands on anything other than the pin says so in the log and the summary.
 #
 # 2. ANYTHING MEASURED IN TIME. A hosted runner is a shared three-core machine. The split is sharp,
 #    and worth getting right: a still is a still, so the pixel-band brightness measurement in
@@ -245,10 +264,22 @@ jobs:
       APP_DIR: apps/ios/Arbos
       SIM_NAME: Arbos Capture ${{ matrix.leg }} ${{ github.run_id }}
       SHOT_DIR: ${{ github.workspace }}/shots
+      VIDEO_DIR: ${{ github.workspace }}/film
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.sha }}
+      # The workspace holds the *commit being shot*, which is usually older than this
+      # workflow and does not contain the rig's own helpers. `github.workflow_sha` is the
+      # commit this workflow file came from, so the rig always runs its own code no matter
+      # how old the subject is — which is the whole point of shooting historical commits.
+      - name: Fetch the rig's own helpers
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .capture-rig
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
       # Copied from ios.yml, not shared: at most two heavy jobs run on the EC2 Mac at a time
       # (#1839). Only relevant when someone points `runner` at it; the hosted pool has no slots.
       - name: Heavy-job slot
@@ -346,19 +377,61 @@ jobs:
         env:
           DEVICE: ${{ inputs.device }}
           APPEARANCE: ${{ inputs.appearance }}
+          WANT_XCODE: ${{ inputs.xcode }}
         run: |
           set -euo pipefail
-          runtime="$(xcrun simctl list runtimes --json \
-            | python3 -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; print(sorted(rs, key=lambda r: [int(p) for p in r["version"].split(".")])[-1]["identifier"] if rs else "")')"
-          if [[ -z "$runtime" ]]; then
+          # Newest first, except that a pinned Xcode puts its own iOS version at the head of
+          # the list, because pinning the toolchain does not pin the simulator. The `xcode-27`
+          # image carries iOS 27.0 *and* 27.1 and offers `iPhone 17` only on 27.0, so taking
+          # the newest ran `simctl create … 27.1` and died with "Incompatible device" — both
+          # legs of run 42524660246, before a single frame. Had the device existed on 27.1 the
+          # quiet outcome would have been worse than the loud one: a shoot on a runtime no
+          # tester has, which the header warns is invisible in the picture.
+          # `mapfile` is bash 4; this runner's /bin/bash is 3.2.
+          runtimes=()
+          while IFS= read -r line; do
+            [[ -n "$line" ]] && runtimes+=("$line")
+          done < <(xcrun simctl list runtimes --json | WANT="$WANT_XCODE" python3 -c 'import json,os,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; rs.sort(key=lambda r: [int(p) for p in r["version"].split(".")], reverse=True); want=os.environ.get("WANT","").strip(); rs.sort(key=lambda r: r["version"] != want) if want else None; [print(r["identifier"] + " " + r["version"]) for r in rs]')
+          if [[ "${#runtimes[@]}" -eq 0 ]]; then
             echo "::error title=No iOS runtime::this runner has no available iOS simulator runtime"
             exit 1
           fi
-          udid="$(xcrun simctl create "$SIM_NAME" "$DEVICE" "$runtime")"
+          # Ask each runtime in turn rather than consult a compatibility table: `simctl create`
+          # is the only authority on whether this runtime carries this device.
+          udid=""; runtime=""; version=""
+          for entry in "${runtimes[@]}"; do
+            candidate="${entry%% *}"; candidate_version="${entry##* }"
+            if udid="$(xcrun simctl create "$SIM_NAME" "$DEVICE" "$candidate" 2>/dev/null)"; then
+              runtime="$candidate"; version="$candidate_version"
+              break
+            fi
+            echo "$DEVICE is not available on $candidate; trying the next runtime"
+            udid=""
+          done
+          if [[ -z "$udid" ]]; then
+            echo "::error title=No runtime carries $DEVICE::tried ${runtimes[*]}. Ask for a device this image has."
+            exit 1
+          fi
+          # Say it rather than let it pass: a shoot on a runtime other than the pinned one is
+          # still a shoot, and nothing in the resulting picture shows which one took it.
+          if [[ -n "$WANT_XCODE" && "$version" != "$WANT_XCODE" ]]; then
+            echo "::warning title=Simulator runtime is not the pinned Xcode::asked for $WANT_XCODE, shot on iOS $version"
+            echo "- \`${{ matrix.leg }}\`: **shot on iOS $version, not the pinned $WANT_XCODE**" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl ui "$udid" appearance "$APPEARANCE"
+          # A fresh simulator shows the swipe-to-type tutorial over the keyboard the first
+          # time one comes up, and it covers the keyboard completely. Any shot with the
+          # keyboard up is then a picture of an Apple panel, and worse, the tutorial is a
+          # first-run state no tester is in, so the shoot is not of the app testers use.
+          # Both keyboard-up legs of runs 42540405590 / 42540407282 landed on it.
+          # The keyboard is its own process, so the defaults go to the device, not the app.
+          for d in com.apple.keyboard com.apple.Preferences; do
+            xcrun simctl spawn "$udid" defaults write "$d" DidShowContinuousPathIntroduction -bool true || true
+          done
+          xcrun simctl spawn "$udid" defaults write com.apple.Preferences KeyboardContinuousPathEnabled -bool false || true
           echo "$DEVICE on $runtime ($udid), appearance $APPEARANCE"
           echo "- \`${{ matrix.leg }}\`: $DEVICE, \`$runtime\`, $APPEARANCE" >> "$GITHUB_STEP_SUMMARY"
       # Separate from the capture, so a compile failure reads as a compile failure in the log
@@ -386,13 +459,66 @@ jobs:
             TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
             TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" 2>&1 \
             | tee build/xcodebuild-capture-build.log \
-            | grep -E "error:|\*\* BUILD" || true
-          grep -q "\*\* BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
+            | grep -E "error:|\*\* (TEST )?BUILD" || true
+          # `build-for-testing` ends in `** TEST BUILD SUCCEEDED **`, not `** BUILD SUCCEEDED **`.
+          grep -qE "\*\* (TEST )?BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
+      # A `TEST_RUNNER_<KEY>` build setting is documented to reach the UI test runner as `<KEY>`.
+      # On this image it does not, and that is why no run of this workflow had ever produced a
+      # screenshot: `CaptureRigUITests` found no `ARBOS_SHOT_DIR`, skipped itself, and xcodebuild
+      # still said `** TEST EXECUTE SUCCEEDED **`. The variables go into the built `.xctestrun`
+      # instead — the file the run actually reads — and the capture step below names that file so
+      # nothing regenerates it underneath us.
+      - name: Put the capture variables in the xctestrun
+        id: xctestrun
+        env:
+          SHOT_SCRIPT: ${{ inputs.script }}
+          SHOT_LAUNCH_ENV: ${{ inputs.launch_env }}
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          # A capture with no script shoots nothing, so it is a dispatch mistake, not a run.
+          if [ -z "${SHOT_SCRIPT//[[:space:]]/}" ]; then
+            echo "::error title=No capture script::dispatch gave an empty \`script\`, so this run would shoot nothing"
+            exit 1
+          fi
+          shopt -s nullglob
+          found=(build/dd/Build/Products/*.xctestrun)
+          if [ "${#found[@]}" -eq 0 ]; then
+            echo "::error title=No xctestrun::build-for-testing wrote no .xctestrun under build/dd/Build/Products"
+            exit 1
+          fi
+          run="${found[0]}"
+          # From `.capture-rig`, not the workspace: see "Fetch the rig's own helpers".
+          helper="$GITHUB_WORKSPACE/.capture-rig/scripts/ci/xctestrun-env.py"
+          if [ ! -f "$helper" ]; then
+            echo "::error title=Rig helper missing::$helper was not checked out, so the capture variables cannot be written"
+            exit 1
+          fi
+          python3 "$helper" "$run" \
+            "ARBOS_SHOT_DIR=$SHOT_DIR" \
+            "ARBOS_SHOT_TAG=${{ matrix.leg }}" \
+            "ARBOS_SHOT_SCRIPT=$SHOT_SCRIPT" \
+            "ARBOS_SHOT_LAUNCH_ENV=$SHOT_LAUNCH_ENV"
+          echo "path=$PWD/$run" >> "$GITHUB_OUTPUT"
       #
       # xcodebuild has sat idle for minutes after a suite finished, still holding the machine. The
       # watchdog below stops it ~20 s after the log carries the verdict, which is the same trick
       # `scripts/feedback/ios-gate.sh` uses, and reads the verdict from the log rather than from
       # xcodebuild's exit code.
+      # A still cannot show a transition, and some claims are about movement rather than
+      # about a state — "the screen follows the finger" is one. `simctl io recordVideo`
+      # films the whole capture beside it, so the same dispatch hands back a pair of films
+      # as well as the pair of stills, and the stills stay the thing the pair job measures.
+      # Kept out of SHOT_DIR so that `pair-screenshots.py` still sees only PNGs.
+      - name: Film this leg
+        id: film
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p "$VIDEO_DIR"
+          xcrun simctl io "${{ steps.sim.outputs.udid }}" recordVideo --codec h264 --force \
+            "$VIDEO_DIR/${{ matrix.leg }}.mp4" > "$VIDEO_DIR/${{ matrix.leg }}.log" 2>&1 &
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
       - name: Capture
         id: shoot
         env:
@@ -403,14 +529,10 @@ jobs:
           mkdir -p "$SHOT_DIR"
           cd "$APP_DIR"
           log=build/xcodebuild-capture-test.log
-          xcodebuild test-without-building -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+          xcodebuild test-without-building -xctestrun "${{ steps.xctestrun.outputs.path }}" \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            -derivedDataPath build/dd -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
-            -only-testing:ArbosUITests/CaptureRigUITests \
-            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
-            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
-            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
-            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" > "$log" 2>&1 &
+            -parallel-testing-enabled NO \
+            -only-testing:ArbosUITests/CaptureRigUITests > "$log" 2>&1 &
           pid=$!
           start=$(date +%s); verdict=0
           while kill -0 "$pid" 2>/dev/null; do
@@ -428,14 +550,46 @@ jobs:
           wait "$pid" 2>/dev/null
           grep -E "ARBOS_CAPTURE|error: |Test Case .* (passed|failed)|was skipped|\*\* TEST" "$log" | tail -40 || true
           ls -la "$SHOT_DIR" || true
+          # A skipped rig is the failure this job was blind to for its whole history: the rig
+          # skips itself when its environment is missing, xcodebuild reports TEST EXECUTE
+          # SUCCEEDED, and the only other symptom is an empty directory — which points at the
+          # directory instead of at the environment. Name the real cause here, first.
+          if grep -q "Test skipped" "$log"; then
+            echo "::error title=Capture rig skipped::the rig skipped instead of shooting, so its environment never reached the test runner. This is not an empty-directory problem. The skip line was:"
+            grep -m1 "Test skipped" "$log" || true
+            exit 1
+          fi
           # A leg with no PNG is a failed leg, whatever xcodebuild said.
           shopt -s nullglob
           shots=("$SHOT_DIR"/*.png)
           if [ "${#shots[@]}" -eq 0 ]; then
-            echo "::error title=No screenshots::${{ matrix.leg }} wrote no PNG; see the capture log artifact"
+            echo "::error title=No screenshots::${{ matrix.leg }} ran the rig but wrote no PNG; see the capture log artifact"
             exit 1
           fi
           echo "${{ matrix.leg }}: ${#shots[@]} screenshot(s)"
+      # SIGINT is how `recordVideo` is asked to close the file properly; killing it outright
+      # leaves an mp4 with no moov atom, which no player will open.
+      - name: Stop filming
+        if: always() && steps.film.outputs.pid != ''
+        continue-on-error: true
+        run: |
+          pid="${{ steps.film.outputs.pid }}"
+          kill -INT "$pid" 2>/dev/null || true
+          for _ in $(seq 1 30); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          kill -9 "$pid" 2>/dev/null || true
+          ls -la "$VIDEO_DIR" || true
+      - name: Keep this leg's film
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: film-${{ matrix.leg }}
+          path: ${{ env.VIDEO_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
       - name: Keep this leg's screenshots
         if: always()
         uses: actions/upload-artifact@v4

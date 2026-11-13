@@ -1371,8 +1371,7 @@ mod tests {
                 members: vec!["user2".into(), "user3".into(), "user4".into()],
                 agent_ids: vec![home.clone()],
                 title: Some("Arbonites".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -1491,8 +1490,7 @@ mod tests {
                 members: vec!["user2".into(), "user3".into(), "user4".into()],
                 agent_ids: vec![home.clone()],
                 title: Some("Pick some".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -1704,8 +1702,7 @@ mod tests {
                 members: vec!["user2".into(), "user3".into()],
                 agent_ids: vec![],
                 title: Some("Speakers".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )

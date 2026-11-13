@@ -22,7 +22,8 @@ use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, PictureSource};
 use crate::ui::avatar_picker;
-use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::avatars::{self, disc};
+use crate::ui::back_swipe::{self, BackSwipe, BackTarget, Region};
 use crate::ui::blocked;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -45,7 +46,7 @@ use crate::ui::member_menu;
 use crate::ui::message_menu;
 use crate::ui::mock_backdrop;
 use crate::ui::modal;
-use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::motion::{ease_out_cubic, shake_offset, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
@@ -58,7 +59,6 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sf_symbols;
 use crate::ui::sidebar;
-use crate::ui::sidebar_fit;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
@@ -105,6 +105,9 @@ enum RenameKind {
 /// backdrop, which hands it to the rename (`rename_from_backdrop`).
 const NAME_CLICK_DELAY: Duration = Duration::from_millis(250);
 
+/// The restore sheet's field hint (the iPhone's).
+const RESTORE_PLACEHOLDER: &str = "twelve words…";
+
 /// Width of my pane's Settings pages that fit the pane; the two wider panels
 /// (`sheet_width`) grow the pane for their page.
 const SETTINGS_WIDTH: f32 = crate::ui::profiles::SHEET_WIDTH;
@@ -140,6 +143,9 @@ pub(crate) enum SettingsPage {
     Secrets,
     /// Signed-in devices of my account: list + sign out another (Oct 23).
     Devices,
+    /// Links that let an outside agent read — or reply as me. This page owns
+    /// every agent token of my account, Devices owns none of them.
+    AgentLinks,
 }
 
 impl SettingsPage {
@@ -147,11 +153,12 @@ impl SettingsPage {
     /// its order); the search index must find each of them
     /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
     #[cfg(test)]
-    pub(crate) const LISTED: [SettingsPage; 8] = [
+    pub(crate) const LISTED: [SettingsPage; 9] = [
         SettingsPage::Appearance,
         SettingsPage::Notifications,
         SettingsPage::Secrets,
         SettingsPage::Devices,
+        SettingsPage::AgentLinks,
         SettingsPage::ThisMac,
         SettingsPage::Machine,
         SettingsPage::Updates,
@@ -174,6 +181,7 @@ impl SettingsPage {
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
             SettingsPage::Devices => "Devices",
+            SettingsPage::AgentLinks => "Agent access link",
         }
     }
 
@@ -188,10 +196,11 @@ impl SettingsPage {
                 | SettingsPage::Updates
                 | SettingsPage::About
                 | SettingsPage::Devices
+                | SettingsPage::AgentLinks
         )
     }
 
-    /// The pane grows for the two pages laid out wider than the card list.
+    /// The pane grows for the pages laid out wider than the card list.
     pub(crate) fn sheet_width(self) -> f32 {
         match self {
             SettingsPage::Root
@@ -206,6 +215,9 @@ impl SettingsPage {
             | SettingsPage::ThisMac
             | SettingsPage::Secrets
             | SettingsPage::Devices => SETTINGS_WIDTH,
+            // The scope rows carry two lines of consequence each; 340 would
+            // wrap them to four.
+            SettingsPage::AgentLinks => 400.0,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -321,6 +333,10 @@ pub struct Shell {
     pub(crate) channels: Entity<ChannelsPanel>,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
+    /// Where in its hit band the sidebar's resize handle was grabbed: pointer to pane edge.
+    pub(crate) sidebar_grab: f32,
+    /// The one timer that redraws the toast slot when the next toast expires.
+    notice_wake: Option<gpui::Task<()>>,
     /// A Finder drag is over the chat pane: the whole pane lights up
     /// (`ui::dropzone`). Set from the pane's own drag-move bounds check, so it
     /// does not depend on GPUI hover state; cleared on drop, exit and release.
@@ -339,10 +355,6 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// Which segment of the chat list's All · Agents · People · Servers
-    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]);
-    /// persisted with the rail state ([feedback mac-sidebar-rail-2026-10-26]).
-    pub(crate) list_filter: sidebar::ListFilter,
     /// Where the expanded sidebar's discs, pictures and footer picture rest,
     /// recorded every frame they are painted; the rail morph reads it.
     pub(crate) morph: rail::Morph,
@@ -353,13 +365,6 @@ pub struct Shell {
     pub(crate) split_drag: crate::ui::split_handle::DragState,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
-    /// The sidebar filter capsules' horizontal scroll (a narrow column,
-    /// [feedback sidebar-narrow-wrap-2026-10-27]).
-    pub(crate) filter_scroll: ScrollHandle,
-    /// Scrolls the selected capsule into view once per selection / width, so
-    /// the strip stays scrollable back to "All" ([feedback
-    /// server-strip-scroll-2026-10-28]).
-    pub(crate) filter_pin: sidebar_fit::FilterPin,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
     /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
@@ -373,6 +378,12 @@ pub struct Shell {
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
+    /// The two-finger back swipe (`ui::back_swipe`) and where it put the
+    /// page this frame (the sidebar reads it while drawing its list).
+    back_swipe: BackSwipe,
+    pub(crate) back_swipe_drawn: Option<back_swipe::Visual>,
+    /// Where the pointer was when the current trackpad gesture started.
+    back_swipe_at: Option<gpui::Point<Pixels>>,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -416,6 +427,19 @@ pub struct Shell {
     pub(crate) device_revoke_armed: Option<String>,
     /// Settings → Devices: the load-failure note's Details disclosure.
     pub(crate) devices_error_details_open: bool,
+    /// Settings → Agent access link: what the next link may do. Read only,
+    /// always, until the user says otherwise on this visit — reply-as-me is
+    /// never pre-selected and never remembered.
+    pub(crate) agent_link_scope: crate::ui::agent_links::Scope,
+    /// Settings → Agent access link: how long the next link lives, in hours.
+    pub(crate) agent_link_ttl_hours: i64,
+    /// Settings → Agent access link: what to call the next link. The relay
+    /// names every unlabelled link the same literal "Agent link", so without
+    /// this every row of the list would read alike; left blank, the name is
+    /// auto-numbered instead ([`crate::ui::agent_links::next_label`]).
+    pub(crate) agent_link_name_input: Entity<ComposerInput>,
+    /// Settings → Agent access link: the load-failure note's Details disclosure.
+    pub(crate) agent_links_error_details_open: bool,
     /// Settings → Updates: the failed-install note's Details disclosure.
     pub(crate) update_error_details_open: bool,
     /// The chat-level notes' Details disclosures (machine error, delivery refusal).
@@ -477,6 +501,8 @@ pub struct Shell {
     profile_open_at_bottom: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
+    /// Agent overview → Edit modal sheet (name, label, avatar, model / reasoning / voice).
+    pub(crate) agent_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
     pub(crate) handle_input: Entity<ComposerInput>,
     pub members_open: bool,
@@ -515,6 +541,7 @@ impl Shell {
                 || v == "appearance"
                 || v == "credits"
                 || v == "devices"
+                || v == "agent-links"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -565,7 +592,7 @@ impl Shell {
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
         {
-            // Keystrokes in a people chat → presence "typing" (throttled in AppState).
+            // Keystrokes → presence "typing" (throttled in AppState).
             let composer_input = composer.read(cx).input.clone();
             cx.observe(&composer_input, |this, input, cx| {
                 if input.read(cx).text().trim().is_empty() {
@@ -585,6 +612,13 @@ impl Shell {
             if let Some(code) = state.update(cx, |s, _| s.pending_join_code.take()) {
                 this.server_input
                     .update(cx, |input, cx| input.set_text(code, cx));
+            }
+            // A locked key backup opened the restore sheet: an empty field, its own hint.
+            if state.update(cx, |s, _| std::mem::take(&mut s.pending_restore_keys)) {
+                this.server_input.update(cx, |input, cx| {
+                    input.clear(cx);
+                    input.set_placeholder(RESTORE_PLACEHOLDER);
+                });
             }
             // The avatar picker: a rig request to open it, and the Generate tab's answer.
             if let Some((target, tab)) = state.update(cx, |s, _| s.avatar_picker_request.take()) {
@@ -856,6 +890,18 @@ impl Shell {
         }
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
             .detach();
+        let agent_link_name_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            agent_link_name_input.update(cx, |input, _| {
+                input.set_placeholder("Codex on my laptop");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.create_agent_link(cx));
+                }));
+            });
+        }
+        cx.observe(&agent_link_name_input, |_, _, cx| cx.notify())
+            .detach();
         let model_search_input = cx.new(ComposerInput::new);
         {
             let weak = cx.weak_entity();
@@ -1103,6 +1149,10 @@ impl Shell {
         let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
         cx.observe(&feedback, |_, _, cx| cx.notify()).detach();
 
+        // Drop the stale All · Agents · People · Servers pref so old segment
+        // choices do not linger ([feedback chat-list-no-filter-mac-2026-11-10]).
+        let _ = std::fs::remove_file(crate::sync::credentials::config_dir().join("sidebar_filter"));
+
         let shell = Self {
             state,
             transcript,
@@ -1148,6 +1198,7 @@ impl Shell {
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
                 Some("devices") => SettingsPage::Devices,
+                Some("agent-links") => SettingsPage::AgentLinks,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -1161,6 +1212,10 @@ impl Shell {
             unblock_armed: None,
             device_revoke_armed: None,
             devices_error_details_open: false,
+            agent_link_scope: crate::ui::agent_links::Scope::Read,
+            agent_link_ttl_hours: crate::ui::agent_links::EXPIRY_DEFAULT_HOURS,
+            agent_link_name_input,
+            agent_links_error_details_open: false,
             update_error_details_open: false,
             machine_error_details_open: false,
             delivery_error_details_open: false,
@@ -1193,20 +1248,17 @@ impl Shell {
             channels,
             secrets,
             shake_started_at: None,
+            sidebar_grab: 0.0,
+            notice_wake: None,
             file_drop_over: false,
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             fullscreen: false,
             menu_open: false,
-            // The saved segment; the rig's `ARBOS_SIDEBAR_FILTER=all|agents|people|servers`
-            // wins at launch.
-            list_filter: sidebar::ListFilter::load(),
             morph: Default::default(),
             rail_hover: None,
             split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
-            filter_scroll: ScrollHandle::new(),
-            filter_pin: sidebar_fit::FilterPin::default(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
@@ -1214,6 +1266,9 @@ impl Shell {
                 .map(|t| t.clamp(0.0, 1.0)),
             last_viewport_width: crate::ui::theme::NARROW_WINDOW,
             hidden_open: false,
+            back_swipe: BackSwipe::default(),
+            back_swipe_drawn: None,
+            back_swipe_at: None,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -1244,6 +1299,7 @@ impl Shell {
             profile_open_at_bottom: std::env::var("ARBOS_PROFILE_SCROLL")
                 .is_ok_and(|v| v == "bottom"),
             profile_edit_open: false,
+            agent_edit_open: false,
             name_input,
             handle_input,
             members_open: false,
@@ -1256,6 +1312,9 @@ impl Shell {
             });
             if shell.settings_page == SettingsPage::Devices {
                 shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
+            if shell.settings_page == SettingsPage::AgentLinks {
+                shell.state.update(cx, |s, cx| s.agent_links_refresh(cx));
             }
         }
         // Rig: `ARBOS_RIG_TOGGLE_RAIL_MS=1500,3500` presses the sidebar toggle at those
@@ -1365,6 +1424,7 @@ impl Shell {
             || focused(&self.wake_auth_input)
             || focused(&self.avatar_prompt_input)
             || focused(&self.model_search_input)
+            || focused(&self.agent_link_name_input)
             || focused(&self.tab_rename_input)
             || focused(&self.feedback.read(cx).note)
             || self.connectors.read(cx).input_focused(window, cx)
@@ -1395,6 +1455,10 @@ impl Shell {
         }
         if state.chart_viewer.is_some() {
             return Some(self.viewer_focus.clone());
+        }
+        // It opens by itself (no click put the keyboard in its field).
+        if state.server_sheet == Some(ServerSheet::RestoreKeys) {
+            return Some(self.server_input.read(cx).focus_handle(cx));
         }
         None
     }
@@ -1432,6 +1496,7 @@ impl Shell {
             | SettingsPage::Updates
             | SettingsPage::About => {}
             SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
+            SettingsPage::AgentLinks => self.state.update(cx, |s, cx| s.agent_links_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -1470,6 +1535,25 @@ impl Shell {
         cx.notify();
     }
 
+    /// Mint the link the Create card describes, from the Create button or from
+    /// Return in the Name field. A blank name is auto-numbered past the live
+    /// links rather than sent empty: the relay would otherwise call this one
+    /// the same literal "Agent link" as every other unlabelled link.
+    pub(crate) fn create_agent_link(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).agent_links.minting {
+            return;
+        }
+        let typed = self.agent_link_name_input.read(cx).text().to_string();
+        let label =
+            crate::ui::agent_links::label_for(&typed, &self.state.read(cx).agent_links.items);
+        let scope = self.agent_link_scope;
+        let ttl = self.agent_link_ttl_hours;
+        self.agent_link_name_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.state
+            .update(cx, |s, cx| s.mint_agent_link(label, scope, ttl, cx));
+    }
+
     /// Close whichever page is embedded in the sheet (its entity stops rendering).
     fn hide_settings_page(&mut self, cx: &mut Context<Self>) {
         match self.settings_page {
@@ -1480,7 +1564,8 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About
-            | SettingsPage::Devices => {}
+            | SettingsPage::Devices
+            | SettingsPage::AgentLinks => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1621,7 +1706,8 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About
-            | SettingsPage::Devices => true,
+            | SettingsPage::Devices
+            | SettingsPage::AgentLinks => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -1664,12 +1750,12 @@ impl Shell {
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
         // Jacob, 2026-10-25: the sheet's Upload / Generate pick travels with the create; the
-        // stored leaf pair is the neutral one, never an automatic leaf.
+        // stored disc colour is the neutral one, never an automatic colour.
         let picture = self.take_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, Some(create_entity::stored_leaf()), picture, cx);
+            s.create_project(name, color, create_entity::stored_disc(), picture, cx);
         });
         Composer::focus(&self.composer, window, cx);
     }
@@ -1747,7 +1833,7 @@ impl Shell {
     }
 
     /// The Create screen's action: agents create, groups go on to the member
-    /// picker (step 2) with the name + leaf kept as the draft, servers create.
+    /// picker (step 2) with the name + colour kept as the draft, servers create.
     pub(crate) fn submit_create(
         &mut self,
         kind: CreateKind,
@@ -1787,7 +1873,7 @@ impl Shell {
                 self.state.update(cx, |s, cx| {
                     s.new_group_draft = Some(crate::app::GroupDraft {
                         title: name,
-                        leaf: Some(create_entity::stored_leaf()),
+                        disc_color: create_entity::stored_disc(),
                         picture,
                     });
                     s.open_new_group(cx);
@@ -1802,7 +1888,7 @@ impl Shell {
                 }
                 let picture = self.take_create_picture(cx);
                 self.state.update(cx, |s, cx| {
-                    s.create_server(name, Some(create_entity::stored_leaf()), picture, cx)
+                    s.create_server(name, create_entity::stored_disc(), picture, cx)
                 });
             }
         }
@@ -1901,7 +1987,7 @@ impl Shell {
         self.state.update(cx, |s, cx| match &pk.target {
             avatar_picker::Target::Agent(_) => {
                 if pk.reset {
-                    s.set_avatar_leaf(id, None, None, cx);
+                    s.set_avatar_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -1909,14 +1995,9 @@ impl Shell {
                                 .projects
                                 .iter()
                                 .find(|p| p.id == id)
-                                .map(crate::ui::avatars::project_leaf)
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_avatar_leaf(
-                                id,
-                                Some(pk.leaf.unwrap_or(current.leaf)),
-                                Some(pk.color.unwrap_or(current.color)),
-                                cx,
-                            );
+                                .map(|p| avatars::disc_color(&p.id, p.avatar_disc_color))
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_avatar_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Generate => {
                             if let Some((key, _)) = pk.generated {
@@ -1933,7 +2014,7 @@ impl Shell {
             }
             avatar_picker::Target::Group(_) => {
                 if pk.reset {
-                    s.set_group_leaf(id, None, cx);
+                    s.set_group_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -1941,16 +2022,9 @@ impl Shell {
                                 .projects
                                 .iter()
                                 .find(|p| p.id == id)
-                                .map(crate::ui::avatars::project_leaf)
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_group_leaf(
-                                id,
-                                Some(LeafPick {
-                                    leaf: pk.leaf.unwrap_or(current.leaf),
-                                    color: pk.color.unwrap_or(current.color),
-                                }),
-                                cx,
-                            );
+                                .map(|p| avatars::disc_color(&p.id, p.avatar_disc_color))
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_group_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Upload => {
                             if let Some(path) = pk.upload {
@@ -1967,7 +2041,7 @@ impl Shell {
             }
             avatar_picker::Target::Server(_) => {
                 if pk.reset {
-                    s.set_server_leaf(id, None, cx);
+                    s.set_server_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -1975,21 +2049,9 @@ impl Shell {
                                 .servers
                                 .iter()
                                 .find(|x| x.id == id)
-                                .and_then(|x| {
-                                    Some(LeafPick {
-                                        leaf: x.avatar_leaf?,
-                                        color: x.avatar_leaf_color?,
-                                    })
-                                })
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_server_leaf(
-                                id,
-                                Some(LeafPick {
-                                    leaf: pk.leaf.unwrap_or(current.leaf),
-                                    color: pk.color.unwrap_or(current.color),
-                                }),
-                                cx,
-                            );
+                                .and_then(|x| x.avatar_disc_color)
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_server_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Upload => {
                             if let Some(path) = pk.upload {
@@ -2182,6 +2244,7 @@ impl Shell {
             ServerSheet::NewServer => CreateKind::Server.placeholder(),
             ServerSheet::JoinServer => "Invite link or code",
             ServerSheet::NewChannel { .. } => "channel-name",
+            ServerSheet::RestoreKeys => RESTORE_PLACEHOLDER,
         };
         self.menu_open = false;
         self.row_menu = None;
@@ -2250,16 +2313,26 @@ impl Shell {
         // Enter in the Create screen: same as its action button.
         let picture = match sheet {
             ServerSheet::NewServer => self.take_create_picture(cx),
-            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } => None,
+            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } | ServerSheet::RestoreKeys => {
+                None
+            }
         };
+        if sheet == ServerSheet::RestoreKeys {
+            // A phrase on its way to the backup has no more business in the field.
+            if self.state.update(cx, |s, cx| s.restore_keys(&text, cx)) {
+                self.server_input.update(cx, |input, cx| input.clear(cx));
+            }
+            return;
+        }
         self.state.update(cx, |s, cx| match sheet {
             ServerSheet::NewServer => {
-                s.create_server(text, Some(create_entity::stored_leaf()), picture, cx)
+                s.create_server(text, create_entity::stored_disc(), picture, cx)
             }
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
             }
+            ServerSheet::RestoreKeys => {}
         });
     }
 
@@ -2318,9 +2391,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// Double-click the agent page's name (`description: false`): the name
-    /// becomes a field inside the sheet (owned agents only). `description:
-    /// true` also opens the about field (kept for the former Edit button).
+    /// Inline name / label edit on the agent pane (superseded by the Edit
+    /// sheet; kept for Escape / Done paths that still clear those flags).
+    #[allow(dead_code)]
     pub(crate) fn start_edit_agent(
         &mut self,
         project_id: crate::model::Id,
@@ -2490,6 +2563,7 @@ impl Shell {
         self.hide_settings_page(cx);
         self.library_reset();
         self.profile_edit_open = false;
+        self.agent_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
         self.server_leave_armed = false;
@@ -2537,6 +2611,192 @@ impl Shell {
         cx.notify();
     }
 
+    /// What back would dismiss now, innermost first in Escape's order: a
+    /// pushed Settings page, then the right pane's page (popping a pushed
+    /// one, else closing the pane), then a server's channel list, then
+    /// Hidden chats — the last two only where the sidebar's list is drawn.
+    pub(crate) fn back_target(&self, cx: &App) -> Option<BackTarget> {
+        let s = self.state.read(cx);
+        if s.profile == Some(ProfilePage::Me) && self.settings_page != SettingsPage::Root {
+            return Some(BackTarget::SettingsPage);
+        }
+        if s.profile.is_some() {
+            return Some(if s.profile_stack.is_empty() {
+                BackTarget::ProfileClose
+            } else {
+                BackTarget::ProfilePage
+            });
+        }
+        let list_shown = if s.window_is_narrow(self.last_viewport_width) {
+            s.sidebar_overlay
+        } else {
+            !s.rail_collapsed
+        };
+        if list_shown && s.open_server.is_some() {
+            return Some(BackTarget::ServerChannels);
+        }
+        if list_shown && self.hidden_open {
+            return Some(BackTarget::HiddenChats);
+        }
+        None
+    }
+
+    /// Back from the trackpad swipe, the mouse's Back button or the
+    /// three-finger / Magic Mouse page swipe; `false` when there is nothing
+    /// to go back to.
+    pub(crate) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.back_target(cx) else {
+            return false;
+        };
+        self.back_swipe.reset();
+        self.run_back(target, window, cx);
+        true
+    }
+
+    fn run_back(&mut self, target: BackTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            BackTarget::SettingsPage => self.settings_back(cx),
+            BackTarget::ProfilePage => self.back_profile(cx),
+            BackTarget::ProfileClose => self.close_profile(window, cx),
+            BackTarget::ServerChannels => self.state.update(cx, |s, cx| s.close_server_pane(cx)),
+            BackTarget::HiddenChats => {
+                self.hidden_open = false;
+                cx.notify();
+            }
+        }
+    }
+
+    /// A swipe never reaches under a sheet, viewer or the palette.
+    fn back_swipe_allowed(&self, cx: &App) -> bool {
+        let s = self.state.read(cx);
+        !(self.palette.open
+            || self.avatar_picker.is_some()
+            || self.feedback.read(cx).is_open()
+            || s.pairing.is_some()
+            || s.media_viewer.is_some()
+            || s.chart_viewer.is_some()
+            || s.forward_message.is_some()
+            || s.new_chat_open
+            || s.server_sheet.is_some())
+    }
+
+    fn back_swipe_claim(&self, cx: &App) -> back_swipe::Claim {
+        let target = self.back_target(cx);
+        let s = self.state.read(cx);
+        let width = match target.map(BackTarget::region) {
+            Some(Region::Pane) => s
+                .profile
+                .as_ref()
+                .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page)),
+            Some(Region::Sidebar) => s.sidebar_width,
+            None => 0.0,
+        };
+        back_swipe::Claim { target, width }
+    }
+
+    /// The window's wheel events, capture phase; `true` = the swipe's own.
+    fn back_swipe_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let now = back_swipe::now();
+        let consumed = match event.touch_phase {
+            gpui::TouchPhase::Started => {
+                let allowed = self.back_swipe_allowed(cx);
+                self.back_swipe.begin(back_swipe::system_prefs(), allowed);
+                self.back_swipe_at = Some(event.position);
+                false
+            }
+            gpui::TouchPhase::Moved => match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => {
+                    let claim = self.back_swipe_claim(cx);
+                    let delta = gpui::point(f32::from(delta.x), f32::from(delta.y));
+                    self.back_swipe.moved(delta, now, || claim)
+                }
+                gpui::ScrollDelta::Lines(_) => false,
+            },
+            gpui::TouchPhase::Ended => self.back_swipe_end(now, window, cx),
+            gpui::TouchPhase::Cancelled => {
+                let swiping = self.back_swipe.target().is_some();
+                self.back_swipe.reset();
+                self.back_swipe_at = None;
+                swiping
+            }
+        };
+        if consumed {
+            cx.notify();
+        }
+        consumed
+    }
+
+    fn back_swipe_end(
+        &mut self,
+        now: std::time::Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.back_swipe_at = None;
+        let (commit, consumed) = self.back_swipe.ended(now, cx.reduce_motion());
+        if let Some(target) = commit.filter(|t| self.back_target(cx) == Some(*t)) {
+            self.run_back(target, window, cx);
+        }
+        if consumed {
+            cx.notify();
+        }
+        consumed
+    }
+
+    /// The fork reads a cancelled touch as a move and sends no end: the
+    /// pointer moving again is the sign the fingers left the trackpad.
+    fn back_swipe_pointer(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = self.back_swipe_at else {
+            return;
+        };
+        let moved = position - at;
+        if f32::from(moved.x).hypot(f32::from(moved.y)) > 8.0 {
+            self.back_swipe_end(back_swipe::now(), window, cx);
+        }
+    }
+
+    /// Registers the capture-phase wheel and pointer listeners for the frame.
+    fn back_swipe_listener(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let shell = cx.entity().downgrade();
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let wheel = shell.clone();
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let consumed = wheel
+                        .update(cx, |this, cx| this.back_swipe_scroll(event, window, cx))
+                        .unwrap_or(false);
+                    if consumed {
+                        cx.stop_propagation();
+                    }
+                });
+                let pointer = shell;
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        let _ = pointer.update(cx, |this, cx| {
+                            this.back_swipe_pointer(event.position, window, cx)
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
     /// Close the New Message sheet (Cancel, click outside); drops an in-progress
     /// New agent / New group form and returns the keyboard to the composer.
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2556,8 +2816,90 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
+    /// Overview Edit pill → modal Edit Agent sheet.
+    pub(crate) fn open_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ProfilePage::Agent { project_id }) = self.state.read(cx).profile.clone() else {
+            return;
+        };
+        let (name, about, mine) = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            (
+                p.name.clone(),
+                p.description.clone().unwrap_or_default(),
+                !p.is_guest(),
+            )
+        };
+        if !mine {
+            return;
+        }
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(false);
+            input.set_text(name, cx);
+        });
+        self.description_input
+            .update(cx, |input, cx| input.set_text(about, cx));
+        self.agent_edit_open = true;
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.agent_edit_open {
+            return;
+        }
+        self.agent_edit_open = false;
+        self.state.update(cx, |s, cx| {
+            s.agent_pick = None;
+            cx.notify();
+        });
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    /// Done on the Edit Agent sheet: save name + label, then close.
+    pub(crate) fn save_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.agent_edit_open {
+            return;
+        }
+        let (project_id, current_name, current_label) = {
+            let state = self.state.read(cx);
+            let Some(ProfilePage::Agent { project_id }) = state.profile.clone() else {
+                self.close_agent_edit(window, cx);
+                return;
+            };
+            let Some(p) = state.project(&project_id) else {
+                self.close_agent_edit(window, cx);
+                return;
+            };
+            (
+                project_id,
+                p.name.clone(),
+                p.description.clone().unwrap_or_default(),
+            )
+        };
+        let name = self.agent_name_input.read(cx).text().trim().to_string();
+        if !name.is_empty() && name != current_name {
+            self.state
+                .update(cx, |s, cx| s.set_project_name(project_id.clone(), name, cx));
+        }
+        let label = self.description_input.read(cx).text().to_string();
+        if label.trim() != current_label.trim() {
+            self.state
+                .update(cx, |s, cx| s.set_description(project_id, label, cx));
+        }
+        self.close_agent_edit(window, cx);
+    }
+
     /// The agent page's "Done": save whichever of the name / description
     /// fields are open (unchanged text is not sent) and leave edit mode.
+    #[allow(dead_code)]
     pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (project_id, renaming, editing, current) = {
             let state = self.state.read(cx);
@@ -2600,7 +2942,8 @@ impl Shell {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
             let closed = self.state.update(cx, |s, cx| s.close_tab(chat_id, cx));
-            if !closed {
+            // The shake is positional motion: Reduce Motion drops it.
+            if !closed && !cx.reduce_motion() {
                 self.shake_started_at = Some(now_ms());
                 cx.notify();
             }
@@ -2838,6 +3181,23 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌫ in the bar's field with nothing to delete (the field propagates it
+    /// then): the pinned sender chip goes, the same press the composer's strip
+    /// takes its last staged attachment on — one press, no select-first step.
+    /// With text in the field the key is the field's own, even with the caret
+    /// at the start where it deletes nothing; the chip is the only token the
+    /// bar can hold, and the offered chip needs typed text, so there is never
+    /// a second token to take or a wrong one to reach. Unpinning re-runs the
+    /// search (`chat_search_unpin_sender` → `chat_search_recompute`), so no
+    /// filter outlives its chip.
+    pub(crate) fn chat_search_backspace(&mut self, cx: &mut Context<Self>) {
+        if !self.chat_search_input.read(cx).text().is_empty() {
+            return;
+        }
+        self.state
+            .update(cx, |s, cx| s.chat_search_unpin_sender(cx));
+    }
+
     /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
     pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if !self.palette.open {
@@ -3059,11 +3419,20 @@ impl Shell {
             self.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
             return;
         }
+        if self.agent_edit_open {
+            self.close_agent_edit(window, cx);
+            return;
+        }
         if self.profile_edit_open {
             // Escape while editing my name/handle drops the edit; the pane stays.
             self.profile_edit_open = false;
             Composer::focus(&self.composer, window, cx);
             cx.notify();
+            return;
+        }
+        if self.state.read(cx).profile_subpage.is_some() {
+            self.state
+                .update(cx, |s, cx| s.set_profile_subpage(None, cx));
             return;
         }
         let mut closed = false;
@@ -3630,7 +3999,7 @@ impl Shell {
             .filter(|p| p.is_people() && !p.is_people_group())
             .and_then(|p| p.person().cloned())
             .filter(|person| state.is_blocked(person));
-        if animating || shake.is_some() || presence.is_some() {
+        if animating || presence.is_some() {
             PulseClock::request(cx);
         }
 
@@ -3761,16 +4130,14 @@ impl Shell {
                 );
         };
 
-        let shake_offset = shake
-            .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
-            .unwrap_or(0.0);
+        let shake_x = shake.map(shake_offset).unwrap_or(0.0);
         // The header. With a transcript it floats over the list top like Grok's
         // (the list runs under it and fades out through the band, see below),
         // so it is appended last as an absolute overlay; everything else in the
         // column is laid out from the top as before.
         let header_bar = div()
             .relative()
-            .left(px(shake_offset))
+            .left(px(shake_x))
             // Without the sidebar the traffic lights sit over this header:
             // clear them (14 pt in, three 12 pt lights, 8 pt gaps). While the
             // sidebar slides the inset is whatever of the lights' band the
@@ -3856,7 +4223,7 @@ impl Shell {
             if let Some(person) = dm_partner {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
-                // D92 amendment: the uploaded / generated picture wins over the leaf / initials.
+                // D92 amendment: the uploaded / generated picture wins over the disc / initials.
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
@@ -4092,47 +4459,7 @@ impl Shell {
                         .parts
                         .iter()
                         .chain(m.hidden_parts.iter())
-                        .filter_map(|p| match p {
-                            crate::model::Part::Approval {
-                                approval_id,
-                                title,
-                                risk,
-                                state,
-                                decided_by,
-                                decided_at,
-                                reason,
-                                ..
-                            } => {
-                                let mut detail = format!(
-                                    "approval_requested · {} · {} · {}",
-                                    risk.label(),
-                                    title,
-                                    approval_id
-                                );
-                                if *state != crate::model::ApprovalState::Pending {
-                                    detail.push_str(&format!(
-                                        "\napproval_decided · {}{}{}",
-                                        state.label().to_lowercase(),
-                                        decided_by
-                                            .as_deref()
-                                            .map(|d| format!(" · by {d}"))
-                                            .unwrap_or_default(),
-                                        reason
-                                            .as_deref()
-                                            .filter(|r| !r.trim().is_empty())
-                                            .map(|r| format!(" · {r}"))
-                                            .unwrap_or_default()
-                                    ));
-                                    if let Some(at) = decided_at {
-                                        let mins =
-                                            crate::model::now_ms().saturating_sub(*at) / 60_000;
-                                        detail.push_str(&format!(" · {mins} min ago"));
-                                    }
-                                }
-                                Some((state.label().to_string(), detail))
-                            }
-                            _ => None,
-                        })
+                        .filter_map(approval_audit_row)
                         .collect();
                     if !approvals.is_empty() {
                         sections.push(("Approvals · audit".into(), approvals));
@@ -4696,7 +5023,6 @@ impl Shell {
         if stack.visible.is_empty() {
             return None;
         }
-        PulseClock::request(cx);
         let mut column = div()
             .id("toast-slot")
             .debug_selector(|| "toast-slot".into())
@@ -4735,6 +5061,7 @@ impl Shell {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.7))
+                            .active(|s| s.opacity(0.6))
                             .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, cx| {
@@ -4820,7 +5147,13 @@ impl Shell {
                     }))
                     .into_any_element(),
             };
-            column = column.child(element);
+            // A toast arrives unprompted, so it fades in (opacity only: the slot's place is a
+            // rule). Keyed by the notice, so a "×N" bump does not replay it.
+            column = column.child(div().child(element).with_animation(
+                SharedString::from(format!("notice-in-{nid}")),
+                Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
+                |el, t| el.opacity(t),
+            ));
         }
         Some(
             div()
@@ -4833,6 +5166,52 @@ impl Shell {
                 .child(column),
         )
     }
+}
+
+/// S18: one audit row per card, `approval_requested` and — only once the card is decided —
+/// `approval_decided`. The second line is gated on [`ApprovalState::decided`] rather than on
+/// "not pending", because a state this build cannot name was closed by something it cannot
+/// name either, and reporting it as decided would invent the outcome.
+fn approval_audit_row(p: &crate::model::Part) -> Option<(String, String)> {
+    let crate::model::Part::Approval {
+        approval_id,
+        title,
+        risk,
+        state,
+        decided_by,
+        decided_at,
+        reason,
+        ..
+    } = p
+    else {
+        return None;
+    };
+    let mut detail = format!(
+        "approval_requested · {} · {} · {}",
+        risk.label(),
+        title,
+        approval_id
+    );
+    if state.decided() {
+        detail.push_str(&format!(
+            "\napproval_decided · {}{}{}",
+            state.label().to_lowercase(),
+            decided_by
+                .as_deref()
+                .map(|d| format!(" · by {d}"))
+                .unwrap_or_default(),
+            reason
+                .as_deref()
+                .filter(|r| !r.trim().is_empty())
+                .map(|r| format!(" · {r}"))
+                .unwrap_or_default()
+        ));
+        if let Some(at) = decided_at {
+            let mins = crate::model::now_ms().saturating_sub(*at) / 60_000;
+            detail.push_str(&format!(" · {mins} min ago"));
+        }
+    }
+    Some((state.label().to_string(), detail))
 }
 
 /// Flatten a JSON object one level ("cost.total") for the drawer.
@@ -4897,6 +5276,24 @@ impl Render for Shell {
         self.last_viewport_width = width;
         self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         crate::ui::picture_fit::note_scale_factor(window.scale_factor());
+        // A committed swipe goes back in the frame its spring ends, before
+        // anything below reads the state, so the page never shows again.
+        let swipe_now = back_swipe::now();
+        if let Some(target) = self.back_swipe.finish(swipe_now) {
+            if self.back_target(cx) == Some(target) {
+                self.run_back(target, window, cx);
+            }
+        }
+        if let Some(Some(target)) = self.back_swipe.target() {
+            if self.back_target(cx) != Some(target) {
+                self.back_swipe.reset();
+            }
+        }
+        let swipe = self.back_swipe.visual(swipe_now);
+        self.back_swipe_drawn = swipe;
+        if swipe.is_some_and(|v| v.settling) {
+            window.request_animation_frame();
+        }
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
         // The narrow band hides the sidebar (an overlay brings it back);
@@ -4923,6 +5320,7 @@ impl Render for Shell {
             .id("shell-root")
             .key_context("Shell")
             .track_focus(&self.focus_handle)
+            .child(self.back_swipe_listener(cx))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::prev_tab))
@@ -4939,8 +5337,15 @@ impl Render for Shell {
             .on_action(cx.listener(Self::paste_into_chat))
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if event.button == gpui::MouseButton::Left {
-                        this.click_outside(event.position, window, cx);
+                    this.back_swipe_end(back_swipe::now(), window, cx);
+                    match event.button {
+                        gpui::MouseButton::Left => this.click_outside(event.position, window, cx),
+                        gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => {
+                            this.go_back(window, cx);
+                        }
+                        gpui::MouseButton::Right
+                        | gpui::MouseButton::Middle
+                        | gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => {}
                     }
                 },
             ))
@@ -5044,6 +5449,9 @@ impl Render for Shell {
             .active()
             .then(|| self.state.read(cx).sidebar_edge_drag.track())
             .flatten();
+        let pane_track = swipe
+            .filter(|v| v.target == Some(BackTarget::ProfileClose))
+            .map(|v| (pane_width - v.offset).clamp(0.0, pane_width));
         let frame = self.slides.step(
             slide::Want {
                 viewport_width: width,
@@ -5055,6 +5463,7 @@ impl Render for Shell {
                 pane_width,
                 reduce_motion: cx.reduce_motion(),
                 sidebar_track,
+                pane_track,
             },
             std::time::Instant::now(),
         );
@@ -5067,6 +5476,14 @@ impl Render for Shell {
             _ => frame,
         };
         if frame.animating() && self.rig_rail_t.is_none() {
+            window.request_animation_frame();
+        }
+        // The header shake runs at the display's rate: two cycles in `SHAKE_MS` alias into a
+        // twitch on the 30 fps pulse clock.
+        if self
+            .shake_started_at
+            .is_some_and(|t| now_ms().saturating_sub(t) < SHAKE_MS)
+        {
             window.request_animation_frame();
         }
         let live_center = width - frame.sidebar_visible - frame.pane_visible;
@@ -5189,7 +5606,25 @@ impl Render for Shell {
                 (Some(pane), true) => {
                     root = root.child(slide::pane_clip(frame.pane_visible, pane));
                 }
-                (Some(pane), false) => root = root.child(pane),
+                (Some(pane), false) => {
+                    let popping = swipe.filter(|v| {
+                        matches!(
+                            v.target,
+                            Some(BackTarget::SettingsPage | BackTarget::ProfilePage)
+                        )
+                    });
+                    root = match popping {
+                        Some(v) => root.child(back_swipe::dismissing(
+                            pane_width,
+                            v.offset,
+                            theme.pane(),
+                            profiles::PANE_EDGE,
+                            theme.pane_edge,
+                            pane,
+                        )),
+                        None => root.child(pane),
+                    };
+                }
                 (None, true) => {
                     // The page's subject is gone mid-slide: an empty pane of
                     // the same width finishes the motion.
@@ -5215,6 +5650,9 @@ impl Render for Shell {
             if let Some(tip) = rail::render_tip(self, cx) {
                 root = root.child(tip);
             }
+        }
+        if let Some(v) = swipe.filter(|v| v.target.is_none() && v.offset > 0.0) {
+            root = root.child(back_swipe::hint(frame.sidebar_visible, v, &theme));
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
@@ -5379,6 +5817,11 @@ impl Render for Shell {
         if let Some(picker) = self.avatar_picker.clone() {
             root = root.child(avatar_picker::sheet(self, &picker, cx));
         }
+        if self.agent_edit_open {
+            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
+                root = root.child(sheet);
+            }
+        }
         if new_chat_open {
             // D93: "New agent" / "New group" open the Create screen over the same backdrop
             // (a group goes on to the member picker as step 2).
@@ -5400,6 +5843,9 @@ impl Render for Shell {
         }
         if let Some(reveal) = self.state.read(cx).connect_reveal.clone() {
             root = root.child(connect_agent::reveal_sheet(self, &reveal, cx));
+        }
+        if let Some(reveal) = self.state.read(cx).agent_link_reveal.clone() {
+            root = root.child(crate::ui::agent_link_reveal::sheet(&reveal, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
@@ -5536,6 +5982,27 @@ impl Render for Shell {
         if let Some(notices) = self.render_notices(frame.sidebar_visible, frame.pane_visible, cx) {
             root = root.child(notices);
         }
+        // Nothing in a toast moves, so the slot is redrawn once, when the next toast runs out
+        // (a held one is looked at again each second), not on the pulse clock.
+        let now = now_ms();
+        let next = self
+            .state
+            .read(cx)
+            .live_notices()
+            .iter()
+            .map(|n| match n.held {
+                true => 1_000,
+                false => (n.at + n.ttl_ms()).saturating_sub(now).max(16),
+            })
+            .min();
+        self.notice_wake = next.map(|ms| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(ms))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+        });
         // D82: first sign-in — the terminal screen covers the shell until the
         // computer, agent and first chat exist, then morphs into the greeting.
         if let Some(onboarding) = self.state.read(cx).onboarding.clone() {
@@ -5593,5 +6060,97 @@ pub(crate) fn delivery_error(
             message: Some(why.sentence(silenced_until_ms)),
         },
         ..error
+    }
+}
+
+#[cfg(test)]
+mod approval_audit_tests {
+    use super::*;
+    use crate::model::{ApprovalRisk, ApprovalState, Part};
+
+    fn card(state: ApprovalState) -> Part {
+        card_with(state, ApprovalRisk::Send)
+    }
+
+    fn card_with(state: ApprovalState, risk: ApprovalRisk) -> Part {
+        Part::Approval {
+            id: "p1".into(),
+            approval_id: "apr_1".into(),
+            title: "Send the draft".into(),
+            summary: String::new(),
+            risk,
+            payload: serde_json::Value::Null,
+            state,
+            expires_at: None,
+            decided_at: Some(crate::model::now_ms()),
+            decided_by: Some("arbos:cancelled".into()),
+            reason: None,
+            grant: None,
+        }
+    }
+
+    /// The gate on the second audit line used to read `!= Pending`, which was only correct
+    /// while the set of states stayed closed. A state this build cannot name was closed by
+    /// something it cannot name either, so claiming it was decided would invent the outcome.
+    ///
+    /// This pins the predicate: without it, `decided()` can quietly regress to a negation.
+    #[test]
+    fn an_unknown_state_reports_no_decision() {
+        let (label, detail) = approval_audit_row(&card(ApprovalState::Unknown)).expect("a row");
+        assert!(
+            detail.contains("approval_requested"),
+            "the card should still be audited: {detail}"
+        );
+        assert!(
+            !detail.contains("approval_decided"),
+            "an unrecognised state was reported as decided: {detail}"
+        );
+        assert!(
+            !detail.contains("arbos:cancelled"),
+            "a decider was attributed to a state this build cannot name: {detail}"
+        );
+        assert_eq!(label, "Unrecognised");
+    }
+
+    /// The states that are decisions still report as decided, so the new predicate did not
+    /// silence the audit line it was written to protect.
+    #[test]
+    fn the_decided_states_still_report_their_decision() {
+        for state in [
+            ApprovalState::Approved,
+            ApprovalState::Rejected,
+            ApprovalState::Expired,
+        ] {
+            let (_, detail) = approval_audit_row(&card(state)).expect("a row");
+            assert!(
+                detail.contains("approval_decided"),
+                "{state:?} stopped reporting its decision: {detail}"
+            );
+        }
+        let (_, pending) = approval_audit_row(&card(ApprovalState::Pending)).expect("a row");
+        assert!(!pending.contains("approval_decided"));
+    }
+
+    /// The only place a shipped build reads a risk: this line. A category it cannot name is
+    /// reported as unrecognised rather than promoted to the gravest one it knows, because the
+    /// audit line's whole value is that it says what the producer said — writing `destructive`
+    /// for a card whose producer said something else records a category nobody sent.
+    #[test]
+    fn an_unrecognised_risk_is_audited_as_itself() {
+        let (_, detail) = approval_audit_row(&card_with(
+            ApprovalState::Pending,
+            ApprovalRisk::Unrecognised,
+        ))
+        .expect("a row");
+        assert!(
+            detail.contains("approval_requested · unrecognised ·"),
+            "the audit line should name the risk as unrecognised: {detail}"
+        );
+        for named in ["destructive", "credential", "money"] {
+            assert!(
+                !detail.contains(named),
+                "a risk category the producer never sent was recorded: {detail}"
+            );
+        }
     }
 }

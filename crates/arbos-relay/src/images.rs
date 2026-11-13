@@ -312,20 +312,6 @@ pub async fn generations(
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
     }
-    if let Ok(Some(p)) = state.db.project(&project_id) {
-        let today = state
-            .db
-            .usage_since(&project_id, crate::proxy::start_of_utc_day_ms())
-            .map(|u| u.usd)
-            .unwrap_or(0.0);
-        if today >= p.spend_cap_daily {
-            return (
-                StatusCode::PAYMENT_REQUIRED,
-                Json(json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } })),
-            )
-                .into_response();
-        }
-    }
     // gpt-image-* models only return base64; DALL·E needs to be asked for it.
     if model.starts_with("dall-e") {
         body["response_format"] = json!("b64_json");
@@ -403,15 +389,6 @@ pub async fn generations(
 }
 
 // ---- avatar generation (D92 amendment: the avatar picker's Generate tab) --------------------
-
-/// Pictures the picker may generate per project per UTC day (`ARBOS_AVATAR_GEN_DAILY`, default 20):
-/// one `gpt-image-1` square at low quality is $0.011, so a day of taps costs cents.
-fn avatar_gen_daily_cap() -> i64 {
-    std::env::var("ARBOS_AVATAR_GEN_DAILY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
-}
 
 /// Models tried in order for an avatar (`ARBOS_AVATAR_GEN_MODELS`, comma-separated, overrides).
 /// Production hits api.openai.com directly with the relay's `OPENAI_API_KEY`; on 2026-10-24
@@ -592,8 +569,6 @@ pub struct AvatarTarget {
     /// The user whose credits pay (the agent's owner, the member / admin asking for a group /
     /// server picture).
     pub payer: String,
-    /// The agent's daily spend cap, when the target is an agent.
-    pub spend_cap_daily: Option<f64>,
     /// The project id to meter against for an agent; the slot for the others.
     pub meter_id: String,
 }
@@ -602,7 +577,7 @@ pub struct AvatarTarget {
 /// prompt, through the relay's OpenAI key, stored in the project's blob slot and **not yet set**:
 /// the answer is `{image_key}` for the picker's preview, and "Set avatar" makes it the picture via
 /// `PATCH /projects/{id} {image_key}`. Metered like `/proxy/v1/images/generations` (usage row,
-/// credits, the project's daily spend cap) plus a per-target daily count cap. `ARBOS_IMAGE_MOCK=1`
+/// credits against the owner's account ledger), with no count cap of its own. `ARBOS_IMAGE_MOCK=1`
 /// answers with the labelled placeholder.
 pub async fn avatar_generate(
     State(state): State<AppState>,
@@ -610,16 +585,22 @@ pub async fn avatar_generate(
     axum::extract::Path(project_id): axum::extract::Path<String>,
     Json(body): Json<AvatarGenerateBody>,
 ) -> Response {
-    let Ok(Some(project)) = state.db.project(&project_id) else {
-        return avatar_error(StatusCode::NOT_FOUND, "no_such_project", "no such project");
+    // `project_owned_by` hides another owner's agent behind the answer a free name gets, so this
+    // route cannot be used to ask which agent names are taken (`api::no_such_project`, reported
+    // 2026-11-02); the 403 below it is only ever met by a guest, who can see the agent anyway.
+    let project = match crate::api::project_owned_by(&state, &principal, &project_id) {
+        Ok(p) => p,
+        Err((status, message)) => {
+            return avatar_error(
+                status,
+                crate::api_error_layer::type_for_status(status),
+                message,
+            )
+        }
     };
-    if !state.owns(&principal, &project.id) {
-        return avatar_error(StatusCode::FORBIDDEN, "forbidden", "not your project");
-    }
     let target = AvatarTarget {
         slot: project.id.clone(),
         payer: project.user_id.clone(),
-        spend_cap_daily: Some(project.spend_cap_daily),
         meter_id: project.id.clone(),
     };
     generate_into(&state, target, &body.prompt).await
@@ -645,7 +626,6 @@ pub async fn chat_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: me,
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -671,7 +651,6 @@ pub async fn server_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: me,
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -682,9 +661,14 @@ pub const USER_BLOB_PREFIX: &str = "users:";
 
 /// `GET /projects/{id}/avatar.jpg` — the agent's current picture (the blob its `image_key`
 /// names), public like `GET /avatars/{user}.jpg` (the same role as a GitHub CDN avatar URL).
+/// The id and nothing else: this route takes no principal, so while it also matched on `name` a
+/// guess at a name answered with the picture when someone held that name and 404 when nobody
+/// did — a list of every agent on the relay, readable by anyone (`api::no_such_project`,
+/// reported 2026-11-02). Clients build this URL from the id already (`arbos-mac`'s
+/// `sync::agent_avatar`, iOS `Project.pictureURL`).
 /// Why not `/blob/{project}/{key}`: that slot is the owner's and the project's guests' (it holds
 /// the agent's working files too), so a viewer who only shares a group with the agent got 403
-/// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
+/// and drew the automatic disc instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
 /// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
 /// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
 /// `?w=<px>` serves the picture at that bucket (`avatar_image`).
@@ -694,8 +678,8 @@ pub async fn project_avatar(
     axum::extract::Query(size): axum::extract::Query<crate::avatar_image::SizeQuery>,
 ) -> Response {
     let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
-    let Ok(Some(p)) = state.db.project(project_id) else {
-        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
+    let Ok(Some(p)) = state.db.project_by_id(project_id) else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
     };
     let Some(key) = p
         .image_key
@@ -859,7 +843,6 @@ pub async fn me_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: user_id.clone(),
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -875,16 +858,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         .db
         .usage_count_since(&target.meter_id, "openai-images", "avatar:", since)
         .unwrap_or(0);
-    if made_today >= avatar_gen_daily_cap() {
-        return avatar_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "avatar_gen_cap",
-            format!(
-                "{} generated pictures today is the limit; try again tomorrow or upload one",
-                avatar_gen_daily_cap()
-            ),
-        );
-    }
     let models = avatar_gen_models();
     let mut model = format!("avatar:{}", models[0]);
     let t0 = Instant::now();
@@ -912,20 +885,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         };
         if let Err(r) = crate::credits::check(state, &target.payer) {
             return crate::credits::refused_response(&r);
-        }
-        if let Some(cap) = target.spend_cap_daily {
-            let today = state
-                .db
-                .usage_since(&target.meter_id, since)
-                .map(|u| u.usd)
-                .unwrap_or(0.0);
-            if today >= cap {
-                return avatar_error(
-                    StatusCode::PAYMENT_REQUIRED,
-                    "spend_cap",
-                    format!("daily spend cap ${cap:.2} reached"),
-                );
-            }
         }
         let url = format!(
             "{}/images/generations",
@@ -1091,7 +1050,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         "model": model.trim_start_matches("avatar:"),
         "mock": state.cfg.image_mock,
         "made_today": made_today + 1,
-        "daily_cap": avatar_gen_daily_cap(),
     }))
     .into_response()
 }
@@ -1528,15 +1486,14 @@ mod avatar_generate_tests {
         // Members read the slot (the apps fetch the picture); strangers do not.
         assert!(state.allows(&bob_dev, &slot));
         assert!(!state.allows(&carol_dev, &slot));
-        // Set avatar on the server accepts it, and the leaf PATCH works beside it.
+        // Set avatar on the server accepts it, and the disc PATCH works beside it.
         let r = crate::matrix::servers::patch(
             State(state.clone()),
             alice_dev.clone(),
             Path(server.id.clone()),
             Json(crate::matrix::servers::PatchBody {
                 image_key: Some(json!(key)),
-                avatar_leaf: Some(None),
-                avatar_leaf_color: Some(None),
+                avatar_disc_color: Some(None),
                 ..serde_json::from_str("{}").unwrap()
             }),
         )

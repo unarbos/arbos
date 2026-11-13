@@ -29,7 +29,7 @@ pub const WINDOW_DRAG_SLOP: f32 = 4.0;
 
 /// The press that may become a window move. A global, not a per-render cell:
 /// element listeners belong to the frame that rendered them, and anything
-/// animating (a leaf avatar's sway, a streaming dot) re-renders every frame,
+/// animating (a streaming dot, a pulsing badge) re-renders every frame,
 /// so a cell created inside `window_drag()` lost the press between mouse-down
 /// and the first mouse-move and the window could not be dragged at all
 /// (v0.6.11x–v0.6.131, [feedback mac-window-drag-hotfix]).
@@ -245,6 +245,7 @@ pub fn primary_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> S
         .text_color(theme.on_primary)
         .cursor_pointer()
         .hover(|s| s.opacity(0.88))
+        .active(|s| s.opacity(0.76))
         .child(label.to_string())
 }
 
@@ -673,10 +674,13 @@ pub fn sheet_header(
                 .flex()
                 .items_center()
                 .justify_center()
+                // Clear of the two corner slots (14 + 72 + 14), so a long group or server
+                // name ends in an ellipsis instead of running under the buttons.
+                .px(px(100.0))
                 .text_size(px(TEXT_BODY + 1.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(title.to_string()),
+                .child(div().min_w_0().truncate().child(title.to_string())),
         )
         .child(div().min_w(px(72.0)).children(left))
         .child(div().min_w(px(72.0)).flex().justify_end().children(right))

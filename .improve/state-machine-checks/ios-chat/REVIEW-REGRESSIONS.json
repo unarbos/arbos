@@ -1,0 +1,80 @@
+{
+  "SCROLL-CANDIDATE-BEFORE": {
+    "source_sha256": "e2b8d05a9bdb438ae75876aa045ff2d93517c9866be2151e47cf6de59526ab16",
+    "closure_sha256": "fc4e7cad6aa30856bf60c2cd8536702aaa32fb1bca0d0ddc02d21d373d710f28",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "cancelled-current-scroll-is-not-account-retirement": false,
+        "fixture-to-authenticated-disappearance-retires-owned-player": true,
+        "normal-current-scroll-keeps-existing-playback-policy": true,
+        "old-account-disappearance-retires-owned-player": true,
+        "unavailable-player-is-retired": true
+      },
+      "failed": 1,
+      "passed": 4,
+      "total": 5
+    },
+    "seconds": 1.6361236249795184
+  },
+  "SCROLL-AFTER": {
+    "source_sha256": "ac6a02d802151f02215b0760e17c832c9b2385dbac21fbf6adcad48960a565ef",
+    "closure_sha256": "ae3d53a0c1a3f199581a1c511f14d203755872d289e50cbc83ea910b9b6939c4",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "cancelled-current-scroll-is-not-account-retirement": true,
+        "fixture-to-authenticated-disappearance-retires-owned-player": true,
+        "normal-current-scroll-keeps-existing-playback-policy": true,
+        "old-account-disappearance-retires-owned-player": true,
+        "unavailable-player-is-retired": true
+      },
+      "failed": 0,
+      "passed": 5,
+      "total": 5
+    },
+    "seconds": 1.4038612080039456
+  },
+  "MIC-CANCEL-CANONICAL-BEFORE": {
+    "source_sha256": "e28ea523859d85b7f300ec69a407b4a83473b0f7ec5980bde2e6975ae83d99fc",
+    "closure_sha256": "bd0310380c5e16f002a31ad8b1817c6d73422889de10d8060962d966a8b209e8",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "cancelled-callback-has-no-current-effect-control": true,
+        "held-release-pending-permission-keeps-auto-finish-control": true,
+        "retired-callback-has-no-current-effect-control": true,
+        "short-release-preserves-toggle-policy-control": true,
+        "slide-cancel-active-recording-control": true,
+        "slide-cancel-revokes-pending-permission": false
+      },
+      "failed": 1,
+      "passed": 5,
+      "total": 6
+    },
+    "seconds": 0.7127847080118954
+  },
+  "MIC-CANCEL-AFTER": {
+    "source_sha256": "19142cc76f8381f6114c0ab48ec9a2fff230b49d2eb63c7ca4e5f9f3d4237440",
+    "closure_sha256": "0df4a2acaa31efe2487234ef96b0ac51149edff7d3fa3721ccd2d44fdd18cb0c",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "cancelled-callback-has-no-current-effect-control": true,
+        "held-release-pending-permission-keeps-auto-finish-control": true,
+        "retired-callback-has-no-current-effect-control": true,
+        "short-release-preserves-toggle-policy-control": true,
+        "slide-cancel-active-recording-control": true,
+        "slide-cancel-revokes-pending-permission": true
+      },
+      "failed": 0,
+      "passed": 6,
+      "total": 6
+    },
+    "seconds": 1.125730041996576
+  }
+}

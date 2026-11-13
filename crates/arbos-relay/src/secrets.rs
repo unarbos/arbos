@@ -717,22 +717,204 @@ impl Refusal {
     }
 }
 
-/// May `asked_by` ask for `s` in `chat_id`? The owner always may. Anyone else needs a People
-/// row that is on and whose scope covers the chat. `None` means no other person is asking
-/// (owner 1:1 chat, or asker unknown) — allowed.
+/// What the box offered about who is directing a turn, beyond the account it named.
+///
+/// `asked_by` on its own is a claim and not evidence: the box reads it out of the chat document,
+/// and every member of a chat can write that document. These are what the relay checks it
+/// against.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TurnAuthor<'a> {
+    /// The row the turn answers. [`Db::message_author`] is keyed on it, so without one the relay
+    /// has nothing to look up — a box too old to send it (see [`directing`]).
+    pub message_id: Option<&'a str>,
+    /// The owner's authority here does not rest on a chat document at all: the box wrote the row
+    /// itself (a routine, a voice line, a bound channel's message), or the owner already answered
+    /// a card for this exact request. A row the box wrote itself is a box assertion, not a
+    /// document claim, and the box is an authenticated principal the relay trusts for everything
+    /// else — so trusting it there is sound precisely where trusting a document field is not.
+    pub not_from_document: bool,
+}
+
+impl<'a> TurnAuthor<'a> {
+    /// What a box offered in its request body.
+    pub(crate) fn offered(message_id: Option<&'a str>, own_work: bool) -> Self {
+        Self {
+            message_id: message_id.map(str::trim).filter(|m| !m.is_empty()),
+            not_from_document: own_work,
+        }
+    }
+
+    /// A use whose authority comes from the owner answering a card for this exact request, so
+    /// there is no document claim left to check.
+    pub(crate) fn card_already_answered() -> Self {
+        Self {
+            message_id: None,
+            not_from_document: true,
+        }
+    }
+}
+
+/// Who the relay can establish is directing a turn, which is not always who the box named.
+enum Directing {
+    /// The owner, whose own secrets are theirs to direct.
+    Owner,
+    /// A named person the author record attests to. They need a People row like anyone else —
+    /// and naming them is stronger than refusing, because the refusal then rests on who they
+    /// are rather than on the relay declining to be fooled.
+    Person(String),
+    /// A claim on the owner's authority that nothing supports, in a room where somebody other
+    /// than the owner could have written the row.
+    Unproven,
+}
+
+/// Resolve who is directing a turn, preferring the attested author record over the box's claim.
+///
+/// The record is written from the authenticated principal that pushed the row
+/// (`push_guard::check_push`), so a guest who writes somebody else's id into `sender` is recorded
+/// under their own name and lands in [`Directing::Person`] as themselves — refused by name on the
+/// People list rather than by absence.
+///
+/// The claim is checked whoever it names, not only when it names the owner. A guest who writes
+/// the id of a person the owner *has* listed would otherwise inherit that person's row, which is
+/// the same defect one step down.
+fn directing(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    chat_id: Option<&str>,
+    asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
+) -> Directing {
+    if author.not_from_document {
+        return claimed(s, asked_by);
+    }
+    let (Some(chat), Some(message_id)) = (chat_id, author.message_id) else {
+        // A box too old to name the row it is answering. Field presence is a function of box
+        // version, and the attacker writes document rows rather than the box's request body, so
+        // this is not a case they can reach — and refusing it would take owners' own secrets away
+        // from them on a *use* path until every box had rolled forward.
+        //
+        // Temporary, and deliberately observable so we can tell when it is dead: see
+        // `note_unattributable`.
+        note_unattributable(
+            state,
+            s,
+            project_id,
+            "no_message_id",
+            shared(state, project_id),
+        );
+        return claimed(s, asked_by);
+    };
+    match state.db.message_author(chat, message_id).ok().flatten() {
+        Some(a) if a == format!("user:{}", s.user_id) => Directing::Owner,
+        // The record carries its prefix attached. `user:<someone else>` is the real asker.
+        Some(a) => match a.strip_prefix("user:") {
+            Some(uid) => Directing::Person(uid.to_owned()),
+            // `agent:<project>`: a row the box wrote under one of its owner's agents. An agent
+            // is not a human directing a turn, so it carries nobody's authority.
+            None => Directing::Unproven,
+        },
+        // `None` means two different things, and only `chat_has_authors` tells them apart: in a
+        // chat the relay has attested something in, the relay never saw *this* message
+        // announced; in a chat it has attested nothing in, the record does not reach the chat at
+        // all and its silence is evidence about nothing.
+        //
+        // Both refuse here, and the reason they land together is particular to this caller: the
+        // row in question is always the row driving the *current* turn, which is new, so an
+        // unreachable record means a client that does not announce rather than genuine history.
+        // Allowing the unreachable branch would also hand the attacker the bypass, since they
+        // pick the chat and any long-idle one has no attestations.
+        None => {
+            let reason = if state.db.chat_has_authors(chat).unwrap_or(false) {
+                "message_not_announced"
+            } else {
+                "record_does_not_reach_chat"
+            };
+            let shared = shared(state, project_id);
+            note_unattributable(state, s, project_id, reason, shared);
+            // Where nobody but the owner could have written the row, the claim still stands.
+            if shared {
+                Directing::Unproven
+            } else {
+                claimed(s, asked_by)
+            }
+        }
+    }
+}
+
+/// The box's claim, taken at face value. Only reached where the relay has established that it
+/// cannot be checked *and* that nobody but the owner could have written the row.
+fn claimed(s: &Secret, asked_by: Option<&str>) -> Directing {
+    match asked_by {
+        None => Directing::Owner,
+        Some(uid) if uid == s.user_id => Directing::Owner,
+        Some(uid) => Directing::Person(uid.to_owned()),
+    }
+}
+
+/// Could anybody other than the owner have written a row in this project's rooms? Ever a guest,
+/// not a guest right now: a departure does not make a room's history the owner's.
+fn shared(state: &AppState, project_id: &str) -> bool {
+    state.db.project_ever_had_member(project_id).unwrap_or(true)
+}
+
+/// A claim to be directing a turn that the relay could not check, recorded so that neither the
+/// fallback nor the refusals become a permanent silent weakening nobody revisits.
+///
+/// One `tracing::warn!` every time for operations, and an audit row only where the project has
+/// ever had a guest — which is where it matters, and which keeps a box too old to send a message
+/// id from writing a row per use in projects where the question cannot arise.
+fn note_unattributable(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    reason: &'static str,
+    shared: bool,
+) {
+    tracing::warn!(
+        secret = %s.id,
+        project = %project_id,
+        reason,
+        shared,
+        "secrets: a claim to direct this turn could not be checked against the author record"
+    );
+    if shared {
+        audit(
+            state,
+            &s.user_id,
+            AuditEntry {
+                project_id: Some(project_id.to_owned()),
+                detail: json!({ "reason": reason }),
+                ..entry("claim_unattributable", s, "relay")
+            },
+        );
+    }
+}
+
+/// May the person directing this turn ask for `s` in `chat_id`? The owner always may. Anyone
+/// else needs a People row that is on and whose scope covers the chat.
+///
+/// Who is directing is not taken from `asked_by` alone. The claim is checked against the
+/// attested author record ([`directing`]), because `asked_by` reaches the relay from a chat
+/// document field that any member of the chat can write — so a guest who writes the owner's id
+/// into it would otherwise inherit the owner's authority over every secret the project can
+/// reach, and one who writes a listed person's id would inherit that person's row.
 pub(crate) fn may_direct(
     state: &AppState,
     s: &Secret,
+    project_id: &str,
     asked_by: Option<&str>,
     chat_id: Option<&str>,
+    author: TurnAuthor<'_>,
 ) -> bool {
-    match asked_by.map(str::trim).filter(|u| !u.is_empty()) {
-        None => true,
-        Some(uid) if uid == s.user_id => true,
-        Some(uid) => state
+    let asked_by = asked_by.map(str::trim).filter(|u| !u.is_empty());
+    match directing(state, s, project_id, chat_id, asked_by, author) {
+        Directing::Owner => true,
+        Directing::Person(uid) => state
             .db
-            .is_secret_director(&s.id, uid, chat_id)
+            .is_secret_director(&s.id, &uid, chat_id)
             .unwrap_or(false),
+        Directing::Unproven => false,
     }
 }
 
@@ -748,15 +930,72 @@ pub(crate) fn not_listed(s: &Secret) -> Refusal {
 /// A use the rule allowed, and what it was allowed by.
 pub struct Allowed {
     pub access: Option<Access>,
-    /// The `allowed_once` request spent by this use.
+    /// An observed request; authority requires an owned claim receipt at use.
     pub once: Option<SecretRequest>,
     /// No host was known yet: pin `host` on the access and tell the owner.
     pub pin_host: bool,
 }
 
+/// An owned admission receipt, either standing access or one atomically claimed grant.
+/// Holding it does not hold a database lock or permit automatic retry/restoration.
+pub(crate) struct UseReceipt {
+    claims: Vec<(SecretRequest, crate::db_secrets::OneUseReceipt)>,
+}
+
+impl UseReceipt {
+    pub(crate) fn permits(&self, once: Option<&SecretRequest>) -> bool {
+        once.is_none_or(|request| self.claims.iter().any(|(claimed, _)| claimed == request))
+    }
+}
+
+pub(crate) fn claim_uses<'a>(
+    state: &AppState,
+    requests: impl IntoIterator<Item = &'a SecretRequest>,
+) -> Result<UseReceipt, ApiErr> {
+    let unavailable = || {
+        err(
+            StatusCode::CONFLICT,
+            "not_allowed",
+            "one-time authorization is no longer available",
+        )
+    };
+    let mut unique = BTreeMap::new();
+    for request in requests {
+        if let Some(previous) = unique.insert(request.id.as_str(), request) {
+            if previous != request {
+                return Err(unavailable());
+            }
+        }
+    }
+    let requests: Vec<&SecretRequest> = unique.into_values().collect();
+    let receipts = state
+        .db
+        .claim_allowed_once_batch(&requests)
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "one-time authorization is unavailable",
+            )
+        })?
+        .ok_or_else(unavailable)?;
+    Ok(UseReceipt {
+        claims: requests.into_iter().cloned().zip(receipts).collect(),
+    })
+}
+
+pub(crate) fn claim_use(
+    state: &AppState,
+    once: Option<&SecretRequest>,
+) -> Result<UseReceipt, ApiErr> {
+    claim_uses(state, once)
+}
+
 /// Check one use of `s` by `project_id` at `host` in `chat_id`. `use_kind` is `header | env |
-/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown).
-/// Pure except for the lookups (access, allowed_once, directors).
+/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown), and
+/// `author` is what the relay can check that claim against ([`TurnAuthor`]).
+/// Pure except for the lookups (access, allowed_once, directors, author record).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_use(
     state: &AppState,
     s: &Secret,
@@ -765,6 +1004,7 @@ pub(crate) fn decide_use(
     use_kind: &str,
     chat_id: Option<&str>,
     asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
 ) -> Result<Allowed, Refusal> {
     if s.expires_at.is_some_and(|t| t < now_ms()) {
         return Err(Refusal::Expired);
@@ -786,7 +1026,7 @@ pub(crate) fn decide_use(
             pin_host: false,
         });
     }
-    if !may_direct(state, s, asked_by, chat_id) {
+    if !may_direct(state, s, project_id, asked_by, chat_id, author) {
         return Err(not_listed(s));
     }
     let Some(a) = access else {
@@ -821,11 +1061,11 @@ pub(crate) fn decide_use(
     })
 }
 
-/// After an allowed use: spend a one-time grant, pin a first host, touch timestamps, audit.
+/// Admit a prepared sensitive use before its effect: claim once, pin hosts, touch and audit.
 /// `asked_by` is the person whose ask this use served (None = the owner); it lands on the
 /// audit row and stamps their People row.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn after_use(
+pub(crate) fn admit_use(
     state: &AppState,
     s: &Secret,
     project_id: &str,
@@ -834,15 +1074,39 @@ pub(crate) fn after_use(
     chat_id: Option<&str>,
     asked_by: Option<&str>,
     allowed: &Allowed,
-) {
+) -> Result<UseReceipt, ApiErr> {
+    let receipt = claim_use(state, allowed.once.as_ref())?;
+    note_use(
+        state, s, project_id, host, use_kind, chat_id, asked_by, allowed, &receipt,
+    )?;
+    Ok(receipt)
+}
+
+/// Metadata does not grant authority; an observed once request needs this operation's receipt.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn note_use(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    host: &str,
+    use_kind: &str,
+    chat_id: Option<&str>,
+    asked_by: Option<&str>,
+    allowed: &Allowed,
+    receipt: &UseReceipt,
+) -> Result<(), ApiErr> {
+    if !receipt.permits(allowed.once.as_ref()) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "not_allowed",
+            "operation has no matching one-time authorization",
+        ));
+    }
     let asked_by = asked_by
         .map(str::trim)
         .filter(|u| !u.is_empty() && *u != s.user_id);
     if let Some(uid) = asked_by {
         let _ = state.db.touch_secret_director(&s.id, uid);
-    }
-    if let Some(once) = &allowed.once {
-        let _ = state.db.consume_allowed_once(&once.id);
     }
     if allowed.pin_host {
         if let Some(a) = &allowed.access {
@@ -875,7 +1139,6 @@ pub(crate) fn after_use(
                     ..entry("access_on", s, &format!("agent:{project_id}"))
                 },
             );
-            spawn_remount(state.clone(), s.user_id.clone());
         }
     }
     let _ = state.db.touch_secret(&s.user_id, &s.id, project_id);
@@ -893,6 +1156,7 @@ pub(crate) fn after_use(
             ..entry("used", s, &format!("agent:{project_id}"))
         },
     );
+    Ok(())
 }
 
 /// `{ asked_by, asked_by_handle }` for an audit row, or `{}` when the owner asked.
@@ -940,96 +1204,7 @@ pub(crate) fn audit_refusal(
     );
 }
 
-// ---- Daytona mirror (D28) -----------------------------------------------------------------------
-
-/// Recompute the user's sandbox env: every secret with at least one enabled access and a known
-/// host set, as Daytona Secrets (`ENV` for one field, `ENV_FIELD` for logins); `{}` while
-/// paused. Best effort; the relay `/egress` path is the authority regardless.
-pub(crate) async fn remount_daytona(state: &AppState, user_id: &str) -> Option<String> {
-    let dt = state.daytona.as_ref()?;
-    let sb = state.db.user_box(user_id).ok().flatten()?;
-    if sb.provider != "daytona" {
-        return None;
-    }
-    let sandbox_id = sb.sandbox_id?;
-    let paused = state.db.secrets_settings(user_id).ok()?.paused;
-    let mut mounts = Vec::new();
-    if !paused {
-        let dek = user_dek(state, user_id).ok()?;
-        for mut s in state.db.list_secrets(user_id).ok()? {
-            if s.expires_at.is_some_and(|t| t < now_ms()) {
-                continue;
-            }
-            let accesses = state.db.accesses_of_target("secret", &s.id).ok()?;
-            let mut hosts = s.hosts.clone();
-            let mut any_on = false;
-            for a in accesses.iter().filter(|a| a.enabled) {
-                any_on = true;
-                hosts.extend(a.hosts.iter().cloned());
-            }
-            hosts.dedup();
-            if !any_on || hosts.is_empty() {
-                continue;
-            }
-            let Ok(plain) = plain_of(state, &dek, &s) else {
-                continue;
-            };
-            let mut ids = s.daytona_secrets.as_object().cloned().unwrap_or_default();
-            let mut changed = false;
-            for (field, value) in &plain.current {
-                if field == "url" || field == "username" {
-                    continue;
-                }
-                let secret_name = format!("arbos-{}-{}", s.id.to_lowercase(), field);
-                let outcome = match ids.get(field).and_then(Value::as_str) {
-                    Some(existing) => dt
-                        .update_secret(existing, value, &hosts)
-                        .await
-                        .map(|_| existing.to_owned()),
-                    None => dt.create_secret(&secret_name, value, &hosts).await,
-                };
-                match outcome {
-                    Ok(sid) => {
-                        if ids.get(field).and_then(Value::as_str) != Some(sid.as_str()) {
-                            ids.insert(field.clone(), Value::String(sid));
-                            changed = true;
-                        }
-                        let env = if field == "value" {
-                            s.env.clone()
-                        } else {
-                            format!("{}_{}", s.env, field.to_ascii_uppercase())
-                        };
-                        let mut m = serde_json::Map::new();
-                        m.insert(env, Value::String(secret_name));
-                        mounts.push(m);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, secret = %s.env, "daytona secret mirror failed");
-                    }
-                }
-            }
-            if changed {
-                s.daytona_secrets = Value::Object(ids);
-                let _ = state.db.update_secret(&s);
-            }
-        }
-    }
-    match dt.update_secrets(&sandbox_id, mounts).await {
-        Ok(_) => Some("mounted".into()),
-        Err(e) => {
-            tracing::warn!(error = %e, "daytona updateSecrets failed");
-            Some(format!("updateSecrets failed: {e}"))
-        }
-    }
-}
-
-pub(crate) fn spawn_remount(state: AppState, user_id: String) {
-    tokio::spawn(async move {
-        remount_daytona(&state, &user_id).await;
-    });
-}
-
-/// Tell the box about one access change and refresh the Daytona mount.
+/// Tell the box about one access change.
 fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
     push_box(
         state,
@@ -1039,7 +1214,6 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
             "env": s.env, "name": s.name, "kind": s.kind, "enabled": a.enabled, "inject_env": s.inject_env,
             "hosts": s.hosts.iter().chain(a.hosts.iter()).collect::<Vec<_>>() }),
     );
-    spawn_remount(state.clone(), s.user_id.clone());
 }
 
 /// A People row or the Others-who-ask switch changed: every agent with Access on the secret
@@ -1232,7 +1406,6 @@ pub async fn create(
         created_at: now,
         updated_at: now,
         last_used_at: None,
-        daytona_secrets: json!({}),
         // Real value in the environment is a choice the owner makes; it also turns off
         // Ask every time, which has nothing to ask once the value is just there.
         inject_env: b.inject_env.unwrap_or(false),
@@ -1295,6 +1468,58 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(secret_envelope(&state, &s))).into_response())
 }
 
+/// The caller's own agent, by id or name. Another owner's agent reads exactly like one that is
+/// not there, so the two answers cannot be used to ask which agent names exist
+/// (`api::no_such_project`, reported 2026-11-02). Names are matched against the caller's own
+/// agents first, because they are not unique across owners.
+fn own_agent(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<crate::db::Project, ApiErr> {
+    let wanted = project_id.trim();
+    if let Some(p) = state
+        .db
+        .project_of_user_by_name(user_id, wanted)
+        .map_err(internal)?
+    {
+        return Ok(p);
+    }
+    state
+        .db
+        .project(wanted)
+        .map_err(internal)?
+        .filter(|p| p.user_id == user_id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))
+}
+
+/// [`own_agent`], widened to the agents the caller was invited into: the owner and the guests
+/// are who may read an agent's secrets card. An agent that is neither reads exactly like one
+/// that is not there, so these answers cannot be used to ask which agent names exist
+/// (`api::no_such_project`, reported 2026-11-02).
+fn visible_agent(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<crate::db::Project, ApiErr> {
+    let wanted = project_id.trim();
+    if let Some(p) = state
+        .db
+        .project_of_user_by_name(user_id, wanted)
+        .map_err(internal)?
+    {
+        return Ok(p);
+    }
+    state
+        .db
+        .project(wanted)
+        .map_err(internal)?
+        .filter(|p| {
+            p.user_id == user_id || state.db.is_project_member(&p.id, user_id).unwrap_or(false)
+        })
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))
+}
+
 /// Create or update the access row for `(secret, project)`; audits on/off. `Ok(None)` when the
 /// project is not the user's.
 #[allow(clippy::too_many_arguments)]
@@ -1308,12 +1533,7 @@ fn grant_access(
     enabled: bool,
     created_from: &str,
 ) -> Result<Option<Access>, ApiErr> {
-    let Some(p) = state.db.project(project_id).map_err(internal)? else {
-        return Err(err(StatusCode::NOT_FOUND, "not_found", "no such agent"));
-    };
-    if p.user_id != user_id {
-        return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your agent"));
-    }
+    let p = own_agent(state, user_id, project_id)?;
     let existing = state.db.access(&p.id, "secret", &s.id).map_err(internal)?;
     let was_on = existing.as_ref().is_some_and(|a| a.enabled);
     let now = now_ms();
@@ -1526,7 +1746,7 @@ pub async fn patch(
 }
 
 /// `PUT /secrets/{id}/value` `{ value | text | fields }` → `{ secret }`: version n+1; version n
-/// keeps resolving for 24 h; Daytona mirrors refreshed; the box drops its cached placeholder env.
+/// keeps resolving for 24 h; the box drops its cached placeholder env.
 pub async fn replace_value(
     State(state): State<AppState>,
     principal: Principal,
@@ -1579,7 +1799,6 @@ pub async fn replace_value(
             json!({ "ref": placeholder(&s.env, "value"), "env": s.env }),
         );
     }
-    spawn_remount(state.clone(), user_id.clone());
     Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
@@ -2170,7 +2389,6 @@ pub async fn box_from_message(
         created_at: now,
         updated_at: now,
         last_used_at: None,
-        daytona_secrets: json!({}),
         inject_env: false,
         others_ask: "refuse".into(),
         source_kind: "chat".into(),
@@ -2268,16 +2486,7 @@ pub async fn project_secrets(
     Path(project_id): Path<String>,
 ) -> ApiResult {
     let user_id = device_user(&principal)?;
-    let p = state
-        .db
-        .project(&project_id)
-        .map_err(internal)?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?;
-    let member =
-        p.user_id == user_id || state.db.is_project_member(&p.id, &user_id).unwrap_or(false);
-    if !member {
-        return Err(err(StatusCode::FORBIDDEN, "forbidden", "not your agent"));
-    }
+    let p = visible_agent(&state, &user_id, &project_id)?;
     let owner = p.user_id.clone();
     let settings = state.db.secrets_settings(&owner).map_err(internal)?;
     let mut items = Vec::new();
@@ -2324,8 +2533,7 @@ pub struct PauseBody {
     pub paused: bool,
 }
 
-/// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s; Daytona
-/// mounts within 15 s.
+/// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s.
 /// The pause `POST /machine/stop` set (D83 decision 8, `paused_by: stop_machine`) is the kill
 /// switch for the downtime, not a standing choice: `POST /machine/start` lifts it. A pause the
 /// user set themselves (`paused_by: user`) stays (#1664: every restart used to leave all
@@ -2373,7 +2581,6 @@ pub(crate) async fn set_paused(
         user_id,
         PushEventDto::SecretsPaused(SecretsPausedPayloadDto { paused }),
     );
-    remount_daytona(state, user_id).await;
     paused_dto(&settings)
 }
 
@@ -2821,6 +3028,14 @@ pub struct BoxRequestBody {
     /// Human directing this turn (`user_id`). Absent = owner / unknown.
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
+    /// The chat row `asked_by` was read out of, so the relay can check the claim against the
+    /// attested author of that row instead of believing it ([`TurnAuthor::message_id`]).
+    #[serde(default, alias = "askedByMessageId")]
+    pub asked_by_message_id: Option<String>,
+    /// The box asserting that this turn came from its own work and not from a chat document at
+    /// all ([`TurnAuthor::not_from_document`]).
+    #[serde(default, alias = "askedByOwnWork")]
+    pub asked_by_own_work: bool,
 }
 
 /// `POST /box/secrets/request` → 201 `{ request }` (a card is needed) or 200
@@ -2903,8 +3118,9 @@ pub async fn box_request(
         .as_deref()
         .map(str::trim)
         .filter(|u| !u.is_empty());
+    let author = TurnAuthor::offered(b.asked_by_message_id.as_deref(), b.asked_by_own_work);
     // A person who is not on the People list: refuse flat (default), or card the owner.
-    if !may_direct(&state, &s, asked_by, chat_id) && s.others_ask != "card" {
+    if !may_direct(&state, &s, &project_id, asked_by, chat_id, author) && s.others_ask != "card" {
         let why = Refusal::NotDirector;
         audit_refusal(
             &state,
@@ -2933,6 +3149,7 @@ pub async fn box_request(
             &use_kind,
             chat_id,
             asked_by,
+            author,
         ) {
             if allowed.once.is_none() {
                 if let Some(a) = &allowed.access {
@@ -2957,7 +3174,7 @@ pub async fn box_request(
                     };
                     state.db.insert_secret_request(&rq).map_err(internal)?;
                     if allowed.pin_host {
-                        after_use(
+                        admit_use(
                             &state,
                             &s,
                             &project_id,
@@ -2970,7 +3187,7 @@ pub async fn box_request(
                                 once: None,
                                 pin_host: true,
                             },
-                        );
+                        )?;
                     }
                     return Ok(Json(json!({ "request": request_json(&state, &rq), "status": "allowed_always", "access_id": a.id, "item": box_item(&state, &s, Some(a)) }))
                         .into_response());
@@ -3133,7 +3350,7 @@ pub async fn box_request_values(
     let host = rq.host.clone().unwrap_or_default();
     // The standing rule still applies at the moment of use. The asker was already judged when
     // the owner answered the card (`asked_by` is not re-checked here).
-    let allowed = match decide_use(
+    let mut allowed = match decide_use(
         &state,
         &s,
         &project_id,
@@ -3141,6 +3358,7 @@ pub async fn box_request_values(
         "browser_fill",
         Some(rq.chat_id.as_str()),
         None,
+        TurnAuthor::card_already_answered(),
     ) {
         Ok(a) => a,
         Err(
@@ -3172,9 +3390,15 @@ pub async fn box_request_values(
             ));
         }
     };
+    // This route releases this answered card, never another matching/newer card.
+    // The fallback above recognizes owner-approved card authority; it must still
+    // carry the exact one-time request into the atomic admission boundary.
+    if rq.status == "allowed_once" {
+        allowed.once = Some(rq.clone());
+    }
     let dek = user_dek(&state, &user_id).map_err(internal)?;
     let plain = plain_of(&state, &dek, &s).map_err(internal)?;
-    after_use(
+    admit_use(
         &state,
         &s,
         &project_id,
@@ -3183,7 +3407,7 @@ pub async fn box_request_values(
         Some(rq.chat_id.as_str()),
         rq.asked_by.as_deref(),
         &allowed,
-    );
+    )?;
     Ok(Json(
         json!({ "name": s.env, "kind": s.kind, "allowed_hosts": s.hosts, "fields": plain.current }),
     )
@@ -3198,12 +3422,14 @@ pub(crate) struct EgressPlan {
     pub items: Vec<crate::vault::Resolved>,
     pub refused: Vec<(String, String)>,
     pub redact: Vec<String>,
-    /// `(secret, allowed)` to settle after the request goes out.
+    /// `(secret, allowed)` to admit after local validation and before the request goes out.
     pub used: Vec<(Secret, Allowed)>,
 }
 
 /// Decide every placeholder in `texts` for `project_id` at `host`. Values are decrypted only
-/// for secrets the rule allows. `asked_by` is the human directing this turn.
+/// for secrets the rule allows. `asked_by` is the human directing this turn, and `author` is
+/// what that claim is checked against ([`TurnAuthor`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_egress(
     state: &AppState,
     user_id: &str,
@@ -3211,6 +3437,7 @@ pub(crate) fn plan_egress(
     host: &str,
     chat_id: Option<&str>,
     asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
     texts: &[&str],
 ) -> Result<EgressPlan, ApiErr> {
     let mut plan = EgressPlan {
@@ -3247,7 +3474,9 @@ pub(crate) fn plan_egress(
                 );
                 continue;
             };
-            match decide_use(state, &s, project_id, host, "header", chat_id, asked_by) {
+            match decide_use(
+                state, &s, project_id, host, "header", chat_id, asked_by, author,
+            ) {
                 Ok(allowed) => {
                     if dek.is_none() {
                         dek = Some(user_dek(state, user_id).map_err(internal)?);
@@ -3401,7 +3630,6 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                 created_at: it.created_at,
                 updated_at: now,
                 last_used_at: it.last_used_at,
-                daytona_secrets: it.daytona_secrets.clone(),
                 inject_env: false,
                 others_ask: "refuse".into(),
                 source_kind: "settings".into(),
@@ -3681,7 +3909,6 @@ mod tests {
             created_at: FIXED_AT,
             updated_at: FIXED_AT,
             last_used_at: Some(FIXED_AT + 1_000),
-            daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
             source_kind: "settings".into(),
@@ -3720,7 +3947,6 @@ mod tests {
             created_at: FIXED_AT,
             updated_at: FIXED_AT,
             last_used_at: None,
-            daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
             source_kind: "settings".into(),
@@ -4147,6 +4373,15 @@ mod tests {
     }
 
     fn verdict(state: &AppState, s: &Secret, asked_by: Option<&str>) -> Result<(), String> {
+        verdict_with(state, s, asked_by, TurnAuthor::default())
+    }
+
+    fn verdict_with(
+        state: &AppState,
+        s: &Secret,
+        asked_by: Option<&str>,
+        author: TurnAuthor<'_>,
+    ) -> Result<(), String> {
         decide_use(
             state,
             s,
@@ -4155,6 +4390,7 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             asked_by,
+            author,
         )
         .map(|_| ())
         .map_err(|r| r.kind().to_owned())
@@ -4229,9 +4465,10 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             Some(&sam),
+            TurnAuthor::default(),
         )
         .unwrap();
-        after_use(
+        admit_use(
             &state,
             &secret,
             "proj_people",
@@ -4240,7 +4477,8 @@ mod tests {
             Some("chat_arbonites"),
             Some(&sam),
             &allowed,
-        );
+        )
+        .unwrap();
         let rows = state
             .db
             .list_audit(
@@ -4417,6 +4655,7 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             Some(&jules),
+            TurnAuthor::default(),
         )
         .unwrap();
         assert!(jules_ok.once.is_some());
@@ -4428,9 +4667,168 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             None,
+            TurnAuthor::default(),
         )
         .unwrap();
         assert!(owner_use.once.is_none());
+    }
+
+    // ---- who is directing the turn: the claim vs the attested author ---------------------------
+
+    const ROOM: &str = "chat_arbonites";
+
+    /// `people_setup`, plus Jules as a guest of the project so that somebody other than the
+    /// owner can write a row in its rooms.
+    fn shared_people_setup() -> (AppState, String, Secret, String, String, String) {
+        let (state, owner, secret, sam, samir, jules) = people_setup();
+        assert!(state
+            .db
+            .add_project_member("proj_people", &jules, &owner)
+            .unwrap());
+        (state, owner, secret, sam, samir, jules)
+    }
+
+    fn wrote(state: &AppState, message_id: &str, author: &str) -> String {
+        state
+            .db
+            .record_message_author(ROOM, message_id, author)
+            .unwrap();
+        message_id.to_owned()
+    }
+
+    fn from_row(message_id: &str) -> TurnAuthor<'_> {
+        TurnAuthor::offered(Some(message_id), false)
+    }
+
+    /// The critical: `asked_by` reaches the relay from a chat document field, and every member of
+    /// the chat can write that document. A guest who writes the owner's id into it used to
+    /// inherit the owner's authority over every secret the project could reach.
+    #[test]
+    fn a_forged_asker_does_not_inherit_the_owners_authority() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        let row = wrote(&state, "msg_forged", &format!("user:{jules}"));
+        // Jules has no People row, so his own ask is refused — which is what the forgery was for.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&jules), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+        // Claiming to be the owner does not change who the record says wrote the row.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+        // Nor does claiming to be nobody, which is the owner's own shape.
+        assert_eq!(
+            verdict_with(&state, &secret, None, from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// The same defect one step down: a guest who writes the id of somebody the owner *has*
+    /// listed would otherwise inherit that person's row. So the claim is checked whoever it
+    /// names, not only when it names the owner.
+    #[test]
+    fn a_forged_asker_does_not_inherit_a_listed_persons_row() {
+        let (state, _owner, secret, sam, _samir, jules) = shared_people_setup();
+        let row = wrote(&state, "msg_as_sam", &format!("user:{jules}"));
+        assert!(
+            verdict(&state, &secret, Some(&sam)).is_ok(),
+            "Sam is listed"
+        );
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&sam), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// The record is believed over the claim in the permissive direction too. Naming the real
+    /// asker is stronger than refusing, because the answer then rests on who they are.
+    #[test]
+    fn the_record_names_the_asker_even_when_the_claim_does_not() {
+        let (state, owner, secret, sam, samir, _jules) = shared_people_setup();
+        let sams = wrote(&state, "msg_sam", &format!("user:{sam}"));
+        // Sam's row is on, so Sam passes however the document names her.
+        assert!(verdict_with(&state, &secret, Some(&owner), from_row(&sams)).is_ok());
+        assert!(verdict_with(&state, &secret, None, from_row(&sams)).is_ok());
+        // Samir's row is off, so he is refused however the document names him.
+        let samirs = wrote(&state, "msg_samir", &format!("user:{samir}"));
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&sam), from_row(&samirs)),
+            Err("not_allowed_person".into())
+        );
+        // The owner's own row carries the owner's authority.
+        let owners = wrote(&state, "msg_owner", &format!("user:{owner}"));
+        assert!(verdict_with(&state, &secret, None, from_row(&owners)).is_ok());
+        assert!(verdict_with(&state, &secret, Some(&samir), from_row(&owners)).is_ok());
+    }
+
+    /// `agent:<project>` is a row one of the owner's agents wrote. An agent is not a human
+    /// directing a turn, so it carries nobody's authority — including the owner's.
+    #[test]
+    fn an_agent_row_carries_nobodys_authority() {
+        let (state, owner, secret, _sam, _samir, _jules) = shared_people_setup();
+        let row = wrote(&state, "msg_agent", "agent:proj_people");
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// A row the relay never attested. In a shared project this refuses, because the attacker
+    /// picks the chat and would otherwise pick one with no attestations in it. In a project
+    /// nobody but the owner has ever been in, the claim still stands — the owner does not lose
+    /// their own secrets to a client that does not announce.
+    #[test]
+    fn an_unattested_row_refuses_only_where_somebody_else_could_have_written_it() {
+        let (state, owner, secret, _sam, _samir, _jules) = shared_people_setup();
+        wrote(&state, "msg_other", &format!("user:{owner}"));
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row("msg_unknown")),
+            Err("not_allowed_person".into()),
+            "attested chat, unannounced row"
+        );
+
+        let (private, p_owner, p_secret, _, _, _) = people_setup();
+        assert!(
+            verdict_with(&private, &p_secret, Some(&p_owner), from_row("msg_unknown")).is_ok(),
+            "nobody but the owner has ever been in this project"
+        );
+        // And the same for a box too old to name the row at all.
+        assert!(verdict(&private, &p_secret, Some(&p_owner)).is_ok());
+    }
+
+    /// A departure does not make a room's history the owner's: the rows the guest wrote are
+    /// still there. So "shared" is ever-a-guest, not a-guest-right-now.
+    #[test]
+    fn a_departed_guest_still_leaves_the_rooms_shared() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        assert!(state
+            .db
+            .remove_project_member("proj_people", &jules)
+            .unwrap());
+        assert!(!state.db.is_project_member("proj_people", &jules).unwrap());
+        assert!(state.db.project_ever_had_member("proj_people").unwrap());
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row("msg_unknown")),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// Work the box did itself — a routine, a voice line, a bound channel — is a box assertion
+    /// rather than a document claim, and the box is already an authenticated principal. The
+    /// owner's authority there does not depend on a chat row at all.
+    #[test]
+    fn own_work_the_box_asserts_is_not_a_document_claim() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        let own = TurnAuthor::offered(None, true);
+        assert!(verdict_with(&state, &secret, None, own).is_ok());
+        assert!(verdict_with(&state, &secret, Some(&owner), own).is_ok());
+        // Own work is not a blank cheque: it says where the turn came from, not who may direct
+        // it, so a person still needs a People row.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&jules), own),
+            Err("not_allowed_person".into())
+        );
     }
 
     // ---- secret hand-off: "save this" (POST /box/secrets/from-message) -------------------------
@@ -4867,5 +5265,603 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["secret"]["source"]["kind"], "settings");
         assert!(state.db.secret_by_name(&owner2, "OTHER").unwrap().is_some());
+    }
+
+    mod one_use_regressions {
+        use super::*;
+
+        fn fixture(asked_by: bool, standing: bool) -> (AppState, String, SecretRequest, Secret) {
+            let state = test_state(AuthMode::Github);
+            let (owner, _) = person(&state, 901);
+            let (asker, _) = person(&state, 902);
+            insert_project(&state, &owner, "proj_once", "Synthetic once-use fixture");
+            let secret = insert_login_secret(&state, &owner);
+            if standing {
+                state
+                    .db
+                    .upsert_access(&Access {
+                        id: "acc_once_fixture".into(),
+                        user_id: owner.clone(),
+                        project_id: "proj_once".into(),
+                        target_kind: "secret".into(),
+                        target_id: secret.id.clone(),
+                        note: String::new(),
+                        hosts: secret.hosts.clone(),
+                        scope_kind: "all".into(),
+                        scope_chat_id: None,
+                        enabled: true,
+                        created_from: "settings".into(),
+                        created_at: now_ms(),
+                        disabled_at: None,
+                        last_used_at: None,
+                    })
+                    .unwrap();
+            }
+            let now = now_ms();
+            let request = SecretRequest {
+                id: "once_browser_fixture".into(),
+                user_id: owner.clone(),
+                project_id: "proj_once".into(),
+                chat_id: "chat_proj_once".into(),
+                target_kind: "secret".into(),
+                target_id: Some(secret.id.clone()),
+                target_ref: secret.env.clone(),
+                purpose: "Synthetic authorized browser fill".into(),
+                use_kind: "browser_fill".into(),
+                host: Some("login.fixture.example".into()),
+                status: if standing {
+                    "allowed_always"
+                } else {
+                    "allowed_once"
+                }
+                .into(),
+                decided_by: Some("card:synthetic".into()),
+                created_at: now,
+                decided_at: Some(now),
+                expires_at: now + 60_000,
+                asked_by: asked_by.then_some(asker),
+            };
+            state.db.insert_secret_request(&request).unwrap();
+            (state, owner, request, secret)
+        }
+
+        async fn values(state: AppState, owner: String, id: String) -> ApiResult {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", "proj_once".parse().unwrap());
+            box_request_values(
+                State(state),
+                Principal::Box { user_id: owner },
+                headers,
+                Path(id),
+            )
+            .await
+        }
+
+        fn grants_value(result: &ApiResult) -> bool {
+            result
+                .as_ref()
+                .is_ok_and(|response| response.status() == StatusCode::OK)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn answered_once_card_with_an_asker_allows_only_one_concurrent_disclosure() {
+            let (state, owner, request, _) = fixture(true, false);
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut attempts = Vec::new();
+            for _ in 0..2 {
+                let (state, owner, id, barrier) = (
+                    state.clone(),
+                    owner.clone(),
+                    request.id.clone(),
+                    barrier.clone(),
+                );
+                attempts.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    values(state, owner, id).await
+                }));
+            }
+            let mut disclosed = 0;
+            for attempt in attempts {
+                disclosed += usize::from(grants_value(&attempt.await.unwrap()));
+            }
+            assert_eq!(
+                disclosed, 1,
+                "one answered request admitted more than one sensitive return"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_consume_cannot_return_plaintext() {
+            let (state, owner, request, _) = fixture(false, false);
+            state.db.with(|c| c.execute_batch(
+                "CREATE TRIGGER fail_once_consume BEFORE UPDATE OF status ON secret_requests
+                 WHEN OLD.id = 'once_browser_fixture' AND OLD.status = 'allowed_once' AND NEW.status = 'expired'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic claim failure'); END;"
+            )).unwrap();
+            let result = values(state, owner, request.id).await;
+            assert!(
+                !grants_value(&result),
+                "database failure admitted a sensitive return"
+            );
+        }
+
+        #[tokio::test]
+        async fn browser_fill_consumes_the_exact_answered_request_not_a_newer_card() {
+            let (state, owner, request, _) = fixture(false, false);
+            let mut newer = request.clone();
+            newer.id = "newer_once_browser_fixture".into();
+            newer.decided_at = request.decided_at.map(|t| t + 1);
+            state.db.insert_secret_request(&newer).unwrap();
+            assert!(grants_value(
+                &values(state.clone(), owner, request.id.clone()).await
+            ));
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+            assert_eq!(
+                state.db.secret_request(&newer.id).unwrap().unwrap().status,
+                "allowed_once"
+            );
+        }
+
+        #[tokio::test]
+        async fn local_preparation_failure_keeps_the_grant_retryable() {
+            let (state, owner, request, secret) = fixture(false, false);
+            state.db.with(|c| c.execute(
+                "UPDATE secret_versions SET fields_enc = 'synthetic-invalid-envelope' WHERE secret_id = ?1",
+                rusqlite::params![secret.id],
+            )).unwrap();
+            assert!(!grants_value(
+                &values(state.clone(), owner, request.id.clone()).await
+            ));
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[tokio::test]
+        async fn ordinary_owner_once_card_still_discloses_once() {
+            let (state, owner, request, _) = fixture(false, false);
+            assert!(grants_value(
+                &values(state.clone(), owner.clone(), request.id.clone()).await
+            ));
+            assert!(!grants_value(&values(state, owner, request.id).await));
+        }
+
+        #[tokio::test]
+        async fn standing_access_remains_repeatable() {
+            let (state, owner, request, _) = fixture(false, true);
+            for _ in 0..2 {
+                assert!(grants_value(
+                    &values(state.clone(), owner.clone(), request.id.clone()).await
+                ));
+            }
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_always"
+            );
+        }
+
+        #[test]
+        fn prepared_permits_race_at_the_shared_admission_boundary() {
+            let (state, _, request, secret) = fixture(false, false);
+            let prepare = || {
+                decide_use(
+                    &state,
+                    &secret,
+                    "proj_once",
+                    "login.fixture.example",
+                    "browser_fill",
+                    Some("chat_proj_once"),
+                    None,
+                    TurnAuthor::card_already_answered(),
+                )
+                .unwrap()
+            };
+            let permits = [prepare(), prepare()];
+            let barrier = std::sync::Barrier::new(2);
+            let effects = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for permit in permits {
+                    let (state, secret, id, barrier, effects) =
+                        (&state, &secret, &request.id, &barrier, &effects);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        if let Ok(_receipt) = admit_use(
+                            state,
+                            secret,
+                            "proj_once",
+                            "login.fixture.example",
+                            "browser_fill",
+                            Some("chat_proj_once"),
+                            None,
+                            &permit,
+                        ) {
+                            // A fake effect can re-enter the DB: the claim retains no lock.
+                            assert_eq!(
+                                state.db.secret_request(id).unwrap().unwrap().status,
+                                "expired"
+                            );
+                            effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_claim_binds_every_observed_scope_field_and_current_expiry() {
+            let (state, _, request, _) = fixture(false, false);
+            type Change = fn(&mut SecretRequest);
+            let changes: [Change; 14] = [
+                |r| r.id.push_str("-other"),
+                |r| r.user_id.push_str("-other"),
+                |r| r.project_id.push_str("-other"),
+                |r| r.chat_id.push_str("-other"),
+                |r| r.target_kind = "vault".into(),
+                |r| r.target_id = None,
+                |r| r.target_ref.push_str("-other"),
+                |r| r.use_kind = "header".into(),
+                |r| r.host = None,
+                |r| r.asked_by = Some("other-fixture-asker".into()),
+                |r| r.decided_by = None,
+                |r| r.decided_at = None,
+                |r| r.expires_at += 1,
+                |r| r.status = "pending".into(),
+            ];
+            for change in changes {
+                let mut different = request.clone();
+                change(&mut different);
+                assert!(state
+                    .db
+                    .claim_allowed_once_batch(&[&different])
+                    .unwrap()
+                    .is_none());
+            }
+            let mut expired = request;
+            expired.expires_at = now_ms() - 1;
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE secret_requests SET expires_at = ?2 WHERE id = ?1",
+                        rusqlite::params![expired.id, expired.expires_at],
+                    )
+                })
+                .unwrap();
+            assert!(state
+                .db
+                .claim_allowed_once_batch(&[&expired])
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn an_uncertain_admitted_effect_never_restores_or_retries_a_grant() {
+            let (state, _, request, secret) = fixture(false, false);
+            let permit = decide_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                TurnAuthor::card_already_answered(),
+            )
+            .unwrap();
+            let receipt = admit_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &permit,
+            )
+            .unwrap();
+            let effects = std::sync::atomic::AtomicUsize::new(0);
+            let fake_effect = || {
+                effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), ()>(()) // Uncertain whether a remote service accepted this effect.
+            };
+            assert!(fake_effect().is_err());
+            drop(receipt);
+            assert!(admit_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &permit
+            )
+            .is_err());
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+        }
+
+        #[test]
+        fn vault_uses_require_the_same_one_use_claim_receipt() {
+            let (state, owner, mut request, _) = fixture(false, false);
+            let reference = "op://SyntheticVault/Item/password";
+            let vault = Vault {
+                id: "vault_once_fixture".into(),
+                user_id: owner.clone(),
+                provider: "onepassword".into(),
+                name: "SyntheticVault".into(),
+                token_enc: Some("synthetic-unusable-envelope".into()),
+                external_vaults: json!([{ "id": "synthetic", "name": "SyntheticVault" }]),
+                items: json!([]),
+                items_count: 0,
+                items_refreshed_at: None,
+                token_expires_at: None,
+                status: "ok".into(),
+                last_error: None,
+                last_refreshed_at: None,
+                created_at: now_ms(),
+                disconnected_at: None,
+            };
+            state.db.upsert_vault(&vault).unwrap();
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "DELETE FROM secret_requests WHERE id = ?1",
+                        rusqlite::params![request.id],
+                    )
+                })
+                .unwrap();
+            request.target_kind = "vault".into();
+            request.target_id = Some(vault.id.clone());
+            request.target_ref = reference.into();
+            state.db.insert_secret_request(&request).unwrap();
+            let Ok(first) = crate::vaults::decide_op_use(
+                &state,
+                &owner,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+            ) else {
+                panic!("synthetic vault authorization fixture")
+            };
+            let Ok(second) = crate::vaults::decide_op_use(
+                &state,
+                &owner,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+            ) else {
+                panic!("synthetic vault authorization fixture")
+            };
+            assert!(crate::vaults::admit_op_use(
+                &state,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                &first
+            )
+            .is_ok());
+            assert!(crate::vaults::admit_op_use(
+                &state,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                &second
+            )
+            .is_err());
+        }
+
+        #[tokio::test]
+        async fn local_request_validation_precedes_one_use_admission() {
+            let (state, owner, request, secret) = fixture(false, false);
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE secret_requests SET use_kind = 'header' WHERE id = ?1",
+                        rusqlite::params![request.id],
+                    )
+                })
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", "proj_once".parse().unwrap());
+            let body = crate::vault::EgressBody {
+                url: "https://login.fixture.example/never-sent".into(),
+                method: Some("POST".into()),
+                headers: BTreeMap::from([(
+                    "Authorization".into(),
+                    format!("Bearer {}\n", placeholder(&secret.env, "password")),
+                )]),
+                body: None,
+                placeholders: Vec::new(),
+                chat_id: Some("chat_proj_once".into()),
+                asked_by: None,
+                asked_by_message_id: None,
+                asked_by_own_work: false,
+            };
+            // Invalid header bytes are rejected by reqwest before DNS/socket work.
+            let result = crate::vault::egress(
+                State(state.clone()),
+                Principal::Box { user_id: owner },
+                headers,
+                Json(body),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.status(), StatusCode::BAD_GATEWAY);
+            let bytes = axum::body::to_bytes(result.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(result["substituted"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_claim_deduplicates_one_grant_for_several_fields() {
+            let (state, _, request, _) = fixture(false, false);
+            let receipt = claim_uses(&state, [&request, &request]);
+            assert!(
+                receipt.is_ok(),
+                "one operation may use several fields of its one approved item"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+        }
+
+        #[test]
+        fn batch_claim_rolls_back_valid_grants_when_another_claim_was_lost() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut lost = request.clone();
+            lost.id = "lost_once_fixture".into();
+            state.db.insert_secret_request(&lost).unwrap();
+            assert!(state
+                .db
+                .claim_allowed_once_batch(&[&lost])
+                .unwrap()
+                .is_some());
+            assert!(claim_uses(&state, [&request, &lost]).is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_claim_rejects_conflicting_scope_for_one_id_without_spending_it() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut different = request.clone();
+            different.host = Some("other.fixture.example".into());
+            assert!(claim_uses(&state, [&request, &different]).is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn standing_receipt_cannot_authorize_a_one_time_metadata_callback() {
+            let (state, _, request, secret) = fixture(false, false);
+            let allowed = decide_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                TurnAuthor::card_already_answered(),
+            )
+            .unwrap();
+            let receipt = claim_use(&state, None).unwrap();
+            assert!(note_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &allowed,
+                &receipt
+            )
+            .is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_sql_error_rolls_back_claims_before_any_operation_receipt() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut second = request.clone();
+            second.id = "z_sql_error_fixture".into();
+            state.db.insert_secret_request(&second).unwrap();
+            state
+                .db
+                .with(|c| {
+                    c.execute_batch(
+                "CREATE TRIGGER fail_second_claim BEFORE UPDATE OF status ON secret_requests
+                 WHEN OLD.id = 'z_sql_error_fixture' AND NEW.status = 'expired'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic second claim failure'); END;"
+            )
+                })
+                .unwrap();
+            assert!(claim_uses(&state, [&request, &second]).is_err());
+            for id in [&request.id, &second.id] {
+                assert_eq!(
+                    state.db.secret_request(id).unwrap().unwrap().status,
+                    "allowed_once"
+                );
+            }
+        }
     }
 }

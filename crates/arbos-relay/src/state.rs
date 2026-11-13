@@ -9,7 +9,6 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use arbos_core::wire::BoxState;
 
-use crate::daytona::Daytona;
 use crate::db::Db;
 
 #[derive(Clone)]
@@ -31,17 +30,22 @@ pub struct Config {
     /// (= direct when `OPENAI_API_KEY` is set, else OpenRouter).
     pub openai_route: OpenAiRoute,
     pub anthropic_base: String,
-    pub daytona_snapshot: String,
-    /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
-    pub daytona_dockerfile: Option<PathBuf>,
+    /// Snapshot new boxes are made from, from `ARBOS_DAYTONA_SNAPSHOT` (the variable keeps its
+    /// name: the deploy worker and every live relay already use it). It names the agentd image
+    /// version; `fleet::image_for_snapshot` turns it into a registry tag.
+    pub default_snapshot: String,
     /// Directory served at `/bootstrap/{file}` to boxes (arbos-agentd binary, arbos-pi-ext.tar).
     pub bootstrap_dir: Option<PathBuf>,
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,
-    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`daytona|process|docker|gvisor`);
-    /// unset = Daytona when configured, else a local process. D89 sets `gvisor` on the relay host.
+    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`process|docker|gvisor|boxd`);
+    /// unset = a local process. D89 sets `gvisor` on the relay host, which is where every new box
+    /// goes now that Daytona is retired.
     pub default_provider: Option<String>,
+    /// `ARBOS_BOXD_URL` and `ARBOS_BOXD_TOKEN_FILE`: the host's `arbos-boxd` daemon
+    /// (docs/box-scaling.md §4.1). Unset = the `boxd` provider is off.
+    pub boxd: Option<crate::boxd::Boxd>,
     /// Host fleet knobs (D89).
     pub fleet: crate::fleet::FleetCfg,
     /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
@@ -72,12 +76,17 @@ pub struct Config {
     pub auth_mode: AuthMode,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-    /// Extra allowed `redirect` prefixes for `/auth/github/start` (`ARBOS_AUTH_REDIRECTS`).
+    /// Extra origins `/auth/github/start` may send the browser to (`ARBOS_AUTH_REDIRECTS`,
+    /// comma-separated). Each entry names one origin — `https://arbos.life` — and is compared
+    /// whole: scheme, host and port. A path on an entry is ignored, and no entry is ever
+    /// matched against the start of a redirect (`signin::redirect_allowed`).
     pub auth_redirects: Vec<String>,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
-    pub default_daily_cap_usd: f64,
+    /// The limit every new account starts with. One limit for the whole ledger; unlimited
+    /// unless `ARBOS_DEFAULT_DAILY_CAP_USD` names a positive number.
+    pub default_account_limit: crate::credits::SpendLimit,
     /// Relay-wide daily inference debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
     pub global_daily_cap_usd: f64,
     /// Relay-wide daily machine cost that only logs a warning (`ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD`).
@@ -85,9 +94,9 @@ pub struct Config {
     /// Machines always on (`ARBOS_ALWAYS_ON`, default on in GitHub mode): no idle auto-stop,
     /// a box per signed-in user from sign-in on, re-woken after a relay restart.
     pub always_on: bool,
-    /// Our Daytona cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
+    /// Our machine cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
     pub machine_usd_per_hour: f64,
-    /// Our Daytona cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
+    /// Our machine cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
     pub machine_stopped_usd_per_day: f64,
     /// `owner/repo` whose `edge` release feeds `GET /download/mac` (`ARBOS_RELEASES_REPO`).
     pub releases_repo: String,
@@ -154,6 +163,18 @@ pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 pub struct RoomDocCache {
     pub key: (i64, i64),
     pub doc: arbos_core::doc::ChatDoc,
+    /// Every message of `doc` as `(id, sender)`, in list order, kept in step with it.
+    ///
+    /// The pre-image a push check needs: Loro's list diff reports a deletion as a count of
+    /// removed entries and never the entries themselves, so without this the id of a deleted
+    /// message is nowhere to be found. Rebuilding it per push is not an option — the projection
+    /// costs ~15 ms at 2 000 messages and ~82 ms at 10 000 — so it is maintained from each
+    /// diff instead.
+    ///
+    /// The sender travels with the id for the same reason the id does: once an update has
+    /// removed a row, neither can be read back out of the doc, and `push_guard` needs the
+    /// sender to tell a box's own unattributed row from a person's.
+    pub message_ids: Vec<arbos_core::doc::MessageIdentity>,
 }
 
 pub struct Room {
@@ -165,6 +186,8 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// One speculative push owns the message preimage through durable admission.
+    pub(crate) push_admission: tokio::sync::Mutex<()>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
     /// agent live only through such a socket; without one the box is told to open the room
     /// (`boxes::after_person_row`, #2120).
@@ -191,9 +214,21 @@ impl Room {
         }
     }
 
-    /// Does `user_id`'s box have a socket open on this room right now?
-    pub fn has_box(&self, user_id: &str) -> bool {
-        self.boxes.lock().unwrap().contains_key(user_id)
+    /// How many sockets `user_id`'s box holds on this room.
+    ///
+    /// One box serves every workspace of its user, and a people room is one shared room that
+    /// several of those workspaces can each be an agent of — so the count, not the presence,
+    /// is what says whether every one of them is on the room. The sockets themselves carry no
+    /// workspace: a box dials `/room/people/{chat}` with a `Principal::Box { user_id }` and a
+    /// device id that is the same across workspaces, so there is nothing here to key on but
+    /// the owner.
+    pub fn box_count(&self, user_id: &str) -> u32 {
+        self.boxes
+            .lock()
+            .unwrap()
+            .get(user_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -202,6 +237,7 @@ impl Room {
 /// sends a 1012 Service Restart close and ends, and `open_sockets` counts down so the restart
 /// can drain before the process exits. A socket that arrives while closing is closed at once.
 pub struct RestartSignal {
+    planned: std::sync::Mutex<crate::restart_lifetime::State>,
     pub closing: tokio::sync::watch::Sender<bool>,
     pub open_sockets: std::sync::atomic::AtomicUsize,
     /// A planned restart is under way: no box upgrade or repair may start (#2262). Set and read
@@ -210,20 +246,71 @@ pub struct RestartSignal {
     /// Users whose `create_box` is between its first row write and the new sandbox id landing
     /// in the row, with the start time (#2262: a restart in that window orphaned a sandbox).
     pub creating: std::sync::Mutex<HashMap<String, i64>>,
+    /// One admission lease per user; weak entries do not retain idle users.
+    creation_slots: std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for RestartSignal {
     fn default() -> Self {
         Self {
+            planned: std::sync::Mutex::new(crate::restart_lifetime::State::Serving(0)),
             closing: tokio::sync::watch::Sender::new(false),
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
             box_work_frozen: std::sync::atomic::AtomicBool::new(false),
             creating: std::sync::Mutex::new(HashMap::new()),
+            creation_slots: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl RestartSignal {
+    pub(crate) async fn admit_creation(self: &Arc<Self>, user_id: &str) -> CreationPermit {
+        let slot = {
+            let mut slots = self.creation_slots.lock().expect("creation admission lock");
+            slots.retain(|_, slot| slot.strong_count() != 0);
+            match slots.get(user_id).and_then(std::sync::Weak::upgrade) {
+                Some(slot) => slot,
+                None => {
+                    let slot = Arc::new(tokio::sync::Mutex::new(()));
+                    slots.insert(user_id.to_owned(), Arc::downgrade(&slot));
+                    slot
+                }
+            }
+        };
+        CreationPermit {
+            restart: self.clone(),
+            user_id: user_id.to_owned(),
+            _lease: slot.lock_owned().await,
+        }
+    }
+
+    /// The guard owns cleanup before the first freeze/notice/drain await.
+    pub(crate) fn begin_planned(self: &Arc<Self>) -> Option<PlannedRestart> {
+        use crate::restart_lifetime::{transition, Event, State};
+        let mut state = self.planned.lock().expect("planned restart lock");
+        if self.is_closing() {
+            return None;
+        }
+        let next = transition(*state, Event::Plan);
+        if next == *state {
+            return None;
+        }
+        let State::Planned { generation, .. } = next else {
+            return None;
+        };
+        *state = next;
+        Some(PlannedRestart {
+            restart: self.clone(),
+            generation,
+        })
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        use crate::restart_lifetime::{transition, Event};
+        let mut state = self.planned.lock().expect("planned restart lock");
+        *state = transition(*state, Event::Shutdown);
+    }
+
     pub fn is_closing(&self) -> bool {
         *self.closing.borrow()
     }
@@ -234,31 +321,90 @@ impl RestartSignal {
     }
 }
 
-/// Marks one `create_box` as in flight for as long as it lives; dropped on every exit path,
-/// including a cancelled task.
-pub struct CreatingGuard {
+/// An exact planned owner; a stale task may never thaw a replacement or shutdown.
+pub(crate) struct PlannedRestart {
     restart: Arc<RestartSignal>,
-    user_id: String,
+    generation: u64,
 }
 
-impl CreatingGuard {
-    pub fn new(restart: &Arc<RestartSignal>, user_id: &str) -> Self {
-        restart
-            .creating
-            .lock()
-            .expect("creating lock")
-            .insert(user_id.to_owned(), arbos_core::ids::now_ms());
-        Self {
-            restart: restart.clone(),
-            user_id: user_id.to_owned(),
+impl PlannedRestart {
+    pub(crate) fn advance(&self, phase: crate::restart_lifetime::Phase) -> bool {
+        use crate::restart_lifetime::{transition, Event, State};
+        let mut state = self.restart.planned.lock().expect("planned restart lock");
+        let next = transition(
+            *state,
+            Event::Advance {
+                generation: self.generation,
+                phase,
+            },
+        );
+        let advanced = next != *state
+            && next
+                == State::Planned {
+                    generation: self.generation,
+                    phase,
+                };
+        *state = next;
+        advanced
+    }
+
+    pub(crate) fn release(&self) -> bool {
+        use crate::restart_lifetime::{transition, Event};
+        let mut state = self.restart.planned.lock().expect("planned restart lock");
+        let next = transition(*state, Event::Release(self.generation));
+        if next == *state {
+            return false;
         }
+        *state = next;
+        self.restart.closing.send_replace(false);
+        self.restart
+            .box_work_frozen
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        true
     }
 }
 
-impl Drop for CreatingGuard {
+impl Drop for PlannedRestart {
     fn drop(&mut self) {
-        if let Ok(mut m) = self.restart.creating.lock() {
-            m.remove(&self.user_id);
+        self.release();
+    }
+}
+
+/// Serializes the existence check and complete create for one user. A guard borrows the
+/// permit, so cancelling a waiting caller cannot remove another creation's restart marker.
+pub(crate) struct CreationPermit {
+    restart: Arc<RestartSignal>,
+    user_id: String,
+    _lease: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl CreationPermit {
+    pub(crate) fn user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
+/// Marks the admitted creation in flight, including cancellation, while its lease is held.
+pub(crate) struct CreatingGuard<'a> {
+    permit: &'a mut CreationPermit,
+}
+
+impl<'a> CreatingGuard<'a> {
+    pub(crate) fn new(permit: &'a mut CreationPermit) -> Self {
+        permit
+            .restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .insert(permit.user_id.clone(), arbos_core::ids::now_ms());
+        Self { permit }
+    }
+}
+
+impl Drop for CreatingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut markers) = self.permit.restart.creating.lock() {
+            markers.remove(&self.permit.user_id);
         }
     }
 }
@@ -268,7 +414,6 @@ pub struct AppState {
     pub db: Db,
     pub cfg: Arc<Config>,
     pub http: reqwest::Client,
-    pub daytona: Option<Daytona>,
     pub rooms: Arc<RwLock<HashMap<String, Arc<Room>>>>,
     /// user_id → live state of the user's box as the relay believes it (STATUS frames, crdt-sync §8).
     pub box_states: Arc<RwLock<HashMap<String, (BoxState, i64)>>>,
@@ -278,6 +423,8 @@ pub struct AppState {
     pub box_conns: Arc<Mutex<HashMap<String, (u32, i64)>>>,
     /// user_id → ms when the current wake started (for wake timing).
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
+    /// Told when a wake job is queued, so the runner takes it now and not at its next look.
+    pub wake_kick: Arc<tokio::sync::Notify>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
     /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
@@ -302,9 +449,6 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
-    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
-    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
-    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
@@ -317,18 +461,19 @@ pub struct AppState {
     pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
     /// Self-hosted LiveKit for calls (`LIVEKIT_*`); `None` = calls answer 503.
     pub livekit: Option<crate::livekit::LiveKit>,
-    /// device_id → last presence frame that was written to `devices.last_seen_at`.
+    /// device_id → its last presence frame; `rooms::flush_presence` writes these to
+    /// `devices.last_seen_at` in batches.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
-    /// sandbox_id → the Daytona preview token learned after the row's one got a 401
-    /// (`boxes::send_to_box`). Memory only: the row is rewritten only by a start the relay finishes.
-    pub fresh_preview_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
+    /// user_id → the last keepalive that said a turn was running. Unlike `turn_running` it stays
+    /// once the turn ends: it ranks `boxd` boxes by use (`fleet::last_active_ms`).
+    pub last_turn: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
     pub evicted: Arc<Mutex<HashMap<String, i64>>>,
     /// Last host pressure sample (D89), for `/admin/fleet`.
@@ -337,7 +482,7 @@ pub struct AppState {
     pub voice: Arc<crate::voice::VoiceCfg>,
     /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
     pub voice_conns: crate::voice::VoiceConns,
-    /// The Daytona snapshot new boxes are made from, switchable at runtime (`POST /admin/snapshot/default`)
+    /// The snapshot new boxes are made from, switchable at runtime (`POST /admin/snapshot/default`)
     /// so an image roll no longer restarts the relay — every restart dropped every client's websocket
     /// (2026-10-22 18:5x: four restarts in 95 min, "Reconnecting…" banners in Jacob's chats).
     pub default_snapshot: Arc<std::sync::RwLock<String>>,
@@ -345,6 +490,13 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Planned-restart signal: room sockets close with 1012 when it flips (`restart.rs`).
     pub restart: Arc<RestartSignal>,
+    /// Bumped once per device revocation (`signin::revoke_device_everywhere`). A live room
+    /// socket resolved its principal at upgrade and never looks again, so without this a
+    /// revoked device keeps reading and writing until it disconnects. The value is a counter
+    /// rather than the device id: a watch channel keeps only the latest value, so two
+    /// revocations in the same moment would hide one another. Watchers re-read
+    /// `device_status`, which is the authority.
+    pub revocations: Arc<tokio::sync::watch::Sender<u64>>,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
@@ -359,6 +511,10 @@ pub struct AppState {
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
     pub matrix: Arc<crate::matrix::Matrix>,
+    /// Who is watching an agent access link's stream, and how to wake them. Holds the set of
+    /// accounts with a live link, which the announce path reads before it does anything else —
+    /// an account without a link pays one read lock and one `is_empty`.
+    pub link_hub: Arc<crate::agent_link_stream::LinkHub>,
 }
 
 impl AppState {
@@ -370,7 +526,7 @@ impl AppState {
             .map(|s| s.clone())
             .unwrap_or_default();
         if cur.is_empty() {
-            self.cfg.daytona_snapshot.clone()
+            self.cfg.default_snapshot.clone()
         } else {
             cur
         }
@@ -401,14 +557,6 @@ pub struct UpgradeStatus {
     pub to_snapshot: String,
 }
 
-/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
-#[derive(Debug, Clone)]
-pub struct UpgradeRefusal {
-    pub reason: String,
-    pub at: i64,
-    pub work_mib: i64,
-}
-
 impl AppState {
     pub async fn room(&self, name: &str) -> Arc<Room> {
         if let Some(r) = self.rooms.read().await.get(name) {
@@ -423,10 +571,23 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    push_admission: tokio::sync::Mutex::new(()),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
             .clone()
+    }
+
+    /// Tell every live socket that some device was revoked, so each one re-reads
+    /// `device_status` and closes if it was the device in question (see [`AppState::revocations`]).
+    pub fn note_device_revoked(&self) {
+        self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Is this device still a live session? `false` for a revoked row and for a row that is
+    /// gone, so a socket cannot outlive the row it was authorised by.
+    pub fn device_is_live(&self, device_id: &str) -> bool {
+        matches!(self.db.device_status(device_id), Ok(Some((_, false))))
     }
 
     /// The user whose box serves a project.
@@ -604,13 +765,13 @@ pub(crate) mod test_support {
             openai_key: None,
             openai_base: String::new(),
             anthropic_base: String::new(),
-            daytona_snapshot: String::new(),
-            daytona_dockerfile: None,
+            default_snapshot: String::new(),
             bootstrap_dir: None,
             agentd_bin: "arbos-agentd".into(),
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
             default_provider: None,
+            boxd: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
             channels_mock: true,
@@ -629,7 +790,7 @@ pub(crate) mod test_support {
             github_client_secret: Some("secret".into()),
             auth_redirects: Vec::new(),
             default_grant_usd: 100.0,
-            default_daily_cap_usd: 20.0,
+            default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,
             global_machine_daily_cap_usd: 400.0,
             always_on: false,
@@ -651,12 +812,12 @@ pub(crate) mod test_support {
             db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
-            daytona: None,
             rooms: Arc::new(RwLock::new(HashMap::new())),
             box_states: Arc::new(RwLock::new(HashMap::new())),
             local_children: Arc::new(Mutex::new(HashMap::new())),
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
+            wake_kick: Arc::default(),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -665,7 +826,6 @@ pub(crate) mod test_support {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
-            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
@@ -676,8 +836,8 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
-            fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
+            last_turn: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
@@ -685,12 +845,14 @@ pub(crate) mod test_support {
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
             restart: Arc::new(RestartSignal::default()),
+            revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 }

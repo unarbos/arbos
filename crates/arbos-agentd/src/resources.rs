@@ -145,6 +145,29 @@ pub fn parse_cpu_max(text: &str) -> Option<f64> {
     (period > 0.0).then(|| quota / period)
 }
 
+/// Cores this box may actually use: the cgroup v2 quota when there is one, else what the kernel
+/// reports. Read once — a sandbox's quota does not change under it.
+///
+/// [`sample`] reads the same `cpu.max`, but only on its 5 s tick and only to turn a usage delta
+/// into a percentage. A caller that needs the number itself — the room ceiling in `sync.rs` — must
+/// not have to wait for a tick, and must still get an answer on a box with no cgroup cap at all.
+pub fn box_cores() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::fs::read_to_string(Path::new(CGROUP_ROOT).join("cpu.max"))
+            .ok()
+            .as_deref()
+            .and_then(parse_cpu_max)
+            .or_else(|| {
+                std::thread::available_parallelism()
+                    .ok()
+                    .map(|n| n.get() as f64)
+            })
+            .unwrap_or(1.0)
+            .max(0.1)
+    })
+}
+
 /// `cpu.stat` → `usage_usec`.
 pub fn parse_cpu_stat_usage(text: &str) -> Option<u64> {
     text.lines()

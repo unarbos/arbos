@@ -183,6 +183,11 @@ enum RowKind: Equatable {
     /// in the sender's slot (mine right, another member's left under their name). Nothing
     /// here is the value; nothing to copy or search.
     case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
+    /// A TAO cheque card (UI/WalletViews.swift), in the sender's slot like the secret ghost.
+    case cheque(bytes: String, mine: Bool, handle: String, avatar: String?)
+    /// A poll (`docs/polls.md`): the question card kept open, each option with its count and my
+    /// vote marked. `by` names whose poll it is when it is not mine.
+    case poll(poll: Poll, by: String?)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -346,6 +351,11 @@ enum Transcript {
     static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
+    /// Extra air above a centred stamp's glyphs. `systemGap` alone left "Today …"
+    /// hard against the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk]); the
+    /// bubble below already opens `Theme.bubbleVPad` before its text, so only the
+    /// stamp's top needs this pad.
+    static let stampTopPad: CGFloat = 16
 
     /// Whether a message from `sender` at `at` continues the run that ended with
     /// `prevSender` at `prevAt`: the same sender, within `runWindowMs` of the run's last
@@ -359,13 +369,17 @@ enum Transcript {
     /// Whether the message's bubble draws a reply quote — a person's `replyRef` / `replyTo`;
     /// an agent's `replyTo`, else `inReplyTo` in a people chat (the row builder's fallback
     /// for member bubbles). A quoted bubble names its sender and starts its own run.
-    static func carriesQuote(_ message: Message, people: Bool) -> Bool {
+    /// `multiParty`: group / channel / people group. In a solo 1:1 agent chat (`!people &&
+    /// !multiParty`) agent bubbles never quote — even when an older box attached `replyTo`
+    /// ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+    static func carriesQuote(_ message: Message, people: Bool, multiParty: Bool = false) -> Bool {
         func set(_ id: String?) -> Bool { !(id ?? "").isEmpty }
         switch message.role {
         case .user:
             if let r = message.replyRef, !r.chatId.isEmpty, !r.messageId.isEmpty { return true }
             return set(message.replyTo)
         case .assistant, .project:
+            if !people && !multiParty { return false }
             return set(message.replyTo) || (people && message.senderHandle != nil && set(message.inReplyTo))
         case .system:
             return false
@@ -387,11 +401,8 @@ enum Transcript {
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
     /// Settings → Appearance → Link previews: off hides every card (plain links stay).
-    /// Set by `AppModel.linkPreviews`; a static so the row builder needs no model.
-    nonisolated(unsafe) static var linkPreviewsEnabled = true
-
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = [], linkPreviews: Bool = true) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
@@ -401,7 +412,7 @@ enum Transcript {
     /// membership line names its actor as the roster does now, not as the row was written.
     /// `hiddenSenders`: `user:<id>` keys of people I blocked — their messages fold into one
     /// `.hidden` row per run instead of bubbles, and carry no date separator.
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = [], linkPreviews: Bool = true) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -476,13 +487,14 @@ enum Transcript {
             // a lone "Today 5:45 PM" in a blank chat.
             var chunk: [Row] = []
             let streaming = message.isStreaming
-            let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
+            let dateBreak = Self.showsDivider(previous: lastAt, at: message.createdAt)
             // Does this message start a sender run? Agents group like people (Jacob,
             // 2026-10-28; supersedes #1447's name on every reply): a reply that quotes the
             // ask starts its own run and is named, a quick follow-up within the window is not.
             let runStart = dateBreak || !Self.continuesRun(prevSender: prevSender, prevAt: prevAt,
                                                            sender: message.sender, at: message.createdAt,
-                                                           quoted: Self.carriesQuote(message, people: people))
+                                                           quoted: Self.carriesQuote(message, people: people,
+                                                                                     multiParty: multiParty))
             let named = multiParty && runStart
             switch message.role {
             case .user:
@@ -494,6 +506,20 @@ enum Transcript {
                     chunk.append(Row(id: "\(message.id)#ghost", messageId: message.id, role: mine ? .user : .project,
                                      kind: .secretGhost(name: ghostName, mine: mine, handle: message.senderHandle ?? "someone",
                                                         avatar: message.senderAvatar, named: named)))
+                    break
+                }
+                // A cheque is the card and nothing else (its text is only the notification's).
+                if let bytes = message.parts.lazy.compactMap(\.chequeBytes).first {
+                    chunk.append(Row(id: "\(message.id)#cheque", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .cheque(bytes: bytes, mine: mine, handle: message.senderHandle ?? "someone",
+                                                   avatar: message.senderAvatar)))
+                    break
+                }
+                // A poll is the card and nothing else: its text part is the same poll in plain
+                // words, for builds without polls.
+                if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+                    chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone")))
                     break
                 }
                 // Collect picture / video attachments first so a typed description can sit
@@ -509,7 +535,7 @@ enum Transcript {
                 var text = message.plainText
                 // The link preview card ([feedback link-embeds-ios-2026-10-27]); a message that
                 // was only the link shows the card alone (iMessage's rule).
-                var preview: LinkPreview? = Self.linkPreviewsEnabled ? message.linkPreview?.preview : nil
+                var preview: LinkPreview? = linkPreviews ? message.linkPreview?.preview : nil
                 preview?.slot = projectId
                 if let p = preview, p.isLinkOnly(text) { text = "" }
                 // A media-viewer forward's whole text is the "Forwarded from …" line: a
@@ -615,11 +641,15 @@ enum Transcript {
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
                 // Quote the message this answers: `replyTo` is the platform reply the box sets by
                 // the #1521 rule (always in groups / channels / people chats and for a row another
-                // agent sent; in a 1:1 only when answering an earlier message than the latest).
-                // Member bubbles from older boxes fall back to `inReplyTo`; a plain 1:1 answer to
-                // the latest message carries no quote.
-                let platformQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
-                let replyQuote = platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                // agent sent; never in a solo 1:1 agent chat — Jacob 2026-11-10). Member bubbles
+                // from older boxes fall back to `inReplyTo`. Clients also hide a stale `replyTo`
+                // on agent bubbles in solo 1:1 so older rows render clean
+                // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+                let soloAgentChat = !people && !multiParty
+                let platformQuote = soloAgentChat ? nil
+                    : message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                let replyQuote = soloAgentChat ? nil
+                    : (platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) })
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -713,7 +743,7 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
                         }
-                    case .linkPreview(let id, var p) where Self.linkPreviewsEnabled && message.linkPreview?.id == id:
+                    case .linkPreview(let id, var p) where linkPreviews && message.linkPreview?.id == id:
                         // The link preview card: one block under the prose, joining the
                         // bubble before it ([feedback link-embeds-ios-2026-10-27]).
                         p.slot = projectId
@@ -734,7 +764,7 @@ enum Transcript {
                         break
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown:
                         break
                     }
                 }
@@ -750,7 +780,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown, .chart, .linkPreview: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown, .chart, .linkPreview: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -762,10 +792,18 @@ enum Transcript {
                 // (wordless, "Working…") must not get "didn't answer" under its own answer
                 // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
                 // = an assistant row answering the same user message with words or a card.
+                //
+                // A hidden / job worker row does not count (#2964): the transcript skips those
+                // above, so treating their "Done." / status text as an answer left the ask with
+                // no bubble and no stock line after a research job finished without a delivery.
                 let turnAnsweredElsewhere: Bool = {
                     guard !failed, let ask = message.inReplyTo else { return false }
                     return messages.contains { other in
-                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                        other.id != message.id
+                            && other.role == .assistant
+                            && other.inReplyTo == ask
+                            && !other.hidden
+                            && other.job == nil
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
@@ -838,7 +876,7 @@ enum Transcript {
                }) {
                 chunk[ix].replyCount = count
             }
-            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
+            // The date separator ("Today 8:00 AM"), at a new day or an hour's gap.
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
                                 kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil),
@@ -863,10 +901,11 @@ enum Transcript {
         switch kind {
         case .other, .member: return true
         case .secretGhost(name: _, mine: let mine, handle: _, avatar: _, named: _): return !mine
+        case .cheque(bytes: _, mine: let mine, handle: _, avatar: _): return !mine
         case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
-        case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
+        case .user, .assistant, .system, .hidden, .question, .poll, .voiceMemo, .forwardHint, .error: return false
         }
     }
 
@@ -1096,6 +1135,20 @@ enum Transcript {
         var i = 1
         while i < lines.count && lines[i].isEmpty { i += 1 }
         return lines[i...].joined(separator: "\n")
+    }
+
+    /// Whether the message at `at` opens with a centred time line, given the clock of the
+    /// message above it (`previous`, 0 when there is none): a new local day, or an hour or
+    /// more between the two (Jacob, 2026-11-05, [feedback time-dividers-2026-11-05]).
+    ///
+    /// The rule itself is `arbos_core::transcript::shows_divider` through `ArbosFFI`, and the
+    /// Mac asks the same function — a divider between nearly every message group was two
+    /// client implementations of one question, each wrong in its own way. `timeZone` decides
+    /// the day half and is the reader's; a test pins it.
+    static func showsDivider(previous: Int64, at: Int64, timeZone: TimeZone = .current) -> Bool {
+        let moment = Date(timeIntervalSince1970: Double(at) / 1000)
+        return showsTimeDivider(previousMs: previous, atMs: at,
+                                utcOffsetSeconds: Int32(timeZone.secondsFromGMT(for: moment)))
     }
 
     static func dateLabel(_ ms: Int64) -> String {
@@ -1455,6 +1508,7 @@ struct RowView: View, Equatable {
     /// bubble. ChatView still observes the model and rebuilds rows when the
     /// transcript changes; actions call through this reference.
     let model: AppModel
+    let account: ChatAccountContext
     /// Plain inputs, not `@Environment`: an environment read made every bubble's body
     /// re-run on each AppModel publish even when the value was equal (SwiftUI marks the
     /// environment dependency changed per write) — the open-time freeze on long groups
@@ -1472,6 +1526,8 @@ struct RowView: View, Equatable {
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
     var onQuoteTap: ((Quote) -> Void)? = nil
+    /// A tap on a "Messaged ◉ X" hand-off notice: open the destination chat.
+    var onHandoffTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
     /// Search-in-chat hit: soft accent wash so the keyword match stands out while
@@ -1491,14 +1547,23 @@ struct RowView: View, Equatable {
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
-    /// Trailing column width for swipe-revealed times (fits "12:59 PM").
-    static let timeRevealWidth: CGFloat = 56
+    /// Trailing column width for swipe-revealed times: fits "12:59 PM" at the design size and
+    /// grows with the Text Size slider (the 11 pt label is 57 pt wide at Larger, 64 at Largest).
+    /// Fixed 56 pt wrapped at Largest ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
+    static func timeRevealWidth(_ theme: Theme) -> CGFloat { theme.pt(56) }
+
+    /// Reply-count digit inset from the bubble's top-trailing corner
+    /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]). Must clear `Theme.bubbleRadius`'s continuous
+    /// curve — 6/8 sat inside it.
+    static let replyCountTop: CGFloat = 10
+    static let replyCountTrailing: CGFloat = 12
 
     /// Skip re-drawing when the parent re-evaluates for an unrelated reason
     /// (composer keystrokes, presence ticks). Closures are not compared — they
     /// stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
-        let same = lhs.row == rhs.row
+        let same = lhs.account == rhs.account
+            && lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -1526,7 +1591,7 @@ struct RowView: View, Equatable {
     /// would not re-run the body when the filter opens or closes.
     private func openProfile(_ target: ProfileTarget) -> () -> Void {
         return {
-            guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
+            guard account.accepts(model), !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
             model.toggleProfile(target)
         }
     }
@@ -1546,7 +1611,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1592,12 +1657,15 @@ struct RowView: View, Equatable {
         .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
+                let column = Self.timeRevealWidth(theme)
                 Text(time)
                     .font(theme.font(11))
                     .foregroundStyle(theme.muted)
-                    .frame(width: Self.timeRevealWidth, alignment: .trailing)
-                    .offset(x: Self.timeRevealWidth - timeReveal)
-                    .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: column, alignment: .trailing)
+                    .offset(x: column - timeReveal)
+                    .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
             }
@@ -1617,7 +1685,7 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
                 if delivery == .failed {
                     Button {
-                        model.resendFailed(chatId: chatId, messageId: row.messageId)
+                        guard account.accepts(model) else { return }; model.resendFailed(chatId: chatId, messageId: row.messageId)
                     } label: {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 16))
@@ -1641,12 +1709,12 @@ struct RowView: View, Equatable {
                     // ScrollView so a drag on / onto a bubble sticks
                     // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]). Copy is on long-press.
                     if !linkOnly {
-                        TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions)
+                        TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions, mediaOrigin: MediaOrigin(model, account: account))
                     }
                     // The link preview card under the text — or as the whole bubble when the
                     // message was only the link ([feedback link-embeds-ios-2026-10-27]).
                     if let preview {
-                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true)
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true, origin: MediaOrigin(model, account: account))
                             .padding(.top, linkOnly ? 0 : 2)
                     }
                 }
@@ -1692,10 +1760,10 @@ struct RowView: View, Equatable {
                             .padding(.bottom, Self.quoteToTextGap)
                     }
                     if !(text.isEmpty && preview != nil) {
-                        TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions)
+                        TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions, mediaOrigin: MediaOrigin(model, account: account))
                     }
                     if let preview {
-                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false)
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false, origin: MediaOrigin(model, account: account))
                             .padding(.top, text.isEmpty ? 0 : 8)
                     }
                 }
@@ -1743,7 +1811,7 @@ struct RowView: View, Equatable {
                         }
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
+                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId, mediaOrigin: MediaOrigin(model, account: account))
                             }
                         }
                     }
@@ -1764,7 +1832,7 @@ struct RowView: View, Equatable {
                         quoteHeader(quote, color: theme.text)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId, mediaOrigin: MediaOrigin(model, account: account))
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -1777,8 +1845,8 @@ struct RowView: View, Equatable {
                     if reportsGreetingFrame {
                         GeometryReader { g in
                             Color.clear
-                                .onAppear { model.greetingBubbleFrame = g.frame(in: .global) }
-                                .onChange(of: g.frame(in: .global)) { _, f in model.greetingBubbleFrame = f }
+                                .onAppear { guard account.accepts(model) else { return }; model.greetingBubbleFrame = g.frame(in: .global) }
+                                .onChange(of: g.frame(in: .global)) { _, f in guard account.accepts(model) else { return }; model.greetingBubbleFrame = f }
                         }
                     }
                 }
@@ -1786,16 +1854,38 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
         case .system(let icon, let text, let avatarProject):
-            HStack(spacing: 5) {
+            // Hand-off notices ("Messaged ◉ X") are tappable when the destination is one of
+            // the viewer's agents ([feedback iphone-messaged-notice-nav-2026-11-10]).
+            let handoff = row.id.hasSuffix("#handoff")
+                && model.canOpenHandoff(fromChat: chatId, messageId: row.messageId)
+            let line = HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))
                 }
                 systemText(text, avatarProject: avatarProject)
+                if handoff {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.muted.opacity(0.7))
+                }
             }
             .font(theme.font(Theme.small))
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+            .padding(.top, Transcript.stampTopPad)
+            if handoff {
+                Button {
+                    onHandoffTap?(row.messageId)
+                } label: {
+                    line.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("handoff-notice:\(row.messageId)")
+                .accessibilityAddTraits(.isLink)
+            } else {
+                line
+            }
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).
@@ -1805,6 +1895,7 @@ struct RowView: View, Equatable {
                 Text(BlockedState.hiddenLine(count: count, who: who))
                 Text("·")
                 Button(BlockedState.unblock) {
+                    guard account.accepts(model) else { return }
                     model.openPersonProfile(handle: handle, avatarUrl: nil, chatId: chatId)
                 }
                 .buttonStyle(.plain)
@@ -1851,12 +1942,43 @@ struct RowView: View, Equatable {
                     Spacer(minLength: 0)
                 }
             }
+        case .cheque(let bytes, let mine, let handle, let avatar):
+            if mine {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    ChequeCard(bytes: bytes, mine: true)
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    avatarColumn {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    ChequeCard(bytes: bytes, mine: false)
+                    Spacer(minLength: 0)
+                }
+            }
+        case .poll(let poll, let by):
+            // The question card's row: after the avatar lane, the cap width of an incoming bubble.
+            let lane = Theme.memberLane(composerInset: composerInset)
+            HStack(spacing: 0) {
+                Color.clear.frame(width: lane, height: 1)
+                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
+                             multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: true,
+                             onPick: { id in
+                                 guard let me = model.myUserId else { return }
+                                 model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                             },
+                             foot: poll.foot(by: by))
+                    .frame(maxWidth: maxBubble - lane, alignment: .leading)
+                Spacer(minLength: 0)
+            }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
+                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
@@ -1864,7 +1986,7 @@ struct RowView: View, Equatable {
         case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named, let quote):
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
+                    FileCard(account: account, item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                         .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
@@ -1872,7 +1994,7 @@ struct RowView: View, Equatable {
             } else {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
+                    FileCard(account: account, item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                         .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
@@ -1889,7 +2011,7 @@ struct RowView: View, Equatable {
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                VoiceMemoBubble(account: account, name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
@@ -1899,14 +2021,14 @@ struct RowView: View, Equatable {
             // Telegram / iMessage stickers; same lane rules as a picture.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(account: account, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 }
             } else {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(account: account, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     if !fromUser { Spacer(minLength: 0) }
                 }
@@ -1917,7 +2039,7 @@ struct RowView: View, Equatable {
             // the sender's avatar in that lane and the name above the first card.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    ImageBubble(item: item, chatId: chatId, fromUser: false,
+                    ImageBubble(account: account, item: item, chatId: chatId, fromUser: false,
                                 maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -1927,7 +2049,7 @@ struct RowView: View, Equatable {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                    ImageBubble(account: account, item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -1942,19 +2064,20 @@ struct RowView: View, Equatable {
                       error: UserError(verb: "", class: message.trimmingCharacters(in: .whitespaces).isEmpty ? .unknown : .refused(message: message),
                                        raw: code),
                       detailsOpen: $errorDetailsOpen,
-                      onTryAgain: { model.retry(chatId: chatId, messageId: row.messageId) })
+                      onTryAgain: { guard account.accepts(model) else { return }; model.retry(chatId: chatId, messageId: row.messageId) })
         }
     }
 
-    /// Reply count in the bubble's top-right corner when this message has replies.
+    /// Reply count in the bubble's top-right corner when this message has replies
+    /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]).
     @ViewBuilder
     private func replyCountBadge(userBubble: Bool) -> some View {
         if row.replyCount > 0 {
             Text("\(row.replyCount)")
                 .font(theme.font(11, weight: .semibold))
                 .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
-                .padding(.top, 6)
-                .padding(.trailing, 8)
+                .padding(.top, Self.replyCountTop)
+                .padding(.trailing, Self.replyCountTrailing)
                 .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
         }
     }
@@ -1963,8 +2086,8 @@ struct RowView: View, Equatable {
     /// with that emoji; long-press lists everyone who used it below the chips.
     private var reactionChips: some View {
         let mine = model.myUserId
-        return HStack(spacing: 4) {
-            if row.role == .user { Spacer(minLength: 0) }
+        // Wraps: many different emoji take a second line instead of squeezing the chips.
+        return WrapLayout(spacing: 4) {
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
                 let selected = !showReactionSenders && selectedReactionEmoji == reaction.emoji
@@ -1991,6 +2114,7 @@ struct RowView: View, Equatable {
                 )
                 .contentShape(Capsule(style: .continuous))
                 .onTapGesture {
+                    guard account.accepts(model) else { return }
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 }
                 // High-priority so the row's bubble long-press (capsule + menu)
@@ -2013,8 +2137,8 @@ struct RowView: View, Equatable {
                     selectedReactionEmoji = selected ? nil : reaction.emoji
                 }
             }
-            if row.role != .user { Spacer(minLength: 0) }
         }
+        .frame(maxWidth: .infinity, alignment: row.role == .user ? .trailing : .leading)
         .padding(.leading, reactionLeading)
     }
 
@@ -2023,7 +2147,7 @@ struct RowView: View, Equatable {
         let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
         return HStack(spacing: 0) {
             if row.role == .user { Spacer(minLength: 0) }
-            Text(names)
+            Text("\(reaction.emoji) \(names)")
                 .font(theme.font(12))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(row.role == .user ? .trailing : .leading)
@@ -2073,6 +2197,8 @@ struct RowView: View, Equatable {
         case .other, .member: return lane
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
+        case .cheque(_, let mine, _, _): return mine ? 0 : lane
+        case .poll: return lane
         case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
         case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0
@@ -2080,10 +2206,10 @@ struct RowView: View, Equatable {
     }
 
     /// The disc beside a people-chat agent's bubble: the agent's picture through the shared
-    /// identity (`AppModel.agent`) — its uploaded picture, its leaf, never initials seeded by
+    /// identity (`AppModel.agent`) — its uploaded picture, its disc, never initials seeded by
     /// the handle (#1592).
     private func memberAvatar(_ agent: Project) -> some View {
-        AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
+        AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar)
     }
 
     /// The avatar column beside an incoming row: the sender's picture when this row shows
@@ -2177,32 +2303,17 @@ struct RowView: View, Equatable {
     /// (`memberBubble`), with the `agent` tag: the identity's display name, never the handle.
     @ViewBuilder
     private func memberName(_ agent: Project) -> some View {
-        if LeafAvatarsFlag.shared.on {
-            LiveSenderName(name: agent.name, url: nil, seed: agent.id, fixed: LeafArt.accent(agent, dark: theme.isDark), agent: true)
-        } else {
-            LiveSenderName(name: agent.name, url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex, agent: true)
-        }
+        LiveSenderName(name: agent.name, url: nil, seed: agent.id, fixed: DiscArt.accent(agent, dark: theme.isDark), agent: true)
     }
 
-    /// Mac parity: an agent's bubbles in a people chat carry its disc colour
-    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise). Accent
-    /// observation stays in `LiveSenderBar` so one new colour does not rebuild
-    /// every bubble in a group chat.
+    /// Mac parity: an agent's bubbles in a people chat carry its D92 disc colour.
     @ViewBuilder
     private func memberBubble<Content: View>(_ agent: Project, content: Content) -> some View {
-        if LeafAvatarsFlag.shared.on {
-            content
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .senderBar(LeafArt.accent(agent, dark: theme.isDark))
-        } else {
-            content
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
-        }
+        content
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+            .senderBar(DiscArt.accent(agent, dark: theme.isDark))
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -2217,7 +2328,7 @@ struct RowView: View, Equatable {
     }
 
     private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
-        ReplyQuoteHeader(quote: quote, color: color, onTap: onQuoteTap)
+        ReplyQuoteHeader(account: account, quote: quote, color: color, onTap: onQuoteTap)
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
@@ -2246,7 +2357,7 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private func agentGlyph(named name: String) -> some View {
         if let target = model.projects.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            AgentAvatar(project: target, theme: theme, size: 16, still: true)
+            AgentAvatar(project: target, theme: theme, size: 16)
         } else {
             // An agent we do not list: initials on the colour its name hashes to.
             InitialsAvatar(name: name, handle: name, id: name, size: 16)
@@ -2295,6 +2406,7 @@ struct BlockView: View {
     var ink: Color? = nil
     /// The code chip behind `` `code` `` (`nil` = `theme.codeChip`).
     var chip: Color? = nil
+    var mediaOrigin: MediaOrigin? = nil
 
     /// The quote bar's width and the gap to the quoted text (Mac `QUOTE_BAR` / `QUOTE_GAP`).
     static let quoteBar: CGFloat = 3
@@ -2340,7 +2452,7 @@ struct BlockView: View {
                     .accessibilityIdentifier("quote-bar")
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(inner.enumerated()), id: \.offset) { _, b in
-                        BlockView(block: b, live: false, mentions: mentions, ink: muted, chip: chip)
+                        BlockView(block: b, live: false, mentions: mentions, ink: muted, chip: chip, mediaOrigin: mediaOrigin)
                     }
                 }
             }
@@ -2377,7 +2489,7 @@ struct BlockView: View {
         case .chart(let partId, let spec, _):
             ChartCard(partId: partId, spec: spec)
         case .linkPreview(_, let preview):
-            LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false)
+            LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false, origin: mediaOrigin)
         case .math(let source):
             // Display math: typeset, a size up, centred on its own line (KaTeX's display
             // mode in Grok Bot).
@@ -2407,12 +2519,13 @@ struct TypedBody: View {
     let ink: Color
     let chip: Color
     let mentions: MentionTable
+    var mediaOrigin: MediaOrigin? = nil
 
     var body: some View {
         let blocks = Markdown.blocks(text)
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block, live: false, mentions: mentions, ink: ink, chip: chip)
+                BlockView(block: block, live: false, mentions: mentions, ink: ink, chip: chip, mediaOrigin: mediaOrigin)
             }
         }
     }
@@ -2902,7 +3015,7 @@ final class AvatarImageCache {
     }
 
     /// Waits between attempts. A cold launch asks for pictures before the network is up (a
-    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the leaf
+    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the disc
     /// placeholder on every surface until the view was rebuilt (Jacob, 2026-10-26, Mac and
     /// iPhone alike).
     nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
@@ -3024,19 +3137,15 @@ struct AvatarCluster: View {
     var size: CGFloat = Theme.avatar
     var maxVisible: Int = 3
     var imageUrl: String? = nil
-    /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
-    var leaf: LeafPick? = nil
-    /// Jacob, 2026-10-25: a group created with no leaf shows its title's initial on grey.
-    var neutralName: String? = nil
+    /// D92 amendment: the group's disc colour from the Create screen (a custom picture wins).
+    var discColor: UInt8? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let neutralName, imageUrl?.isEmpty ?? true {
-            NeutralAvatar(name: neutralName, size: size * 1.12)
-        } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
-            LeafAvatar(pick: leaf, size: size * 1.12)
+        if let discColor, imageUrl?.isEmpty ?? true {
+            DiscAvatar(color: discColor, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we
             // do not flash initials ("G") then flip to the selected image.
@@ -3094,6 +3203,7 @@ struct AvatarCluster: View {
 struct ReplyQuoteHeader: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let quote: Quote
     let color: Color
     var onTap: ((Quote) -> Void)? = nil
@@ -3103,7 +3213,7 @@ struct ReplyQuoteHeader: View {
         // can open that chat (a member), else just the words.
         let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
         return Button {
-            guard linkable else { return }
+            guard account.accepts(model), linkable else { return }
             onTap?(quote)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -3172,6 +3282,7 @@ struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.displayScale) private var displayScale
+    let account: ChatAccountContext
     let item: MediaItem
     let chatId: Id
     let fromUser: Bool
@@ -3204,6 +3315,11 @@ struct ImageBubble: View {
     static let pictureInset: CGFloat = 8
     static let pictureRadius: CGFloat = Theme.bubbleRadius - pictureInset
 
+    private var cacheKey: ChatImageCache.Key? {
+        guard let owner = account.owner, let ref = item.cacheKey else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: item.slot, ref: ref)
+    }
+
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
     private var captionText: String? { Self.captionText(caption) }
@@ -3221,7 +3337,7 @@ struct ImageBubble: View {
         }
         // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
         // natural size keeps the row's height steady while the picture comes back.
-        if let ref = item.cacheKey, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+        if let cacheKey, let known = ChatImageCache.naturalSize(for: cacheKey), known.width > 0, known.height > 0 {
             return Self.fit(known, maxWidth: bubbleWidth)
         }
         return Self.placeholder
@@ -3249,7 +3365,7 @@ struct ImageBubble: View {
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(account: account, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
@@ -3297,7 +3413,8 @@ struct ImageBubble: View {
         .onAppear { animate = stillFrame != nil }
         .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
@@ -3313,9 +3430,7 @@ struct ImageBubble: View {
             let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
             ZStack {
                 if let shown = (animate ? image : stillFrame) ?? image {
-                    Image(uiImage: shown)
-                        .resizable()
-                        .scaledToFit()
+                    PlayingImage(image: shown)
                 } else if failed || item.cacheKey == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
@@ -3336,28 +3451,34 @@ struct ImageBubble: View {
 
     /// Open the full-screen viewer for this picture.
     private func openViewer() {
+        guard !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
         viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
     }
 
     private func load() async {
+        guard account.accepts(model) else { return }
         // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
         // no decode, no placeholder flash.
-        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
+        if let cacheKey, let hit = ChatImageCache.decoded(for: cacheKey) {
             show(hit)
             return
         }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) }) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
+        guard account.accepts(model) else { return }
         // Decode + trim off the main actor (`ChatImageCache.decode`); animated GIF / WebP keep
         // every frame, no ImageTrim (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
         let maxPixels = CGSize(width: 280 * displayScale, height: Self.maxHeight * displayScale)
         guard let decoded = await ChatImageCache.decode(data, maxPixels: maxPixels) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
-        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
+        guard account.accepts(model) else { return }
+        if let cacheKey { ChatImageCache.store(decoded, for: cacheKey) }
         show(decoded)
     }
 
@@ -3644,6 +3765,7 @@ enum ImageTrim {
 struct ReplyThumb: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let projectId: Id
     let blobRef: String
 
@@ -3665,11 +3787,13 @@ struct ReplyThumb: View {
     }
 
     private func load() async {
+        guard account.accepts(model) else { return }
         guard let url = model.blobURL(projectId: projectId, key: blobRef) else { return }
         var req = URLRequest(url: url)
         for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return }
+        guard account.accepts(model) else { return }
         image = UIImage(data: data)
     }
 }
@@ -3696,6 +3820,7 @@ enum MediaOpen {
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let item: MediaItem
     let subtitle: String
     let chatId: Id
@@ -3725,13 +3850,13 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(account: account, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
-            Button {
-                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-            } label: {
+            // Not a Button, as the picture tile above: a Button counts a back swipe that starts
+            // on the card as a tap when the finger lifts, and the file opened under the pop.
+            Group {
                 // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
                 // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
                 HStack(spacing: 14) {
@@ -3740,7 +3865,7 @@ struct FileCard: View {
                         .frame(width: 21, height: 27)
                         .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1).truncationMode(.middle)
                         Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
                     }
                 }
@@ -3750,8 +3875,11 @@ struct FileCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(item.blobRef == nil)
+            .onTapGesture {
+                guard item.blobRef != nil, !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            }
+            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
                 Text(captionText)
@@ -3767,7 +3895,8 @@ struct FileCard: View {
         }
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
@@ -3795,6 +3924,7 @@ struct FileCard: View {
 struct VoiceMemoBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let name: String
     let projectId: Id
     let blobRef: String?
@@ -3803,8 +3933,8 @@ struct VoiceMemoBubble: View {
 
     var body: some View {
         Button {
-            guard let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
-            player.toggle(url: url, headers: model.authHeaders)
+            guard account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
+            player.toggle(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
         } label: {
             HStack(spacing: 10) {
                 Circle().fill(theme.primary).frame(width: 32, height: 32)
@@ -3829,9 +3959,23 @@ struct VoiceMemoBubble: View {
         .buttonStyle(.plain)
         .disabled(blobRef == nil)
         .onAppear {
+            guard account.accepts(model) else { return }
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
-                player.loadDuration(url: url, headers: model.authHeaders)
+                player.loadDuration(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
             }
+        }
+        .onDisappear {
+            // A normal scroll keeps the existing playback policy; account retirement does not.
+            let ownsLifetime: Bool
+            switch account {
+            case .account(let work):
+                ownsLifetime = !model.isFixture && model.accountLifetime.accepts(work.owner)
+            case .fixture(let owner):
+                ownsLifetime = model.isFixture && model.accountLifetime.accepts(owner)
+            case .unavailable:
+                ownsLifetime = false
+            }
+            if !ownsLifetime { player.retire() }
         }
     }
 }
@@ -3850,13 +3994,15 @@ final class MemoPlayer: ObservableObject {
     /// Resolve the memo length as soon as the bubble appears (not only on play).
     /// Remote `AVURLAsset` often returns no duration for m4a until the whole file is
     /// buffered (moov at the end), so download then probe with `AVAudioPlayer`.
-    func loadDuration(url: URL, headers: [String: String]) {
+    func loadDuration(url: URL, headers: [String: String], isCurrent: @escaping @MainActor () -> Bool) {
+        guard isCurrent() else { return }
         guard totalSeconds <= 0, localData == nil else { return }
         fetchTask?.cancel()
-        fetchTask = Task { _ = await ensureLocal(url: url, headers: headers) }
+        fetchTask = Task { _ = await ensureLocal(url: url, headers: headers, isCurrent: isCurrent) }
     }
 
-    func toggle(url: URL, headers: [String: String]) {
+    func toggle(url: URL, headers: [String: String], isCurrent: @escaping @MainActor () -> Bool) {
+        guard isCurrent() else { return }
         if let audio {
             if audio.isPlaying {
                 audio.pause()
@@ -3874,11 +4020,11 @@ final class MemoPlayer: ObservableObject {
         playing = true
         fetchTask?.cancel()
         fetchTask = Task {
-            guard await ensureLocal(url: url, headers: headers) else {
+            guard await ensureLocal(url: url, headers: headers, isCurrent: isCurrent) else {
                 playing = false
                 return
             }
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, isCurrent() else {
                 playing = false
                 return
             }
@@ -3886,22 +4032,33 @@ final class MemoPlayer: ObservableObject {
         }
     }
 
+    func retire() {
+        fetchTask?.cancel()
+        fetchTask = nil
+        audio?.stop()
+        audio = nil
+        playing = false
+        stopTick()
+        localData = nil
+    }
+
     /// Download the blob (Bearer / `?token=`) so duration and playback do not
     /// depend on `AVPlayer` streaming authenticated URLs.
-    private func ensureLocal(url: URL, headers: [String: String]) async -> Bool {
+    private func ensureLocal(url: URL, headers: [String: String], isCurrent: @MainActor () -> Bool) async -> Bool {
+        guard isCurrent() else { return false }
         if localData != nil, totalSeconds > 0 { return true }
         do {
             var req = URLRequest(url: url)
             for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, isCurrent() else { return false }
             guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
                 return false
             }
             let probe = try AVAudioPlayer(data: data)
             let d = probe.duration
             guard d.isFinite, d > 0 else { return false }
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, isCurrent() else { return false }
             localData = data
             totalSeconds = d
             if !playing { durationLabel = Self.format(d) }
@@ -4040,5 +4197,28 @@ struct StreamingText: View {
 
     private func string(_ bytes: [UInt8], _ from: Int, _ to: Int) -> String {
         String(decoding: bytes[from..<to], as: UTF8.self)
+    }
+}
+
+/// A picture fitted to the size it is given, playing when it is an animated `UIImage`.
+/// SwiftUI's `Image(uiImage:)` draws one frame of an animated image and never the rest;
+/// `UIImageView` plays it.
+struct PlayingImage: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        if view.image !== image { view.image = image }
+    }
+
+    /// The offered size, not the picture's pixel size.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIImageView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions(by: image.size)
     }
 }

@@ -1,0 +1,205 @@
+{
+  "status": "frozen",
+  "source": {
+    "actual_controller_source_sha256": {
+      "arbos-heavy-slot.sh": "c0788255e35c7d9bab87708ba53dc4375f30a9ee19708c5f9fc5ed79a9e94f46",
+      "gui-lock.sh": "170201f5d1ae1086c5d4449401ef6c9d53d91e649608534b6187fbd921ba40fb",
+      "xcrun-slot-guard.sh": "baa76d732488260c6d1b745d285b94e1c7a9cf86b60e2b32066fb0e1c2ae77f9"
+    },
+    "origin": "state-heavy-slots frozen actual controllers; copies are materialized source, only pure definitions are executed"
+  },
+  "laws": {
+    "exit_code": 0,
+    "wall_seconds": 21.421026416006498,
+    "generated_laws": 4,
+    "generated_cases": 1024,
+    "protocol_tests": 1,
+    "source_sha256": {
+      "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+      "scripts/runner/tests/lease_state_bridge.py": "d1308420bc0c61726f12dfa1a83c2d75abd280f87ba44d49fce9c13b44522703"
+    }
+  },
+  "typecheck": {
+    "command": [
+      "node",
+      "/Users/cister/arbos life/arbos-codex/harness/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/bin/tsc",
+      "--noEmit",
+      "--strict",
+      "--target",
+      "ES2022",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--types",
+      "node",
+      "--skipLibCheck",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/state-heavy-laws/harness/arbos-pi-ext/lease-state-laws.test.ts"
+    ],
+    "exit_code": 0,
+    "seconds": 0.6593716669594869,
+    "invocation_note": "Actual installed compiler selected from one cached pnpm package; earlier wrapper/resolver invocations failed before typechecking."
+  },
+  "negative_controls": {
+    "mutations_are_isolated": true,
+    "actual_functions": true,
+    "control": {
+      "exit_code": 0,
+      "wall_seconds": 21.421026416006498,
+      "generated_laws": 4,
+      "generated_cases": 1024,
+      "protocol_tests": 1,
+      "source_sha256": {
+        "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+        "scripts/runner/tests/lease_state_bridge.py": "d1308420bc0c61726f12dfa1a83c2d75abd280f87ba44d49fce9c13b44522703"
+      }
+    },
+    "results": [
+      {
+        "name": "invalid-lease-not-counted",
+        "seed": 89003,
+        "original_sha256": "c0788255e35c7d9bab87708ba53dc4375f30a9ee19708c5f9fc5ed79a9e94f46",
+        "mutant_sha256": "c559f469d4635513a6e0a124c32eb0c0c8af6fd2aa232ba75c04692814d1507f",
+        "replace": {
+          "before": "    InvalidHeld|CappedHeld|ExemptHeld|HeldCleanupFailed) echo 1 ;;",
+          "after": "    InvalidHeld) echo 0 ;;\n    CappedHeld|ExemptHeld|HeldCleanupFailed) echo 1 ;;"
+        },
+        "generated": {
+          "exit_code": 1,
+          "wall_seconds": 0.24119666602928191,
+          "log": "mutants/invalid-lease-not-counted-generated.log"
+        },
+        "replay": {
+          "exit_code": 1,
+          "wall_seconds": 0.22142870794050395,
+          "log": "mutants/invalid-lease-not-counted-replay.log"
+        },
+        "counterexample": {
+          "ask": "Ask",
+          "phase": "Claiming",
+          "abort": "Cancelled",
+          "badPid": "1",
+          "badSince": "invalid",
+          "snapshot": "Retired",
+          "scope": "Explicit",
+          "tail": []
+        }
+      },
+      {
+        "name": "retired-lease-authorizes-boot",
+        "seed": 89004,
+        "original_sha256": "baa76d732488260c6d1b745d285b94e1c7a9cf86b60e2b32066fb0e1c2ae77f9",
+        "mutant_sha256": "4bf726482a45d501758f6ac3369d78b3b596767173c0fb39794eedb57fb2ccb3",
+        "replace": {
+          "before": "    Ancestor:Owned) echo OwnedLease ;;",
+          "after": "    Explicit:Retired) echo ExplicitLiveLease ;;\n    Ancestor:Owned) echo OwnedLease ;;"
+        },
+        "generated": {
+          "exit_code": 1,
+          "wall_seconds": 0.24579800001811236,
+          "log": "mutants/retired-lease-authorizes-boot-generated.log"
+        },
+        "replay": {
+          "exit_code": 1,
+          "wall_seconds": 0.23501558299176395,
+          "log": "mutants/retired-lease-authorizes-boot-replay.log"
+        },
+        "counterexample": {
+          "ask": "Ask",
+          "phase": "Claiming",
+          "abort": "Cancelled",
+          "badPid": "1",
+          "badSince": "invalid",
+          "snapshot": "Retired",
+          "scope": "Explicit",
+          "tail": []
+        }
+      }
+    ]
+  },
+  "files": {
+    "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+    "scripts/runner/tests/lease_state_bridge.py": "d1308420bc0c61726f12dfa1a83c2d75abd280f87ba44d49fce9c13b44522703",
+    "check_mutants.py": "e8a3d5f7a3734c71903f2bc5fd456e570b7ffc79c01beea5970e1b02dd755f52",
+    "README.md": "f3ac31b98f420ba0c7ec35b2d428ff6e7ff74aa2a167593c1d735259d78aa746",
+    "REVIEW.md": "f06898991f89799f4466dbe52be865286fda88e6041380f4ea27cb0c812b777a"
+  },
+  "public_mutant_adapter": {
+    "path": ".improve/state-machine-checks/check_lease_mutants.py",
+    "sha256": "85fa1b88feb8ad8fe82ce3c1a9b9e69e556260373df1c8f10470d00a39447636",
+    "changes": "explicit root/new output, copies only four required source files, reruns unmodified control; no private laws.json dependency",
+    "root_execution": {
+      "mutations_are_isolated": true,
+      "actual_functions": true,
+      "control": {
+        "exit_code": 0,
+        "wall_seconds": 25.722099040984176,
+        "generated_laws": 4,
+        "generated_cases": 1024,
+        "protocol_tests": 1
+      },
+      "results": [
+        {
+          "name": "invalid-lease-not-counted",
+          "seed": 89003,
+          "original_sha256": "c0788255e35c7d9bab87708ba53dc4375f30a9ee19708c5f9fc5ed79a9e94f46",
+          "mutant_sha256": "c559f469d4635513a6e0a124c32eb0c0c8af6fd2aa232ba75c04692814d1507f",
+          "replace": {
+            "before": "    InvalidHeld|CappedHeld|ExemptHeld|HeldCleanupFailed) echo 1 ;;",
+            "after": "    InvalidHeld) echo 0 ;;\n    CappedHeld|ExemptHeld|HeldCleanupFailed) echo 1 ;;"
+          },
+          "generated": {
+            "exit_code": 1,
+            "wall_seconds": 0.2616029588971287,
+            "log": "invalid-lease-not-counted-generated.log"
+          },
+          "replay": {
+            "exit_code": 1,
+            "wall_seconds": 0.22245208302047104,
+            "log": "invalid-lease-not-counted-replay.log"
+          },
+          "counterexample": {
+            "ask": "Ask",
+            "phase": "Claiming",
+            "abort": "Cancelled",
+            "badPid": "1",
+            "badSince": "invalid",
+            "snapshot": "Retired",
+            "scope": "Explicit",
+            "tail": []
+          }
+        },
+        {
+          "name": "retired-lease-authorizes-boot",
+          "seed": 89004,
+          "original_sha256": "baa76d732488260c6d1b745d285b94e1c7a9cf86b60e2b32066fb0e1c2ae77f9",
+          "mutant_sha256": "4bf726482a45d501758f6ac3369d78b3b596767173c0fb39794eedb57fb2ccb3",
+          "replace": {
+            "before": "    Ancestor:Owned) echo OwnedLease ;;",
+            "after": "    Explicit:Retired) echo ExplicitLiveLease ;;\n    Ancestor:Owned) echo OwnedLease ;;"
+          },
+          "generated": {
+            "exit_code": 1,
+            "wall_seconds": 0.25445633300114423,
+            "log": "retired-lease-authorizes-boot-generated.log"
+          },
+          "replay": {
+            "exit_code": 1,
+            "wall_seconds": 0.24287474993616343,
+            "log": "retired-lease-authorizes-boot-replay.log"
+          },
+          "counterexample": {
+            "ask": "Ask",
+            "phase": "Claiming",
+            "abort": "Cancelled",
+            "badPid": "1",
+            "badSince": "invalid",
+            "snapshot": "Retired",
+            "scope": "Explicit",
+            "tail": []
+          }
+        }
+      ]
+    }
+  }
+}

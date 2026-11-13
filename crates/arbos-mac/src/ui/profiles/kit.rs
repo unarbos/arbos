@@ -89,6 +89,14 @@ pub enum Leading {
     Glyph(&'static str),
 }
 
+/// The glyph slot inside a [`Leading::Glyph`] tile. `sf_symbols::glyph` draws
+/// at [`sf_symbols::GLYPH_POINT_RATIO`] of the slot, so 20 is a 17 pt symbol —
+/// what the iPhone's `PaneLeading.glyph` puts in the same 36 pt tile. The mac
+/// asked for an 18 pt slot, which is a 15 pt symbol: the same mark 2 pt
+/// smaller than its iPhone twin, and the thinner half of what the group pane's
+/// Add members and Description tiles were read as.
+const GLYPH_TILE_SLOT: f32 = 20.0;
+
 /// The grouped card: one fill, one radius, one margin.
 pub fn card(theme: &Theme) -> Div {
     div()
@@ -197,7 +205,11 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
+                .child(sf_symbols::glyph(
+                    glyph,
+                    GLYPH_TILE_SLOT,
+                    theme.label_muted(),
+                ))
                 .into_any_element(),
         ),
     }
@@ -294,6 +306,9 @@ pub fn row_state(
             el.child(
                 div()
                     .flex_shrink_0()
+                    // A long model id or image path ends in an ellipsis inside the card.
+                    .max_w(gpui::relative(0.6))
+                    .truncate()
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.label_muted())
                     .child(d),
@@ -421,6 +436,57 @@ pub fn pill_button(
         .child(label.to_string())
 }
 
+/// Grok Bot's dark "Edit" pill under a profile name (no glyph) — overview
+/// landing for agent / group / server
+/// ([feedback iphone-entity-profile-edit-2026-11-10]).
+pub fn edit_pill(id: &'static str, theme: &Theme) -> Stateful<Div> {
+    text_pill(id, "Edit", theme.control_fill(), theme.text, theme)
+}
+
+/// Grok Bot's white "Done" / "Create" / "Next" pill (Edit / Create pages).
+pub fn done_pill(id: &'static str, label: &str, enabled: bool, theme: &Theme) -> Stateful<Div> {
+    let (bg, fg) = if enabled {
+        (gpui::white(), gpui::black())
+    } else {
+        (theme.control_fill(), theme.label_faint())
+    };
+    text_pill(id, label, bg, fg, theme).when(enabled, |el| el.cursor_pointer())
+}
+
+/// Compact text-only capsule used by [`edit_pill`] / [`done_pill`].
+pub fn text_pill(
+    id: &'static str,
+    label: &str,
+    bg: Hsla,
+    fg: Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let _ = theme;
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .h(px(28.0))
+        .px(px(14.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .hover(|s| s.opacity(0.88))
+        .active(|s| s.opacity(0.76))
+        .child(label.to_string())
+}
+
+/// Uppercase section header over an Edit / Create card ("Name", "Appearance",
+/// "Voice Calls") — Grok Bot Edit hierarchy.
+pub fn edit_section_header(text: &str, theme: &Theme) -> Div {
+    section_title(text.to_uppercase(), theme)
+}
+
 /// Grey explanatory line under a card.
 pub fn footnote(text: impl Into<SharedString>, theme: &Theme) -> Div {
     div()
@@ -483,6 +549,7 @@ pub fn confirm_button(
             el.bg(theme.danger)
                 .text_color(gpui::white())
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
         })
         .when(!danger, |el| {
             highlight::washed(

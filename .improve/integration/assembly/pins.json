@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "phases": [
+    {
+      "phase": 3,
+      "ref": "refs/heads/improve/structure",
+      "commit": "658266a56e21eff1f740b6040d802033b4620873"
+    },
+    {
+      "phase": 4,
+      "ref": "refs/heads/improve/state-machines",
+      "commit": "03a12e30e7d956070cfcacfd0e30cd35fca16598"
+    },
+    {
+      "phase": 5,
+      "ref": "refs/heads/improve/observability",
+      "commit": "ef3cfc72a02027d89e0236420e4282d573fe9f7c"
+    },
+    {
+      "phase": 6,
+      "ref": "refs/heads/improve/performance",
+      "commit": "84cb882feefc327e67167b723c9441015ab65944"
+    },
+    {
+      "phase": 7,
+      "ref": "refs/heads/improve/database-scale",
+      "commit": "a35e9ccfd54bbdc40ee8a3ac50da80dc5083e768"
+    },
+    {
+      "phase": 8,
+      "ref": "refs/heads/improve/laws",
+      "commit": "b15e3f9ba8080539a9f882cc806478f3ba6a8f33"
+    },
+    {
+      "phase": 9,
+      "ref": "refs/heads/improve/finish",
+      "commit": "f1f7e745bb40cc4314a12392abb7cdb7be9cc25e"
+    }
+  ],
+  "readiness": "Explicit final local source commits supplied by Root; package pending Root review before any full assembly execution."
+}

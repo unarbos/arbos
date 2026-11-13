@@ -32,7 +32,11 @@ use super::{
     chats_of, collect, editable_name, hero_picture, kit, list_row, HeroClick, HERO_AVATAR,
 };
 
+/// Overview row labels (tabs superseded —
+/// [feedback iphone-entity-profile-edit-2026-11-10]).
 pub(super) const TABS: [&str; 2] = ["Members", "Library"];
+pub(crate) const TAB_MEMBERS: usize = 0;
+pub(crate) const TAB_LIBRARY: usize = 1;
 
 /// The Members tab's one add row (element id and debug selector).
 pub(crate) const ADD_MEMBERS_ID: &str = "profile-add-members";
@@ -100,7 +104,7 @@ pub(super) fn page(
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let space = state.project(space_id)?.clone();
-    let tab = state.profile_tab;
+    let subpage = state.profile_subpage;
     // Agent pictures through the resolver, read while `state` is borrowed (the rows below
     // take `cx` mutably for their listeners).
     let agent_images = avatars::project_images(state);
@@ -180,9 +184,30 @@ pub(super) fn page(
     .into_any_element();
     // Subtitle: the member count (the person pane shows @handle here).
     let count = people.len();
-    let subtitle = format!("{count} member{}", if count == 1 { "" } else { "s" });
+    let drilled = subpage.is_some();
+    let subtitle = if drilled {
+        space.name.clone()
+    } else {
+        format!("{count} member{}", if count == 1 { "" } else { "s" })
+    };
+    let name = if let Some(title) = match subpage {
+        Some(TAB_MEMBERS) => Some(TABS[TAB_MEMBERS]),
+        Some(TAB_LIBRARY) => Some(TABS[TAB_LIBRARY]),
+        _ => None,
+    } {
+        pane::name(title, &theme)
+    } else {
+        name
+    };
     let hero = Hero {
-        picture: Picture::Element(avatar),
+        picture: if drilled {
+            Picture::Glyph(match subpage {
+                Some(TAB_LIBRARY) => "books.vertical",
+                _ => "person.2",
+            })
+        } else {
+            Picture::Element(avatar)
+        },
         name,
         badge: None,
         subtitle: Some(subtitle.into()),
@@ -198,8 +223,37 @@ pub(super) fn page(
     // side bar on group/"): the × alone; the Add members card stays first.
     let share: Option<HeroClick> = None;
 
-    let body: Vec<Section> = match tab {
-        0 => {
+    let body: Vec<Section> = match subpage {
+        None => {
+            let mut rows = vec![kit::nav_row(
+                "group-overview-members",
+                "person.2",
+                TABS[TAB_MEMBERS],
+                Some(count.to_string()),
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state
+                    .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_MEMBERS), cx));
+            }))
+            .into_any_element()];
+            rows.push(
+                kit::nav_row(
+                    "group-overview-library",
+                    "books.vertical",
+                    TABS[TAB_LIBRARY],
+                    None,
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_LIBRARY), cx));
+                }))
+                .into_any_element(),
+            );
+            vec![Section::Card(rows)]
+        }
+        Some(TAB_MEMBERS) => {
             // Mock b: "Add members" is a card of its own above the member list —
             // the one way in for people AND agents (its picker has an Agents
             // section). The second "Add agent" row is gone (Jacob 2026-10-27).
@@ -395,7 +449,7 @@ pub(super) fn page(
                             ))),
                             {
                                 let (ident, image) = &agent_pictures[ai];
-                                avatars::agent_picture(ident, image.clone(), kit::AVATAR, &theme)
+                                avatars::agent_picture(ident, image.clone(), kit::AVATAR)
                                     .into_any_element()
                             },
                             a.name.clone(),
@@ -489,12 +543,13 @@ pub(super) fn page(
                 space_id: space.id.clone(),
             },
             hero,
-            tabs: &TABS,
-            selected: tab,
+            tabs: &[],
+            selected: 0,
             body,
             footer: Vec::new(),
             done: None,
             share,
+            overview_back: drilled,
         },
         shell,
         cx,
@@ -757,8 +812,19 @@ mod render_tests {
 
     fn open(state: &Entity<AppState>, vcx: &mut VisualTestContext, page: ProfilePage, tab: usize) {
         state.update(vcx, |s, cx| {
+            // Agent / group / server land on an overview; Members / Library /
+            // … are `profile_subpage` drill-ins. Person / channel panes still
+            // use the tab pill (`profile_tab`).
+            let overview = matches!(
+                page,
+                ProfilePage::Group { .. } | ProfilePage::Server { .. } | ProfilePage::Agent { .. }
+            );
             s.open_profile(page, cx);
-            s.set_profile_tab(tab, cx);
+            if overview {
+                s.set_profile_subpage(Some(tab), cx);
+            } else {
+                s.set_profile_tab(tab, cx);
+            }
         });
     }
 

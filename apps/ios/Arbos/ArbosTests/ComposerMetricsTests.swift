@@ -15,38 +15,61 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     func testDiscFieldAndInsetsAreGroksKeyboardUp() {
-        // `+` disc 144 px at 54 px from the edge; field 144 px tall; 30 px between them;
-        // the field ends 54 px from the right edge. 420 − 18 − 48 − 10 − 18 = 326 pt field.
-        XCTAssertEqual(Theme.plusButton, 48)
+        // One pill, not a disc beside a field: the `+` is inside the field now, so the
+        // field runs the whole width between the insets — 420 − 18 − 18 = 384 pt — and
+        // there is no disc width and no gap to subtract.
         XCTAssertEqual(Theme.composerHeight, 48)
-        XCTAssertEqual(Theme.plusFieldGap, 10)
         XCTAssertEqual(Theme.composerInsetKeyboard, 18)
         XCTAssertEqual(Theme.composerInset, 31, "keyboard down keeps the 2026-10-15 reading")
-        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2 - Theme.plusButton - Theme.plusFieldGap
-        XCTAssertEqual(fieldWidth, 326)
+        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2
+        XCTAssertEqual(fieldWidth, 384)
+        // Both ends of the pill are now the same 96 × 96 disc, each inset 26 px from its
+        // own edge — the white action went round in the same change, so this reads as a
+        // pair rather than as a disc facing a capsule.
+        XCTAssertEqual(Theme.composerDisc, Theme.actionPillHeight)
+        XCTAssertEqual(Theme.composerDisc, Theme.actionPillWidth)
+        XCTAssertEqual(Theme.composerPlusLeading, Theme.actionPillTrailing)
+        assertOnPixel(Theme.composerPlusLeading, "composerPlusLeading")
         // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill
         // and disc is the composer's size (`Controls`, `ControlMetricsTests`).
         XCTAssertEqual(Theme.fieldHeight, Theme.composerHeight)
     }
 
     func testPlusGlyphIsGroksSize() {
-        // SF `plus`, regular: 54 px arms (22 pt draws 53, 22.5 draws 54), 5 px strokes
-        // like Grok's — medium would draw 8.
-        XCTAssertEqual(Theme.plusGlyph, 22.5)
+        // Measured off the reference at 3 px/pt: its `+` draws 38 px arms where this
+        // build drew 54, so the glyph comes down with the disc it sits in. SF `plus`,
+        // regular: 16 pt draws 38.
+        XCTAssertEqual(Theme.composerPlusGlyph, 16)
     }
 
     func testFieldTextStartsAtGroksCaret() {
-        // Caret centre 51 px from the field's outer edge; one 22 pt line centred in 48.
+        // Full-width caret centre 51 px from the pill's outer edge; one 22 pt line centred in 48.
         XCTAssertEqual(Theme.composerTextInset, 17)
         XCTAssertEqual(Theme.composerTextPadY, 13)
         XCTAssertEqual(MentionTextView.insets.left, Theme.composerTextInset)
         XCTAssertEqual(MentionTextView.insets.top + 22 + MentionTextView.insets.bottom, Theme.composerHeight)
     }
 
-    func testActionIsAWhitePillNotACircle() {
-        // 120 × 96 px capsule, 24 px from the field's top and bottom, 26 px from its right edge.
-        XCTAssertEqual(Theme.actionPillWidth, 40)
+    func testAskPlaceholderSitsBesideThePlus() {
+        // When the `+` shares the row, a second 17 pt pad made "Ask …" read centred
+        // ([feedback AJuVf-Tv2c-WhHzsKiVmi9U], Jacob 2026-11-10: "Ask Bob should be left
+        // aligned here in the chat bar"). The HStack gap is the only left space; full-width
+        // rows (channel / stacked) still keep Grok's 17.
+        XCTAssertEqual(Theme.composerTextInsetBesidePlus, 0)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).left, 0)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInset).left, Theme.composerTextInset)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).top,
+                       MentionTextView.insets.top)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).bottom,
+                       MentionTextView.insets.bottom)
+    }
+
+    func testActionIsAWhiteCircleNotACapsule() {
+        // 96 × 96 px, 24 px from the field's top and bottom, 26 px from its right edge.
+        // Measured off the reference at 3 px/pt: 96 × 96 there against 120 × 96 here.
+        XCTAssertEqual(Theme.actionPillWidth, 32)
         XCTAssertEqual(Theme.actionPillHeight, 32)
+        XCTAssertEqual(Theme.actionPillWidth, Theme.actionPillHeight, "round, not a capsule")
         XCTAssertEqual((Theme.composerHeight - Theme.actionPillHeight) / 2, 8)
         XCTAssertEqual(Theme.actionPillTrailing * 3, 26, accuracy: 0.001)
         assertOnPixel(Theme.actionPillTrailing, "actionPillTrailing")
@@ -58,7 +81,7 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(VoiceWaveGlyph.pitch, 3.25)
         XCTAssertEqual(VoiceWaveGlyph.heights, [6.5, 14.5, 8.5, 14.5, 6.5])
         XCTAssertEqual(VoiceWaveGlyph.heights, Array(VoiceWaveGlyph.heights.reversed()))
-        // The five bars span 15 pt and 14.5 pt — inside the 40 × 32 pill with room to spare.
+        // The five bars span 15 pt and 14.5 pt — inside the 32 pt circle with room to spare.
         let span = VoiceWaveGlyph.pitch * 4 + VoiceWaveGlyph.barWidth
         XCTAssertEqual(span, 15)
         XCTAssertLessThan(span, Theme.actionPillWidth)
@@ -81,8 +104,9 @@ final class ComposerMetricsTests: XCTestCase {
     /// landed. The mic keeps its frame now, so the trailing cluster is one
     /// width whatever the field holds.
     func testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds() {
-        // 132 + 6 + 120 + 26 px: the mic's hit frame, the gap, the pill, the inset.
-        XCTAssertEqual(Theme.composerTrailingWidth * 3, 284, accuracy: 0.001)
+        // 132 + 6 + 96 + 26 px: the mic's hit frame, the gap, the circle, the inset.
+        // 284 until the action went round and took 24 px off the cluster.
+        XCTAssertEqual(Theme.composerTrailingWidth * 3, 260, accuracy: 0.001)
         XCTAssertEqual(
             Theme.composerTrailingWidth,
             Theme.micHitWidth + Theme.micPillGap + Theme.actionPillWidth + Theme.actionPillTrailing)
@@ -100,35 +124,31 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     /// Typing fast, deleting fast or clearing the field mid-swap must never
-    /// leave the trailing slot without a control that answers a tap. The pill
-    /// is mounted in every state — the swap only trades the mark inside it —
-    /// so `sendShown` says which mark, and the property that can break is the
-    /// mic's: it may only leave once the mark has become the arrow. Both marks
-    /// show at once in two states, and neither is a glitch: a recording, which
-    /// wants the mic to finish it and the arrow to send it, and an empty draft
-    /// in a server channel, which has no call to offer (C1) so the arrow is
-    /// already there, dimmed.
-    func testTheMicOnlyLeavesOnceThePillHasBecomeSend() {
+    /// leave the trailing slot without a control that answers a tap.
+    ///
+    /// This used to say something narrower: that the mic may leave, but only
+    /// once the mark beside it had become the send arrow. Jacob's comparison
+    /// against Grok on 2026-11-09 retired that rule — the mic now never leaves
+    /// at all, so the slot's safety no longer depends on the handover being
+    /// ordered correctly. What is left to check is that the arrow still shows
+    /// exactly when it should, and that the mic is beside it in every state.
+    func testTheMicIsBesideTheArrowInEveryState() {
         for draftEmpty in [true, false] {
             for recording in [true, false] {
                 for isChannel in [true, false] {
+                    let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
+                    XCTAssertTrue(ComposerTrailing.micShown(), "the mic left: \(state)")
                     // An empty draft cannot send; a non-empty one always can.
-                    let mic = ComposerTrailing.micShown(draftEmpty: draftEmpty, recording: recording)
                     let send = ComposerTrailing.sendShown(
                         canSend: !draftEmpty, recording: recording, isChannel: isChannel)
-                    let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
-                    if !mic {
-                        XCTAssertTrue(send, "the mic left before the arrow arrived: \(state)")
-                    }
-                    XCTAssertEqual(mic && send, recording || (draftEmpty && isChannel),
-                                   "both marks at once: \(state)")
+                    // The arrow is there for anything sendable, while a recording is being
+                    // finished, and in a server channel, which has no call to offer (C1) and
+                    // so shows it dimmed rather than showing nothing.
+                    XCTAssertEqual(send, !draftEmpty || recording || isChannel,
+                                   "the arrow is in the wrong state: \(state)")
                 }
             }
         }
-        // Pending attachments on an empty draft: the mic is still there, and
-        // the pill sends them.
-        XCTAssertTrue(ComposerTrailing.micShown(draftEmpty: true, recording: false))
-        XCTAssertTrue(ComposerTrailing.sendShown(canSend: true, recording: false, isChannel: false))
     }
 
     func testMicGlyphIsGroksFilledMicWithoutABase() {
@@ -198,30 +218,50 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertLessThanOrEqual(PresenceRow.chipHeight, PresenceRow.height)
     }
 
-    /// [feedback status-row-gap-ios-2026-10-26]: the row rises into the transcript's tail
-    /// so the picture sits Grok's 42 px under the last bubble (the same 2026-10-25 shot:
-    /// bubble bottom → picture 42 px, picture → composer 68 px, bubble → composer 187 px),
-    /// instead of starting under the tail and the bar's pad (36 pt, 109 px).
-    func testStatusRowRisesIntoTheTranscriptTail() {
+    /// [feedback status-row-gap-ios-2026-10-26]: the picture sits Grok's 42 px under the
+    /// last bubble (the same 2026-10-25 shot: bubble bottom → picture 42 px, picture →
+    /// composer 68 px, bubble → composer 187 px).
+    ///
+    /// [feedback typing-anchor-2026-11-08] moved the row out of the bar and into the
+    /// transcript, so it settles *into* the tail rather than rising out of it. The two
+    /// offsets are mirror images — `presenceTopGap` against `presenceBottomGap` — and
+    /// every distance a reader can see is unchanged.
+    func testStatusRowSettlesIntoTheTranscriptTail() {
         XCTAssertEqual(Theme.presenceTopGap * 3, 42, accuracy: 0.001)
         XCTAssertEqual(Theme.transcriptTail, 28)
         XCTAssertEqual(Theme.chatBarTopPad, 8)
-        // Last bubble → picture top = tail + pad − lift.
-        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceLift, Theme.presenceTopGap, accuracy: 0.001)
-        // The row never rises past the tail into the last bubble, and never sinks below the pad.
-        XCTAssertLessThanOrEqual(Theme.presenceLift, Theme.transcriptTail)
-        XCTAssertGreaterThanOrEqual(Theme.presenceLift, 0)
+        // Picture bottom → composer top = tail + pad − settle, Grok's 68 px.
+        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceSettle,
+                       Theme.presenceBottomGap, accuracy: 0.001)
+        // The row settles no further than the tail reserves, and never lifts off it.
+        XCTAssertLessThanOrEqual(Theme.presenceSettle, Theme.transcriptTail)
+        XCTAssertGreaterThanOrEqual(Theme.presenceSettle, 0)
         // Bubble → composer with the row showing: Grok's 187 px (icon crop ± 2 px).
         XCTAssertEqual((Theme.presenceTopGap + Theme.presenceAvatar + Theme.presenceBottomGap) * 3, 187, accuracy: 3)
-        // The bar grows by the row's height less the lift when the row appears.
-        XCTAssertEqual(Theme.presenceAvatar + Theme.presenceBottomGap - Theme.presenceLift, 26, accuracy: 0.001)
+    }
+
+    /// The row left the bar for the transcript, and the reader must not be able to tell
+    /// from anything but where it stops scrolling: the transcript's content is the same
+    /// height either way, so a turn starting while someone is up in history cannot move
+    /// the rows they are reading.
+    func testMovingTheRowIntoTheTranscriptKeptEveryHeight() {
+        // What the row used to add to the bar, and so to the tail that follows the bar.
+        let addedToTheBarBefore = Theme.presenceAvatar + Theme.presenceBottomGap
+            - (Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceTopGap)
+        // What it adds to the transcript now: its own box, less the settle into the tail.
+        let addedToTheTranscriptNow = Theme.presenceTopGap + Theme.presenceAvatar - Theme.presenceSettle
+        XCTAssertEqual(addedToTheBarBefore, 26, accuracy: 0.001)
+        XCTAssertEqual(addedToTheTranscriptNow, addedToTheBarBefore, accuracy: 0.001,
+                       "the row appearing must change the scroll extent by what it always did")
     }
 
     func testEveryMetricLandsOnAPixel() {
         for (name, value) in [
             ("plusButton", Theme.plusButton), ("composerHeight", Theme.composerHeight),
             ("plusFieldGap", Theme.plusFieldGap), ("composerInsetKeyboard", Theme.composerInsetKeyboard),
-            ("composerTextInset", Theme.composerTextInset), ("composerTextPadY", Theme.composerTextPadY),
+            ("composerTextInset", Theme.composerTextInset),
+            ("composerTextInsetBesidePlus", Theme.composerTextInsetBesidePlus),
+            ("composerTextPadY", Theme.composerTextPadY),
             ("actionPillWidth", Theme.actionPillWidth), ("actionPillHeight", Theme.actionPillHeight),
             ("actionPillTrailing", Theme.actionPillTrailing),
             ("composerTrailingWidth", Theme.composerTrailingWidth),
@@ -229,7 +269,7 @@ final class ComposerMetricsTests: XCTestCase {
             ("micGlyphHeight", Theme.micGlyphHeight), ("composerBottomKeyboard", Theme.composerBottomKeyboard),
             ("presenceAvatar", Theme.presenceAvatar), ("presenceAvatarOffset", Theme.presenceAvatarOffset),
             ("presenceGap", Theme.presenceGap), ("presenceBottomGap", Theme.presenceBottomGap),
-            ("presenceTopGap", Theme.presenceTopGap), ("presenceLift", Theme.presenceLift),
+            ("presenceTopGap", Theme.presenceTopGap), ("presenceSettle", Theme.presenceSettle),
         ] {
             assertOnPixel(value, name)
         }
@@ -272,6 +312,19 @@ final class ComposerMetricsTests: XCTestCase {
 /// through the view, that chat's rows and messages (about 4 MB a group open, Pass 3).
 @MainActor
 final class ComposerDraftLifetimeTests: XCTestCase {
+    private final class DraftReference {
+        weak var value: ComposerDraft?
+        init(_ draft: ComposerDraft) { value = draft }
+    }
+
+    private func references(excluding existing: Set<ObjectIdentifier>) -> [DraftReference] {
+        ComposerDraft.liveInstances.filter { !existing.contains(ObjectIdentifier($0)) }.map(DraftReference.init)
+    }
+
+    private func released(_ drafts: [DraftReference]) -> Bool {
+        drafts.allSatisfy { $0.value == nil }
+    }
+
     private func settle() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
     }
@@ -279,22 +332,73 @@ final class ComposerDraftLifetimeTests: XCTestCase {
     func testAClosedChatFreesItsDraft() {
         let model = AppModel()
         settle()
-        let before = ComposerDraft.live
-        autoreleasepool {
-            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-            let host = UIHostingController(rootView: AnyView(
-                ChatView(chatId: "draft-lifetime-chat", projectId: "draft-lifetime-project")
-                    .environmentObject(model).environment(\.theme, Theme.dark)))
-            window.rootViewController = host
-            window.makeKeyAndVisible()
+        let existing = ComposerDraft.liveInstances
+        let existingIds = Set(existing.map(ObjectIdentifier.init))
+        var hosted: [DraftReference] = []
+        // Another view may release an earlier draft during our run-loop turns.
+        // Keep those identities alive so only this host's new drafts are observed.
+        withExtendedLifetime(existing) {
+            autoreleasepool {
+                let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+                let host = UIHostingController(rootView: AnyView(
+                    ChatView(chatId: "draft-lifetime-chat", projectId: "draft-lifetime-project")
+                        .environmentObject(model).environment(\.theme, Theme.dark)))
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                settle()
+                hosted = references(excluding: existingIds)
+                XCTAssertFalse(hosted.isEmpty, "the open chat holds a draft")
+                XCTAssertTrue(hosted.allSatisfy { $0.value != nil }, "the hosted draft is alive while open")
+                host.rootView = AnyView(EmptyView())
+                settle()
+                window.isHidden = true
+                window.rootViewController = nil
+            }
             settle()
-            XCTAssertGreaterThan(ComposerDraft.live, before, "the open chat holds a draft")
-            host.rootView = AnyView(EmptyView())
-            settle()
-            window.isHidden = true
-            window.rootViewController = nil
+            XCTAssertTrue(released(hosted), "the closed chat's draft is still alive")
         }
-        settle()
-        XCTAssertEqual(ComposerDraft.live, before, "the closed chat's draft is still alive")
+    }
+
+    func testUnrelatedDraftReleaseCannotFailTheInstanceObservation() {
+        let existing = ComposerDraft.liveInstances
+        withExtendedLifetime(existing) {
+            var unrelated: ComposerDraft? = ComposerDraft()
+            let unrelatedReference = DraftReference(unrelated!)
+            let existingIds = Set(existing.map(ObjectIdentifier.init)).union([ObjectIdentifier(unrelated!)])
+            var observed: [DraftReference] = []
+            autoreleasepool {
+                let draft = ComposerDraft()
+                observed = references(excluding: existingIds)
+                XCTAssertEqual(observed.count, 1)
+                XCTAssertTrue(observed.first?.value === draft)
+            }
+            XCTAssertNotNil(unrelatedReference.value)
+            unrelated = nil
+            XCTAssertNil(unrelatedReference.value)
+            XCTAssertTrue(released(observed), "an unrelated release cannot make a freed draft look retained")
+        }
+    }
+
+    func testRetainedDraftIsDetectedWhenAnUnrelatedDraftFrees() {
+        let existing = ComposerDraft.liveInstances
+        withExtendedLifetime(existing) {
+            var unrelated: ComposerDraft? = ComposerDraft()
+            let unrelatedReference = DraftReference(unrelated!)
+            let existingIds = Set(existing.map(ObjectIdentifier.init)).union([ObjectIdentifier(unrelated!)])
+            var retained: ComposerDraft?
+            var observed: [DraftReference] = []
+            autoreleasepool {
+                retained = ComposerDraft()
+                observed = references(excluding: existingIds)
+                XCTAssertEqual(observed.count, 1)
+            }
+            XCTAssertNotNil(unrelatedReference.value)
+            unrelated = nil
+            XCTAssertNil(unrelatedReference.value)
+            XCTAssertFalse(released(observed), "an unrelated release cannot hide the retained owned draft")
+            XCTAssertTrue(observed.first?.value === retained)
+            retained = nil
+            XCTAssertTrue(released(observed), "the observer itself must not retain the draft")
+        }
     }
 }

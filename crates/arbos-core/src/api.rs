@@ -81,21 +81,21 @@ pub struct ProjectDto {
     pub avatar_color_index: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub avatar_color_index_effective: i64,
-    /// D92 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
+    /// D92 solid disc: the owner's colour pick (`null` = automatic from the id). The alias is
+    /// the name an older relay sent the same pick under.
+    #[serde(default, alias = "avatar_leaf_color")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf: Option<i64>,
+    pub avatar_disc_color: Option<i64>,
+    /// The colour actually drawn. Always sent by relays with D92; optional so older relays
+    /// still decode.
+    #[serde(default, alias = "avatar_leaf_color_effective")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color: Option<i64>,
-    /// Always sent by relays with D92; optional so older relays still decode.
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_effective: Option<i64>,
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color_effective: Option<i64>,
+    pub avatar_disc_color_effective: Option<i64>,
     /// D92 amendment: the agent's uploaded / generated picture, a blob name in the project's own
-    /// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
+    /// slot (`GET /blob/{project}/{key}`); wins over the disc. Absent on older relays.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// Stamp (ms) of the agent's last avatar change (picture, leaf or colour pick). Clients
+    /// Stamp (ms) of the agent's last avatar change (picture or colour pick). Clients
     /// hold several copies of one agent (project record, each roster); the highest stamp is
     /// the one drawn, so a change never flips back to the old picture. Absent on older relays.
     #[serde(default)]
@@ -127,7 +127,7 @@ pub struct ProjectDto {
     pub message_grants: Vec<MessageGrantDto>,
 }
 
-/// Project chat (`chat_json` / `chat_json_for`).
+/// Project chat (`chat_dto` / `chat_dto_for`).
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatDto {
@@ -190,15 +190,13 @@ pub struct ChatMemberProjectDto {
     pub avatar_color_index: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub avatar_color_index_effective: i64,
+    #[serde(default, alias = "avatar_leaf_color")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf: Option<i64>,
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color: Option<i64>,
+    pub avatar_disc_color: Option<i64>,
     /// Always sent by relays with D92; optional so older relays still decode.
+    #[serde(default, alias = "avatar_leaf_color_effective")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_effective: Option<i64>,
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color_effective: Option<i64>,
+    pub avatar_disc_color_effective: Option<i64>,
     /// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
     #[serde(default)]
     pub image_key: Option<String>,
@@ -259,19 +257,21 @@ pub struct ChatMemberDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_color_index_effective: Option<i64>,
-    /// Agent: D92 leaf picks and the pair in effect. Human: omitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Agent: the D92 disc colour pick and the colour in effect. Human: omitted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "avatar_leaf_color"
+    )]
     #[typeshare(serialized_as = "Option<Option<I54>>")]
-    pub avatar_leaf: Option<Option<i64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[typeshare(serialized_as = "Option<Option<I54>>")]
-    pub avatar_leaf_color: Option<Option<i64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_disc_color: Option<Option<i64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "avatar_leaf_color_effective"
+    )]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_effective: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color_effective: Option<i64>,
+    pub avatar_disc_color_effective: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ChatMemberProjectDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -299,13 +299,10 @@ pub struct PeopleChatDto {
     pub created_at: i64,
     pub title: String,
     pub image_key: Option<String>,
-    /// D92 amendment: the group's leaf picture, when one was picked (`image_key` wins).
-    #[serde(default)]
+    /// D92 amendment: the group's disc colour, when one was picked (`image_key` wins).
+    #[serde(default, alias = "avatar_leaf_color")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf: Option<i64>,
-    #[serde(default)]
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color: Option<i64>,
+    pub avatar_disc_color: Option<i64>,
     /// Optional about text for a people group (≤200 chars). Absent or empty = none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -604,11 +601,12 @@ pub struct MeFeaturesDto {
     /// #1265: the Connect 1Password flow (default off).
     #[serde(default)]
     pub vault_connect: Option<bool>,
-    /// D92: agents without a photo draw a leaf, not initials (default on).
+    /// Retired 2026-11-05: the leaf artwork is gone and agents draw a solid-colour disc. The
+    /// two keys stay because this struct's names are a contract with shipped apps, and the
+    /// relay now sends `false` for both so a build that still carries the art stops drawing
+    /// it. Current builds ignore them.
     #[serde(default)]
     pub leaf_avatars: Option<bool>,
-    /// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
-    /// native sway (default on).
     #[serde(default)]
     pub leaf_lottie: Option<bool>,
     /// Voice mode — spoken replies, the voice picker, reply playback (default off since
@@ -721,6 +719,22 @@ pub struct MachineImageDto {
     pub default: String,
 }
 
+/// What a machine's disk held when it last went to sleep, on `GET /machine`. The relay keeps
+/// it, so reading it never wakes the machine.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineStorageDto {
+    #[typeshare(serialized_as = "I54")]
+    pub files_bytes: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub scratch_bytes: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub trash_bytes: Option<i64>,
+    /// When it was measured, ms.
+    #[typeshare(serialized_as = "I54")]
+    pub at: i64,
+}
+
 /// `GET /machine` success body.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -744,6 +758,13 @@ pub struct MachineStatusDto {
     pub always_on: bool,
     pub held: bool,
     pub machine_today_usd: f64,
+    /// A machine that sleeps by itself says where it was last left: `warm`, `waking`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold` (its files are in cold storage) or `error`.
+    /// Absent for every other machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<MachineStorageDto>,
 }
 
 /// `POST /machine/start|stop|restart` reply.
@@ -773,11 +794,10 @@ pub struct SenderDto {
     pub avatar_color_index: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub avatar_color_index_effective: i64,
-    /// D92: agents get the leaf pair in effect; people send JSON null.
+    /// D92: agents get the disc colour in effect; people send JSON null.
+    #[serde(default, alias = "avatar_leaf_color_effective")]
     #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_effective: Option<i64>,
-    #[typeshare(serialized_as = "Option<I54>")]
-    pub avatar_leaf_color_effective: Option<i64>,
+    pub avatar_disc_color_effective: Option<i64>,
 }
 
 /// One device under `reachable[].devices` on a start-call reply.
@@ -1501,8 +1521,6 @@ pub struct HealthDto {
     #[serde(default)]
     #[typeshare(serialized_as = "I54")]
     pub devices: i64,
-    #[serde(default)]
-    pub daytona: bool,
     /// Present on current relays; absent on very old ones that only had `auth`.
     #[serde(default)]
     pub auth_mode: Option<String>,
@@ -1860,10 +1878,11 @@ pub struct ProfileUpdatedPayloadDto {
 }
 
 /// `agent_profile_updated` payload: an agent's avatar changed (`PATCH /projects/{id}` with
-/// `image_key`, a leaf pick or a colour pick) — the agents' `profile_updated`. Sent to the
+/// `image_key` or a colour pick) — the agents' `profile_updated`. Sent to the
 /// owner's other devices, the project's members and everyone who shares a people chat with the
-/// agent. `image_key` is the picture now in effect (`null` = the leaf / initials; the leaf
-/// picks come with the registry re-read), `avatar_version` the stamp every copy must reach.
+/// agent. `image_key` is the picture now in effect (`null` = the solid disc / initials; the
+/// colour pick comes with the registry re-read), `avatar_version` the stamp every copy
+/// must reach.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentProfileUpdatedPayloadDto {

@@ -62,15 +62,14 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
     }
 }
 
-/// A shared agent's avatar, through the resolver (its picture, else its leaf).
+/// A shared agent's avatar, through the resolver (its picture, else its disc).
 pub fn agent_glyph(
     state: &AppState,
     chat: Option<&Project>,
     agent: &AgentMember,
     size: f32,
-    theme: &Theme,
 ) -> Div {
-    crate::ui::avatars::member_picture(state, chat, agent, size, theme)
+    crate::ui::avatars::member_picture(state, chat, agent, size)
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
@@ -460,6 +459,7 @@ pub fn new_chat_sheet(
                                 div()
                                     .text_size(px(TEXT_SMALL))
                                     .text_color(theme.text_muted)
+                                    .truncate()
                                     .child(format!("@{}", person.handle)),
                             ),
                     )
@@ -539,7 +539,7 @@ pub fn new_chat_sheet(
         Some(
             glass::primary_button("add-members-go", "Add", &theme)
                 .h(px(34.0))
-                .when(!can_add, |el| el.opacity(0.45))
+                .when(!can_add, |el| el.opacity(0.45).active(|s| s.opacity(0.88)))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if !can_add {
                         return;
@@ -558,7 +558,9 @@ pub fn new_chat_sheet(
                 &theme,
             )
             .h(px(34.0))
-            .when(!can_create, |el| el.opacity(0.45))
+            .when(!can_create, |el| {
+                el.opacity(0.45).active(|s| s.opacity(0.88))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !can_create {
                     return;
@@ -777,7 +779,7 @@ fn new_group_body(
                     .relative()
                     .when(!last, |el| el.child(kit::hairline_below(theme)))
                     .opacity(0.5)
-                    .child(avatars::agent_picture(ident, image.clone(), 40.0, theme))
+                    .child(avatars::agent_picture(ident, image.clone(), 40.0))
                     .child(
                         div()
                             .flex()
@@ -887,6 +889,7 @@ fn new_group_body(
                             div()
                                 .text_size(px(TEXT_SMALL))
                                 .text_color(theme.text_muted)
+                                .truncate()
                                 .child(format!("@{}", person.handle)),
                         ),
                 )
@@ -1109,7 +1112,7 @@ pub fn members_popover(
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .map(|el| highlight::row(el, false, Shape::Own, &theme))
-                        .child(agent_glyph(s, Some(space), a, 22.0, &theme))
+                        .child(agent_glyph(s, Some(space), a, 22.0))
                         .on_click({
                             let pid = a.project_id.clone();
                             cx.listener(move |this, _, _, cx| {
@@ -1134,6 +1137,7 @@ pub fn members_popover(
                             div()
                                 .text_size(px(12.5))
                                 .text_color(theme.text)
+                                .truncate()
                                 .child(format!("{} · @{}", a.name, a.handle)),
                         )
                         .child(

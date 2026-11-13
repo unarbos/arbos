@@ -10,6 +10,9 @@ struct SignInView: View {
     @Environment(\.theme) private var theme
     @State private var advanced = false
     @State private var relayUrl = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Something has opened under the button, over the lower circles.
+    private var crowded: Bool { advanced || model.signInError != nil }
 
     /// Grok's welcome screen scatters five bots around the title (positions read
     /// off the App Store shot, as fractions of the screen; the last one sits half
@@ -20,11 +23,29 @@ struct SignInView: View {
         (0.90, 0.80, 5, "O"), (0.52, 0.985, 6, "S"),
     ]
 
+    /// How far a circle travels to be clear of the screen: out through its nearest edge
+    /// (the one half off the bottom drops; the side ones leave sideways).
+    private static func exit(_ spot: (x: CGFloat, y: CGFloat, color: Int, letter: String), in size: CGSize) -> CGSize {
+        let clear: CGFloat = 64 + 24
+        if spot.y > 0.9 { return CGSize(width: 0, height: size.height * (1 - spot.y) + clear) }
+        return spot.x < 0.5 ? CGSize(width: -(size.width * spot.x + clear), height: 0)
+                            : CGSize(width: size.width * (1 - spot.x) + clear, height: 0)
+    }
+
     private func scatteredTrees(in size: CGSize) -> some View {
         ZStack {
-            ForEach(Array(Self.scatter.enumerated()), id: \.offset) { _, spot in
+            ForEach(Array(Self.scatter.enumerated()), id: \.offset) { i, spot in
+                // The lower three stand where the relay field and the sign-in note open, and
+                // step aside for either: each leaves by the screen edge it is nearest, one
+                // after the other, and comes back the same way. Under Reduce Motion they fade.
+                let aside = spot.y > 0.5 && crowded
                 InitialsAvatar(initials: spot.letter, colorIndex: spot.color, size: 64)
                     .position(x: size.width * spot.x, y: size.height * spot.y)
+                    .offset(aside && !reduceMotion ? Self.exit(spot, in: size) : .zero)
+                    .opacity(aside && reduceMotion ? 0 : 1)
+                    .animation(reduceMotion ? .easeOut(duration: 0.2)
+                               : .spring(response: 0.42, dampingFraction: 0.84).delay(Double(i - 2) * 0.04),
+                               value: crowded)
             }
         }
         .allowsHitTesting(false)
@@ -59,7 +80,7 @@ struct SignInView: View {
                                 if model.signingIn {
                                     ProgressView().tint(theme.onPrimary)
                                 } else {
-                                    GitHubMark().fill(theme.onPrimary).frame(width: 20, height: 20)
+                                    Image("brand-github").resizable().scaledToFit().frame(width: 20, height: 20)
                                 }
                                 Text(model.signingIn ? "Signing in…" : "Sign in with GitHub")
                                     .font(theme.font(Theme.body, weight: .semibold))
@@ -144,24 +165,6 @@ struct SignInView: View {
         let trimmed = relayUrl.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         model.setRelayUrl(trimmed)
-    }
-}
-
-/// GitHub's mark as a path (so no asset is needed), drawn in a 20×20 box.
-struct GitHubMark: Shape {
-    func path(in rect: CGRect) -> Path {
-        let s = min(rect.width, rect.height) / 16
-        var p = Path()
-        // Simplified octocat silhouette: head circle + body.
-        p.addEllipse(in: CGRect(x: rect.minX + 2 * s, y: rect.minY + 1 * s, width: 12 * s, height: 12 * s))
-        var bottom = Path()
-        bottom.move(to: CGPoint(x: rect.minX + 5 * s, y: rect.minY + 10 * s))
-        bottom.addLine(to: CGPoint(x: rect.minX + 5 * s, y: rect.minY + 16 * s))
-        bottom.addLine(to: CGPoint(x: rect.minX + 11 * s, y: rect.minY + 16 * s))
-        bottom.addLine(to: CGPoint(x: rect.minX + 11 * s, y: rect.minY + 10 * s))
-        bottom.closeSubpath()
-        p.addPath(bottom)
-        return p
     }
 }
 

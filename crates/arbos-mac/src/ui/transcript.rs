@@ -2,16 +2,17 @@
 //! block (zeron-study §4.1–§4.4). Rows are diffed by `(id, version)` and
 //! spliced; streaming text fades in through the veil.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
-    BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
-    Stateful, TextRun, Window,
+    actions, canvas, div, list, point, prelude::*, px, Animation, AnimationExt, AnyElement, App,
+    Bounds, BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -36,6 +37,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::reveal::RevealInset;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::sf_symbols;
@@ -45,7 +47,9 @@ use crate::ui::theme::{
 };
 use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
-use crate::ui::widgets::QuestionCard;
+use crate::ui::widgets::{
+    card_frame, card_header, letter, option_list, option_row, CardLook, QuestionCard, RowState,
+};
 use serde_json::Value;
 
 actions!(transcript, [Copy]);
@@ -146,8 +150,23 @@ pub fn own_bubble_fraction(people: bool) -> f32 {
 pub(crate) fn people_cap(slot_width: f32) -> f32 {
     slot_width * PEOPLE_BUBBLE_FRACTION
 }
-/// A new time stamp line whenever messages are this far apart.
-const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// When a centred time stamp lands: `arbos_core::transcript::shows_divider` —
+/// a new local day, or an hour or more since the message above it (Jacob,
+/// 2026-11-05, [feedback time-dividers-2026-11-05]). The rule is the iPhone's
+/// too; the Mac used to measure its hour from the last stamp it drew, so a chat
+/// with messages minutes apart grew one every hour mid-conversation.
+pub use arbos_core::transcript::shows_divider;
+#[cfg(test)]
+use arbos_core::transcript::DIVIDER_GAP_MS;
+
+/// The reader's offset from UTC in seconds, for the day half of the rule.
+/// Taken from the system zone each build, so a transcript left open across a
+/// DST step reads the new offset on its next build.
+fn utc_offset_seconds() -> i32 {
+    use chrono::{Local, Offset};
+    Local::now().offset().fix().local_minus_utc()
+}
+
 /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
 /// consecutive messages from one sender this close together form one **run** —
 /// the name and the disc show once, on the run's first message; the later
@@ -166,10 +185,10 @@ pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// The gap between two bubbles of one run, and the gap a new run opens — the
-/// numbers the rhythm tests pin.
+/// numbers the rhythm tests pin. `TURN_GAP` is also the air a revealed hit
+/// keeps under the header (`REVEAL_TOP_INSET`).
 #[cfg(test)]
 pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
-#[cfg(test)]
 pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
 
 /// The tail of the sender run the row builder is in: who spoke last and when
@@ -198,7 +217,11 @@ pub(crate) fn continues_run(tail: Option<&RunTail>, sender: &str, at: u64, quote
 /// `replyTo`; an agent's `replyTo`, else `inReplyTo` in an attributed chat (a
 /// people-chat reply or another Project's row, the fallback the row builder
 /// uses). A quoted bubble names its sender and starts its own run.
-fn carries_quote(message: &Message) -> bool {
+///
+/// `names_senders`: group / channel / people group. In a solo 1:1 agent chat
+/// (`!names_senders`) agent bubbles never quote — even when an older box
+/// attached `replyTo` ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]).
+fn carries_quote(message: &Message, names_senders: bool) -> bool {
     let non_empty = |id: Option<&str>| id.is_some_and(|id| !id.is_empty());
     match message.role {
         Role::User => {
@@ -209,6 +232,9 @@ fn carries_quote(message: &Message) -> bool {
                 || non_empty(message.reply_to.as_deref())
         }
         Role::Assistant | Role::Project => {
+            if !names_senders {
+                return false;
+            }
             let in_people =
                 message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
             let attributed = message.role == Role::Project || in_people;
@@ -270,6 +296,16 @@ pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP
 const HOVER_FADE_MS: f32 = 150.0;
 /// The fade band under the floating header (one number for every chat kind).
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
+/// Where a reveal brings a message to rest: its row's top edge this far below
+/// the transcript's own top edge.
+///
+/// The chat pane's reading of the shared rule in [`crate::ui::reveal`] — the
+/// band the floating header fades the list out over, plus the gap the transcript
+/// already opens between two speakers. Both terms are read from where they live,
+/// so a header that changes size carries the inset with it. Any other list a
+/// reveal lands in states its own two terms through `reveal::top_inset` rather
+/// than reaching for this one.
+pub const REVEAL_TOP_INSET: f32 = crate::ui::reveal::top_inset(HEADER_FADE_BAND, TURN_GAP);
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 /// Ignore pointer noise until a click-drag travels this far before it is a
@@ -702,6 +738,17 @@ pub enum RowKind {
         /// People chat: the card sits after the sender's avatar lane, like its bubble.
         lane: bool,
     },
+    /// A poll (`docs/polls.md`): a card of its options, each with who holds it. A click
+    /// casts, changes or retracts my vote.
+    Poll {
+        question: String,
+        /// `(option id, label, the doc senders who hold it)`, in the poll's order.
+        options: Vec<(String, String, Vec<String>)>,
+        /// "Allow multiple answers".
+        multiple: bool,
+        /// Whose poll, when it is not mine.
+        by: Option<String>,
+    },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
@@ -814,6 +861,17 @@ pub const RAIL_GAP: f32 = 2.0;
 /// inset all round keeps each button's round hover wash inside the capsule's
 /// rim and concentric with its rounded ends ([feedback hover-bar-highlight-mac-2026-10-29]).
 pub const RAIL_PLATE_PAD: f32 = 2.0;
+/// The rail's widest box: three buttons, their gaps and the Glass capsule's insets.
+pub const RAIL_WIDTH: f32 = 3.0 * RAIL_BUTTON + 2.0 * RAIL_GAP + 2.0 * RAIL_PLATE_PAD;
+/// Room for the widest 11 pt hover time ("12:44 PM": 49 pt in the Mac system
+/// font, 53 in the Linux test font).
+pub const HOVER_TIME_WIDTH: f32 = 56.0;
+/// The lane on my bubble's outer (left) edge that holds the hover time and the
+/// rail. It is reserved at rest too, so a narrow column (a scaled display, a
+/// small window) narrows the bubble instead of pushing the time out past the
+/// column's left edge into the sidebar — and hovering never re-wraps the text
+/// ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
+pub const OWN_RAIL_LANE: f32 = HOVER_TIME_WIDTH + 8.0 + RAIL_WIDTH + 6.0;
 
 /// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
 /// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
@@ -884,6 +942,8 @@ pub struct Transcript {
     pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
+    /// The row a reveal still owes its [`REVEAL_TOP_INSET`] to.
+    reveal_inset: crate::ui::reveal::RevealInset,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -920,6 +980,9 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
+    /// Where the wide tables and code cards keep their sideways place, read
+    /// by [`Self::claim_sideways_wheel`] to tell their gestures from the chat's.
+    sideways: Rc<SidewaysScroll>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -986,6 +1049,7 @@ impl Transcript {
             arrived_at: None,
             rows_laid_out: 0,
             revealed: None,
+            reveal_inset: RevealInset::default(),
             spring: StickSpring::default(),
             repin_check_pending: false,
             hover: HoverFade::default(),
@@ -1011,6 +1075,7 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
+            sideways: Rc::default(),
         }
     }
 
@@ -1332,6 +1397,71 @@ impl Transcript {
         cx.notify();
     }
 
+    /// A wheel or trackpad gesture over a sideways scroller — a wide markdown
+    /// table, a code card — offered to that scroller before anything else
+    /// sees it. While it still has room to move the way the gesture goes, it
+    /// takes the gesture alone and the chat behind it stays where it was. At
+    /// its first or last column the chat takes the gesture over, as it does
+    /// straight away for a gesture that is more up-and-down than sideways.
+    /// Returns whether the event was the scroller's, which is what the caller
+    /// stops the propagation of.
+    ///
+    /// This cannot be a listener on the scroller. GPUI's own scroll handling
+    /// never ends a wheel event, and the transcript's `list` registers its
+    /// listener after painting its rows, so in the bubble phase — which runs
+    /// listeners back to front — the chat has already moved by the time the
+    /// table is asked (Jacob, 2026-11-04: a wide table in an agent bubble
+    /// scrolled the transcript behind it along with its own columns).
+    fn claim_sideways_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+        // 20 pt a line, the same reading of a line-wise wheel as `on_wheel`
+        // and as the list's own scroll listener.
+        let delta = event.delta.pixel_delta(px(20.0));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        if dx == 0.0 || dx.abs() <= dy.abs() {
+            return false;
+        }
+        let Some(scroller) = self.sideways.under(event.position) else {
+            return false;
+        };
+        // 0 at the first column, −`travel` at the last.
+        let travel = f32::from(scroller.max_offset().x);
+        let at = f32::from(scroller.offset().x).clamp(-travel, 0.0);
+        let moved = (at + dx).clamp(-travel, 0.0);
+        if moved == at {
+            return false;
+        }
+        scroller.set_offset(point(px(moved), scroller.offset().y));
+        cx.notify();
+        true
+    }
+
+    /// The capture-phase listener that offers every wheel event to the
+    /// scroller under the pointer first ([`Self::claim_sideways_wheel`]). A
+    /// `canvas` because GPUI's fluent wheel listeners are all bubble-phase,
+    /// and by then the chat has moved; the shell's back swipe is wired the
+    /// same way.
+    fn sideways_wheel_arbiter(cx: &mut Context<Self>) -> impl IntoElement {
+        let transcript = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let claimed = transcript
+                        .update(cx, |this, cx| this.claim_sideways_wheel(event, cx))
+                        .unwrap_or(false);
+                    if claimed {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
     /// Wheel over the composer (sibling of this list): move the transcript
     /// the same way a wheel over the bubbles would ([feedback
     /// app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
@@ -1583,6 +1713,7 @@ impl Transcript {
             &mentions,
             multi_party,
             people_space,
+            state.link_previews,
             &mut self.row_cache,
             &hidden_senders,
         );
@@ -1689,6 +1820,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
+            self.reveal_inset.clear();
             return;
         };
         let nonce = state.reveal_nonce;
@@ -1704,10 +1836,23 @@ impl Transcript {
             return;
         };
         self.pinned_to_bottom = false;
+        // The row to the top of the pane, then `REVEAL_TOP_INSET` back down it
+        // from inside the list's own prepaint (`RevealInset::row_request`).
+        //
+        // `offset_in_item` cannot carry the inset, however much it looks like
+        // the field for it. A negative one does anchor the row below the
+        // viewport's top edge — the list's own `scroll_by` says so — but it
+        // renders nothing above the row it anchors: `layout_items` only walks
+        // into earlier rows when the ones from the scroll top down fail to fill
+        // the viewport, and a negative offset makes them appear to fill more of
+        // it, not less. The reveal would land in a blank strip under the header
+        // instead of in the conversation, which is a worse artefact than the dim
+        // row it replaces.
         self.list.scroll_to(gpui::ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
+        self.reveal_inset.owed(ix);
         self.revealed = Some(nonce);
         cx.notify();
     }
@@ -1902,6 +2047,7 @@ impl Transcript {
             copied: copied_pill(&self.code_copied, Instant::now()),
             links: Some(links),
             moderates: false,
+            sideways: Some(self.sideways.clone()),
             on_copy: Some(Rc::new(move |id, code, _, cx| {
                 let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
             })),
@@ -2217,7 +2363,7 @@ impl Transcript {
         (a.name, a.seed, a.color_index, a.project_id)
     }
 
-    /// `agent_identity` plus the D92 leaf pair in effect — the shared rule
+    /// `agent_identity` plus the D92 disc colour in effect — the shared rule
     /// (`avatars::agent_identity`, #1592): the open chat's roster, then my projects, then
     /// every other roster; the row's own name when no card knows the agent. The presence
     /// row asks the same function with the same row, so the two can never disagree.
@@ -2229,19 +2375,12 @@ impl Transcript {
         let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
         let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-        // A neutral agent (no leaf, Jacob 2026-10-25) carries the stored pair on, so every
-        // disc drawn from this identity goes through `avatars::agent`'s neutral branch.
-        let leaf = if a.neutral {
-            let n = avatars::neutral_pick();
-            (Some(n.leaf), Some(n.color))
-        } else {
-            (Some(a.leaf.leaf), Some(a.leaf.color))
-        };
+        let disc_color = Some(a.disc_color);
         AgentIdentity {
             name: a.name,
             seed: a.id.clone(),
             color_index: Some(a.color_index),
-            leaf,
+            disc_color,
             image,
             project_id: (a.known || had_id).then_some(a.id),
         }
@@ -2256,6 +2395,38 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.agent_line_inner(lead, names, None, theme, cx)
+    }
+
+    /// Hand-off line: same glyphs as [`Self::agent_line`], whole row tappable when the
+    /// destination is one of my agents (`open_handoff` + brief highlight).
+    fn handoff_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        message_id: &Id,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat_id = self.chat_id.clone().unwrap_or_default();
+        let openable = self.state.read(cx).can_open_handoff(&chat_id, message_id);
+        self.agent_line_inner(
+            lead,
+            names,
+            openable.then(|| (chat_id, message_id.clone())),
+            theme,
+            cx,
+        )
+    }
+
+    fn agent_line_inner(
+        &self,
+        lead: &str,
+        names: &[String],
+        handoff: Option<(Id, Id)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let state = self.state.read(cx);
         let mut line = div()
             .flex()
@@ -2265,6 +2436,7 @@ impl Transcript {
             .text_color(theme.text_muted)
             .child(lead.to_owned());
         let n = names.len();
+        let name_links = handoff.is_none();
         for (i, name) in names.iter().enumerate() {
             let mine = state
                 .projects
@@ -2286,16 +2458,18 @@ impl Transcript {
                 .gap(px(5.0))
                 .child(glyph)
                 .child(div().child(name.clone()));
-            if let Some(space) = mine {
-                let pid = space.id.clone();
-                let state_entity = self.state.clone();
-                who = who
-                    .cursor_pointer()
-                    .hover(|el| el.text_color(theme.text))
-                    .on_click(move |_, _, cx| {
-                        let pid = pid.clone();
-                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
-                    });
+            if name_links {
+                if let Some(space) = mine {
+                    let pid = space.id.clone();
+                    let state_entity = self.state.clone();
+                    who = who
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(theme.text))
+                        .on_click(move |_, _, cx| {
+                            let pid = pid.clone();
+                            state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                        });
+                }
             }
             line = line.child(who);
             if n >= 2 && i + 2 == n {
@@ -2304,14 +2478,40 @@ impl Transcript {
                 line = line.child(div().ml(px(-5.0)).child(","));
             }
         }
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .pt(px(10.0))
-            .pb(px(6.0))
-            .child(line)
-            .into_any_element()
+        if handoff.is_some() {
+            line = line
+                .hover(|el| el.text_color(theme.text))
+                .child(sf_symbols::glyph("chevron.right", 11.0, theme.text_faint));
+        }
+        match handoff {
+            Some((chat_id, message_id)) => {
+                let state_entity = self.state.clone();
+                let selector = format!("handoff-notice-{message_id}");
+                div()
+                    .id(SharedString::from(format!("handoff-{message_id}")))
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(10.0))
+                    .pb(px(6.0))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let (chat_id, message_id) = (chat_id.clone(), message_id.clone());
+                        state_entity.update(cx, |s, cx| s.open_handoff(&chat_id, &message_id, cx));
+                    })
+                    .child(line)
+                    .into_any_element()
+            }
+            None => div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .pt(px(10.0))
+                .pb(px(6.0))
+                .child(line)
+                .into_any_element(),
+        }
     }
 
     /// The disc and (when `named`) the name label for someone else's attachment row —
@@ -2365,8 +2565,7 @@ impl Transcript {
             }
             AttachmentSender::Agent { seed } => {
                 let a = self.agent_identity_full(seed, "Agent", cx);
-                let color =
-                    avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme);
+                let color = avatars::agent_accent(&a.seed, a.disc_color, theme);
                 let disc = div()
                     .id(SharedString::from(format!("{row_id}#disc")))
                     .debug_selector(|| format!("disc#{row_id}"))
@@ -2402,7 +2601,6 @@ impl Transcript {
 
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
-        let theme = Theme::of(cx).clone();
         let a = self.agent_identity_full(seed, "Agent", cx);
         if let Some(image) = a.image {
             return div()
@@ -2420,12 +2618,8 @@ impl Transcript {
         avatars::agent(
             // avatar-lint: allow (the resolver's identity, decoded above)
             &a.seed,
-            &a.name,
-            a.color_index,
-            a.leaf.0,
-            a.leaf.1,
+            a.disc_color,
             SENDER_DISC,
-            &theme,
         )
     }
 
@@ -2555,7 +2749,7 @@ impl Transcript {
             .map(|seed| self.agent_identity_full(seed, "Agent", cx));
         let agent_accent = identity
             .as_ref()
-            .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
+            .map(|a| avatars::agent_accent(&a.seed, a.disc_color, theme));
         // Group / channel: the agent's name inside its first bubble, in its
         // colour, with the `agent` tag; the time only appears in the hover rail.
         // The name and the disc are profile targets: one click opens the
@@ -2976,8 +3170,7 @@ impl Transcript {
                             let delivery = delivery.unwrap_or(Delivery::Delivered);
                             row_el
                                 .justify_end()
-                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                                .child(actions.mr(px(6.0)))
+                                .child(own_rail_lane(hover_time(time, reveal, &theme), actions))
                                 .children((delivery == Delivery::Failed).then(|| {
                                     self.failed_retry(&row.id, &row.message_id, &theme, cx)
                                         .mr(px(8.0))
@@ -2988,7 +3181,9 @@ impl Transcript {
                                 )
                                 .child(own_bubble(
                                     // One selector per element: a ghost keeps "secret-ghost".
-                                    bubble.when(ghost.is_none(), |b| {
+                                    // `min_w_0` lets the bubble narrow beside the reserved
+                                    // rail lane on a scaled / narrow pane (#2310).
+                                    bubble.min_w_0().when(ghost.is_none(), |b| {
                                         b.debug_selector(|| format!("own-bubble#{}", row.id))
                                     }),
                                     delivery,
@@ -3238,7 +3433,7 @@ impl Transcript {
                 } else {
                     format!("{total} messages with")
                 };
-                self.agent_line(&lead, &names, &theme, cx)
+                self.handoff_line(&lead, &names, &row.message_id, &theme, cx)
             }
             RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
@@ -3316,8 +3511,7 @@ impl Transcript {
                             row_el
                                 .justify_end()
                                 .items_center()
-                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                                .child(actions.mr(px(6.0)))
+                                .child(own_rail_lane(hover_time(time, reveal, &theme), actions))
                                 .child(card),
                         )
                         .into_any_element()
@@ -3389,6 +3583,86 @@ impl Transcript {
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
+            }
+            RowKind::Poll {
+                question,
+                options,
+                multiple,
+                by,
+            } => {
+                let me = format!("user:{}", self.state.read(cx).me_id());
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let look = CardLook::of(&theme);
+                let mine: Vec<String> = options
+                    .iter()
+                    .filter(|(_, _, voters)| voters.contains(&me))
+                    .map(|(id, ..)| id.clone())
+                    .collect();
+                let voted = options
+                    .iter()
+                    .flat_map(|(_, _, voters)| voters)
+                    .collect::<HashSet<_>>()
+                    .len();
+                let mut list = option_list(&look.palette);
+                for (ix, (id, label, voters)) in options.iter().enumerate() {
+                    let on = mine.contains(id);
+                    let next = poll_pick(&mine, id, multiple);
+                    let names: SharedString = voters
+                        .iter()
+                        .map(|s| self.reaction_sender_label(s, &me, cx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into();
+                    let (state, chat, message_id) =
+                        (self.state.clone(), chat_id.clone(), row.message_id.clone());
+                    let selector: SharedString = format!("poll-option#{id}").into();
+                    list = list.child(
+                        option_row(
+                            format!("{}#{id}", row.id),
+                            Some(letter(ix)),
+                            label,
+                            if on { RowState::Chosen } else { RowState::Open },
+                            ix > 0,
+                            &look,
+                        )
+                        .debug_selector(move || selector.to_string())
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(voters.len().to_string()),
+                        )
+                        // Who voted for it, behind a hover — the reaction chip's tip.
+                        .when(!voters.is_empty(), |el| {
+                            el.tooltip(move |_, cx| {
+                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                            })
+                        })
+                        .on_click(move |_, _, cx| {
+                            let (chat, message_id, next) =
+                                (chat.clone(), message_id.clone(), next.clone());
+                            state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                        }),
+                    );
+                }
+                let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
+                let rule = if multiple { "pick any" } else { "pick one" };
+                let card = card_frame(format!("{}-card", row.id), &look.palette)
+                    .debug_selector(|| "poll-card".into())
+                    .child(card_header("", &question, None, &look.palette, &theme))
+                    .child(list)
+                    .child(
+                        div()
+                            .px(px(1.0))
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(look.palette.badge_ink)
+                            .child(format!("{whose} · {voted} voted · {rule}")),
+                    );
+                // Right-click is the message menu, as on a bubble: its author deletes it there.
+                let card = self.menu_target(card, &row.message_id, cx);
+                card_row(card, true).into_any_element()
             }
             RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
@@ -3573,11 +3847,13 @@ impl Transcript {
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
+        let inset = self.reveal_inset.row_request(ix, REVEAL_TOP_INSET);
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
             .child(measure)
+            .when_some(inset, |el, inset| el.child(inset))
             .child(
                 column_row(inner)
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
@@ -3666,6 +3942,18 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
     }
 }
 
+/// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
+/// the one already held; a multiple-answer poll toggles it.
+fn poll_pick(mine: &[String], id: &str, multiple: bool) -> Vec<String> {
+    let held = mine.iter().any(|m| m == id);
+    match (multiple, held) {
+        (true, true) => mine.iter().filter(|m| *m != id).cloned().collect(),
+        (true, false) => mine.iter().cloned().chain([id.to_owned()]).collect(),
+        (false, true) => Vec::new(),
+        (false, false) => vec![id.to_owned()],
+    }
+}
+
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
 /// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
 /// the same cap width (`assistant_slot`, or the people slot after a lane). The lane is left
@@ -3686,6 +3974,7 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.step_spring(window, cx);
+        self.sideways.begin_frame();
         let theme = Theme::of(cx).clone();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
         // the user has scrolled up; clicking re-pins and lands on the newest
@@ -3722,6 +4011,7 @@ impl Render for Transcript {
             .key_context("Transcript")
             .track_focus(&focus)
             .child(Self::measure_into(&self.measured, None))
+            .child(Self::sideways_wheel_arbiter(cx))
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
             // Drag-scroll: move/up live on the transcript so a drag that
@@ -3811,7 +4101,8 @@ impl Render for Transcript {
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
-                                    Animation::new(Duration::from_millis(180)),
+                                    Animation::new(Duration::from_millis(150))
+                                        .with_easing(crate::ui::motion::ease_out_cubic),
                                     |el, t| el.opacity(t),
                                 ),
                         ),
@@ -3825,12 +4116,12 @@ impl Render for Transcript {
 // ---------------------------------------------------------------------------
 
 /// Who an agent lane belongs to: display name, disc seed, D79 colour, D92
-/// leaf pair in effect, and the project id when the lane names one.
+/// disc colour in effect, and the project id when the lane names one.
 struct AgentIdentity {
     name: String,
     seed: String,
     color_index: Option<u8>,
-    leaf: (Option<u8>, Option<u8>),
+    disc_color: Option<u8>,
     image: Option<std::sync::Arc<gpui::RenderImage>>,
     project_id: Option<Id>,
 }
@@ -4018,6 +4309,21 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
+/// The [`OWN_RAIL_LANE`] left of my bubble or card: the hover time, then the
+/// rail, right-aligned against the bubble. It never shrinks; the bubble beside
+/// it does (`min_w_0`), so the lane always stays inside the column (#2310).
+fn own_rail_lane(time: Option<Div>, rail: Div) -> Div {
+    div()
+        .flex_shrink_0()
+        .min_w(px(OWN_RAIL_LANE))
+        .flex()
+        .items_center()
+        .justify_end()
+        .debug_selector(|| "own-rail-lane".into())
+        .children(time.map(|t| t.mr(px(8.0))))
+        .child(rail.mr(px(6.0)))
+}
+
 /// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
 /// to the bubble itself, never a wrapper: the bubble's cap is
 /// `relative_width(own_bubble_fraction(..))` of its parent, and a wrapper that is itself
@@ -4100,7 +4406,9 @@ pub struct MessageRowCache {
 struct CachedMessageRows {
     version: u64,
     rows: Vec<Row>,
-    last_stamp_at: u64,
+    /// The clock the next message's stamp is measured against: this message's
+    /// own, once it drew a row.
+    last_at: u64,
     run_tail: Option<RunTail>,
     run_start: bool,
 }
@@ -4119,7 +4427,7 @@ impl MessageRowCache {
 #[allow(clippy::too_many_arguments)]
 fn message_render_version(
     message: &Message,
-    last_stamp_at: u64,
+    last_at: u64,
     continues_run: bool,
     is_last_reply: bool,
     show_details: bool,
@@ -4129,6 +4437,7 @@ fn message_render_version(
     names_senders: bool,
     // Width class: multi-party layout changes who gets a name caption.
     width_class: u8,
+    link_previews: bool,
 ) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     message.id.hash(&mut h);
@@ -4172,6 +4481,7 @@ fn message_render_version(
     message.reply_to.hash(&mut h);
     message.forwarded_from.hash(&mut h);
     message.agent_reply_to.hash(&mut h);
+    format!("{:?}", message.agent_message).hash(&mut h);
     message.asked_by_handle.hash(&mut h);
     message.owner_handle.hash(&mut h);
     message.routine_name.hash(&mut h);
@@ -4179,7 +4489,7 @@ fn message_render_version(
     format!("{:?}", message.turn).hash(&mut h);
     format!("{:?}", message.reply_ref).hash(&mut h);
     format!("{:?}", message.job).hash(&mut h);
-    last_stamp_at.hash(&mut h);
+    last_at.hash(&mut h);
     continues_run.hash(&mut h);
     is_last_reply.hash(&mut h);
     show_details.hash(&mut h);
@@ -4190,6 +4500,7 @@ fn message_render_version(
     me_id.hash(&mut h);
     names_senders.hash(&mut h);
     width_class.hash(&mut h);
+    link_previews.hash(&mut h);
     h.finish()
 }
 
@@ -4200,8 +4511,6 @@ fn message_render_version(
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
-/// `names_senders` landed from a parallel feedback; keep it a plain arg
-/// rather than a one-off options struct.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows(
@@ -4250,6 +4559,7 @@ pub fn build_rows_hiding(
         mentions,
         names_senders,
         false,
+        true,
         &mut cache,
         hidden_senders,
     )
@@ -4268,6 +4578,7 @@ pub fn build_rows_with_cache(
     mentions: &Mentions,
     names_senders: bool,
     people_space: bool,
+    link_previews: bool,
     cache: &mut MessageRowCache,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
@@ -4284,7 +4595,10 @@ pub fn build_rows_with_cache(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
-    let mut last_stamp_at: u64 = 0;
+    // The clock of the last message that drew a row: what the next message's
+    // stamp is measured against ([`shows_divider`]). 0 until the first one.
+    let mut last_at: u64 = 0;
+    let tz_offset = utc_offset_seconds();
     // The sender run the builder is in (who spoke last, when): a message that
     // continues it draws no name and no disc and sits in the tight in-run gap; a
     // date stamp, a system line or a hidden fold ends it ([feedback
@@ -4301,12 +4615,7 @@ pub fn build_rows_with_cache(
     let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
         keep.insert(message.id.clone());
-        retract_dangling_stamp(
-            &mut rows,
-            &mut pending_stamp,
-            &mut last_stamp_at,
-            &mut run_tail,
-        );
+        retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
         // Cross-message fold — do not serve from the per-message row cache.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
@@ -4348,12 +4657,12 @@ pub fn build_rows_with_cache(
             run_tail.as_ref(),
             &message.sender,
             message.created_at,
-            carries_quote(message),
+            carries_quote(message, names_senders),
         );
         let run_start = !continues;
         let version = message_render_version(
             message,
-            last_stamp_at,
+            last_at,
             continues,
             is_last_reply,
             show_details,
@@ -4362,11 +4671,12 @@ pub fn build_rows_with_cache(
             thumb_keys,
             names_senders,
             width_class,
+            link_previews,
         );
         if let Some(hit) = cache.entries.get(&message.id) {
             if hit.version == version {
                 rows.extend(hit.rows.iter().cloned());
-                last_stamp_at = hit.last_stamp_at;
+                last_at = hit.last_at;
                 run_tail = hit.run_tail.clone();
                 if hit.run_start {
                     cache.run_starts.insert(message.id.clone());
@@ -4378,10 +4688,8 @@ pub fn build_rows_with_cache(
         cache.built += 1;
         let start = rows.len();
         let streaming = message.is_streaming();
-        if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
-        {
-            pending_stamp = Some((rows.len(), last_stamp_at, run_tail.take()));
-            last_stamp_at = message.created_at;
+        if shows_divider(last_at, message.created_at, tz_offset) {
+            pending_stamp = Some((rows.len(), last_at, run_tail.take()));
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -4413,7 +4721,7 @@ pub fn build_rows_with_cache(
                 // alone (iMessage's rule), the full URL stays one hover away on the card.
                 let preview = ghost
                     .is_none()
-                    .then(|| link_preview_of(message))
+                    .then(|| link_preview_of(message, link_previews))
                     .flatten()
                     .map(|(id, p)| Box::new((id.clone(), p.clone())));
                 if let Some(p) = &preview {
@@ -4553,7 +4861,41 @@ pub fn build_rows_with_cache(
                         },
                     });
                 }
-                if show_text || attachment_parts.is_empty() || preview.is_some() {
+                // A poll draws as its card; its text part is the same poll in plain words,
+                // for builds without polls, and gets no bubble here.
+                let poll = message.parts.iter().find_map(|p| match p {
+                    Part::Poll {
+                        question,
+                        options,
+                        max,
+                        votes,
+                        ..
+                    } => Some(RowKind::Poll {
+                        question: question.clone(),
+                        options: options
+                            .iter()
+                            .map(|o| {
+                                let voters = votes.get(&o.id).cloned().unwrap_or_default();
+                                (o.id.clone(), o.label.clone(), voters)
+                            })
+                            .collect(),
+                        multiple: *max > 1,
+                        by: from
+                            .as_ref()
+                            .map(|p| p.name.clone().unwrap_or_else(|| p.handle.clone())),
+                    }),
+                    _ => None,
+                });
+                let is_poll = poll.is_some();
+                if let Some(kind) = poll {
+                    rows.push(Row {
+                        version: hash_version(&format!("{kind:?}"), false),
+                        id: format!("{}#poll", message.id),
+                        message_id: message.id.clone(),
+                        kind,
+                    });
+                }
+                if !is_poll && (show_text || attachment_parts.is_empty() || preview.is_some()) {
                     // The quote is on the first card when the message has any.
                     let quote = quote.filter(|_| attachment_parts.is_empty());
                     let delivery = delivery_state(message, is_mine);
@@ -4690,21 +5032,28 @@ pub fn build_rows_with_cache(
                     || (names_senders && message.sender.starts_with("agent:"));
                 // Quote the message this answers: `replyTo` is the platform reply the
                 // box sets by the #1521 rule (always in groups / channels / people chats
-                // and for a row another agent sent; in a 1:1 only when answering an
-                // earlier message than the latest). Rows from older boxes in attributed
-                // chats fall back to `inReplyTo` (#1447); a plain 1:1 answer to the
-                // latest message carries no quote.
+                // and for a row another agent sent; never in a solo 1:1 agent chat —
+                // Jacob 2026-11-10). Rows from older boxes in attributed chats fall
+                // back to `inReplyTo` (#1447). Clients also hide a stale `replyTo` on
+                // agent bubbles in solo 1:1 so older rows render clean
+                // ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]).
                 let attributed = message.role == Role::Project || in_people;
-                let reply_quote = message
-                    .reply_to
-                    .as_deref()
-                    .filter(|id| !id.is_empty())
-                    .or_else(|| {
-                        attributed
-                            .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
-                            .flatten()
+                let reply_quote = names_senders
+                    .then(|| {
+                        message
+                            .reply_to
+                            .as_deref()
+                            .filter(|id| !id.is_empty())
+                            .or_else(|| {
+                                attributed
+                                    .then(|| {
+                                        message.in_reply_to.as_deref().filter(|id| !id.is_empty())
+                                    })
+                                    .flatten()
+                            })
+                            .map(|id| Quote::for_reply(id, messages))
                     })
-                    .map(|id| Quote::for_reply(id, messages));
+                    .flatten();
                 if agent_speaker {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
                     // the disc on the last block names it. No meta line — "answering
@@ -4741,7 +5090,8 @@ pub fn build_rows_with_cache(
                     .iter()
                     .filter(|p| matches!(p, Part::Chart { .. }))
                     .count();
-                let link_preview = link_preview_of(message).map(|(id, _)| id.clone());
+                let link_preview =
+                    link_preview_of(message, link_previews).map(|(id, _)| id.clone());
                 let total_blocks: usize = polished
                     .iter()
                     .map(|(_, text)| {
@@ -5074,6 +5424,7 @@ pub fn build_rows_with_cache(
                         | Part::Browser { .. }
                         | Part::Skills { .. }
                         | Part::SecretRedacted { .. }
+                        | Part::Poll { .. }
                         | Part::Unknown => {}
                     }
                 }
@@ -5106,12 +5457,18 @@ pub fn build_rows_with_cache(
                 // (wordless, "Working…") must not get "didn't answer" under its own answer
                 // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
                 // = an assistant row answering the same user message with words or a card.
+                //
+                // A hidden / job worker row does not count (#2964): this builder skips those
+                // above, so treating their "Done." / status text as an answer left the ask with
+                // no bubble and no stock line after a research job finished without a delivery.
                 let turn_answered_elsewhere = !failed
                     && message.in_reply_to.as_deref().is_some_and(|ask| {
                         messages.iter().any(|m| {
                             m.id != message.id
                                 && m.role == Role::Assistant
                                 && m.in_reply_to.as_deref() == Some(ask)
+                                && !m.hidden
+                                && m.job.is_none()
                                 && (!m.plain_text().trim().is_empty()
                                     || m.parts.iter().any(|p| {
                                         matches!(
@@ -5255,6 +5612,9 @@ pub fn build_rows_with_cache(
         // a run, and is never a turn start.
         let drew = rows.len() > rows_before_message;
         if drew {
+            if message.created_at > 0 {
+                last_at = message.created_at;
+            }
             run_tail = Some(RunTail {
                 sender: message.sender.clone(),
                 at: message.created_at,
@@ -5266,34 +5626,24 @@ pub fn build_rows_with_cache(
         // Finalize a no-content message's stamp now so the cached slice is
         // complete (same outcome as retract on the next turn).
         if !drew {
-            retract_dangling_stamp(
-                &mut rows,
-                &mut pending_stamp,
-                &mut last_stamp_at,
-                &mut run_tail,
-            );
+            retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
         }
         cache.entries.insert(
             message.id.clone(),
             CachedMessageRows {
                 version,
                 rows: rows[start..].to_vec(),
-                last_stamp_at,
+                last_at,
                 run_tail: run_tail.clone(),
                 run_start: drew && run_start,
             },
         );
     }
-    retract_dangling_stamp(
-        &mut rows,
-        &mut pending_stamp,
-        &mut last_stamp_at,
-        &mut run_tail,
-    );
+    retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
     cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued, last_stamp_at, run_tail);
+    let _ = (running, queued, last_at, run_tail);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -5313,13 +5663,13 @@ pub fn build_rows_with_cache(
 fn retract_dangling_stamp(
     rows: &mut Vec<Row>,
     pending: &mut Option<(usize, u64, Option<RunTail>)>,
-    last_stamp_at: &mut u64,
+    last_at: &mut u64,
     run_tail: &mut Option<RunTail>,
 ) {
     if let Some((ix, at, tail)) = pending.take() {
         if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
             rows.pop();
-            *last_stamp_at = at;
+            *last_at = at;
             *run_tail = tail;
         }
     }
@@ -5637,10 +5987,9 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .into_any_element()
 }
 
-/// The message's link preview, when the global switch is on and the sender has not removed
-/// it ([feedback link-embeds-mac-2026-10-27]).
-pub fn link_preview_of(message: &Message) -> Option<(&Id, &LinkPreview)> {
-    if !crate::ui::link_card::enabled() {
+/// The message's link preview under this transcript's settings, unless the sender removed it.
+pub fn link_preview_of(message: &Message, link_previews: bool) -> Option<(&Id, &LinkPreview)> {
+    if !link_previews {
         return None;
     }
     message.link_preview()
@@ -6151,14 +6500,19 @@ fn render_block_in(
             }
             // Wider than the bubble (many columns, long cells): the table keeps
             // its column widths and scrolls sideways inside the frame instead
-            // of squeezing every cell to a word per line.
+            // of squeezing every cell to a word per line. A sideways gesture
+            // over it is the table's, not the chat's
+            // ([`Transcript::claim_sideways_wheel`]).
+            let id = SharedString::from(format!("{row_id}#table"));
+            let handle = copy.sideways.as_ref().map(|tables| tables.handle(&id));
             sideways_scroll(
                 div()
-                    .id(SharedString::from(format!("{row_id}#table")))
+                    .id(id)
                     .w_full()
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(theme.border),
+                handle.as_ref(),
             )
             .child(table)
             .into_any_element()
@@ -6254,13 +6608,74 @@ fn math_runs(source: &str, color: gpui::Hsla, theme: &Theme) -> (String, Vec<Tex
 /// trackpad gesture is horizontal. GPUI otherwise turns a vertical wheel over a
 /// horizontal-only scroll area into sideways motion and the transcript stops
 /// scrolling under the pointer (`Style::restrict_scroll_to_axis`).
-fn sideways_scroll(frame: Stateful<Div>) -> Stateful<Div> {
+///
+/// With a `handle` the frame's place is kept in [`SidewaysScroll`] instead of
+/// in GPUI's element state, where [`Transcript::claim_sideways_wheel`] can
+/// read it and so decide whether a gesture belongs to the frame or to the
+/// chat. Without one the frame scrolls as before and claims nothing.
+fn sideways_scroll(frame: Stateful<Div>, handle: Option<&ScrollHandle>) -> Stateful<Div> {
     // A flex row: its one child sizes to its content (max-content) and, with
     // `flex_shrink_0` + `min_w_full`, is never narrower than the frame nor
     // squeezed below its content — so the frame has something to scroll.
     let mut frame = frame.flex().overflow_x_scroll();
     frame.style().restrict_scroll_to_axis = Some(true);
-    frame
+    let frame = match handle {
+        Some(handle) => frame.track_scroll(handle),
+        None => frame,
+    };
+    crate::ui::back_swipe::mark_sideways_scroller(frame)
+}
+
+/// Where the transcript's sideways scrollers — the wide markdown tables and
+/// the code cards — keep their place from frame to frame.
+///
+/// A scrolling frame keeps its offset in GPUI's element state, which nothing
+/// outside the element can read. [`Transcript::claim_sideways_wheel`] has to
+/// read a frame's place and its remaining travel from outside it, so each one
+/// is drawn with a `ScrollHandle` kept here instead.
+#[derive(Default)]
+pub struct SidewaysScroll {
+    /// Bumped once per transcript render, and stamped on every scroller the
+    /// frame draws: a scroller's bounds are only worth reading while fresh.
+    frame: Cell<u64>,
+    scrollers: RefCell<HashMap<SharedString, (u64, ScrollHandle)>>,
+}
+
+/// A scroller the transcript has not drawn for this many frames is forgotten,
+/// and its place with it — as GPUI already drops the element state of a row
+/// the list has scrolled away from.
+const SIDEWAYS_FORGET_AFTER: u64 = 4;
+
+impl SidewaysScroll {
+    /// A new transcript frame.
+    fn begin_frame(&self) {
+        let frame = self.frame.get() + 1;
+        self.frame.set(frame);
+        self.scrollers
+            .borrow_mut()
+            .retain(|_, (drawn, _)| frame - *drawn < SIDEWAYS_FORGET_AFTER);
+    }
+
+    /// The handle scroller `id` is drawn with this frame, new on first sight.
+    fn handle(&self, id: &SharedString) -> ScrollHandle {
+        let frame = self.frame.get();
+        let mut scrollers = self.scrollers.borrow_mut();
+        let (drawn, handle) = scrollers
+            .entry(id.clone())
+            .or_insert_with(|| (frame, ScrollHandle::new()));
+        *drawn = frame;
+        handle.clone()
+    }
+
+    /// The scroller under `at` in the frame on screen, if the pointer is over one.
+    fn under(&self, at: Point<Pixels>) -> Option<ScrollHandle> {
+        let frame = self.frame.get();
+        self.scrollers
+            .borrow()
+            .values()
+            .find(|(drawn, handle)| *drawn == frame && handle.bounds().contains(&at))
+            .map(|(_, handle)| handle.clone())
+    }
 }
 
 /// The narrowest a table column is laid out at, in points.
@@ -6310,6 +6725,11 @@ pub struct CodeCopy {
     /// I moderate this chat (my own project, or a group I own): Remove preview shows on
     /// others' cards too.
     pub moderates: bool,
+    /// Where the wide tables and code cards keep their sideways place, so a
+    /// gesture over one is theirs and not the chat's
+    /// ([`Transcript::claim_sideways_wheel`]). Without it they still scroll;
+    /// they just claim nothing.
+    pub sideways: Option<Rc<SidewaysScroll>>,
 }
 
 /// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
@@ -6431,7 +6851,11 @@ fn code_fence_card(
         }))
         .child(bubble.text(at, code.to_string(), runs));
     // Long lines (a fenced table, a wide log line) keep their columns and
-    // scroll sideways instead of wrapping into an unreadable stack.
+    // scroll sideways instead of wrapping into an unreadable stack. The card
+    // takes a sideways gesture the way a table does
+    // ([`Transcript::claim_sideways_wheel`]).
+    let id = SharedString::from(format!("{row_id}#code"));
+    let handle = copy.sideways.as_ref().map(|scroll| scroll.handle(&id));
     div()
         .flex()
         .flex_col()
@@ -6441,14 +6865,7 @@ fn code_fence_card(
         .bg(theme.code_bg)
         .border_1()
         .border_color(theme.border)
-        .child(
-            sideways_scroll(
-                div()
-                    .id(SharedString::from(format!("{row_id}#code")))
-                    .w_full(),
-            )
-            .child(body),
-        )
+        .child(sideways_scroll(div().id(id).w_full(), handle.as_ref()).child(body))
         .child(
             div()
                 .absolute()
@@ -8138,6 +8555,8 @@ mod layout_tests {
     struct BubbleRow {
         pane: f32,
         who: Who,
+        /// A people chat (DM / group): my bubble takes the people share.
+        people: bool,
         text: &'static str,
         /// The row's hover opacity this frame (0 = at rest, 1 = hovered).
         hover: f32,
@@ -8159,7 +8578,7 @@ mod layout_tests {
         ) -> impl IntoElement {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
             let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
-            let time = || hover_time(Some("1:52 PM".to_string()), self.hover, &theme);
+            let time = || hover_time(Some("12:52 PM".to_string()), self.hover, &theme);
             let name = |name: &'static str| {
                 div()
                     .text_size(px(CHAT_BODY))
@@ -8218,13 +8637,13 @@ mod layout_tests {
                         &CodeCopy::default(),
                     );
                     let other = matches!(self.who, Who::Other);
-                    // Another person's bubble: a people chat; mine: an agent chat here.
+                    // Another person's bubble: a people chat; mine: agent or people per `self.people`.
                     let bubble = div()
                         .debug_selector(|| "test-bubble".into())
                         .max_w(relative_width(if other {
                             PEOPLE_BUBBLE_FRACTION
                         } else {
-                            own_bubble_fraction(false)
+                            own_bubble_fraction(self.people)
                         }))
                         .px(px(BUBBLE_PAD_X))
                         .py(px(BUBBLE_PAD_Y))
@@ -8259,11 +8678,13 @@ mod layout_tests {
                             .items_end()
                             .justify_end()
                             .debug_selector(|| "test-bubble-parent".into())
-                            .children(time().map(|t| t.mr(px(8.0))))
-                            .child(div().size(px(16.0)).mr(px(6.0)))
+                            .child(own_rail_lane(
+                                time(),
+                                div().w(px(RAIL_WIDTH)).h(px(RAIL_BUTTON)),
+                            ))
                             // Through the real delivery wrapper: a sent bubble must
                             // keep the same cap as a seen one (v0.6.223 regression).
-                            .child(own_bubble(bubble, Delivery::Delivered))
+                            .child(own_bubble(bubble.min_w_0(), Delivery::Delivered))
                     }
                 }
             };
@@ -8278,9 +8699,10 @@ mod layout_tests {
 
     /// The cap a [`BubbleRow`] bubble may reach: the people share of the slot
     /// for an agent in a group (it has a lane); 72 % of the row for my own
-    /// bubble in an agent chat; the people share of the lane beside the disc
-    /// for another person — `relative_width` is relative to the parent.
-    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
+    /// bubble in an agent chat (80 % in a people chat), never into the
+    /// [`OWN_RAIL_LANE`]; the people share of the lane beside the disc for
+    /// another person — `relative_width` is relative to the parent.
+    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who, people: bool) -> f32 {
         match who {
             Who::Agent => {
                 let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
@@ -8290,12 +8712,13 @@ mod layout_tests {
                 let parent = vcx
                     .debug_bounds("test-bubble-parent")
                     .expect("bubble parent drawn");
-                let share = if matches!(who, Who::Other) {
-                    PEOPLE_BUBBLE_FRACTION
+                let width = f32::from(parent.size.width);
+                if matches!(who, Who::Other) {
+                    width * PEOPLE_BUBBLE_FRACTION
                 } else {
-                    own_bubble_fraction(false)
-                };
-                f32::from(parent.size.width) * share
+                    // Mine also leaves the rail lane free on its left.
+                    (width * own_bubble_fraction(people)).min(width - OWN_RAIL_LANE)
+                }
             }
         }
     }
@@ -8317,6 +8740,7 @@ mod layout_tests {
                 let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                     pane,
                     who,
+                    people: false,
                     text: OVERFLOWING_LINE,
                     hover: 0.0,
                     selection: cx.new(TextSelection::new),
@@ -8327,7 +8751,7 @@ mod layout_tests {
                 let text = vcx.debug_bounds("bubble-text").expect("text drawn");
                 let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
                 let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
-                let cap = bubble_cap(vcx, who);
+                let cap = bubble_cap(vcx, who, false);
                 let bw = f32::from(bubble.size.width);
                 assert!(
                     right(bubble) <= right(column) + 0.5 && left(bubble) >= left(column) - 0.5,
@@ -8370,6 +8794,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 0.0,
                 selection: cx.new(TextSelection::new),
@@ -8380,7 +8805,7 @@ mod layout_tests {
             let bw = f32::from(bubble.size.width);
             let tw = f32::from(text.size.width);
             let th = f32::from(text.size.height);
-            let cap = bubble_cap(vcx, who);
+            let cap = bubble_cap(vcx, who, false);
             assert!(
                 th <= CHAT_LINE_HEIGHT + 0.5,
                 "{who:?}: a short line stays on one line ({th} pt tall)"
@@ -8409,6 +8834,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 0.0,
                 selection: cx.new(TextSelection::new),
@@ -8423,6 +8849,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 1.0,
                 selection: cx.new(TextSelection::new),
@@ -8454,6 +8881,74 @@ mod layout_tests {
                         <= f32::from(bubble.origin.y + bubble.size.height),
                 "{who:?}: the time is not on the bubble's line"
             );
+        }
+    }
+
+    /// Scout, Arbonites, 2026-10-29 ("the time stamp on the message is
+    /// clipping into the left column when the app window is custom scaled"):
+    /// my bubble took its whole share of the column and the time + rail went
+    /// left of it, so below a ~700 pt column (a scaled display, a small
+    /// window) the time ran past the column's left edge into the sidebar.
+    /// Mine, in an agent chat and in a group, from a full 1440 pt window down
+    /// to 820 pt and the 400 pt sidebar-less pane: the hovered time stays in
+    /// the column, outside the bubble, and hovering does not re-wrap the text.
+    #[gpui::test]
+    fn my_hover_time_stays_in_the_column_when_the_window_is_scaled_down(cx: &mut TestAppContext) {
+        let sidebar = crate::ui::theme::SIDEBAR_WIDTH;
+        for pane in [
+            1440.0 - sidebar,
+            1152.0 - sidebar,
+            960.0 - sidebar,
+            820.0 - sidebar,
+            400.0,
+        ] {
+            for people in [false, true] {
+                let mut bubbles = Vec::new();
+                for hover in [0.0, 1.0] {
+                    let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                        pane,
+                        who: Who::Mine,
+                        people,
+                        text: OVERFLOWING_LINE,
+                        hover,
+                        selection: cx.new(TextSelection::new),
+                    });
+                    vcx.run_until_parked();
+                    let column = vcx.debug_bounds("chat-column").expect("column drawn");
+                    let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+                    let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+                    let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                    let cap = bubble_cap(vcx, Who::Mine, people);
+                    let bw = f32::from(bubble.size.width);
+                    assert!(
+                        (bw - cap).abs() <= 1.0,
+                        "pane {pane} people {people}: a long line fills the cap: bubble {bw}, cap {cap}"
+                    );
+                    if hover > 0.0 {
+                        let time = vcx.debug_bounds("bubble-time").expect("time on hover");
+                        assert!(
+                            time.size.width <= px(HOVER_TIME_WIDTH),
+                            "the time is wider than its room: {}",
+                            f32::from(time.size.width)
+                        );
+                        assert!(
+                            left(time) >= left(column) - 0.5,
+                            "pane {pane} people {people}: the time starts at {} left of the column {}",
+                            left(time),
+                            left(column)
+                        );
+                        assert!(
+                            right(time) <= left(bubble),
+                            "pane {pane} people {people}: the time overlaps the bubble"
+                        );
+                    }
+                    bubbles.push(bubble.size);
+                }
+                assert_eq!(
+                    bubbles[0], bubbles[1],
+                    "pane {pane} people {people}: hovering resized my bubble"
+                );
+            }
         }
     }
 
@@ -8987,6 +9482,92 @@ mod transcript_smoke_tests {
         );
     }
 
+    /// A reveal brings its message to rest clear of the floating header's fade
+    /// band. Every jump into a transcript shares one path — a home-search or
+    /// palette hit, Search-in-chat stepping, a channel-message notification, a
+    /// reply quote click, all through `Transcript::reveal_hit` — and that path
+    /// used to land the row at the pane's top edge, inside the band, so the
+    /// message the reader had just asked for was the faintest on screen.
+    ///
+    /// What this pins is the position against the band rather than a number of
+    /// its own: the row's top edge sits `REVEAL_TOP_INSET` (the band plus one
+    /// turn gap) below the pane's top edge, with the message before it drawn in
+    /// that space — not the blank strip a negative `offset_in_item` leaves.
+    #[gpui::test]
+    fn a_revealed_hit_rests_clear_of_the_headers_fade_band(cx: &mut TestAppContext) {
+        const ROWS: usize = 160;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                message(
+                    &format!("m{i}"),
+                    role,
+                    &format!("history line {i} — lorem ipsum dolor sit amet, consectetur"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+
+        // How far down the pane the list drew a message's row, or `None` when
+        // that message is off screen.
+        let landing = |vcx: &gpui::VisualTestContext, message_id: &str| -> Option<f32> {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                let row = t.rows.iter().find(|r| r.message_id == message_id)?;
+                let bounds = m.rows.get(&row.id)?;
+                Some(f32::from(bounds.top() - m.viewport.top()))
+            })
+        };
+        // What the palette, Search-in-chat and a quote click all do to the state.
+        let reveal = |vcx: &mut gpui::VisualTestContext, message_id: &str| {
+            transcript.update(vcx, |t, _| t.measured.borrow_mut().rows.clear());
+            state.update(vcx, |s, cx| {
+                s.reveal_message = Some(("c1".into(), message_id.into()));
+                s.reveal_nonce += 1;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+
+        // A hit in the middle of the history, with chat above it and below it.
+        reveal(vcx, "m80");
+        let inset = landing(vcx, "m80").expect("the revealed row is on screen");
+        assert!(
+            (inset - REVEAL_TOP_INSET).abs() < 0.5,
+            "the revealed row rests {inset} pt down the pane, not {REVEAL_TOP_INSET}"
+        );
+        assert!(
+            inset > HEADER_FADE_BAND,
+            "…so it is clear of the {HEADER_FADE_BAND} pt fade band, where it used to land"
+        );
+        assert!(
+            landing(vcx, "m79").is_some_and(|above| above < inset),
+            "the message before the hit fills the space above it"
+        );
+
+        // The first message in a chat has next to nothing above it to scroll:
+        // the walk runs out of rows and clamps at the very top, which is where
+        // a reveal landed before the inset — no blank band, nothing worse.
+        reveal(vcx, "m0");
+        let top = transcript.read_with(&*vcx, |t, _| t.list.logical_scroll_top());
+        assert_eq!(
+            (top.item_ix, f32::from(top.offset_in_item)),
+            (0, 0.0),
+            "nothing above the first message to give it the inset"
+        );
+        let first = landing(vcx, "m0").expect("the first message is on screen");
+        assert!(
+            (0.0..REVEAL_TOP_INSET).contains(&first),
+            "it takes what little sits above it ({first} pt) and no more"
+        );
+    }
+
     /// Grouped messages ([feedback grouped-messages-mac-2026-10-28]), drawn by the real
     /// transcript in a people group: Bob's second line 30 s later has no disc and no name
     /// but keeps the lane (its bubble's left edge is the first bubble's), and sits in the
@@ -9063,6 +9644,158 @@ mod transcript_smoke_tests {
         assert_eq!(
             b3.size.height, b1.size.height,
             "Sam's first bubble is named like Bob's"
+        );
+    }
+
+    /// Jacob, 2026-11-04 (Mac, dark): an agent reply held a Check / Finding /
+    /// Source table whose Source column was cut off at the bubble's right
+    /// edge, and scrolling the table sideways scrolled the chat behind it as
+    /// well. Grok's tables are the reference: the table takes the gesture
+    /// alone, and only at its last column does the chat take over.
+    const WIDE_TABLE: &str = "| Check | Finding | Source |\n| --- | --- | --- |\n| Team | Two named founders, both with prior protocol work | GitHub, LinkedIn, the project's own about page |\n| Code | Public repository, audited in August | GitHub, the audit report PDF |\n| Alpha token | Issued on subnet 64, no lock-up | dTAOscan, Geckoterminal, the subnet dashboard |\n| Liquidity | Thin outside the main pool | dTAOscan, Geckoterminal |\n| Emissions | Steady since registration | Taostats, the subnet dashboard |\n| Registration | Subnet 64, registered in June | Taostats, the chain itself |\n| Payout rule | Weekly, to stakers of record | The project's own docs |";
+
+    /// The window and the two numbers these tests watch: where the table's
+    /// Source column is drawn (the table's own place) and where the table is
+    /// drawn (the chat's place).
+    struct TableRig<'a> {
+        /// The state's tokio workers are parked for good, and dropping their
+        /// runtime inside a test would block on them.
+        _rt: tokio::runtime::Runtime,
+        vcx: &'a mut gpui::VisualTestContext,
+    }
+
+    impl TableRig<'_> {
+        /// Left edge of the Source column, in window points.
+        fn column_left(&mut self) -> f32 {
+            f32::from(
+                self.vcx
+                    .debug_bounds("table-cell-r0-c2")
+                    .expect("the Source header is drawn")
+                    .left(),
+            )
+        }
+
+        /// Top edge of the table, which moves only when the chat scrolls.
+        fn table_top(&mut self) -> f32 {
+            f32::from(
+                self.vcx
+                    .debug_bounds("table")
+                    .expect("the table is drawn")
+                    .top(),
+            )
+        }
+
+        /// One trackpad event over the middle of the table. A real sideways
+        /// gesture is never exactly flat, so `dy` is never zero either: it is
+        /// the vertical crumb that used to drag the chat along.
+        fn gesture(&mut self, dx: f32, dy: f32) {
+            let over = self
+                .vcx
+                .debug_bounds("table")
+                .expect("the table is drawn")
+                .center();
+            self.vcx.simulate_event(gpui::ScrollWheelEvent {
+                position: over,
+                delta: gpui::ScrollDelta::Pixels(point(px(dx), px(dy))),
+                modifiers: Modifiers::default(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            self.vcx.run_until_parked();
+        }
+    }
+
+    /// Drives the table to its last column, with a flat gesture so that
+    /// nothing the chat could do shows up in the reading.
+    fn to_the_last_column(rig: &mut TableRig<'_>) {
+        let mut column = rig.column_left();
+        for _ in 0..40 {
+            rig.gesture(-120.0, 0.0);
+            let now = rig.column_left();
+            if now == column {
+                return;
+            }
+            column = now;
+        }
+        panic!("the table never reached its last column");
+    }
+
+    /// A chat long enough to have somewhere to scroll, ending in the wide table.
+    fn mount_wide_table(cx: &mut TestAppContext) -> TableRig<'_> {
+        let t = 1_700_000_000_000u64;
+        let mut messages = Vec::new();
+        for i in 0..4 {
+            messages.push(message(
+                &format!("u{i}"),
+                "user",
+                "What did the diligence turn up?",
+                t + i * 1_000,
+            ));
+            messages.push(message(
+                &format!("a{i}"),
+                "assistant",
+                LONG_REPLY,
+                t + i * 1_000 + 500,
+            ));
+        }
+        messages.push(message("mt", "assistant", WIDE_TABLE, t + 20_000));
+        let (rt, _state, transcript) = mount_with(cx, messages);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.simulate_resize(gpui::size(px(900.0), px(620.0)));
+        vcx.run_until_parked();
+        TableRig { _rt: rt, vcx }
+    }
+
+    #[gpui::test]
+    fn a_sideways_gesture_over_a_table_leaves_the_chat_where_it_was(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        let column = rig.column_left();
+        let top = rig.table_top();
+        rig.gesture(-60.0, 8.0);
+        assert_eq!(
+            rig.column_left(),
+            column - 60.0,
+            "the table moved the gesture's 60 pt"
+        );
+        assert_eq!(
+            rig.table_top(),
+            top,
+            "and the chat behind it did not move at all"
+        );
+    }
+
+    /// The table is not a trap: once its last column is on screen the same
+    /// gesture passes through and the chat scrolls.
+    #[gpui::test]
+    fn at_the_tables_last_column_the_chat_takes_the_gesture_over(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        to_the_last_column(&mut rig);
+        let column = rig.column_left();
+        let top = rig.table_top();
+        rig.gesture(-60.0, 8.0);
+        assert_eq!(
+            rig.column_left(),
+            column,
+            "the table has nowhere left to go"
+        );
+        assert!(
+            rig.table_top() > top,
+            "so the chat took the gesture: {top} to {}",
+            rig.table_top()
+        );
+    }
+
+    /// An up-and-down gesture over the table is the chat's, as it always was.
+    #[gpui::test]
+    fn an_up_and_down_gesture_over_a_table_still_scrolls_the_chat(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        let top = rig.table_top();
+        rig.gesture(-8.0, 60.0);
+        assert!(
+            rig.table_top() > top,
+            "the chat scrolled: {top} to {}",
+            rig.table_top()
         );
     }
 }
@@ -10873,6 +11606,7 @@ mod grouping_tests {
             &Mentions::empty(),
             names_senders,
             names_senders,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -11082,7 +11816,7 @@ mod grouping_tests {
             person("m6", "bob", "after the quote", T + 4_000),
             // An hour later: the date stamp lands and breaks the run (the window has
             // passed anyway).
-            person("m7", "bob", "next hour", T + 2 * STAMP_GAP_MS),
+            person("m7", "bob", "next hour", T + 2 * DIVIDER_GAP_MS),
         ];
         let (rows, starts) = rows_of(&messages, true);
         assert_eq!(
@@ -11221,6 +11955,7 @@ mod grouping_tests {
                 &Mentions::empty(),
                 true,
                 true,
+                true,
                 cache,
                 &HashSet::new(),
             )
@@ -11235,6 +11970,224 @@ mod grouping_tests {
             HashSet::from(["m1".to_string(), "m3".to_string()]),
             "run starts are rebuilt from the cached entries"
         );
+    }
+}
+
+#[cfg(test)]
+mod time_divider_tests {
+    //! The centred time stamp (Jacob, 2026-11-05, [feedback
+    //! time-dividers-2026-11-05]): one lands at a new local day or at an hour's
+    //! gap, and nowhere else. The hour is measured from the message above,
+    //! which is what the Mac got wrong: it measured from the last stamp it drew,
+    //! so a chat whose messages are minutes apart grew one every hour.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    /// 2026-11-05 12:00:00 UTC. Midday, so the short gaps below cannot cross a
+    /// day where the tests run (UTC on CI and on the gate boxes).
+    const NOON: u64 = 1_793_880_000_000;
+    const MINUTE: u64 = 60_000;
+
+    fn person(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "user",
+            "sender": "user:gh_456",
+            "senderHandle": "sam",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn stamps(messages: &[Message]) -> Vec<String> {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        build_rows_with_cache(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+            true,
+            true,
+            &mut cache,
+            &HashSet::new(),
+        )
+        .into_iter()
+        .filter_map(|row| match row.kind {
+            RowKind::Stamp { .. } => Some(row.message_id),
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// The symptom in Jacob's screenshot: a chat ticking along a few minutes at
+    /// a time used to collect a stamp every hour, mid-conversation.
+    #[test]
+    fn a_chat_whose_messages_are_minutes_apart_opens_with_one_stamp_and_no_more() {
+        let messages: Vec<Message> = (0..40)
+            .map(|i| person(&format!("m{i}"), "steady", NOON + i * 6 * MINUTE))
+            .collect();
+        assert_eq!(
+            stamps(&messages),
+            ["m0".to_string()],
+            "four hours of talking, one stamp — the chat's first message"
+        );
+    }
+
+    #[test]
+    fn an_hour_of_silence_draws_one_and_the_rest_of_the_run_does_not() {
+        let messages = [
+            person("m1", "morning", NOON),
+            person("m2", "still here", NOON + 20 * MINUTE),
+            person("m3", "back", NOON + 20 * MINUTE + DIVIDER_GAP_MS),
+            person("m4", "and one more", NOON + 25 * MINUTE + DIVIDER_GAP_MS),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string(), "m3".to_string()]);
+    }
+
+    /// 23:52 → 00:03 is four minutes short of the hour and still a new day:
+    /// neither client drew a stamp there before this.
+    #[test]
+    fn a_new_day_draws_one_on_a_gap_too_short_for_the_hour() {
+        let before_midnight = NOON + 11 * 60 * MINUTE + 52 * MINUTE;
+        let messages = [
+            person("m1", "last of the night", before_midnight),
+            person("m2", "one more thought", before_midnight + 11 * MINUTE),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string(), "m2".to_string()]);
+    }
+
+    /// A row with no clock gets no stamp, and does not become the clock the next
+    /// message is measured against.
+    #[test]
+    fn a_row_with_no_clock_neither_draws_a_stamp_nor_moves_the_one_before_it() {
+        let messages = [
+            person("m1", "with a clock", NOON),
+            person("m2", "without one", 0),
+            person("m3", "with a clock again", NOON + 12 * MINUTE),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod poll_rows_tests {
+    //! A poll (`docs/polls.md`) draws as one card row built from the doc's own projection:
+    //! the options in order with who holds each, and no bubble for its plain-text twin.
+    use std::collections::{HashMap, HashSet};
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::poll::Poll;
+
+    use super::*;
+    use crate::model::Message;
+
+    #[test]
+    fn a_poll_is_one_card_row_with_its_votes_and_no_text_bubble() {
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let from = |user: &str| UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            sender_name: Some("Ana".into()),
+            ..Default::default()
+        };
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &from("ana"))
+                .unwrap();
+            d.set_poll_vote("p1", "user:ana", &["2".into()]).unwrap();
+            d.set_poll_vote("p1", "user:me", &["2".into()]).unwrap();
+        });
+        let messages: Vec<Message> = doc
+            .projected_rows()
+            .into_iter()
+            .map(|row| serde_json::from_value(row).expect("a core row reads as a Message"))
+            .collect();
+        assert!(matches!(messages[0].parts[1], Part::Poll { .. }));
+
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        // The date stamp and the bottom inset frame every transcript; between them, one row.
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["p1#stamp", "p1#poll", "chat#bottom-inset"]);
+        let RowKind::Poll {
+            question,
+            options,
+            multiple,
+            by,
+        } = &rows[1].kind
+        else {
+            panic!("the poll row is a poll card");
+        };
+        assert_eq!(question, "Where?");
+        assert_eq!(by.as_deref(), Some("Ana"));
+        assert!(!multiple);
+        assert_eq!(
+            options,
+            &[
+                ("1".to_owned(), "Lisbon".to_owned(), vec![]),
+                (
+                    "2".to_owned(),
+                    "Berlin".to_owned(),
+                    vec!["user:ana".to_owned(), "user:me".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    /// A build without polls reads the row as the doc stores it — no projection, so no poll
+    /// part — and gets an ordinary message whose text is the poll in plain words. The poll and
+    /// vote fields on the row are fields it does not know and skips.
+    #[test]
+    fn a_build_without_polls_reads_the_row_as_its_plain_text() {
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
+                .unwrap();
+            d.set_poll_vote("p1", "user:ana", &["2".into()]).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        assert!(row.get("poll").is_some() && row.get("vote|user:ana").is_some());
+        arbos_core::doc::project_reactions(&mut row);
+        let message: Message = serde_json::from_value(row).expect("the row still reads");
+        assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
+        assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
+    #[test]
+    fn a_click_swaps_or_retracts_a_single_choice_and_toggles_a_multiple_one() {
+        let held = ["1".to_owned()];
+        assert_eq!(poll_pick(&[], "1", false), ["1"]);
+        assert_eq!(poll_pick(&held, "2", false), ["2"]);
+        assert!(poll_pick(&held, "1", false).is_empty());
+        assert_eq!(poll_pick(&held, "2", true), ["1", "2"]);
+        assert!(poll_pick(&held, "1", true).is_empty());
     }
 }
 
@@ -11438,12 +12391,50 @@ mod presence_rows_tests {
             "no 'didn't answer' under an answer: {:?}",
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
+        // The wordless row draws nothing at all — not a stock line, not a blank bubble, not a
+        // bare sender header. agentd leans on this: since 2026-11-04 it hides that row instead
+        // of deleting it, because the relay refuses a deletion it cannot attribute to the
+        // pusher and the refusal stalled the room link for 10 s. Hiding is only free if the
+        // row is invisible here.
+        assert!(
+            rows.iter().all(|r| r.message_id != "r2"),
+            "the wordless row drew something: {:?}",
+            rows.iter()
+                .map(|r| (r.message_id.as_str(), r.id.as_str()))
+                .collect::<Vec<_>>()
+        );
         let silent = [reply_row("r3", "u2", "done", "", now + 2)];
         let rows = rows_of(&silent);
         assert!(
             rows.iter()
                 .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
             "a turn that said nothing keeps the stock line"
+        );
+    }
+
+    /// #2964 / feedback AG5fMKSEGcm19R9A3FU1oKw: a research ask left a wordless Done result
+    /// and a finished hidden job worker with "Done." on it. The worker is not a bubble —
+    /// counting it as "answered elsewhere" drew neither the answer nor the stock line.
+    #[test]
+    fn a_hidden_job_row_does_not_suppress_the_stock_line() {
+        let now = now_ms();
+        let mut worker = reply_row("j1", "u1", "done", "Done.", now + 2);
+        worker.hidden = true;
+        worker.job = Some(crate::model::JobRef {
+            id: "01JOBSUSHI000000000000000".into(),
+            title: "Finding sushi".into(),
+        });
+        let messages = [reply_row("r1", "u1", "done", "", now + 1), worker];
+        let rows = rows_of(&messages);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
+            "stock line when only a hidden job spoke: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            rows.iter().all(|r| r.message_id != "j1"),
+            "the job row stays off the transcript"
         );
     }
 
@@ -11507,7 +12498,7 @@ mod presence_rows_tests {
     #[test]
     fn a_wordless_row_an_hour_later_brings_no_dangling_stamp() {
         let now = now_ms();
-        let earlier = now - 2 * STAMP_GAP_MS;
+        let earlier = now - 2 * DIVIDER_GAP_MS;
         let settled = [
             agent_message(
                 "done",
@@ -11725,6 +12716,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -11745,6 +12737,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -11776,6 +12769,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -11878,6 +12872,147 @@ mod delivery_tests {
             f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
             "the clock sits outside the pending bubble"
         );
+    }
+}
+
+#[cfg(test)]
+mod solo_agent_reply_quote_tests {
+    //! Jacob 2026-11-10 ([feedback solo-1to1-no-agent-reply-quote-mac-2026-11-10]):
+    //! in a solo 1:1 agent chat the agent's bubbles never show a reply/quote header
+    //! — even when an older box still attached `replyTo`. Groups and channels still
+    //! quote. A human's own explicit reply still quotes. iPhone twin:
+    //! `SoloAgentReplyQuoteTests`.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn user(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_solo",
+            "role": "user",
+            "sender": "user",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("user")
+    }
+
+    fn agent_with_reply(id: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_solo",
+            "role": "assistant",
+            "sender": "agent:box",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "inReplyTo": reply_to,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent")
+    }
+
+    fn group_agent_with_reply(id: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "inReplyTo": reply_to,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("group agent")
+    }
+
+    fn rows_of(messages: &[Message], names_senders: bool) -> Vec<Row> {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            names_senders,
+        )
+    }
+
+    fn assistant_quote(rows: &[Row]) -> Option<Quote> {
+        rows.iter().find_map(|r| match &r.kind {
+            RowKind::Markdown {
+                first: true, quote, ..
+            } => quote.clone(),
+            RowKind::NoAnswer { quote, .. } => quote.clone(),
+            _ => None,
+        })
+    }
+
+    fn user_quote(rows: &[Row]) -> Option<Quote> {
+        rows.iter().find_map(|r| match &r.kind {
+            RowKind::User { quote, .. } => quote.clone(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn solo_agent_chat_hides_agent_reply_quote_even_when_reply_to_is_set() {
+        let t = 1_700_000_000_000u64;
+        let ask = user("u1", "what's the weather", t);
+        let answer = agent_with_reply("a1", "sunny", "u1", t + 1_000);
+        let rows = rows_of(&[ask, answer.clone()], false);
+        assert!(
+            assistant_quote(&rows).is_none(),
+            "solo 1:1: agent bubble carries no quote header"
+        );
+        assert!(!carries_quote(&answer, false));
+    }
+
+    #[test]
+    fn group_still_shows_agent_reply_quote() {
+        let t = 1_700_000_000_000u64;
+        let ask = serde_json::from_value(serde_json::json!({
+            "id": "u1",
+            "chatId": "chat_group",
+            "role": "user",
+            "sender": "user:gh_me",
+            "senderHandle": "me",
+            "status": "done",
+            "createdAt": t,
+            "parts": [{ "id": "p-u1", "kind": "text", "text": "what's the weather" }],
+        }))
+        .expect("ask");
+        let answer = group_agent_with_reply("a1", "sunny", "u1", t + 1_000);
+        let rows = rows_of(&[ask, answer.clone()], true);
+        let quote = assistant_quote(&rows).expect("group agent quotes the ask");
+        assert_eq!(quote.message_id, "u1");
+        assert_eq!(quote.text, "what's the weather");
+        assert!(carries_quote(&answer, true));
+    }
+
+    #[test]
+    fn human_explicit_reply_in_solo_still_shows_quote() {
+        let t = 1_700_000_000_000u64;
+        let first = user("u1", "first thought", t);
+        let mut reply = user("u2", "following up", t + 2_000);
+        reply.reply_to = Some("u1".into());
+        let rows = rows_of(&[first, reply.clone()], false);
+        let quote = user_quote(&rows).expect("a human's own reply still quotes in 1:1");
+        assert_eq!(quote.message_id, "u1");
+        assert_eq!(quote.text, "first thought");
+        assert!(carries_quote(&reply, false));
     }
 }
 
@@ -12775,7 +13910,7 @@ mod chart_tests {
 
 /// Link previews ([feedback link-embeds-mac-2026-10-27]): the `link_preview` part parses,
 /// becomes a card under the text (or the whole bubble for a bare link), is hidden by
-/// `preview: "off"` and the global switch, and the card draws its parts.
+/// `preview: "off"` and each transcript setting, and the card draws its parts.
 #[cfg(test)]
 mod link_preview_tests {
     use super::*;
@@ -12812,6 +13947,10 @@ mod link_preview_tests {
     }
 
     fn rows_of(m: Message) -> Vec<Row> {
+        rows_with_previews(m, true)
+    }
+
+    fn rows_with_previews(m: Message, link_previews: bool) -> Vec<Row> {
         let spoken = HashSet::new();
         let failed = HashMap::new();
         let speech = SpeechRows {
@@ -12820,7 +13959,7 @@ mod link_preview_tests {
             failed: &failed,
             voice_mode: false,
         };
-        build_rows(
+        build_rows_with_cache(
             &[m],
             false,
             speech,
@@ -12828,14 +13967,11 @@ mod link_preview_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            false,
+            link_previews,
+            &mut MessageRowCache::default(),
+            &HashSet::new(),
         )
-    }
-
-    /// The global Link previews switch is process-wide: the tests that read or flip it take
-    /// this lock so the parallel runner cannot interleave them.
-    fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn user_row(rows: &[Row]) -> (String, Option<Box<(String, LinkPreview)>>) {
@@ -12877,7 +14013,6 @@ mod link_preview_tests {
 
     #[test]
     fn text_plus_link_keeps_the_text_and_a_bare_link_becomes_the_card() {
-        let _switch = switch_lock();
         let (text, preview) = user_row(&rows_of(user_message(
             "listen to this https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
             None,
@@ -12901,8 +14036,7 @@ mod link_preview_tests {
     }
 
     #[test]
-    fn preview_off_and_the_global_switch_hide_the_card() {
-        let _switch = switch_lock();
+    fn preview_off_and_transcript_setting_hide_the_card() {
         let (text, preview) = user_row(&rows_of(user_message(
             "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
             Some("off"),
@@ -12910,18 +14044,77 @@ mod link_preview_tests {
         assert!(preview.is_none());
         assert!(text.starts_with("https://"), "the plain link is back");
 
-        crate::ui::link_card::set_enabled(false);
-        let (_, preview) = user_row(&rows_of(user_message(
-            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
-            None,
-        )));
-        crate::ui::link_card::set_enabled(true);
+        let (_, preview) = user_row(&rows_with_previews(
+            user_message(
+                "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+                None,
+            ),
+            false,
+        ));
         assert!(preview.is_none());
     }
 
     #[test]
+    fn changing_preview_policy_rebuilds_a_warm_cache_and_restores_plain_links() {
+        let url = "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH";
+        let messages = [user_message(url, None)];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let build = |cache: &mut MessageRowCache, enabled| {
+            build_rows_with_cache(
+                &messages,
+                false,
+                speech,
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                false,
+                false,
+                enabled,
+                cache,
+                &HashSet::new(),
+            )
+        };
+        let (text, preview) = user_row(&build(&mut cache, true));
+        assert_eq!(text, "");
+        assert!(preview.is_some());
+        let (text, preview) = user_row(&build(&mut cache, false));
+        assert_eq!(text, url);
+        assert!(preview.is_none());
+        assert_eq!(
+            cache.built, 1,
+            "a changed policy rebuilds the cached message"
+        );
+        build(&mut cache, false);
+        assert_eq!(cache.built, 0, "an unchanged policy still reuses rows");
+        let (text, preview) = user_row(&build(&mut cache, true));
+        assert_eq!(text, "");
+        assert!(preview.is_some());
+        assert_eq!(cache.built, 1);
+    }
+
+    #[test]
+    fn independent_transcript_settings_do_not_change_each_others_previews() {
+        let message = || {
+            user_message(
+                "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+                None,
+            )
+        };
+        assert!(user_row(&rows_with_previews(message(), true)).1.is_some());
+        assert!(user_row(&rows_with_previews(message(), false)).1.is_none());
+        assert!(user_row(&rows_with_previews(message(), true)).1.is_some());
+    }
+
+    #[test]
     fn an_agents_link_preview_is_the_bubbles_last_block() {
-        let _switch = switch_lock();
         let m: Message = serde_json::from_value(serde_json::json!({
             "id": "m2", "chatId": "c1", "role": "assistant", "sender": "box:1", "status": "done",
             "createdAt": 1_700_000_002_000u64,

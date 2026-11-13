@@ -180,7 +180,7 @@ struct GlobalSearchRow: View {
         switch entry.picture {
         case .project(let id):
             if let p = model.project(id) ?? model.foreignAgent(id) {
-                AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true)
+                AgentAvatar(project: p, theme: theme, size: PaneKit.avatar)
             } else {
                 glyphTile("sparkles")
             }

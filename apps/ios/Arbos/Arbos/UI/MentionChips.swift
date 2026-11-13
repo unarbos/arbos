@@ -42,6 +42,9 @@ final class MentionTable {
     /// the instance, so a rebuilt-but-equal table does not redraw every bubble.
     var stamp = 0
     private var byHandle: [String: MentionEntry] = [:]
+    /// `byHandle`'s entries in the order they were added: two that share a display name
+    /// resolve the same way on every rebuild.
+    private var order: [MentionEntry] = []
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     private var names: [(String, MentionEntry)] = []
 
@@ -81,10 +84,13 @@ final class MentionTable {
             add(slug, MentionEntry(
                 name: p.name.trimmingCharacters(in: .whitespaces),
                 target: .agent(projectId: p.id),
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture))
             ))
         }
         for chat in model.peopleChats {
+            // Chat members include me: a bubble that says `@<my handle>` is my chip
+            // for me too ([feedback typed-handle-mention-chip-2026-10-29]; Mac twin
+            // adds me explicitly because sync drops the viewer from `people`).
             for m in chat.members where !m.isAgent {
                 add(m.handle, MentionEntry(
                     name: m.name?.isEmpty == false ? m.name! : m.handle,
@@ -101,7 +107,7 @@ final class MentionTable {
                 add(slug, MentionEntry(
                     name: p.name,
                     target: .agent(projectId: p.id),
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture))
                 ))
             }
             if chat.isGroup {
@@ -135,8 +141,28 @@ final class MentionTable {
                 picture: AnyView(ServerAvatar(server: server, size: Self.picture))
             ))
         }
-        names = byHandle.values.map { ($0.name, $0) }
-            .sorted { a, b in a.0.count != b.0.count ? a.0.count > b.0.count : a.0 < b.0 }
+        finish()
+    }
+
+    /// A fixed table, entries in the order the sources add them (tests).
+    init(entries: [(String, MentionEntry)]) {
+        for (handle, entry) in entries { add(handle, entry) }
+        finish()
+    }
+
+    /// Two entities with one name (a chat member "Scout" with a photo and a directory "Scout"
+    /// without one) keep the first added — chat people before the directory — never the
+    /// dictionary's order, which differs per table and flipped the chip between the photo and
+    /// the other one's initials ([feedback mention-chip-name-tie-ios-2026-10-29]).
+    private func finish() {
+        names = order.enumerated()
+            .sorted { a, b in
+                let (x, y) = (a.element.name, b.element.name)
+                if x.count != y.count { return x.count > y.count }
+                if x != y { return x < y }
+                return a.offset < b.offset
+            }
+            .map { ($0.element.name, $0.element) }
     }
 
     /// One shared table for the open chat — rebuilt only when the mention
@@ -166,8 +192,7 @@ final class MentionTable {
                 h.combine(p.id)
                 h.combine(p.name)
                 h.combine(p.avatarColorIndex)
-                h.combine(p.avatarLeaf)
-                h.combine(p.avatarLeafColor)
+                h.combine(p.avatarDiscColor)
                 h.combine(p.imageKey)
                 h.combine(p.avatarVersion)
             }
@@ -175,8 +200,7 @@ final class MentionTable {
             for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
                 h.combine(chat.id)
                 h.combine(chat.title)
-                h.combine(chat.avatarLeaf)
-                h.combine(chat.avatarLeafColor)
+                h.combine(chat.avatarDiscColor)
                 h.combine(chat.imageKey)
                 for m in chat.members {
                     h.combine(m.id)
@@ -184,8 +208,7 @@ final class MentionTable {
                     h.combine(m.name)
                     h.combine(m.avatarUrl)
                     h.combine(m.project?.name)
-                    h.combine(m.project?.avatarLeaf)
-                    h.combine(m.project?.avatarLeafColor)
+                    h.combine(m.project?.avatarDiscColor)
                     h.combine(m.project?.imageKey)
                     h.combine(m.project?.avatarVersion)
                     h.combine(m.isAgent)
@@ -207,7 +230,10 @@ final class MentionTable {
 
     private func add(_ handle: String, _ entry: MentionEntry) {
         let key = handle.lowercased()
-        if byHandle[key] == nil { byHandle[key] = entry }
+        if byHandle[key] == nil {
+            byHandle[key] = entry
+            order.append(entry)
+        }
     }
 
     var isEmpty: Bool { byHandle.isEmpty }

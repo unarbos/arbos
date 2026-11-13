@@ -133,6 +133,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// `6bfb3a31f` an aim 2 pt inside the strip (y483) was acted on and one 34 pt inside it
     /// (y514) was not, so the interactive edge sits a little below the reported one and this
     /// suite should not be deciding exactly where. 24 pt, the same as the top margin.
+    ///
+    /// The scroll-to-bottom chevron used to sit in this same strip (10 pt above the bar, 44 pt
+    /// hit, centred) and steal a raised aim at exactly this margin — gate run 43133707619,
+    /// `long-265` at y457 with the bar still open and the list re-pinned to its newest hits.
+    /// The app now hides that chip while search is open; the margin stays 24 for the bar, and
+    /// `jumpChip` below is the backstop if the chip ever returns.
     private static let aimBandBottomMargin: CGFloat = 24
     /// How far below a row's own top edge the aim must stay, so that a point raised by
     /// `aimPoint` cannot climb into the sender's name or avatar. Those are checked explicitly
@@ -308,9 +314,18 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         element.exists ? "bottom edge y\(Int(element.frame.maxY))" : "not on screen"
     }
 
+    /// The scroll-to-bottom / new-messages chip's top edge, when one is on screen.
+    ///
+    /// It floats centred just above the chat bar. A raised aim that clears the bar by the
+    /// bottom margin can still sit inside this chip: gate run 43133707619 aimed at y457 —
+    /// 24 pt above the bar — and the chevron took the touch, jumped the filtered list to its
+    /// end, and left the search bar open. The app hides the chip while search is open; this
+    /// read is the harness backstop if that ever regresses.
+    private var jumpChipTop: CGFloat?
+
     /// The part of the window a touch actually reaches: below the header and the Search bar,
-    /// above the chat bar and the keyboard. Being inside the window is not the same as being
-    /// reachable, and neither is being above the keyboard.
+    /// above the chat bar, the jump chip and the keyboard. Being inside the window is not the
+    /// same as being reachable, and neither is being above the keyboard.
     private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
         let button = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let field = app.textFields["chat-search-field"]
@@ -339,9 +354,22 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             let seen = bar.frame.minY
             chatBarTop = min(chatBarTop ?? seen, seen)
         }
+        // Either chip owns the same centred slot above the bar. Prefer the one that exists;
+        // clear the bound when both are gone so a prior reading cannot keep shrinking the band
+        // after search hid the chip.
+        var chipTop: CGFloat?
+        for id in ["chat-scroll-to-bottom", "chat-jump-to-latest"] {
+            let chip = app.descendants(matching: .any)[id].firstMatch
+            if chip.exists {
+                chipTop = chip.frame.minY
+                break
+            }
+        }
+        jumpChipTop = chipTop
         var bottom = screen.maxY
         if let keyboardTop { bottom = min(bottom, keyboardTop) }
         if let chatBarTop { bottom = min(bottom, chatBarTop) }
+        if let jumpChipTop { bottom = min(bottom, jumpChipTop) }
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
     }
 
@@ -656,7 +684,23 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             if name.exists, name.frame.contains(point) { continue }
             let avatar = inRow(app, short, "sender-avatar")
             if avatar.exists, avatar.frame.contains(point) { continue }
+            // Same clearance for the jump chip that used to steal a raised aim at the band
+            // floor (43133707619). `reachable` already ends the band at its top when it is
+            // present; this is the per-point check that matches name/avatar.
+            if jumpChip(app)?.frame.insetBy(dx: -2, dy: -2).contains(point) == true {
+                print("[rig] skipped \(id) at \(point): inside the jump chip")
+                continue
+            }
             return (short, point)
+        }
+        return nil
+    }
+
+    /// The centred jump chip above the chat bar, if one is on screen.
+    private func jumpChip(_ app: XCUIApplication) -> XCUIElement? {
+        for id in ["chat-scroll-to-bottom", "chat-jump-to-latest"] {
+            let chip = app.descendants(matching: .any)[id].firstMatch
+            if chip.exists { return chip }
         }
         return nil
     }
@@ -858,7 +902,13 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
               + "y\(Int(band.minY)), \(Int(band.maxY - aim.y))pt above the band bottom "
               + "y\(Int(band.maxY)) (keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), "
               + "bound \(keyboardTop.map { "y\(Int($0))" } ?? "never seen"); chat bar "
-              + "\(chatBarTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
+              + "\(chatBarTop.map { "y\(Int($0))" } ?? "never seen"); jump chip "
+              + "\(jumpChipTop.map { "y\(Int($0))" } ?? "absent")), \(gap)")
+        if let chip = jumpChip(app), chip.frame.insetBy(dx: -2, dy: -2).contains(aim) {
+            return XCTFail("the aim \(aim) sits inside the jump chip at \(chip.frame) — a tap "
+                           + "there jumps to the filtered end and leaves the bar open "
+                           + "(results: \(describe(bubbles(app))))")
+        }
         // dy 1 is the row's bottom edge and the offset back up is whatever `aimPoint` chose —
         // `bubbleBottomAim` into `Theme.bubbleVPad` for a row that fits, further up for one
         // whose edge sits below the band. It is derived from `aim` rather than written as a

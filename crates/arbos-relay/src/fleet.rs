@@ -30,7 +30,7 @@ use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
 use crate::auth::Principal;
-use crate::boxes::{self, Provider};
+use crate::boxes::{self, docker_failure, Provider};
 use crate::db::Sandbox;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -62,7 +62,8 @@ pub struct FleetCfg {
     pub runtime: String,
     /// Registry path the agent image is pulled from; the tag is the version in the relay's
     /// default snapshot name (`arbos-agent-0.1.55` → `<repo>:0.1.55`), so the CD image roll that
-    /// switches `ARBOS_DAYTONA_SNAPSHOT` drives host sandboxes too.
+    /// switches the snapshot setting (`ARBOS_DAYTONA_SNAPSHOT`, which keeps its name) drives
+    /// host sandboxes too.
     pub image_repo: String,
 }
 
@@ -270,6 +271,10 @@ pub struct Capacity {
     pub min_free_disk_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
+    /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
+    /// box needs only disk. Absent when the provider is off, and nothing above counts its boxes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boxd: Option<crate::boxd::Capacity>,
 }
 
 /// `max_boxes` from the DB override (`PUT /admin/fleet`) or the env default.
@@ -303,6 +308,7 @@ pub async fn capacity(state: &AppState) -> Capacity {
             disk_free_gb,
             state.cfg.fleet.min_free_disk_gb,
         ),
+        boxd: crate::boxd::capacity(state).await,
     }
 }
 
@@ -339,7 +345,7 @@ pub async fn try_admit(state: &AppState, user_id: &str) -> Result<bool> {
 
 // ---- the sandbox itself ----------------------------------------------------------------------
 
-fn container_name(user_id: &str) -> String {
+pub(crate) fn container_name(user_id: &str) -> String {
     let safe: String = user_id
         .chars()
         .map(|c| {
@@ -378,7 +384,7 @@ pub fn run_args(
         format!("--runtime={}", cfg.runtime),
         "--network".into(),
         cfg.box_network.clone(),
-        // The image's entrypoint runs as root in Daytona too; in gVisor that root is the Sentry's.
+        // The image's entrypoint runs as root; in gVisor that root is the Sentry's, not the host's.
         "-u".into(),
         "0".into(),
         "--read-only".into(),
@@ -427,17 +433,16 @@ pub fn run_args(
 }
 
 async fn docker(args: &[String]) -> Result<String> {
-    let out = tokio::process::Command::new("docker")
+    let out = match tokio::process::Command::new("docker")
         .args(args)
         .output()
         .await
-        .with_context(|| format!("docker {}", args.first().cloned().unwrap_or_default()))?;
+    {
+        Ok(out) => out,
+        Err(e) => return Err(docker_failure(args, &e.to_string())),
+    };
     if !out.status.success() {
-        return Err(anyhow!(
-            "docker {} failed: {}",
-            args.first().cloned().unwrap_or_default(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(docker_failure(args, &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
@@ -822,23 +827,48 @@ pub fn pick_eviction(cands: &[Candidate]) -> Option<String> {
 }
 
 /// A keepalive said a turn is running this recently → the sandbox is busy.
-const TURN_FRESH_MS: i64 = 3 * 60_000;
+pub(crate) const TURN_FRESH_MS: i64 = 3 * 60_000;
 
-async fn candidates(state: &AppState) -> Vec<Candidate> {
+/// When a box was last in use. `last_seen_at` is stamped by every request the box itself makes,
+/// its 3 s poll included, so on `boxd`, where this picks the box that sleeps at the resident cap,
+/// only what its user did counts: a client's row, a turn, a start.
+pub fn last_active_ms(
+    provider: Provider,
+    last_seen_at: Option<i64>,
+    last_started_at: Option<i64>,
+    last_client_push: Option<i64>,
+    last_turn: Option<i64>,
+) -> i64 {
+    let own = if provider == Provider::Boxd {
+        last_turn
+    } else {
+        last_seen_at
+    };
+    [own, last_started_at, last_client_push]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+}
+
+pub(crate) async fn candidates(state: &AppState, provider: Provider) -> Vec<Candidate> {
     let boxes = state.db.list_boxes().unwrap_or_default();
     let turns = state.turn_running.lock().await.clone();
+    let last_turns = state.last_turn.lock().await.clone();
     let pushes = state.last_client_push.lock().await.clone();
     let mut out = Vec::new();
-    for b in boxes.into_iter().filter(|b| b.provider == "gvisor") {
-        let (st, _) = state.box_state(&b.user_id).await;
-        let last_active_ms = [
-            b.last_seen_at.unwrap_or(0),
-            b.last_started_at.unwrap_or(0),
-            pushes.get(&b.user_id).copied().unwrap_or(0),
-        ]
+    for b in boxes
         .into_iter()
-        .max()
-        .unwrap_or(0);
+        .filter(|b| b.provider == provider.as_str())
+    {
+        let (st, _) = state.box_state(&b.user_id).await;
+        let last_active_ms = last_active_ms(
+            provider,
+            b.last_seen_at,
+            b.last_started_at,
+            pushes.get(&b.user_id).copied(),
+            last_turns.get(&b.user_id).copied(),
+        );
         out.push(Candidate {
             turn_running: turns
                 .get(&b.user_id)
@@ -938,7 +968,7 @@ pub async fn spawn_fleet_tasks(state: AppState) {
                 if evicted >= 5 {
                     break;
                 }
-                let Some(victim) = pick_eviction(&candidates(&st).await) else {
+                let Some(victim) = pick_eviction(&candidates(&st, Provider::Gvisor).await) else {
                     tracing::warn!(trigger, "host pressure but no evictable sandbox");
                     break;
                 };
@@ -1436,6 +1466,42 @@ mod tests {
         assert!(!state.db.is_waitlisted("u_b").unwrap());
     }
 
+    /// A box that polls is not a box in use: on `boxd` the newest of a client's row, a turn and
+    /// a start ranks it, and `last_seen_at` does not. The gVisor fleet ranks as it did.
+    #[test]
+    fn a_boxd_box_is_ranked_by_its_user_and_not_by_its_own_poll() {
+        let at = |p, seen, started, push, turn| last_active_ms(p, seen, started, push, turn);
+        assert_eq!(at(Provider::Boxd, Some(900), Some(10), Some(20), None), 20);
+        assert_eq!(at(Provider::Boxd, Some(900), Some(10), None, Some(30)), 30);
+        assert_eq!(
+            at(Provider::Boxd, Some(900), Some(40), Some(20), Some(30)),
+            40
+        );
+        assert_eq!(at(Provider::Boxd, Some(900), None, None, None), 0);
+        assert_eq!(
+            at(Provider::Gvisor, Some(900), Some(10), Some(20), Some(950)),
+            900
+        );
+        // The box whose user wrote last stays up, whichever box polled last.
+        let c = |u: &str, t| Candidate {
+            user_id: u.into(),
+            awake: true,
+            turn_running: false,
+            last_active_ms: t,
+        };
+        let cands = [
+            c(
+                "polled_now",
+                at(Provider::Boxd, Some(999), Some(1), Some(5), None),
+            ),
+            c(
+                "used_now",
+                at(Provider::Boxd, Some(100), Some(1), Some(50), None),
+            ),
+        ];
+        assert_eq!(pick_eviction(&cands).as_deref(), Some("polled_now"));
+    }
+
     #[test]
     fn eviction_picks_least_recently_active_and_skips_turns() {
         let c = |u: &str, awake: bool, turn: bool, t: i64| Candidate {
@@ -1523,6 +1589,56 @@ mod tests {
         assert_eq!(a.last().map(String::as_str), Some("img:1"));
         assert_eq!(container_name("gh_108417131"), "arbos-box-gh_108417131");
         assert_eq!(container_name("Odd/Id"), "arbos-box-odd-id");
+    }
+
+    /// A `docker run` for an `arbos-agent-*` image that fails is logged with the command that
+    /// failed, and that command carries the box's whole environment as `-e NAME=value`. On
+    /// 2026-11-09 an OpenRouter key reached journald that way. The failure line must name the
+    /// variables and the image and carry no value at all, from the argument list or from
+    /// docker's own stderr.
+    #[test]
+    fn a_failed_run_logs_no_secret_from_the_command_or_the_stderr() {
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789";
+        let token = "abx_0123456789abcdef0123456789abcdef";
+        let env = std::collections::BTreeMap::from([
+            ("OPENROUTER_API_KEY".to_owned(), key.to_owned()),
+            ("ARBOS_BOX_TOKEN".to_owned(), token.to_owned()),
+            ("ARBOS_USER_ID".to_owned(), "u".to_owned()),
+        ]);
+        let args = run_args(
+            &FleetCfg::default(),
+            "arbos-box-u",
+            Path::new("/d/boxes/u/mnt"),
+            Path::new("/d/boxes/resolv.conf"),
+            "ghcr.io/unarbos/arbos/arbos-agent:0.1.203",
+            &env,
+        );
+        let line = docker_failure(
+            &args,
+            &format!("docker: Error response from daemon: no such image (env had OPENROUTER_API_KEY={key})"),
+        )
+        .to_string();
+
+        assert!(
+            !line.contains(key),
+            "the openrouter key reaches the log: {line}"
+        );
+        assert!(
+            !line.contains(token),
+            "the box token reaches the log: {line}"
+        );
+        assert!(line.contains("OPENROUTER_API_KEY=[REDACTED:env]"), "{line}");
+        assert!(line.contains("ARBOS_BOX_TOKEN=[REDACTED:env]"), "{line}");
+        // Still debuggable: the subcommand, the container, the image and docker's reason.
+        assert!(
+            line.starts_with("docker run -d --name arbos-box-u"),
+            "{line}"
+        );
+        assert!(line.contains("arbos-agent:0.1.203"), "{line}");
+        assert!(line.contains("no such image"), "{line}");
+        // Every `-e` value goes, secret-looking or not: the box's environment holds vault values
+        // under names this pass cannot know, so the name is the most a log line may carry.
+        assert!(line.contains("-e ARBOS_USER_ID=[REDACTED:env]"), "{line}");
     }
 
     #[test]

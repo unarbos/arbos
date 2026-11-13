@@ -1,0 +1,54 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "8c2b27c345f81bb3b70af544235b68c83fd9a98525eb2db904d53aa1eef6c086",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 9,
+    "results": [
+      {
+        "name": "late-unread-cannot-save-or-badge-B",
+        "pass": true
+      },
+      {
+        "name": "late-unread-entry-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "current-unread-control",
+        "pass": true
+      },
+      {
+        "name": "fixture-unread-still-badges-without-request",
+        "pass": true
+      },
+      {
+        "name": "late-me-cannot-paint-cache-or-feature-B",
+        "pass": true
+      },
+      {
+        "name": "late-refresh-followup-cannot-fetch-me-as-B",
+        "pass": true
+      },
+      {
+        "name": "late-account-entry-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "current-account-control",
+        "pass": true
+      },
+      {
+        "name": "same-account-refresh-followup-control",
+        "pass": true
+      }
+    ],
+    "total": 9
+  },
+  "seconds": 0.7955817499896511
+}

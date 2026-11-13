@@ -3,6 +3,7 @@
 //! so the existing transcript draws a channel like any chat; [`ChannelRow`] / [`SpaceRow`] feed
 //! the left list.
 
+use matrix_sdk_crypto::vodozemac::{Ed25519PublicKey, Ed25519Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -21,6 +22,17 @@ pub struct MessageRow {
     pub sender_name: String,
     pub text: String,
     pub created_at: i64,
+    /// This device cannot decrypt the event (yet): `text` is [`LOCKED`], never the ciphertext.
+    pub locked: bool,
+    /// This device's own send, shown before the homeserver has it ([`echo_row`]); the event
+    /// replaces it. Its `event_id` is not an event's.
+    #[serde(default)]
+    pub pending: bool,
+    /// A row of the chat's earlier history, carried into the room by a member's device and
+    /// vouched for by the relay ([`carried_row`]): `sender` and `created_at` are the signed
+    /// ones, not the carrying event's.
+    #[serde(default)]
+    pub carried: bool,
     /// Full row for the transcript (same shape as a chat-doc message).
     pub json: String,
 }
@@ -64,6 +76,67 @@ pub struct SpaceRow {
     pub channel_ids: Vec<String>,
 }
 
+/// A DM or group in the left list (phase 3: people chats read from the homeserver).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleRoomRow {
+    pub room_id: String,
+    /// The relay's chat id (`life.arbos.chat.chat_id`, the same in the room's create event).
+    pub chat_id: String,
+    /// `dm` | `group`.
+    pub kind: String,
+    /// Messages here are end-to-end encrypted; not knowing counts as encrypted.
+    pub encrypted: bool,
+    pub unread: u64,
+    pub mentions: u64,
+    pub last_text: String,
+    /// See [`ChannelRow::last_sender`].
+    pub last_sender: String,
+    pub last_sender_name: String,
+    pub last_ts: i64,
+}
+
+/// `life.arbos.chat` as the relay writes it on a chat's room (`matrix/worker.rs::chat_state`,
+/// and `close_room`'s marker). Anything else in there is not a state this build knows how to
+/// read, so the room is not listed rather than half understood.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // every field is type-checked; only some are read
+struct ChatState {
+    chat_id: String,
+    kind: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    created_by: Option<String>,
+    #[serde(default)]
+    created_at: Option<i64>,
+    #[serde(default)]
+    epoch: Option<i64>,
+    #[serde(default)]
+    closed_at: Option<i64>,
+}
+
+/// The relay's ids are ULIDs; this is the widest shape an app will take as a chat id.
+fn is_chat_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `(chat_id, kind)` when a room is an open people chat: `state` is its `life.arbos.chat`
+/// content, `create` its `m.room.create` content. Any member with the power to send state can
+/// rewrite `life.arbos.chat`; nobody can rewrite the create event, so a room is the chat the
+/// relay created it as (`creation_content.life.arbos.chat_id`) or it is not listed. A project
+/// chat (`project_id`) is not a people chat, whatever its kind.
+pub fn people_chat(state: &Value, create: &Value) -> Option<(String, String)> {
+    let s: ChatState = serde_json::from_value(state.clone()).ok()?;
+    let people = matches!(s.kind.as_str(), "dm" | "group") && s.project_id.is_none();
+    let created_as = create["life.arbos.chat_id"].as_str() == Some(s.chat_id.as_str());
+    (people && s.closed_at.is_none() && is_chat_id(&s.chat_id) && created_as)
+        .then_some((s.chat_id, s.kind))
+}
+
 /// `@gh_1:arbos.life` → `user:gh_1`; `@_a_<ulid>` → `agent:<ULID>`; anything else → `system`.
 pub fn member_of_mxid(mxid: &str) -> String {
     let local = mxid
@@ -80,6 +153,430 @@ pub fn member_of_mxid(mxid: &str) -> String {
     }
 }
 
+/// What a message this device cannot decrypt (yet) reads as.
+pub const LOCKED: &str = "🔒 Waiting for this message's key";
+
+/// What a message reads as that was sent while this person was not in the chat: its key was
+/// never meant for them, so there is nothing to wait for.
+pub const LOCKED_BEFORE_JOIN: &str = "🔒 Sent before you joined";
+
+/// Whether the homeserver says the reader was not a member when `ev` was sent
+/// (`unsigned.membership`, Matrix 1.11). It can say so of any event; all that follows from it
+/// is which of the two sentences a row that stays locked either way shows.
+fn sent_before_joining(ev: &Value) -> bool {
+    ev["unsigned"]["membership"]
+        .as_str()
+        .is_some_and(|m| m != "join")
+}
+
+/// Events that become transcript rows: messages, and encrypted events that did not decrypt.
+pub fn is_message(ev: &Value) -> bool {
+    matches!(
+        ev["type"].as_str(),
+        Some("m.room.message" | "m.room.encrypted")
+    )
+}
+
+/// The one message an encrypted room shows although it was not encrypted: the relay's system
+/// line (`matrix/spaces.rs::channel_notice`), which says nothing the member list does not.
+fn is_system_notice(ev: &Value) -> bool {
+    let c = &ev["content"];
+    c["msgtype"] == "m.notice"
+        && c["life.arbos.sender"] == "system"
+        && c["life.arbos.parts"].is_null()
+}
+
+/// Whether an event becomes a row. In an encrypted room a message that did not arrive
+/// encrypted is whatever the homeserver (or any member) chose to write, so it is dropped
+/// rather than drawn like a message its sender's device vouched for.
+pub fn shows(ev: &Value, room_encrypted: bool, decrypted: bool) -> bool {
+    is_message(ev)
+        && !is_redacted(ev)
+        && (!room_encrypted
+            || decrypted
+            || ev["type"] == "m.room.encrypted"
+            || is_system_notice(ev))
+}
+
+/// Whether a people-chat event says nothing about its sender that the homeserver does not:
+/// `life.arbos.sender` is absent, names the Matrix `sender`, or marks the relay's system
+/// line. A row's author in a people chat is the account that sent the event, so a message
+/// that names another member is not drawn, and neither is one the mirror carried for someone
+/// who had left (`life.arbos.on_behalf`). The one row shown under a name its event's sender
+/// does not have is the chat's earlier history with the relay's signature ([`carried_row`]).
+pub fn sender_is_own(ev: &Value) -> bool {
+    match ev["content"].get("life.arbos.sender") {
+        None => true,
+        Some(claimed) => {
+            is_system_notice(ev)
+                || claimed.as_str() == ev["sender"].as_str().map(member_of_mxid).as_deref()
+        }
+    }
+}
+
+/// A removed event as the homeserver hands it out afterwards: its content stripped.
+pub fn is_redacted(ev: &Value) -> bool {
+    ev["unsigned"]["redacted_because"].is_object()
+}
+
+/// The longest reaction an app sends or draws (bytes): an emoji with its modifiers, not text.
+pub const REACTION_KEY_MAX: usize = 64;
+
+pub fn is_reaction_key(key: &str) -> bool {
+    (1..=REACTION_KEY_MAX).contains(&key.len()) && !key.chars().any(char::is_control)
+}
+
+/// One member's reaction on a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaction {
+    /// The row reacted to, by event id.
+    pub target: String,
+    pub key: String,
+    /// Who reacted: the account that sent the event ([`member_of_mxid`]), nothing it says.
+    pub sender: String,
+}
+
+/// A people chat's reaction: its event type, and the one thing its `m.relates_to` says. Not
+/// `m.reaction`, which the SDK sends unencrypted into an encrypted room, key and target
+/// readable by the homeserver.
+pub const REACTION: &str = "life.arbos.reaction";
+
+/// The content of a reaction `key` on the event `target`. Both are in the part an encrypted
+/// room encrypts. `m.relates_to` is the one field that stays outside the ciphertext, so it
+/// carries no more than what kind of event this is: enough for the homeserver not to count
+/// it as an unread message ([`reaction_push_rule`]), and neither the row nor the emoji.
+pub fn reaction_content(target: &str, key: &str) -> Value {
+    json!({ "event_id": target, "key": key, "m.relates_to": { "rel_type": REACTION } })
+}
+
+/// The push rule (`PUT …/pushrules/global/override/life.arbos.reaction`) under which the
+/// homeserver neither counts nor announces a [`REACTION`].
+pub fn reaction_push_rule() -> Value {
+    json!({ "rule_id": REACTION, "actions": [], "conditions": [{ "kind": "event_property_is",
+            "key": "content.m\\.relates_to.rel_type", "value": REACTION }] })
+}
+
+/// Whether an encrypted event's envelope says it is a reaction, so it is no locked message
+/// while this device has no key for it. The homeserver can write that on any envelope; what
+/// the event is once decrypted does not depend on it.
+pub fn sealed_reaction(ev: &Value) -> bool {
+    ev["type"] == "m.room.encrypted" && ev["content"]["m.relates_to"]["rel_type"] == REACTION
+}
+
+/// `(the reaction's own event id, the reaction)` when `ev` is a well-formed [`REACTION`].
+pub fn reaction(ev: &Value) -> Option<(String, Reaction)> {
+    let c = &ev["content"];
+    let key = c["key"].as_str().filter(|k| is_reaction_key(k))?;
+    (ev["type"] == REACTION).then_some(())?;
+    Some((
+        ev["event_id"].as_str()?.to_owned(),
+        Reaction {
+            target: c["event_id"].as_str()?.to_owned(),
+            key: key.to_owned(),
+            sender: member_of_mxid(ev["sender"].as_str()?),
+        },
+    ))
+}
+
+/// The content key of a row of the chat's earlier history, carried into the room by a
+/// member's device: what the relay signed besides the id, the sender and the text
+/// (`arbos-relay` `matrix/history.rs`).
+pub const HISTORY: &str = "life.arbos.history";
+
+/// The schema of a carried row this build reads and sends.
+const HISTORY_VERSION: u32 = 1;
+
+/// The most extra parts shown with one carried row.
+const HISTORY_PARTS_MAX: usize = 16;
+
+/// One row of `GET /chats/{id}/matrix/history`, as the relay signs it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRow {
+    pub id: String,
+    /// `user:<id>` | `agent:<project>` | `system`.
+    pub sender: String,
+    /// The sender's handle (a person) or name (an agent) when it was said.
+    pub handle: String,
+    pub ts: i64,
+    pub text: String,
+    /// The id of the row it answers, or empty.
+    pub reply_to: String,
+    /// The extra parts as JSON text, or empty.
+    pub parts: String,
+    pub sig: String,
+}
+
+/// The bytes the relay signed for `row` in `room_id`, the room of `chat_id`; the same function
+/// as the relay's `matrix::history::signing_bytes`.
+pub fn history_bytes(key: &[u8], room_id: &str, chat_id: &str, row: &HistoryRow) -> Vec<u8> {
+    let mut out = b"arbos.history".to_vec();
+    out.extend_from_slice(&HISTORY_VERSION.to_be_bytes());
+    let mut field = |bytes: &[u8]| {
+        out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        out.extend_from_slice(bytes);
+    };
+    field(key);
+    field(room_id.as_bytes());
+    field(chat_id.as_bytes());
+    field(row.id.as_bytes());
+    field(row.sender.as_bytes());
+    field(row.handle.as_bytes());
+    field(&row.ts.to_be_bytes());
+    field(row.text.as_bytes());
+    field(row.reply_to.as_bytes());
+    field(row.parts.as_bytes());
+    out
+}
+
+/// `user:<id>`, `agent:<id>` or `system`, the id in the relay's alphabet.
+fn is_member(sender: &str) -> bool {
+    sender == "system"
+        || sender
+            .strip_prefix("user:")
+            .or_else(|| sender.strip_prefix("agent:"))
+            .is_some_and(is_chat_id)
+}
+
+/// Whether `row` is one the relay signed, with `key`, for this room of this chat, and is
+/// shaped like a row. Nothing else about a carried row is believed.
+pub fn history_verified(
+    key: &Ed25519PublicKey,
+    room_id: &str,
+    chat_id: &str,
+    row: &HistoryRow,
+) -> bool {
+    let shaped = is_chat_id(&row.id)
+        && is_member(&row.sender)
+        && row.ts >= 0
+        && (row.reply_to.is_empty() || is_chat_id(&row.reply_to));
+    let Ok(sig) = Ed25519Signature::from_base64(&row.sig) else {
+        return false;
+    };
+    shaped
+        && key
+            .verify(&history_bytes(key.as_bytes(), room_id, chat_id, row), &sig)
+            .is_ok()
+}
+
+/// The content of the event that carries `row`. `m.relates_to` is the one field that stays
+/// outside an encrypted room's ciphertext, and says only what kind of event this is, so the
+/// homeserver neither counts nor announces old history as new messages
+/// ([`history_push_rule`]).
+pub fn history_content(row: &HistoryRow) -> Value {
+    json!({ "msgtype": "m.text", "body": row.text, "life.arbos.id": row.id,
+            "life.arbos.sender": row.sender,
+            HISTORY: { "v": HISTORY_VERSION, "handle": row.handle, "ts": row.ts,
+                       "reply_to": row.reply_to, "parts": row.parts, "sig": row.sig },
+            "m.relates_to": { "rel_type": HISTORY } })
+}
+
+/// The push rule under which the homeserver neither counts nor announces a carried row. The
+/// relay sets it for every member before it hands a row out.
+pub fn history_push_rule() -> Value {
+    json!({ "rule_id": HISTORY, "actions": [], "conditions": [{ "kind": "event_property_is",
+            "key": "content.m\\.relates_to.rel_type", "value": HISTORY }] })
+}
+
+/// What [`history_content`] puts under [`HISTORY`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryClaim {
+    v: u32,
+    handle: String,
+    ts: i64,
+    reply_to: String,
+    parts: String,
+    sig: String,
+}
+
+/// The row of an event that carries a row of the chat's earlier history, when the relay
+/// signed exactly that row for exactly this room: `key` is the relay's history key this
+/// device pinned, `chat_id` what the room's create event says the room is. The row is its
+/// signed sender's, at its signed time; the account that carried it is not shown. Anything
+/// else under [`HISTORY`] (another room's row, another key's, a changed word) is no row.
+pub fn carried_row(
+    ev: &Value,
+    room_id: &str,
+    chat_id: &str,
+    key: &Ed25519PublicKey,
+) -> Option<MessageRow> {
+    let content = &ev["content"];
+    let claim: HistoryClaim = serde_json::from_value(content[HISTORY].clone()).ok()?;
+    let row = HistoryRow {
+        id: content["life.arbos.id"].as_str()?.to_owned(),
+        sender: content["life.arbos.sender"].as_str()?.to_owned(),
+        handle: claim.handle,
+        ts: claim.ts,
+        text: content["body"].as_str()?.to_owned(),
+        reply_to: claim.reply_to,
+        parts: claim.parts,
+        sig: claim.sig,
+    };
+    if claim.v != HISTORY_VERSION
+        || ev["type"] != "m.room.message"
+        || !history_verified(key, room_id, chat_id, &row)
+    {
+        return None;
+    }
+    // Drawn from what was signed, through the one function that draws a message.
+    let mut signed = json!({ "msgtype": "m.text", "body": row.text, "life.arbos.id": row.id,
+                             "life.arbos.sender": row.sender });
+    let parts: Option<Vec<Value>> = serde_json::from_str(&row.parts).ok();
+    if let Some(parts) =
+        parts.filter(|p| p.len() <= HISTORY_PARTS_MAX && p.iter().all(Value::is_object))
+    {
+        signed["life.arbos.parts"] = Value::Array(parts);
+    }
+    let ev = json!({ "type": "m.room.message", "event_id": ev["event_id"],
+                     "origin_server_ts": row.ts, "content": signed });
+    let mut out = message_row(&ev, &|_| Some(row.handle.clone()))?;
+    if !row.reply_to.is_empty() {
+        let mut v: Value = serde_json::from_str(&out.json).ok()?;
+        v["replyTo"] = json!(row.reply_to);
+        out.json = v.to_string();
+    }
+    out.carried = true;
+    Some(out)
+}
+
+/// The event an `m.room.redaction` removes (top level before room version 11, in the content
+/// from it on).
+pub fn redacts(ev: &Value) -> Option<String> {
+    (ev["type"] == "m.room.redaction").then_some(())?;
+    ev["redacts"]
+        .as_str()
+        .or_else(|| ev["content"]["redacts"].as_str())
+        .map(str::to_owned)
+}
+
+/// The content key naming the event a people chat's message answers. Not `m.in_reply_to`:
+/// `m.relates_to` stays outside the ciphertext of an encrypted room, where the homeserver
+/// reads it and can rewrite it.
+pub const REPLY_TO: &str = "life.arbos.reply_to";
+
+/// The event id a row answers (`replyToEvent`, from the event's [`REPLY_TO`]).
+pub fn reply_target(row: &MessageRow) -> Option<String> {
+    row.json.contains("\"replyToEvent\"").then_some(())?;
+    serde_json::from_str::<Value>(&row.json).ok()?["replyToEvent"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The largest file a people chat sends or shows (the apps' "25 MB max").
+pub const MEDIA_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// The most files one message carries.
+pub const MEDIA_MAX_FILES: usize = 16;
+
+/// What an attachment's `ref` starts with when its file is kept on the homeserver, encrypted
+/// ([`file_part`]); `<event id>/<index in life.arbos.parts>` follows. Any other `ref` is a
+/// blob on the relay, as in a Loro room.
+pub const MEDIA_REF: &str = "mx:";
+
+/// `type/subtype`, nothing a header or a path could be made of.
+pub fn is_mime(mime: &str) -> bool {
+    let token = |t: &str| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&b))
+    };
+    mime.len() <= 127
+        && mime
+            .split_once('/')
+            .is_some_and(|(kind, sub)| token(kind) && token(sub))
+}
+
+/// The attachment part of a file this device encrypted and uploaded: `file` is the Matrix
+/// `EncryptedFile` (where the ciphertext is, its key and its hash), which travels inside the
+/// message, so only who can read the message can read the file.
+pub fn file_part(
+    id: &str,
+    name: &str,
+    mime: &str,
+    kind: Option<&str>,
+    bytes: u64,
+    file: Value,
+) -> Value {
+    let mut attachment = json!({ "name": name, "mime": mime, "bytes": bytes, "file": file });
+    if let Some(kind) = kind {
+        attachment["kind"] = json!(kind);
+    }
+    json!({ "id": id, "kind": "attachment", "attachment": attachment })
+}
+
+/// `(mime, file)` of a part that names a file on the homeserver the apps would take: a name,
+/// a media type, a size within [`MEDIA_MAX_BYTES`] and an `mxc://` address. What `file` says
+/// beyond that is checked by whoever decrypts with it.
+pub fn part_file(part: &Value) -> Option<(&str, &Value)> {
+    let a = &part["attachment"];
+    let file = a.get("file")?;
+    let sized = a["bytes"].as_u64().is_some_and(|b| b <= MEDIA_MAX_BYTES);
+    let named = a["name"]
+        .as_str()
+        .is_some_and(|n| (1..=255).contains(&n.len()) && !n.chars().any(char::is_control));
+    let mime = a["mime"].as_str().filter(|m| is_mime(m))?;
+    let placed = file["url"]
+        .as_str()
+        .is_some_and(|u| u.starts_with("mxc://") && u.len() <= 255);
+    (part["kind"] == "attachment" && sized && named && placed).then_some((mime, file))
+}
+
+/// A part of `life.arbos.parts` as the transcript gets it. A file on the homeserver is named
+/// by `ref` ([`MEDIA_REF`]) for the app to ask this client for; its key stays in the event.
+/// One that is not a file the apps would take ([`part_file`]) has no `ref` and shows as an
+/// attachment that is not there, and nobody else's `ref` is taken for one of these.
+fn shown_part(event_id: &str, index: usize, part: &Value) -> Value {
+    let reference = part_file(part).map(|_| format!("{MEDIA_REF}{event_id}/{index}"));
+    let mut part = part.clone();
+    if let Some(a) = part.get_mut("attachment").and_then(Value::as_object_mut) {
+        let claimed = a.get("ref").and_then(Value::as_str);
+        let claimed = claimed.is_some_and(|r| r.starts_with(MEDIA_REF));
+        if a.remove("file").is_some() || claimed {
+            a.remove("ref");
+        }
+        if let Some(reference) = reference {
+            a.insert("ref".to_owned(), json!(reference));
+        }
+    }
+    part
+}
+
+/// What [`echo_row`] puts before the local id to make a pending row's `event_id`; no event id
+/// starts with it (they start with `$`).
+const ECHO: &str = "~";
+
+/// The row of a message this device is sending, as it will read once the homeserver has it:
+/// `content` is the event content, `local_id` its `life.arbos.id`.
+pub fn echo_row(me: &str, content: &Value, local_id: &str, now_ms: i64) -> Option<MessageRow> {
+    let ev = json!({ "type": "m.room.message", "event_id": format!("{ECHO}{local_id}"),
+                     "sender": me, "origin_server_ts": now_ms, "content": content });
+    let mut row = message_row(&ev, &|_| None)?;
+    let mut v: Value = serde_json::from_str(&row.json).ok()?;
+    v["pending"] = json!(true);
+    row.json = v.to_string();
+    row.pending = true;
+    Some(row)
+}
+
+/// Write what the room's other events say about a row into its JSON: `reactions` in the
+/// chat-doc's projected shape (`emoji → { member → true }`) and `replyTo`, the id of the row
+/// it answers.
+pub fn decorate(
+    row: &mut MessageRow,
+    reactions: &std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, bool>>,
+    reply_to: Option<&str>,
+) {
+    let Ok(mut v) = serde_json::from_str::<Value>(&row.json) else {
+        return;
+    };
+    v["reactions"] = json!(reactions);
+    if let Some(id) = reply_to {
+        v["replyTo"] = json!(id);
+    }
+    row.json = v.to_string();
+}
+
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
 /// `display_name` resolves the sender's Matrix display name — the relay registers a person
 /// under their **handle** (`matrix/worker.rs::display_name`), an agent under its name. A
@@ -92,9 +589,10 @@ pub fn message_row(
     ev: &Value,
     display_name: &dyn Fn(&str) -> Option<String>,
 ) -> Option<MessageRow> {
-    if ev["type"].as_str() != Some("m.room.message") {
+    if !is_message(ev) {
         return None;
     }
+    let locked = ev["type"] == "m.room.encrypted";
     let content = &ev["content"];
     let event_id = ev["event_id"].as_str()?.to_owned();
     let mxid = ev["sender"].as_str().unwrap_or_default();
@@ -106,7 +604,13 @@ pub fn message_row(
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| event_id.clone());
-    let text = content["body"].as_str().unwrap_or_default().to_owned();
+    let text = if locked && sent_before_joining(ev) {
+        LOCKED_BEFORE_JOIN.to_owned()
+    } else if locked {
+        LOCKED.to_owned()
+    } else {
+        content["body"].as_str().unwrap_or_default().to_owned()
+    };
     let created_at = ev["origin_server_ts"].as_i64().unwrap_or(0);
     let role = if sender.starts_with("agent:") {
         "assistant"
@@ -136,8 +640,9 @@ pub fn message_row(
         String::new()
     };
     let mut parts = vec![json!({ "id": format!("{event_id}#text"), "kind": "text", "text": text })];
-    if let Some(extra) = content["life.arbos.parts"].as_array() {
-        parts.extend(extra.iter().cloned());
+    if let Some(extra) = content["life.arbos.parts"].as_array().filter(|_| !locked) {
+        let shown = extra.iter().enumerate();
+        parts.extend(shown.map(|(i, p)| shown_part(&event_id, i, p)));
     }
     let mut row = json!({
         "id": id,
@@ -154,6 +659,10 @@ pub fn message_row(
     if !person {
         row["senderName"] = json!(sender_name);
     }
+    // Nothing from an undecrypted event's envelope.
+    if let Some(e) = content[REPLY_TO].as_str().filter(|_| !locked) {
+        row["replyToEvent"] = json!(e);
+    }
     Some(MessageRow {
         event_id,
         id,
@@ -161,6 +670,9 @@ pub fn message_row(
         sender_name,
         text,
         created_at,
+        locked,
+        pending: false,
+        carried: false,
         json: row.to_string(),
     })
 }
@@ -174,6 +686,37 @@ mod tests {
         assert_eq!(member_of_mxid("@gh_12:arbos.life"), "user:gh_12");
         assert_eq!(member_of_mxid("@_a_01jabc:arbos.life"), "agent:01JABC");
         assert_eq!(member_of_mxid("@_arbos:arbos.life"), "system");
+    }
+
+    #[test]
+    fn a_file_on_the_homeserver_is_a_ref_and_its_key_stays_in_the_event() {
+        let file = json!({ "url": "mxc://arbos.test/abc", "v": "v2", "key": { "k": "secret" } });
+        let part = |bytes: u64, mime: &str, file: Value| {
+            file_part("p", "cat.png", mime, Some("image"), bytes, file)
+        };
+        let row = |parts: Value| {
+            let ev = json!({ "type": "m.room.message", "event_id": "$e1", "sender": "@gh_7:arbos.test",
+                "origin_server_ts": 1, "content": { "msgtype": "m.text", "body": "", "life.arbos.parts": parts } });
+            let row = message_row(&ev, &|_| None).unwrap();
+            assert!(!row.json.contains("secret"), "{}", row.json);
+            serde_json::from_str::<Value>(&row.json).unwrap()["parts"].clone()
+        };
+        let blob = json!({ "id": "b", "kind": "attachment", "attachment": { "name": "a", "mime": "a/b", "ref": "att-1" } });
+        let shown = row(json!([blob, part(3, "image/png", file.clone())]));
+        assert_eq!(shown[1]["attachment"]["ref"], "att-1");
+        assert_eq!(shown[2]["attachment"]["ref"], "mx:$e1/1");
+        assert_eq!(shown[2]["attachment"]["kind"], "image");
+        // Too large, no media type, not on a homeserver, or a ref that only claims to be one.
+        let claims = json!({ "id": "c", "kind": "attachment", "attachment": { "name": "a", "mime": "a/b", "ref": "mx:$other/0" } });
+        for bad in [
+            part(MEDIA_MAX_BYTES + 1, "image/png", file.clone()),
+            part(3, "image/png\r\nx: y", file.clone()),
+            part(3, "image/png", json!({ "url": "https://example.com/x" })),
+            claims,
+        ] {
+            let shown = row(json!([bad]));
+            assert!(shown[1]["attachment"].get("ref").is_none(), "{shown}");
+        }
     }
 
     #[test]
@@ -216,6 +759,20 @@ mod tests {
         let v: Value = serde_json::from_str(&named.json).unwrap();
         assert_eq!(v["senderName"], "Comms");
         assert!(message_row(&json!({ "type": "m.room.member" }), &|_| None).is_none());
+        // Undecryptable: a locked row in its place, never the ciphertext.
+        let enc = json!({
+            "type": "m.room.encrypted", "event_id": "$e4", "sender": "@gh_7:arbos.life", "origin_server_ts": 2000,
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA…", "life.arbos.parts": [{"kind": "x"}] }
+        });
+        let row = message_row(&enc, &|_| None).unwrap();
+        assert!(row.locked);
+        assert_eq!(row.sender, "user:gh_7");
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(
+            v["parts"].as_array().unwrap().len(),
+            1,
+            "nothing from the envelope"
+        );
         // A membership notice: the owner sent it, the content names the system.
         let notice = json!({
             "type": "m.room.message", "event_id": "$e3", "sender": "@gh_7:arbos.life", "origin_server_ts": 1900,
@@ -227,5 +784,496 @@ mod tests {
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "system");
         assert_eq!(v["senderHandle"], "");
+        // Anyone can type the locked row's words; that does not make a row locked.
+        let typed = json!({
+            "type": "m.room.message", "event_id": "$e5", "sender": "@gh_7:arbos.life",
+            "content": { "msgtype": "m.text", "body": LOCKED }
+        });
+        assert!(!message_row(&typed, &|_| None).unwrap().locked);
+    }
+
+    #[test]
+    fn a_people_chat_is_the_room_the_relay_created_for_it() {
+        let state = json!({ "chat_id": "01JCHAT", "kind": "dm", "project_id": null,
+            "created_by": "@gh_1:arbos.life", "created_at": 1700, "epoch": 1 });
+        let create = json!({ "room_version": "12", "life.arbos.chat_id": "01JCHAT" });
+        assert_eq!(
+            people_chat(&state, &create),
+            Some(("01JCHAT".to_owned(), "dm".to_owned()))
+        );
+        let with = |k: &str, v: Value| {
+            let mut s = state.clone();
+            s[k] = v;
+            s
+        };
+        assert!(people_chat(&with("kind", json!("group")), &create).is_some());
+        for (why, s, c) in [
+            ("a channel", with("kind", json!("channel")), create.clone()),
+            (
+                "a project chat",
+                with("project_id", json!("01JP")),
+                create.clone(),
+            ),
+            ("closed", with("closed_at", json!(1800)), create.clone()),
+            (
+                "an unknown field",
+                with("server_id", json!("x")),
+                create.clone(),
+            ),
+            (
+                "a chat id of the wrong type",
+                with("chat_id", json!(7)),
+                create.clone(),
+            ),
+            (
+                "an empty chat id",
+                with("chat_id", json!("")),
+                json!({ "life.arbos.chat_id": "" }),
+            ),
+            (
+                "a chat id that is a path",
+                with("chat_id", json!("../x")),
+                json!({ "life.arbos.chat_id": "../x" }),
+            ),
+            (
+                "an oversized chat id",
+                with("chat_id", json!("a".repeat(65))),
+                json!({ "life.arbos.chat_id": "a".repeat(65) }),
+            ),
+            // State rewritten to another chat's id: the create event still names the first.
+            (
+                "another chat's id",
+                with("chat_id", json!("01JOTHER")),
+                create.clone(),
+            ),
+            (
+                "no id in the create event",
+                state.clone(),
+                json!({ "room_version": "12" }),
+            ),
+            ("no state", Value::Null, create.clone()),
+        ] {
+            assert_eq!(people_chat(&s, &c), None, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_people_row_is_from_the_account_that_sent_it() {
+        let ev = |sender: Value, content: Value| json!({ "type": "m.room.message", "event_id": "$e", "sender": sender, "content": content });
+        let mine = json!("@gh_7:arbos.life");
+        for (why, e, own) in [
+            (
+                "no claim",
+                ev(mine.clone(), json!({ "msgtype": "m.text", "body": "hi" })),
+                true,
+            ),
+            (
+                "the relay's mirror names the sender itself",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_7" }),
+                ),
+                true,
+            ),
+            (
+                "another member's name",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_8" }),
+                ),
+                false,
+            ),
+            (
+                "carried for a past member",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_8", "life.arbos.on_behalf": true }),
+                ),
+                false,
+            ),
+            (
+                "an agent's name",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "agent:01X" }),
+                ),
+                false,
+            ),
+            (
+                "the system line",
+                ev(
+                    mine.clone(),
+                    json!({ "msgtype": "m.notice", "body": "a added b", "life.arbos.sender": "system" }),
+                ),
+                true,
+            ),
+            (
+                "a message dressed as the system",
+                ev(
+                    mine.clone(),
+                    json!({ "msgtype": "m.text", "body": "x", "life.arbos.sender": "system" }),
+                ),
+                false,
+            ),
+            (
+                "a claim that is not a string",
+                ev(mine.clone(), json!({ "life.arbos.sender": 7 })),
+                false,
+            ),
+            (
+                "a null claim",
+                ev(mine.clone(), json!({ "life.arbos.sender": null })),
+                false,
+            ),
+            (
+                "no sender at all",
+                ev(Value::Null, json!({ "life.arbos.sender": "user:gh_7" })),
+                false,
+            ),
+            // Undecryptable: the envelope carries no claim, the row is the sender's locked row.
+            (
+                "a locked event",
+                json!({ "type": "m.room.encrypted", "sender": "@gh_7:arbos.life", "content": { "ciphertext": "x" } }),
+                true,
+            ),
+        ] {
+            assert_eq!(sender_is_own(&e), own, "{why}");
+        }
+    }
+
+    #[test]
+    fn reactions_removals_and_replies_are_read_from_the_event_not_its_claims() {
+        let react = |content: Value| json!({ "type": REACTION, "event_id": "$r", "sender": "@gh_7:arbos.life", "content": content });
+        assert_eq!(
+            reaction(&react(reaction_content("$m", "👍"))),
+            Some((
+                "$r".to_owned(),
+                Reaction {
+                    target: "$m".into(),
+                    key: "👍".into(),
+                    sender: "user:gh_7".into()
+                }
+            ))
+        );
+        // What stays outside an encrypted room's ciphertext names neither the row nor the emoji.
+        assert_eq!(
+            reaction_content("$m", "👍")["m.relates_to"],
+            json!({ "rel_type": REACTION })
+        );
+        // Who reacted is the account that sent it, whatever the content adds.
+        let mut claims = reaction_content("$m", "👍");
+        claims["life.arbos.sender"] = json!("user:gh_8");
+        assert_eq!(reaction(&react(claims)).unwrap().1.sender, "user:gh_7");
+        let keyed = |key: Value| json!({ "event_id": "$m", "key": key });
+        for (why, ev) in [
+            ("an empty key", react(keyed(json!("")))),
+            ("a key that is not a string", react(keyed(json!(7)))),
+            (
+                "an essay",
+                react(keyed(json!("a".repeat(REACTION_KEY_MAX + 1)))),
+            ),
+            ("a control character", react(keyed(json!("a\nb")))),
+            ("no target", react(json!({ "key": "👍" }))),
+            (
+                "a target only the envelope names",
+                react(
+                    json!({ "key": "👍", "m.relates_to": { "rel_type": REACTION, "event_id": "$m" } }),
+                ),
+            ),
+            // A removed reaction comes back with its content stripped.
+            ("removed", react(json!({}))),
+            (
+                "a message dressed as a reaction",
+                json!({ "type": "m.room.message", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": reaction_content("$m", "👍") }),
+            ),
+            (
+                "the reaction other clients send, which no room of ours encrypts",
+                json!({ "type": "m.reaction", "event_id": "$r", "sender": "@gh_7:arbos.life",
+                        "content": { "m.relates_to": { "rel_type": "m.annotation", "event_id": "$m", "key": "👍" } } }),
+            ),
+        ] {
+            assert_eq!(reaction(&ev), None, "{why}");
+        }
+        // An undecrypted reaction is known by its envelope; a message is not.
+        let sealed = |relates: Value| json!({ "type": "m.room.encrypted", "content": { "ciphertext": "x", "m.relates_to": relates } });
+        assert!(sealed_reaction(&sealed(json!({ "rel_type": REACTION }))));
+        assert!(!sealed_reaction(&sealed(json!({}))));
+        assert!(!sealed_reaction(&react(reaction_content("$m", "👍"))));
+        assert_eq!(
+            redacts(&json!({ "type": "m.room.redaction", "redacts": "$m", "content": {} })),
+            Some("$m".to_owned())
+        );
+        assert_eq!(
+            redacts(&json!({ "type": "m.room.redaction", "content": { "redacts": "$m" } })),
+            Some("$m".to_owned()),
+            "room version 11 on"
+        );
+        assert_eq!(
+            redacts(
+                &json!({ "type": "m.room.message", "redacts": "$m", "content": { "redacts": "$m" } })
+            ),
+            None
+        );
+        // A removed message is not a row, encrypted or not.
+        let gone = json!({ "type": "m.room.message", "content": {}, "unsigned": { "redacted_because": { "type": "m.room.redaction" } } });
+        assert!(!shows(&gone, false, false));
+        let mut gone_locked = gone.clone();
+        gone_locked["type"] = json!("m.room.encrypted");
+        assert!(!shows(&gone_locked, true, false));
+        let answer = |content: Value, kind: &str| {
+            let mut ev = json!({ "type": kind, "event_id": "$a", "sender": "@gh_7:arbos.life",
+                                 "content": { "body": "\"replyToEvent\"" } });
+            for (k, v) in content.as_object().unwrap() {
+                ev["content"][k] = v.clone();
+            }
+            reply_target(&message_row(&ev, &|_| None).unwrap())
+        };
+        assert_eq!(
+            answer(json!({ REPLY_TO: "$m" }), "m.room.message"),
+            Some("$m".to_owned())
+        );
+        assert_eq!(answer(json!({ REPLY_TO: 7 }), "m.room.message"), None);
+        assert_eq!(answer(json!({}), "m.room.message"), None);
+        // `m.relates_to` is the homeserver's to write on an encrypted event: never read.
+        let relates = json!({ "m.relates_to": { "m.in_reply_to": { "event_id": "$m" } } });
+        assert_eq!(answer(relates, "m.room.message"), None);
+        // An undecrypted event's envelope says nothing the row repeats.
+        assert_eq!(answer(json!({ REPLY_TO: "$m" }), "m.room.encrypted"), None);
+    }
+
+    /// The relay's test vector (`matrix::history::tests`): the key of seed `[7; 32]`, and its
+    /// signature over this row in this room.
+    #[test]
+    fn a_carried_row_is_the_relays_word_for_this_room_and_nothing_else() {
+        let key =
+            Ed25519PublicKey::from_base64("6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw").unwrap();
+        let row = HistoryRow {
+            id: "01HISTORY".into(),
+            sender: "user:gh_8".into(),
+            handle: "mira".into(),
+            ts: 1_700_000_000_123,
+            text: "see you at noon".into(),
+            reply_to: String::new(),
+            parts: String::new(),
+            sig: "DA2DHf8+cNdovLKYvOsViEsQuPrDcVDMyLgmSAsErXD3Ubl1JFRzfszRh+Kr9Ov5G5sZcjkn0OuRzyOckTytDQ".into(),
+        };
+        assert!(history_verified(&key, "!r:arbos.test", "01CHAT", &row));
+        // Carried by gh_7, who is not its sender; shown as gh_8's, at the time it was said.
+        let carried = |content: Value| {
+            json!({ "type": "m.room.message", "event_id": "$c", "sender": "@gh_7:arbos.test",
+                    "origin_server_ts": 1_800_000_000_000_i64, "content": content })
+        };
+        let ev = carried(history_content(&row));
+        let shown = carried_row(&ev, "!r:arbos.test", "01CHAT", &key).expect("a row");
+        assert!(shown.carried && !shown.locked && !shown.pending);
+        assert_eq!(
+            (
+                shown.id.as_str(),
+                shown.sender.as_str(),
+                shown.text.as_str()
+            ),
+            ("01HISTORY", "user:gh_8", "see you at noon")
+        );
+        assert_eq!(
+            (shown.created_at, shown.sender_name.as_str()),
+            (row.ts, "mira")
+        );
+        let v: Value = serde_json::from_str(&shown.json).unwrap();
+        assert_eq!(v["senderHandle"], "mira");
+        assert_eq!(v["createdAt"], row.ts);
+        // Outside the ciphertext: what kind of event, and nothing of the row.
+        assert_eq!(
+            ev["content"]["m.relates_to"],
+            json!({ "rel_type": HISTORY })
+        );
+        // The rule every other people-chat row passes does not pass it; only the signature does.
+        assert!(!sender_is_own(&ev));
+
+        let other_key =
+            Ed25519PublicKey::from_base64("iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w").unwrap();
+        let with = |change: &dyn Fn(&mut Value)| {
+            let mut content = history_content(&row);
+            change(&mut content);
+            carried(content)
+        };
+        for (why, ev, room, chat, k) in [
+            (
+                "another room",
+                ev.clone(),
+                "!other:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            ("another chat", ev.clone(), "!r:arbos.test", "01OTHER", &key),
+            (
+                "another key",
+                ev.clone(),
+                "!r:arbos.test",
+                "01CHAT",
+                &other_key,
+            ),
+            (
+                "a changed word",
+                with(&|c| c["body"] = json!("see you at one")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another sender",
+                with(&|c| c["life.arbos.sender"] = json!("user:gh_9")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another id",
+                with(&|c| c["life.arbos.id"] = json!("01OTHER")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another time",
+                with(&|c| c[HISTORY]["ts"] = json!(1)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "another handle",
+                with(&|c| c[HISTORY]["handle"] = json!("jacob")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "added parts",
+                with(&|c| c[HISTORY]["parts"] = json!("[{\"kind\":\"cheque\"}]")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "an answer it never was",
+                with(&|c| c[HISTORY]["reply_to"] = json!("01X")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "no signature",
+                with(&|c| c[HISTORY]["sig"] = json!("")),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "a later schema",
+                with(&|c| c[HISTORY]["v"] = json!(2)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "a field this build does not know",
+                with(&|c| c[HISTORY]["on_behalf"] = json!(true)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+            (
+                "the mirror's unsigned carry",
+                with(&|c| c[HISTORY] = json!(true)),
+                "!r:arbos.test",
+                "01CHAT",
+                &key,
+            ),
+        ] {
+            assert!(carried_row(&ev, room, chat, k).is_none(), "{why}");
+        }
+        // Parts the relay signed are drawn; parts beside the signature are not.
+        let beside = with(&|c| c["life.arbos.parts"] = json!([{ "kind": "cheque" }]));
+        let shown = carried_row(&beside, "!r:arbos.test", "01CHAT", &key).unwrap();
+        let v: Value = serde_json::from_str(&shown.json).unwrap();
+        assert_eq!(v["parts"].as_array().unwrap().len(), 1, "{v}");
+    }
+
+    #[test]
+    fn a_row_that_stays_locked_says_why() {
+        let sealed = |unsigned: Value| {
+            let ev = json!({ "type": "m.room.encrypted", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                             "content": { "ciphertext": "x" }, "unsigned": unsigned });
+            message_row(&ev, &|_| None).unwrap()
+        };
+        for (unsigned, text) in [
+            (json!({}), LOCKED),
+            (json!({ "membership": "join" }), LOCKED),
+            (json!({ "membership": "leave" }), LOCKED_BEFORE_JOIN),
+            (json!({ "membership": "invite" }), LOCKED_BEFORE_JOIN),
+            (json!({ "membership": 7 }), LOCKED),
+        ] {
+            let row = sealed(unsigned.clone());
+            assert!(row.locked, "{unsigned}");
+            assert_eq!(row.text, text, "{unsigned}");
+        }
+        // A readable message says what it says, whatever the homeserver adds.
+        let clear = json!({ "type": "m.room.message", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                            "content": { "body": "hi" }, "unsigned": { "membership": "leave" } });
+        assert_eq!(message_row(&clear, &|_| None).unwrap().text, "hi");
+    }
+
+    #[test]
+    fn a_pending_row_reads_like_the_message_it_becomes() {
+        let content =
+            json!({ "msgtype": "m.text", "body": "on my way", "life.arbos.id": "01LOCAL" });
+        let mut row = echo_row("@gh_7:arbos.life", &content, "01LOCAL", 1700).unwrap();
+        assert!(row.pending && !row.locked);
+        assert_eq!(
+            (row.id.as_str(), row.sender.as_str(), row.text.as_str()),
+            ("01LOCAL", "user:gh_7", "on my way")
+        );
+        assert!(!row.event_id.starts_with('$'), "not an event id");
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["pending"], true);
+        let sent = json!({ "type": "m.room.message", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                           "origin_server_ts": 1800, "content": content });
+        let sent = message_row(&sent, &|_| None).unwrap();
+        assert!(!sent.pending);
+        assert_eq!(
+            (sent.id.as_str(), sent.sender.as_str()),
+            ("01LOCAL", "user:gh_7")
+        );
+        // Reactions and the row it answers are written in the chat-doc's shape.
+        let reactions = [("👍", [("user:gh_8", true)].into())].into();
+        decorate(&mut row, &reactions, Some("01TARGET"));
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["reactions"], json!({ "👍": { "user:gh_8": true } }));
+        assert_eq!(v["replyTo"], "01TARGET");
+        assert_eq!(v["parts"][0]["text"], "on my way");
+    }
+
+    #[test]
+    fn an_encrypted_room_shows_no_cleartext_message() {
+        let clear =
+            json!({ "type": "m.room.message", "content": { "msgtype": "m.text", "body": "hi" } });
+        let notice = json!({ "type": "m.room.message",
+            "content": { "msgtype": "m.notice", "body": "Mira K. added Sam Rivera", "life.arbos.sender": "system" } });
+        // A "system" line that carries parts (a cheque card, say) is not the relay's notice.
+        let dressed = json!({ "type": "m.room.message",
+            "content": { "msgtype": "m.notice", "body": "x", "life.arbos.sender": "system", "life.arbos.parts": [{ "kind": "x" }] } });
+        let locked = json!({ "type": "m.room.encrypted", "content": {} });
+        // (event, room encrypted, decrypted) -> shown
+        for (ev, encrypted, decrypted, shown) in [
+            (&clear, false, false, true),
+            (&clear, true, true, true),
+            (&clear, true, false, false),
+            (&dressed, true, false, false),
+            (&notice, true, false, true),
+            (&locked, true, false, true),
+            (&json!({ "type": "m.room.member" }), false, false, false),
+        ] {
+            assert_eq!(shows(ev, encrypted, decrypted), shown, "{ev}");
+        }
     }
 }

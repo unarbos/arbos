@@ -496,7 +496,11 @@ impl Agent {
     /// `decide` with this project's `decision_model` settings.
     pub async fn decide_responders(&self, room: &Room) -> anyhow::Result<ResponderDecision> {
         let cfg: DecisionConfig = self.settings.models.read().await.decision_cfg.clone();
-        decide(&self.llm, &cfg, room).await
+        let llm = self
+            .llm
+            .with_context(arbos_core::usage::UsageContext::for_chat(&room.chat_id))
+            .with_purpose("responders");
+        decide(&llm, &cfg, room).await
     }
 
     /// One `memory_decision_log` row (side `respond`) per decision, with inputs hash,

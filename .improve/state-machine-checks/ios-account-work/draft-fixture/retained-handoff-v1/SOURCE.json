@@ -1,0 +1,25 @@
+{
+  "files": {
+    ".improve/state-machine-checks/ios-account-work/methods/check_draft_sends.py": {
+      "before": "1157982e52501f42095fc9e5edee45d5e48d0a9ad79fde03939d60c5e5ae1efb",
+      "after": "056b8b6ec111a39581172ebcc3597675507030045ea8c39d267e01099965b7f9"
+    },
+    ".improve/state-machine-checks/ios-account-work/run_all.py": {
+      "before": "3fd79a17ccd9a1132c66421cb5828e3c3cade01f681182774a0de6acf6009cb2",
+      "after": "4c93743e70225a4cc55e475b4f6c303fb09ad6319cf0cfe3b7a717a1e15d8394"
+    },
+    ".improve/state-machine-checks/ios-account-work/README.md": {
+      "before": "7a62aadc294fde842da7c8a4be91a36998fe41eac7bc6f7fad3ef3a3a3da9056",
+      "after": "67fd5ef64225a84db42501521ce37005c4ac7bfe3fdb614001600d8f93141f6b"
+    }
+  },
+  "unchanged_mutant_entrypoint": {
+    "path": ".improve/state-machine-checks/ios-account-work/check_draft_mutants.py",
+    "sha256": "6f9126c038aa2b688828715b44593e1860642ecdc87f883383dcd73f9861218e"
+  },
+  "patch": {
+    "sha256": "680a01b34cabd709a41ce96d2f338eae2f49e6ea135f4f8a175b3d041c5b7d1c",
+    "bytes": 12974
+  },
+  "full_suite_status": "Not rerun; historical296 is not relabeled305. Only public --only draft_sends18 was run against this candidate."
+}

@@ -35,10 +35,17 @@ final class BlockedStateTests: XCTestCase {
             "Muted until Oct 30, 14:30"
         )
         XCTAssertEqual(BlockedState.mutedUntilLabel(untilMs: nil, nowMs: nowMs, timeZone: tz), "Muted")
+        // The public sentence deliberately uses the reader's local timezone.
+        // Build its fixed clock in that same zone; do not assume the host is UTC.
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = .current
+        let localNow = localCalendar.date(from: DateComponents(year: 2026, month: 10, day: 28, hour: 12))!
+        let localUntil = localCalendar.date(from: DateComponents(year: 2026, month: 10, day: 28, hour: 14, minute: 30))!
         XCTAssertEqual(
             BlockedState.refusalSentence(
                 reason: "silenced", name: nil, handle: nil,
-                silencedUntilMs: laterToday, nowMs: nowMs
+                silencedUntilMs: Int64(localUntil.timeIntervalSince1970 * 1000),
+                nowMs: Int64(localNow.timeIntervalSince1970 * 1000)
             ),
             "Muted until 14:30. Your messages aren't being delivered."
         )
@@ -253,7 +260,8 @@ final class BlockedHiddenRowsTests: XCTestCase {
               let model = try source("Store/AppModel.swift") else {
             throw XCTSkip("sources not beside the test bundle (CI without the tree)")
         }
-        XCTAssertEqual(chat.components(separatedBy: "hiddenSenders: hiddenSenders)").count - 1, 3, "every rows() call carries the hint")
+        // The source-consumer Swift check compiles all three actual rows() calls
+        // against a required hiddenSenders input and verifies its nonempty/empty values.
         XCTAssertTrue(chat.contains("let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []"))
         XCTAssertTrue(transcript.contains("case .hidden(let count, _, let handle, let name):"), "the fold is drawn")
         XCTAssertTrue(transcript.contains("Text(BlockedState.hiddenLine(count: count, who: who))"))

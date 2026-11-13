@@ -1,0 +1,2 @@
+# Preserve the single-space context for empty lines in unified patches.
+*.patch -whitespace

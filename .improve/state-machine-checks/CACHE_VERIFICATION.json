@@ -1,0 +1,634 @@
+{
+  "before": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "rooms::covered_push_tests::speculative_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 39.04647037491668,
+    "results": [
+      [
+        "FAILED",
+        "1",
+        "2",
+        "0"
+      ]
+    ],
+    "source_sha256": "998ed39ffb68ec16a505a777dd75297ec1a1de448d0f27cc4439075d4a21fa89",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins",
+    "expected_tests": 3,
+    "count_matches": true
+  },
+  "isolation-before": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "speculative_inflight_cache_is_not_visible_to_other_readers",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 101,
+    "seconds": 27.877944958978333,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "source_sha256": "5ad22fb84bf9df539c0c039d61fd39d834f6fc8c9a0d39cdbffa6bfc614c3fdf",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins",
+    "expected_tests": 1,
+    "count_matches": true
+  },
+  "concurrent-before": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "speculative_preparations_hold_one_admission_lease",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 101,
+    "seconds": 32.9272323329933,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "source_sha256": "ce486d4977e7ee1fc24fb5b078f6816148d912836dcd4c3cd7899b1b1dc4fd26",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins",
+    "expected_tests": 1,
+    "count_matches": true
+  },
+  "after": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "rooms::covered_push_tests::speculative_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 47.22775208298117,
+    "results": [
+      [
+        "ok",
+        "9",
+        "0",
+        "0"
+      ]
+    ],
+    "source_sha256": "493218c27204b8f53310d15e15b7f2564cd804bee4d07a9cb77fe271b7c21ed4",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins",
+    "expected_tests": 9,
+    "count_matches": true
+  },
+  "covered": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "rooms::covered_push_tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 66.88831470906734,
+    "results": [
+      [
+        "ok",
+        "13",
+        "0",
+        "0"
+      ]
+    ],
+    "source_sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins"
+  },
+  "check": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 29.585425207973458,
+    "results": [],
+    "source_sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins"
+  },
+  "clippy": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 36.45189720799681,
+    "results": [],
+    "source_sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins"
+  },
+  "build": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay"
+    ],
+    "exit": 0,
+    "seconds": 59.175069167045876,
+    "results": [],
+    "source_sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins"
+  },
+  "fmt": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 0,
+    "seconds": 3.532579208025709,
+    "results": [],
+    "source_sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "exact actual55ea source plusselectedtests; unique target/workspace artifacts cleaned; onlyvalidatedloopbacknetwork; freshHOME/noinheritedoptins"
+  },
+  "clean": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "cargo",
+      "clean",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client",
+      "-p",
+      "arbos-matrix",
+      "-p",
+      "arbos-ffi",
+      "-p",
+      "arbos-relay",
+      "-p",
+      "arbos-agentd",
+      "-p",
+      "arbosctl",
+      "-p",
+      "arbos-acp",
+      "-p",
+      "arbos-sidecar",
+      "-p",
+      "arbos-local",
+      "-p",
+      "arbos-mac",
+      "-p",
+      "arbos-update"
+    ],
+    "exit": 0,
+    "seconds": 0.49252316600177437,
+    "scope": "own unique APFS clone only; all12workspace crate artifacts cleaned; own old target read-only"
+  },
+  "fence": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "-I",
+      "-B",
+      "<checkout>/.improve/evidence/cache-receipt/probe.py"
+    ],
+    "exit": 0,
+    "seconds": 0.034736957983113825,
+    "policy_sha256": "339423f809b977e1c1a1b0ca1d88035fc03f56227d8ae69e844d983b61bc484f",
+    "note": "Seatbelt supports localhost loopback class rather than literal numeric IP filter; fixture uses127.0.0.1 only",
+    "stdout": "{\"loopback_echo\": true, \"forbidden_errno\": 1, \"forbidden_seconds\": 1.6666948795318604e-05, \"forbidden_numeric_test_net\": true, \"environment_keys\": [\"LC_CTYPE\", \"PATH\", \"TMPDIR\", \"__CF_USER_TEXT_ENCODING\"], \"dns_used\": false}",
+    "stderr": ""
+  },
+  "FIXTURE_AUDIT": {
+    "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+    "production_section_sha256": "e53240fcdf93be846c3101a242cae58491ff2ba35091df12add252d222d0c68a",
+    "production_section_unchanged": true,
+    "selected_tests": "rooms::covered_push_tests::speculative_",
+    "test_count": 3,
+    "endpoint_path": [
+      "serve binds127.0.0.1:0",
+      "addr=listener.local_addr",
+      "push_after_catchup derivesws://{addr}/room/...",
+      "no other selectedfixture connects"
+    ],
+    "state_services": {
+      "push": "capture",
+      "matrix": "Config::off",
+      "daytona": null,
+      "livekit": null,
+      "outside_agents": "none",
+      "links_in_messages": "none"
+    },
+    "retained_subscriber": "room.tx.subscribe named binding held through whole test",
+    "config": "existing test_state synthetic literals; noConfig::from_env",
+    "network_fence_sha256": "339423f809b977e1c1a1b0ca1d88035fc03f56227d8ae69e844d983b61bc484f"
+  },
+  "CACHE_OWNERSHIP": {
+    "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+    "unchanged_helpers": {
+      "build_room_doc": "fba6cf6f71773a9aabcb236ddf432eba4dd36075bf12829725a8cec7714d6ec0",
+      "advance_room_doc": "3a51494df077c8d0db1e4e8a1a499a8287cdbb30375d1cbd81c9ce06ea96fdb6",
+      "diff_pushed_row": "3a8288ccf1e1a2f99c6beb0cf0afd0780a32c3033cd5bc23ce43cb5863e4cd91"
+    },
+    "cache_reference_lines": {
+      "crates/arbos-relay/src/rooms.rs": [
+        33,
+        53,
+        64,
+        117,
+        138,
+        139,
+        141,
+        162,
+        188,
+        220,
+        243,
+        276,
+        460,
+        2776,
+        2943,
+        2953,
+        3063,
+        3090,
+        3095,
+        3106,
+        3194,
+        3204
+      ],
+      "crates/arbos-relay/src/state.rs": [
+        159,
+        184,
+        455
+      ]
+    },
+    "ownership_trace": [
+      "RoomDocCache has noClone; ChatDoc has noClone",
+      "build_room_doc creates freshChatDoc or imports snapshot bytes into freshLoroDoc",
+      "warm preparation takes the entire Option value under mutex; no shallow Loro clone",
+      "PendingRoomPush owns cache and Tokio admission guard",
+      "cached VV APIs return ownedVersionVector/encodedbytes; projected tail returns ownedJSON",
+      "temporary LoroList handle stays in synchronous tail closure under sharedmutex",
+      "cached LoroDoc is never cloned or returned by these consumers",
+      "Arc<Room> clones share the mutex container only; immutable payload Bytes/identity strings mayclone",
+      "PendingDrop discards local doc; it never clears shared newer cache",
+      "durable publication refreshes stored head/floor and retains existing cacheobject",
+      "failed incremental durable refresh invalidates only that potentially partiallyadvanced cache"
+    ],
+    "source_hashes": {
+      "crates/arbos-relay/src/rooms.rs": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+      "crates/arbos-relay/src/state.rs": "e85045f362adf0827c7683333176ef82193d351be32c601aff07e9c6fd9e804f"
+    }
+  },
+  "NATIVE_LAWS": {
+    "initial_seed": 99538195,
+    "cases": [
+      {
+        "case": 0,
+        "seed": 13177649110098272934,
+        "reject": true,
+        "intervening_rows": 2,
+        "replays": 2
+      },
+      {
+        "case": 1,
+        "seed": 8342161147397747325,
+        "reject": false,
+        "intervening_rows": 3,
+        "replays": 3
+      },
+      {
+        "case": 2,
+        "seed": 8600216983940523080,
+        "reject": true,
+        "intervening_rows": 0,
+        "replays": 2
+      },
+      {
+        "case": 3,
+        "seed": 9286201472189913591,
+        "reject": false,
+        "intervening_rows": 3,
+        "replays": 3
+      },
+      {
+        "case": 4,
+        "seed": 3877072154051762874,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 1
+      },
+      {
+        "case": 5,
+        "seed": 12488258448888936961,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 1
+      },
+      {
+        "case": 6,
+        "seed": 10939872478978290300,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 2
+      },
+      {
+        "case": 7,
+        "seed": 948422538812744987,
+        "reject": false,
+        "intervening_rows": 1,
+        "replays": 3
+      },
+      {
+        "case": 8,
+        "seed": 12884821776812518414,
+        "reject": true,
+        "intervening_rows": 0,
+        "replays": 2
+      },
+      {
+        "case": 9,
+        "seed": 13850430573029798341,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 10,
+        "seed": 6940345653537962992,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 1
+      },
+      {
+        "case": 11,
+        "seed": 12198464144053066367,
+        "reject": false,
+        "intervening_rows": 3,
+        "replays": 3
+      },
+      {
+        "case": 12,
+        "seed": 5744245549427223202,
+        "reject": true,
+        "intervening_rows": 2,
+        "replays": 3
+      },
+      {
+        "case": 13,
+        "seed": 9677203536443383241,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 14,
+        "seed": 16140003691652641956,
+        "reject": true,
+        "intervening_rows": 2,
+        "replays": 3
+      },
+      {
+        "case": 15,
+        "seed": 18336704914441231907,
+        "reject": false,
+        "intervening_rows": 2,
+        "replays": 1
+      },
+      {
+        "case": 16,
+        "seed": 2901598629670808182,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 1
+      },
+      {
+        "case": 17,
+        "seed": 109119441696211469,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 18,
+        "seed": 10863729066542665880,
+        "reject": true,
+        "intervening_rows": 1,
+        "replays": 1
+      },
+      {
+        "case": 19,
+        "seed": 1828379965312226311,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 1
+      },
+      {
+        "case": 20,
+        "seed": 17823176522867457930,
+        "reject": true,
+        "intervening_rows": 0,
+        "replays": 2
+      },
+      {
+        "case": 21,
+        "seed": 13340176423346283153,
+        "reject": false,
+        "intervening_rows": 1,
+        "replays": 2
+      },
+      {
+        "case": 22,
+        "seed": 3852563704466310092,
+        "reject": true,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 23,
+        "seed": 4192471823851544619,
+        "reject": false,
+        "intervening_rows": 2,
+        "replays": 2
+      },
+      {
+        "case": 24,
+        "seed": 9702103149311016414,
+        "reject": true,
+        "intervening_rows": 1,
+        "replays": 2
+      },
+      {
+        "case": 25,
+        "seed": 16411633957063164757,
+        "reject": false,
+        "intervening_rows": 1,
+        "replays": 2
+      },
+      {
+        "case": 26,
+        "seed": 16226215151202812480,
+        "reject": true,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 27,
+        "seed": 17525584360575461007,
+        "reject": false,
+        "intervening_rows": 0,
+        "replays": 3
+      },
+      {
+        "case": 28,
+        "seed": 8914232368569842034,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 2
+      },
+      {
+        "case": 29,
+        "seed": 12417593705270143065,
+        "reject": false,
+        "intervening_rows": 1,
+        "replays": 3
+      },
+      {
+        "case": 30,
+        "seed": 9526166555560345588,
+        "reject": true,
+        "intervening_rows": 3,
+        "replays": 2
+      },
+      {
+        "case": 31,
+        "seed": 9101293918272162611,
+        "reject": false,
+        "intervening_rows": 3,
+        "replays": 3
+      }
+    ],
+    "accepted": 16,
+    "refused": 16,
+    "note": "32finiteactualnativeLoro/SQLitetraces; not EffectSchema/shrinking or exhaustiveinterleavingproof; actual Loro peer IDs randomized, relational invariants seed-controlled"
+  },
+  "patch": {
+    "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+    "patch_bytes": 30569,
+    "patch_sha256": "a35bdd9f6256b0aea3264b63caddbcb5e7e713437c3b029e54e1a8407d18f359",
+    "live_apply_check": 0,
+    "apply_note": "",
+    "files": {
+      "crates/arbos-relay/src/rooms.rs": {
+        "bytes": 165314,
+        "sha256": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5"
+      },
+      "crates/arbos-relay/src/state.rs": {
+        "bytes": 34497,
+        "sha256": "e85045f362adf0827c7683333176ef82193d351be32c601aff07e9c6fd9e804f"
+      }
+    },
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435"
+  },
+  "native_distinct_tests": 13,
+  "new_native_tests": 9,
+  "finite_generated_native_traces": 32,
+  "selected_after_superseded_by_final_covered_module": "Selected9beforehexliteralgroupformatting; exactfinalsource was then rebuilt and all13module tests passed",
+  "full_workspace_tests": false,
+  "log_sha256": {
+    "before": "9fa5a500e25e608fe1f08f0f7c3acad196d73185623b986e52ee70448790beaa",
+    "isolation-before": "2cd85f4f3de846e4e9e3e0d0ac119333e615d206e9e8bda8b7caba656b4f9f75",
+    "concurrent-before": "5995c1cc25e67aae7d1342f942e98c38b22fe73c970267ba21dba2d4e92cc144",
+    "covered": "cc59b1aa0bc87ee722bf83aa96e9d25295962db5f6ad67e669b7ed3afd3884fd",
+    "check": "8fec004a8a44360c057088e14541c59ebdc04ad022be6ba744605b6ee7af39c4",
+    "clippy": "29966898373f336d63a883b0f5e983aac5ff89132880637363e3a582f85b5f0d",
+    "build": "dbd464dfd6ddd6b933dd1da904dec7cf0f6a220362181b093a851e7422f07826",
+    "fmt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -18,7 +18,7 @@
 //! construction. Group and people chats see only their own subtree.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -31,7 +31,14 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::config::Config;
 use crate::llm::Llm;
+use crate::settings::{LiveModels, ModelRole};
 use crate::store::{Store, T3Row};
+
+static CARD_HEADING: LazyLock<Option<regex_lite::Regex>> =
+    LazyLock::new(|| regex_lite::Regex::new(r#""heading"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok());
+
+static CARD_SUMMARY: LazyLock<Option<regex_lite::Regex>> =
+    LazyLock::new(|| regex_lite::Regex::new(r#""summary"\s*:\s*"((?:[^"\\]|\\.)*)"#).ok());
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tree_nodes (
@@ -133,6 +140,24 @@ impl TreeMode {
             Self::On => "on",
             Self::Log => "log",
             Self::Off => "off",
+        }
+    }
+
+    /// The mode as one byte, so the live value can be mirrored in an atomic and read from sync
+    /// code without the async settings lock (`LiveModels::tree_mode`).
+    pub fn code(self) -> u8 {
+        match self {
+            Self::On => 0,
+            Self::Log => 1,
+            Self::Off => 2,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Log,
+            2 => Self::Off,
+            _ => Self::On,
         }
     }
 }
@@ -267,6 +292,16 @@ pub struct WalkOptions {
     pub fast: bool,
 }
 
+/// What `Tree::backfill_refused` did (or, on a dry run, would do). `found` is every historical
+/// refused turn the detector matched; `marked` and `rebuilt` are 0 on a dry run.
+#[derive(Debug, Clone, Copy)]
+pub struct RefusedBackfill {
+    pub dry_run: bool,
+    pub found: usize,
+    pub marked: usize,
+    pub rebuilt: usize,
+}
+
 /// Where a leaf candidate came from; decides whether it stays once its parents are scored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Via {
@@ -313,12 +348,12 @@ struct Gathered {
 pub struct Tree {
     project_id: String,
     project_name: String,
-    /// Chat model for the cards (the project's `decision_model` slot).
-    card_model: String,
+    /// Chat model for the cards: the project's live `decision_model` slot, read per pass so a
+    /// model change in the app reaches the cards without a box restart (Jacob, 2026-11-04).
+    models: LiveModels,
     store: Store,
     llm: Arc<Llm>,
     build_lock: tokio::sync::Mutex<()>,
-    cap_warned: std::sync::Mutex<Option<i64>>,
 }
 
 pub fn est_tokens(s: &str) -> usize {
@@ -400,8 +435,8 @@ fn parse_card(text: &str) -> Option<(String, String, Vec<String>)> {
             ));
         }
     }
-    let re_h = regex_lite::Regex::new(r#""heading"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok()?;
-    let re_s = regex_lite::Regex::new(r#""summary"\s*:\s*"((?:[^"\\]|\\.)*)"#).ok()?;
+    let re_h = CARD_HEADING.as_ref()?;
+    let re_s = CARD_SUMMARY.as_ref()?;
     let h = re_h.captures(text)?.get(1)?.as_str().replace("\\\"", "\"");
     let s = re_s
         .captures(text)
@@ -479,20 +514,14 @@ fn cache_ctx(words: &[String], asked_at: i64, asker: &str, restricted: bool) -> 
 }
 
 impl Tree {
-    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>) -> Self {
-        Self::with_ids(
-            &cfg.project_id,
-            &cfg.project_name,
-            &cfg.decision_model,
-            store,
-            llm,
-        )
+    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>, models: LiveModels) -> Self {
+        Self::with_ids(&cfg.project_id, &cfg.project_name, models, store, llm)
     }
 
     pub fn with_ids(
         project_id: &str,
         project_name: &str,
-        card_model: &str,
+        models: LiveModels,
         store: Store,
         llm: Arc<Llm>,
     ) -> Self {
@@ -503,11 +532,10 @@ impl Tree {
         let tree = Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
-            card_model: card_model.to_owned(),
+            models,
             store,
             llm,
             build_lock: tokio::sync::Mutex::new(()),
-            cap_warned: std::sync::Mutex::new(None),
         };
         tree.backfill_cards_fts();
         tree
@@ -531,29 +559,6 @@ impl Tree {
 
     // ---- settings -----------------------------------------------------------------------------
 
-    /// Per-box daily cap on tree spend (cards + Jev), USD. `ARBOS_MEMORY_TREE_DAILY_CAP_USD`,
-    /// default 0.80 so six boxes stay under the $5/day rule.
-    pub fn daily_cap_usd() -> f64 {
-        std::env::var("ARBOS_MEMORY_TREE_DAILY_CAP_USD")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| *v >= 0.0)
-            .unwrap_or(0.80)
-    }
-
-    pub fn spend_today(&self) -> f64 {
-        let since = day_start_ms(now_ms());
-        self.store
-            .with(|c| {
-                c.query_row(
-                    "SELECT COALESCE(SUM(usd), 0) FROM tree_cost WHERE created_at >= ?1",
-                    params![since],
-                    |r| r.get::<_, f64>(0),
-                )
-            })
-            .unwrap_or(0.0)
-    }
-
     /// Spend today split by kind, plus a straight-line projection to 24 h.
     pub fn spend_report(&self) -> Value {
         let now = now_ms();
@@ -573,28 +578,7 @@ impl Tree {
             "today_usd": total,
             "by_kind": rows.iter().map(|(k, u, n)| json!({"kind": k, "usd": u, "calls": n})).collect::<Vec<_>>(),
             "projected_24h_usd": total / elapsed_h * 24.0,
-            "cap_usd": Self::daily_cap_usd(),
-            "capped": self.capped(),
         })
-    }
-
-    /// True once today's spend reached the cap; warns once a day.
-    pub fn capped(&self) -> bool {
-        let cap = Self::daily_cap_usd();
-        if cap <= 0.0 {
-            return false;
-        }
-        let spent = self.spend_today();
-        if spent < cap {
-            return false;
-        }
-        let today = day_start_ms(now_ms());
-        let mut w = self.cap_warned.lock().expect("cap warned");
-        if *w != Some(today) {
-            *w = Some(today);
-            tracing::warn!(project = %self.project_id, spent_usd = spent, cap_usd = cap, "memory tree: daily spend cap reached; builder and walk paused until tomorrow (UTC)");
-        }
-        true
     }
 
     fn add_cost(&self, kind: &str, usage: &Value) {
@@ -744,6 +728,99 @@ impl Tree {
         });
     }
 
+    /// Blank a node's card and drop its prefilter row, so nothing it once summarised is offered
+    /// until the node is rebuilt. The node and its child links stay; only the summary text goes.
+    fn clear_card(&self, node_id: &str) {
+        if let Some(mut n) = self.node(node_id) {
+            n.heading.clear();
+            n.summary.clear();
+            n.entities.clear();
+            n.updated_at = now_ms();
+            self.upsert_node(&n);
+        }
+        let _ = self.store.with(|c| {
+            c.execute(
+                "DELETE FROM tree_cards_fts WHERE node_id = ?1",
+                params![node_id],
+            )
+        });
+    }
+
+    /// A turn just became a declined one (`Store::t3_mark_refused`). The walk's leaf paths already
+    /// pass over `T3_KIND_REFUSED`, but a card written *before* the mark still carries the declined
+    /// words in its summary and in `tree_cards_fts`, so it rides the walk into this chat or any
+    /// other chat in the project — the cross-chat refusal path. Clear every card that summarised
+    /// this leaf now (so nothing leaks before a rebuild) and queue the node for a rebuild: the
+    /// episode card re-summarises from its remaining leaves, which `leaves_by_ids` builds without
+    /// the declined one, so the episode's other turns stay in memory and only the declined turn
+    /// leaves. The thread and root cards cascade from the episode.
+    pub fn invalidate_refused_leaf(&self, leaf_id: &str) {
+        let like = format!("%\"{leaf_id}\"%");
+        let eps = self.nodes_where("level = 'episode' AND children LIKE ?1", &[&like]);
+        let mut threads: HashSet<String> = HashSet::new();
+        let mut touched = false;
+        for ep in &eps {
+            // `LIKE` is only a prefilter; confirm the leaf is actually a child.
+            if !ep.children.iter().any(|c| c == leaf_id) {
+                continue;
+            }
+            touched = true;
+            self.clear_card(&ep.id);
+            self.set_status(&ep.id, "closed");
+            if let Some(t) = &ep.thread_id {
+                threads.insert(t.clone());
+            }
+        }
+        for t in &threads {
+            let tid = format!("thread:{t}");
+            self.clear_card(&tid);
+            self.set_status(&tid, "stale");
+        }
+        if touched {
+            self.clear_card(ROOT_ID);
+            self.set_status(ROOT_ID, "stale");
+        }
+    }
+
+    /// One-off backfill for boxes that carry refused turns from before live marking (#2925): mark
+    /// every historical provider-refused user turn (`Store::refused_backfill_candidates`) and
+    /// rebuild the cards that summarised it, through the same mark/invalidate path a live refusal
+    /// now takes. Mark-only — it changes a row's kind and rebuilds derived cards, and never
+    /// deletes or rewrites any message content. Idempotent: a turn already marked is skipped, so a
+    /// second run marks nothing new and invalidates nothing already clean. `dry_run` only counts
+    /// what a live run would mark and touches nothing.
+    pub fn backfill_refused(&self, dry_run: bool) -> anyhow::Result<RefusedBackfill> {
+        let candidates = self.store.refused_backfill_candidates()?;
+        let found = candidates.len();
+        if dry_run {
+            return Ok(RefusedBackfill {
+                dry_run: true,
+                found,
+                marked: 0,
+                rebuilt: 0,
+            });
+        }
+        let mut marked = 0usize;
+        let mut rebuilt = 0usize;
+        for c in &candidates {
+            let n = self.store.t3_mark_refused(&c.thread_id, &c.message_id)?;
+            if n == 0 {
+                continue;
+            }
+            marked += n;
+            if let Some(row_id) = self.store.t3_refused_row_id(&c.thread_id, &c.message_id)? {
+                self.invalidate_refused_leaf(&row_id);
+                rebuilt += 1;
+            }
+        }
+        Ok(RefusedBackfill {
+            dry_run: false,
+            found,
+            marked,
+            rebuilt,
+        })
+    }
+
     /// Threads with keyword evidence for the question: a leaf (`t3_fts`) or an index card
     /// (`tree_cards_fts`) shares a stemmed content word with it. A word that occurs in most
     /// threads of the project (the agent's greetings, the user's name, "hello", "say") tells
@@ -763,7 +840,12 @@ impl Tree {
             usize::MAX
         };
         let found = self.store.with(|c| {
-            let mut leaves = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
+            // A declined turn is evidence for nothing: the walk cannot offer that row
+            // (`leaves_by_ids`, `bm25_hits`), so letting its words decide which threads to
+            // expand would pick a thread for a reason the pack can never show.
+            let mut leaves = c.prepare(
+                "SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1 AND kind <> ?2",
+            )?;
             let mut cards = c.prepare(
                 "SELECT DISTINCT thread_id FROM tree_cards_fts WHERE tree_cards_fts MATCH ?1 AND thread_id IS NOT NULL",
             )?;
@@ -773,7 +855,9 @@ impl Tree {
                     continue;
                 };
                 let mut per_word: HashSet<String> = HashSet::new();
-                for r in leaves.query_map(params![q], |r| r.get::<_, String>(0))? {
+                for r in leaves.query_map(params![q, crate::store::T3_KIND_REFUSED], |r| {
+                    r.get::<_, String>(0)
+                })? {
                     per_word.insert(r?);
                 }
                 for r in cards.query_map(params![q], |r| r.get::<_, String>(0))? {
@@ -867,15 +951,25 @@ impl Tree {
             .unwrap_or_default()
     }
 
+    /// The chosen leaves, as rows. The one choke point between a walk's pick and the words that
+    /// ride in front of the next turn, so a turn the provider declined is left out here: no
+    /// record of `T3_KIND_REFUSED` is loaded, for the pack or for a card.
     fn leaves_by_ids(&self, ids: &[String]) -> Vec<T3Row> {
         let mut out = Vec::new();
         for chunk in ids.chunks(200) {
             let marks = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let p: Vec<&dyn rusqlite::ToSql> =
+            let mut p: Vec<&dyn rusqlite::ToSql> =
                 chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            out.extend(self.t3_rows(&format!("WHERE id IN ({marks}) ORDER BY at, id"), &p));
+            p.push(&crate::store::T3_KIND_REFUSED);
+            out.extend(self.t3_rows(
+                &format!(
+                    "WHERE id IN ({marks}) AND kind <> ?{} ORDER BY at, id",
+                    chunk.len() + 1
+                ),
+                &p,
+            ));
         }
         out
     }
@@ -1097,12 +1191,14 @@ impl Tree {
         self.ensure_root();
         self.expire_score_cache();
         let t0 = Instant::now();
-        let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0, "skipped_cap": false });
-        // 1. leaves → episodes (no model calls)
+        let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0 });
+        // 1. leaves → episodes (no model calls). A declined turn (`T3_KIND_REFUSED`) is kept out
+        // of episodes in the first place, so no card ever summarises it and its words cannot ride
+        // the walk into this or any other chat (the cross-chat refusal path).
         let through = self.state_get("built_through").unwrap_or_default();
         let rows = self.t3_rows(
-            "WHERE id > ?1 AND kind <> 'route' ORDER BY id LIMIT 2000",
-            &[&through],
+            "WHERE id > ?1 AND kind NOT IN ('route', ?2) ORDER BY id LIMIT 2000",
+            &[&through, &crate::store::T3_KIND_REFUSED],
         );
         let mut last_id = through.clone();
         let mut new_eps = 0;
@@ -1183,12 +1279,7 @@ impl Tree {
         }
         stats["leaves"] = json!(rows.len());
         stats["episodes_new"] = json!(new_eps);
-        if self.capped() {
-            stats["skipped_cap"] = json!(true);
-            stats["ms"] = json!(t0.elapsed().as_millis() as i64);
-            return Ok(stats);
-        }
-        let model = self.card_model();
+        let model = self.card_model().await;
         let mut calls = 0usize;
         let mut errors = 0usize;
         // 2. page cards for big tool results (deduped by content)
@@ -1319,6 +1410,19 @@ impl Tree {
                     )
                 })
                 .collect();
+            // Every leaf of this episode was declined (`leaves_by_ids` drops `T3_KIND_REFUSED`):
+            // there is nothing left to summarise, so leave no card rather than ask the model to
+            // summarise an empty body. `index_card` then drops any stale prefilter row.
+            if body.iter().all(|l| l.trim().is_empty()) {
+                ep.heading.clear();
+                ep.summary.clear();
+                ep.entities.clear();
+                ep.status = "ready".into();
+                ep.updated_at = now_ms();
+                self.upsert_node(&ep);
+                self.index_card(&ep);
+                continue;
+            }
             let thread = ep
                 .thread_id
                 .as_ref()
@@ -1476,8 +1580,8 @@ impl Tree {
         Ok(stats)
     }
 
-    fn card_model(&self) -> String {
-        self.card_model.clone()
+    async fn card_model(&self) -> String {
+        self.models.resolve(ModelRole::Decision).await
     }
 
     async fn write_card(
@@ -1572,6 +1676,7 @@ impl Tree {
     /// Score sibling candidates with the decision model; one request per chunk, chunks in parallel.
     async fn score(
         &self,
+        llm: &Llm,
         scorer: &str,
         query: &Value,
         cards: &[(String, Value)],
@@ -1598,8 +1703,7 @@ impl Tree {
                 .collect();
             let state = json!({ "query": query, "candidates": Value::Object(cands) });
             async move {
-                let r = self
-                    .llm
+                let r = llm
                     .decide(
                         scorer,
                         &state,
@@ -1645,6 +1749,7 @@ impl Tree {
     #[allow(clippy::too_many_arguments)]
     async fn score_cached(
         &self,
+        llm: &Llm,
         scorer: &str,
         query: &Value,
         cards: &[(String, Value)],
@@ -1670,7 +1775,7 @@ impl Tree {
             }
         }
         if !todo.is_empty() {
-            let fresh = self.score(scorer, query, &todo, tally).await;
+            let fresh = self.score(llm, scorer, query, &todo, tally).await;
             let puts: Vec<(String, f64)> = todo
                 .iter()
                 .zip(&todo_keys)
@@ -1719,7 +1824,10 @@ impl Tree {
         let mut out = Vec::new();
         if let Ok(hits) = self.store.t3_search_any(words, BM25_EXTRA) {
             for (r, _, _) in hits {
-                if r.kind == "route" || !scope.leaf_ok(&r.thread_id, &r.id) {
+                if r.kind == "route"
+                    || r.kind == crate::store::T3_KIND_REFUSED
+                    || !scope.leaf_ok(&r.thread_id, &r.id)
+                {
                     continue;
                 }
                 out.push(r.id);
@@ -1856,6 +1964,7 @@ impl Tree {
     #[allow(clippy::too_many_arguments)]
     async fn score_round(
         &self,
+        llm: &Llm,
         fast: bool,
         scorer: &str,
         query: &Value,
@@ -1874,10 +1983,10 @@ impl Tree {
             return;
         }
         let got = if fast {
-            self.score_cached(scorer, query, &todo, ctx, tally, cache_hits)
+            self.score_cached(llm, scorer, query, &todo, ctx, tally, cache_hits)
                 .await
         } else {
-            self.score(scorer, query, &todo, tally).await
+            self.score(llm, scorer, query, &todo, tally).await
         };
         probs.extend(got);
     }
@@ -1910,6 +2019,11 @@ impl Tree {
     ) -> Pack {
         let t0 = Instant::now();
         let asked_at = now_ms();
+        let llm = self.llm.with_context(
+            self.store
+                .usage_context(chat_id)
+                .unwrap_or_else(|_| arbos_core::usage::UsageContext::for_chat(chat_id)),
+        );
         let mut pack = Pack::default();
         let scope = Scope {
             chat_id,
@@ -2030,6 +2144,7 @@ impl Tree {
         }
         // round 1: threads (and, when small, everything under them)
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
@@ -2084,6 +2199,7 @@ impl Tree {
         };
         // round 2: episode cards not scored yet (none when round 1 covered them)
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
@@ -2142,6 +2258,7 @@ impl Tree {
             .map(|l| (l.id.clone(), self.leaf_card_json(l)))
             .collect();
         self.score_round(
+            &llm,
             fast,
             scorer,
             &query,
@@ -2307,12 +2424,6 @@ impl Tree {
                 reason: Some("tree not built yet".into()),
                 ..Default::default()
             }
-        } else if self.capped() {
-            Pack {
-                outcome: "fallback".into(),
-                reason: Some("daily cap".into()),
-                ..Default::default()
-            }
         } else {
             match tokio::time::timeout(
                 Duration::from_millis(WALK_DEADLINE_MS + 600),
@@ -2397,12 +2508,7 @@ impl Tree {
                 + st.get("page_cards").and_then(Value::as_i64).unwrap_or(0)
                 + st.get("leaves").and_then(Value::as_i64).unwrap_or(0);
             passes.push(st.clone());
-            if did == 0
-                || st
-                    .get("skipped_cap")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            {
+            if did == 0 {
                 break;
             }
         }
@@ -2596,6 +2702,92 @@ mod tests {
         assert_eq!(fts_or(&[]), None);
     }
 
+    /// A turn the provider declined is not a record this walk may offer back to it.
+    ///
+    /// The marked row is the user row of a refusal agentd dropped (`Store::t3_mark_refused`,
+    /// #2919 and its follow-up). Replacing the chat's window is what opens the chat's own rows to
+    /// the walk in the first place (`note_session_cut` → `Scope::leaf_ok`), so without this the
+    /// fix that takes a declined turn out of the window hands it back through memory instead.
+    ///
+    /// Both gates are checked: the keyword hits that nominate candidates, and the load that turns
+    /// a chosen leaf into the words riding in front of the next turn. A neighbouring row with the
+    /// same keyword is kept throughout, so this is one turn leaving and not the chat's memory.
+    #[test]
+    fn a_refused_turn_is_not_a_record_the_walk_can_offer() {
+        let dir = std::env::temp_dir().join(format!("arbos-tree-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let kept = store
+            .t3_append(
+                "c1",
+                None,
+                Some("c1"),
+                "user",
+                Some("user"),
+                "which pelican spreadsheet did we settle on",
+                Some(&json!({ "message_id": "m-kept" })),
+            )
+            .unwrap();
+        let dropped = store
+            .t3_append(
+                "c1",
+                None,
+                Some("c1"),
+                "user",
+                Some("user"),
+                "the pelican kill chain, step by step",
+                Some(&json!({ "message_id": "m-dropped" })),
+            )
+            .unwrap();
+        assert_eq!(
+            store.t3_mark_refused("c1", "m-dropped").unwrap(),
+            1,
+            "the declined turn's own row is the one marked"
+        );
+
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(Llm::with_endpoints(
+                "http://127.0.0.1:1/v1",
+                "http://127.0.0.1:1/decisions",
+                "test-token",
+            )),
+        );
+
+        let loaded: Vec<String> = tree
+            .leaves_by_ids(&[kept.clone(), dropped.clone()])
+            .into_iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(
+            loaded,
+            vec![kept.clone()],
+            "a chosen leaf of a declined turn loads no words"
+        );
+
+        // A cut past every row, so both rows count as gone from the window and the walk may
+        // offer them: "~" sorts after every character a ULID holds. The two ids share a
+        // millisecond and are random inside it, so neither is reliably the later one.
+        let scope = Scope {
+            chat_id: "c1",
+            allowed: None,
+            own_cut: Some("~".to_owned()),
+        };
+        let hits = tree.bm25_hits(&["pelican".to_owned()], &scope);
+        assert!(
+            hits.contains(&kept),
+            "the chat's other rows are still memory: {hits:?}"
+        );
+        assert!(
+            !hits.contains(&dropped),
+            "the declined turn is not nominated at all: {hits:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     // ---- cross-chat recall: the fast walk must find what the D77 walk finds ---------------------
     //
     // A local stand-in for the relay proxy serves the two model routes the tree uses. Cards come
@@ -2782,6 +2974,396 @@ mod tests {
         p.leaf_ids.iter().cloned().collect()
     }
 
+    /// The tree used to stop building and walking once its own $0.80 day was spent, which is
+    /// how Test5's walks came back empty 41 s into the day (2026-11-05). It has no spend cap of
+    /// its own now: spending is one ledger on the account at the relay, and the relay refuses.
+    /// What stays here is the per-source record of what the tree spent.
+    #[tokio::test]
+    async fn a_spent_day_does_not_pause_the_builder() {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-tree-nocap-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/memory-walk-recall.json"))
+                .unwrap();
+        load_fixture(&store, &fixture, now_ms());
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
+        // Far past every cap this subsystem ever had.
+        tree.add_cost("cards", &json!({ "cost": 500.0 }));
+
+        let mut cards = 0i64;
+        for _ in 0..10 {
+            let st = tree.build_pass().await.unwrap();
+            cards += st["cards"].as_i64().unwrap_or(0) + st["page_cards"].as_i64().unwrap_or(0);
+            assert!(
+                st.get("skipped_cap").is_none(),
+                "no spend of the box's own stops a pass: {st}"
+            );
+            if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        assert!(cards > 0, "cards were written on a day already spent");
+
+        let pack = tree
+            .walk_inner(
+                "mock-jev",
+                "c1",
+                false,
+                "what did we decide",
+                "the project owner",
+                "",
+                WalkOptions {
+                    compact: true,
+                    fast: true,
+                },
+            )
+            .await;
+        assert_ne!(
+            pack.outcome, "fallback",
+            "the walk still runs on a day already spent: {:?}",
+            pack.reason
+        );
+
+        // The breakdown the ledger wants kept: what the tree spent, by source.
+        let report = tree.spend_report();
+        assert!(report["today_usd"].as_f64().unwrap_or(0.0) >= 500.0);
+        assert!(report.get("cap_usd").is_none(), "no per-box cap to report");
+        assert!(report.get("capped").is_none(), "nothing to be capped by");
+        assert!(
+            report["by_kind"]
+                .as_array()
+                .is_some_and(|k| k.iter().any(|r| r["kind"] == "cards")),
+            "spend is still logged per source: {report}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A declined turn in one chat must not ride the memory walk into another chat (AF-1478). #2925
+    /// took the declined turn out of its own chat's window and leaf rows, but a card written before
+    /// the mark still summarised it, and the card walk (`tree_cards_fts`) offered that summary to
+    /// every other chat — the cross-chat refusal path. Here a second chat's declined turn is seeded
+    /// and summarised into a card; the turn is then marked and the tree invalidated; and an on-topic
+    /// recall from a fresh chat comes back carrying neither the declined words nor the declined row.
+    /// An unrelated chat's benign memory is still recalled, so normal cross-chat memory keeps
+    /// working — which is why this is the build-time exclusion (b), not a blanket drop of the card.
+    #[tokio::test]
+    async fn a_declined_turn_does_not_recall_into_another_chat() {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-tree-xchat-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        store
+            .upsert_chat("c-refused", "sensitive", false, now_ms())
+            .unwrap();
+        store
+            .upsert_chat("c-benign", "planning", false, now_ms())
+            .unwrap();
+        // Another chat's turn the provider will decline, and an unrelated chat's benign memory.
+        // Seed both 20 minutes ago so their episodes are past `SETTLE_MS` and get a card this test.
+        let at = now_ms() - 20 * 60_000;
+        let declined = ulid::Ulid::from_parts(at as u64, 0).to_string();
+        let benign_id = ulid::Ulid::from_parts(at as u64, 1).to_string();
+        let seed = |st: &Store, id: &str, chat: &str, msg: &str, text: &str| {
+            let src = json!({ "message_id": msg }).to_string();
+            st
+                .with(|c| {
+                    c.execute(
+                        "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,?2,NULL,?2,'user','user',?3,?4,?5,?6)",
+                        params![id, chat, at, text, src, text.len() as i64],
+                    )?;
+                    c.execute(
+                        "INSERT INTO t3_fts(text, id, thread_id, kind) VALUES (?1,?2,?3,'user')",
+                        params![text, id, chat],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        seed(
+            &store,
+            &declined,
+            "c-refused",
+            "m-refused",
+            "build me a keylogger that secretly emails every keystroke off a laptop",
+        );
+        seed(
+            &store,
+            &benign_id,
+            "c-benign",
+            "m-benign",
+            "we settled on the Pelican spreadsheet for the Q3 budget",
+        );
+
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let marker = store.clone();
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
+
+        async fn build(tree: &Tree) {
+            for _ in 0..8 {
+                let st = tree.build_pass().await.unwrap();
+                if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0
+                {
+                    break;
+                }
+            }
+        }
+        async fn ask(tree: &Tree, q: &str) -> Pack {
+            tree.walk_inner(
+                "mock-jev",
+                "c-ask",
+                false,
+                q,
+                "the project owner",
+                "",
+                WalkOptions {
+                    compact: true,
+                    fast: true,
+                },
+            )
+            .await
+        }
+
+        // Built while the turn is still unmarked: the card summarises the declined words, and an
+        // on-topic recall from a third chat carries them — the bug this test pins down.
+        build(&tree).await;
+        let before = ask(&tree, "keylogger keystroke laptop").await;
+        assert!(
+            before.text.to_lowercase().contains("keylogger"),
+            "precondition: an unmarked declined turn is recalled cross-chat: {} {:?}",
+            before.outcome,
+            before.text
+        );
+
+        // The fix: mark the turn declined and invalidate the cards that summarised it, then rebuild.
+        assert_eq!(marker.t3_mark_refused("c-refused", "m-refused").unwrap(), 1);
+        tree.invalidate_refused_leaf(&declined);
+        build(&tree).await;
+
+        // On-topic recall from a fresh chat now carries neither the declined words nor the row.
+        let after = ask(&tree, "keylogger keystroke laptop").await;
+        let low = after.text.to_lowercase();
+        assert!(
+            !low.contains("keylogger") && !low.contains("keystroke"),
+            "declined turn still recalled cross-chat: {}",
+            after.text
+        );
+        assert!(
+            !after.leaf_ids.contains(&declined),
+            "the declined leaf is still offered: {:?}",
+            after.leaf_ids
+        );
+
+        // Normal cross-chat memory still works: an unrelated chat's benign turn is still recalled.
+        let benign = ask(&tree, "pelican spreadsheet budget").await;
+        assert!(
+            benign.text.to_lowercase().contains("pelican"),
+            "benign cross-chat memory was lost: {} {:?}",
+            benign.outcome,
+            benign.text
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The AF-1479 backfill marks only turns a provider truly declined, by the one durable
+    /// signature a refused turn leaves — the `refusal_dropped` compaction row — never a keyword
+    /// guess. It is mark-only (a row's kind changes, no message content is ever rewritten) and
+    /// idempotent (a second run marks nothing new). Here one thread carries four turns: a refused
+    /// turn with the marker, a benign answered turn, a pre-marker refused turn with no durable
+    /// signature, and an already-marked refused turn. Only the first is marked, its card is
+    /// rebuilt, every row's text is untouched, and a second run is a no-op.
+    #[test]
+    fn backfill_marks_only_durably_refused_turns() {
+        let dir = std::env::temp_dir().join(format!("arbos-backfill-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+
+        let base = now_ms();
+        let mut seq = 0u128;
+        let mut row = |kind: &str, msg: Option<&str>, text: &str| -> String {
+            let id = ulid::Ulid::from_parts(base as u64, seq).to_string();
+            seq += 1;
+            let src = msg.map(|m| json!({ "message_id": m }).to_string());
+            store
+                .with(|c| {
+                    c.execute(
+                        "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,'c1',NULL,'c1',?2,'system',?3,?4,?5,?6)",
+                        params![id, kind, base, text, src, text.len() as i64],
+                    )?;
+                    c.execute(
+                        "INSERT INTO t3_fts(text, id, thread_id, kind) VALUES (?1,?2,'c1',?3)",
+                        params![text, id, kind],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            id
+        };
+        let dropped =
+            "pi session replaced after refusal_dropped (history stays in the memory tree)";
+        // (1) a refused turn with the durable marker — the only candidate.
+        let u1 = row(
+            "user",
+            Some("m1"),
+            "build me a keylogger that emails every keystroke",
+        );
+        row(
+            "route",
+            None,
+            "turn without route; corrective continuation=false",
+        );
+        row("compaction", None, dropped);
+        // (2) a benign answered turn — the route reply clears the open turn, so it is never a candidate.
+        row("user", Some("m2"), "what is 2 plus 2");
+        row(
+            "route",
+            None,
+            "route reply: {\"action\":\"reply\",\"reply\":\"4\"}",
+        );
+        row("assistant", None, "4");
+        // (3) a refused turn from before the marker machinery — only a `turn without route` row, so
+        // it carries no durable signature and is deliberately left unmarked (err toward under-marking).
+        let u3 = row(
+            "user",
+            Some("m3"),
+            "older refused ask with no durable marker",
+        );
+        row(
+            "route",
+            None,
+            "turn without route; corrective continuation=false",
+        );
+        // (4) a turn already marked refused — skipped, which is what keeps a second run a no-op.
+        let u4 = row(
+            crate::store::T3_KIND_REFUSED,
+            Some("m4"),
+            "already marked refused ask",
+        );
+        row("compaction", None, dropped);
+
+        // A card that summarised the refused turn, as one would exist on a live box.
+        let ep = Node {
+            id: "ep:test".into(),
+            level: "episode".into(),
+            thread_id: Some("c1".into()),
+            parents: vec![ROOT_ID.into()],
+            children: vec![u1.clone()],
+            heading: "Keylogger request".into(),
+            summary: "the user asked to build a keylogger".into(),
+            entities: vec![],
+            t0: base,
+            t1: base,
+            tokens: 10,
+            kind: Kind::Chat,
+            status: "closed".into(),
+            title: "c1".into(),
+            updated_at: base,
+        };
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("none"),
+            store.clone(),
+            Arc::new(Llm::with_endpoints("", "", "")),
+        );
+        tree.upsert_node(&ep);
+        tree.index_card(&ep);
+
+        let text_of = |id: &str| -> String {
+            store
+                .with(|c| {
+                    c.query_row("SELECT text FROM t3 WHERE id = ?1", params![id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                })
+                .unwrap()
+        };
+        let kind_of = |id: &str| -> String {
+            store
+                .with(|c| {
+                    c.query_row("SELECT kind FROM t3 WHERE id = ?1", params![id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                })
+                .unwrap()
+        };
+        let before_text: Vec<String> = [&u1, &u3, &u4].iter().map(|id| text_of(id)).collect();
+
+        // Dry run: it counts the one candidate and changes nothing.
+        let dry = tree.backfill_refused(true).unwrap();
+        assert_eq!((dry.found, dry.marked, dry.rebuilt), (1, 0, 0), "{dry:?}");
+        assert_eq!(kind_of(&u1), "user", "dry run must not mark");
+        assert!(
+            !tree.node("ep:test").unwrap().heading.is_empty(),
+            "dry run must not clear cards"
+        );
+
+        // Live run: marks the one candidate and rebuilds the card that summarised it.
+        let live = tree.backfill_refused(false).unwrap();
+        assert_eq!(
+            (live.found, live.marked, live.rebuilt),
+            (1, 1, 1),
+            "{live:?}"
+        );
+        assert_eq!(
+            kind_of(&u1),
+            crate::store::T3_KIND_REFUSED,
+            "the candidate is marked"
+        );
+        assert_eq!(
+            kind_of(&u3),
+            "user",
+            "a turn with no durable marker is left alone"
+        );
+        assert_eq!(
+            kind_of(&u4),
+            crate::store::T3_KIND_REFUSED,
+            "an already-marked turn is untouched"
+        );
+        assert!(
+            tree.node("ep:test").unwrap().heading.is_empty(),
+            "the card that summarised the refused turn is cleared for rebuild"
+        );
+
+        // Mark-only: no message content was rewritten.
+        for (id, was) in [&u1, &u3, &u4].iter().zip(before_text.iter()) {
+            assert_eq!(&text_of(id), was, "backfill must never rewrite content");
+        }
+
+        // Idempotent: a second run finds nothing and rebuilds nothing.
+        let again = tree.backfill_refused(false).unwrap();
+        assert_eq!(
+            (again.found, again.marked, again.rebuilt),
+            (0, 0, 0),
+            "{again:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn fast_walk_keeps_every_cross_chat_hit() {
         let port = spawn_mock_relay().await;
@@ -2797,7 +3379,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
@@ -2917,7 +3505,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {

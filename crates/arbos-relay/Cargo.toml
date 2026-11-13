@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-description = "The one service outside the boxes: registry, pairing, sync rooms, blobs, model proxy, Daytona, push queue"
+description = "The one service outside the boxes: registry, pairing, sync rooms, blobs, model proxy, box fleet, push queue"
 
 [dependencies]
 arbos-core.workspace = true
@@ -30,10 +30,20 @@ chrono-tz = "0.10"
 croner = "3"
 sha2.workspace = true
 hex.workspace = true
+# Wallet links (`wallets.rs`): verify an sr25519 proof over an SS58 address; no keys here.
+schnorrkel = "0.11"
+bs58 = "0.5"
+blake2 = "0.10"
 nix.workspace = true
 base64.workspace = true
+url.workspace = true
 rand.workspace = true
 aes-gcm = "0.10"
 hmac = "0.12"
 ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "gif", "webp"] }
+
+[dev-dependencies]
+# The TLS server the boxd client's tests dial. Both are what reqwest already builds.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

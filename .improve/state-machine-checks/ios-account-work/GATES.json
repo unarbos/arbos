@@ -1,0 +1,367 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/App/ArbosApp.swift": "0220b554379a02bc94eda77be44484106e2c0d91f29dd67d8c7136efd3d6f6aa",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Store/DevicesStore.swift": "ccb7a61bb096d639cc28c35c93fa5895ca77b0b299641c98d208f6868cb4583c",
+    "apps/ios/Arbos/Arbos/Store/FirstLogin.swift": "0e9e95cece6f8b5febfe90fe3b495727321c6ffd7bf1c0f09fabc3a6351b7632",
+    "apps/ios/Arbos/Arbos/Store/PushManager.swift": "8ec8066333559fce83bde2b9e2a1456fa61bd6ccb2a42fc0c9e35adbcd55bd01",
+    "apps/ios/Arbos/Arbos/Store/SecretsStore.swift": "2f9b7b30b54c748f470b9d4a8879cc9ec54f467623940f7bb4d82586a7a9e3d4",
+    "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "44df2eeb3bbf93d8b9f65e597cf2feeffb79e342734ddfdd2e9f42735142c932",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/UI/AvatarPickerSheet.swift": "87f2194ba44a773207b90187d2b07574d64e439eb5a1f2d9ff37882863f7f84b",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "4571bcc26be7bb8fd7ccd39c85939b5ff5d042021b5a597497290fdb1c84273b",
+    "apps/ios/Arbos/Arbos/UI/Confirm.swift": "403bead31c038e936be09378419cb9f50e6c0ffedb8bc9bf17287488cd0c44ee",
+    "apps/ios/Arbos/Arbos/UI/FeedbackSheet.swift": "ac49684aa7ae1690991edabef98d0014b9ab19e3bcb317e248493af00e2dfa44",
+    "apps/ios/Arbos/Arbos/UI/FirstLoginView.swift": "8afd4760e289e0f98878b75ed98be14aa0cd1a19705581b6e9999aeb06272977",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "a15f4914c8814e071b5b7965bd20639f00621479e0c6a192c15b485c40ca4537",
+    "apps/ios/Arbos/Arbos/UI/HomeView.swift": "c718c4b5649ae5a51d62fffb7be003d554b72ca787b3a390e8bd0cc43ce758e0",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "e824fa221b4834f64d76e36ca53670f9ea5fecf8d75ec32058cd13c299e7dfe8",
+    "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "a3de3c740086f6ac3640c9741d37d6743b19c960a27c0220ae8d14c9797968a6",
+    "apps/ios/Arbos/Arbos/UI/ProfilePages.swift": "5abdc957ed6932d6c3b7e59200cd21e2737dcfd36fd005c9f77b7e9b3eefbab0",
+    "apps/ios/Arbos/Arbos/UI/SecretsViews.swift": "1ab9b08e10f425dcbe2b05a0cd15719a2fd9d02578725238d7f2e79cdf06e9b7",
+    "apps/ios/Arbos/Arbos/UI/ServerChannelsView.swift": "23d167a1c23206ae5e339fc56a698a365924cd8ddce1680b2b9811c2cb17b335",
+    "apps/ios/Arbos/Arbos/UI/SettingsView.swift": "8382795bb2f0b389cf9fff49c0d14927813a697f3bb95abec6874ead9a89d139",
+    "apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj": "835d1e3265e273de9a2c2d98ee90f7cff71375cd6c8d1a18b627b50b6ab72657"
+  },
+  "source_stable": true,
+  "gates": [
+    {
+      "name": "directory",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 1.5430267079500481,
+      "evidence": "retained/directory.json"
+    },
+    {
+      "name": "registry",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.8963437499478459,
+      "evidence": "retained/registry.json"
+    },
+    {
+      "name": "machine",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.7798764589242637,
+      "evidence": "retained/machine.json"
+    },
+    {
+      "name": "pins",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.7305119159864262,
+      "evidence": "retained/pins.json"
+    },
+    {
+      "name": "poll_data",
+      "passed": 9,
+      "failed": 0,
+      "expected": 9,
+      "ok": true,
+      "seconds": 0.8510111250216141,
+      "evidence": "retained/poll_data.json"
+    },
+    {
+      "name": "people",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.7766595410648733,
+      "evidence": "retained/people.json"
+    },
+    {
+      "name": "servers",
+      "passed": 8,
+      "failed": 0,
+      "expected": 8,
+      "ok": true,
+      "seconds": 0.7678863750770688,
+      "evidence": "retained/servers.json"
+    },
+    {
+      "name": "store_docs",
+      "passed": 4,
+      "failed": 0,
+      "expected": 4,
+      "ok": true,
+      "seconds": 0.861386000062339,
+      "evidence": "retained/store_docs.json"
+    },
+    {
+      "name": "matrix_entry",
+      "passed": 4,
+      "failed": 0,
+      "expected": 4,
+      "ok": true,
+      "seconds": 0.7855212499853224,
+      "evidence": "retained/matrix_entry.json"
+    },
+    {
+      "name": "secrets",
+      "passed": 9,
+      "failed": 0,
+      "expected": 9,
+      "ok": true,
+      "seconds": 0.6883546659955755,
+      "evidence": "retained/secrets.json"
+    },
+    {
+      "name": "push_admission",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.6667405420448631,
+      "evidence": "retained/push_admission.json"
+    },
+    {
+      "name": "feedback_capture",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.7762385420501232,
+      "evidence": "retained/feedback_capture.json"
+    },
+    {
+      "name": "startup",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.776776458020322,
+      "evidence": "retained/startup.json"
+    },
+    {
+      "name": "notification",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.586571584106423,
+      "evidence": "retained/notification.json"
+    },
+    {
+      "name": "push_registration",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.903508416027762,
+      "evidence": "retained/push_registration.json"
+    },
+    {
+      "name": "draft_sends",
+      "passed": 9,
+      "failed": 0,
+      "expected": 9,
+      "ok": true,
+      "seconds": 0.902610250050202,
+      "evidence": "retained/draft_sends.json"
+    },
+    {
+      "name": "reset",
+      "passed": 9,
+      "failed": 0,
+      "expected": 9,
+      "ok": true,
+      "seconds": 0.8789044579025358,
+      "evidence": "retained/reset.json"
+    },
+    {
+      "name": "uploads",
+      "passed": 11,
+      "failed": 0,
+      "expected": 11,
+      "ok": true,
+      "seconds": 0.8723620830569416,
+      "evidence": "retained/uploads.json"
+    },
+    {
+      "name": "identity",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.6545966250123456,
+      "evidence": "retained/identity.json"
+    },
+    {
+      "name": "media",
+      "passed": 8,
+      "failed": 0,
+      "expected": 8,
+      "ok": true,
+      "seconds": 0.7896321250591427,
+      "evidence": "retained/media.json"
+    },
+    {
+      "name": "memo",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.7261587500106543,
+      "evidence": "retained/memo.json"
+    },
+    {
+      "name": "forward",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.8684508339501917,
+      "evidence": "retained/forward.json"
+    },
+    {
+      "name": "actions",
+      "passed": 19,
+      "failed": 0,
+      "expected": 19,
+      "ok": true,
+      "seconds": 0.9055607090704143,
+      "evidence": "retained/actions.json"
+    },
+    {
+      "name": "connectors",
+      "passed": 6,
+      "failed": 0,
+      "expected": 6,
+      "ok": true,
+      "seconds": 0.8208125000819564,
+      "evidence": "retained/connectors.json"
+    },
+    {
+      "name": "ui_identity",
+      "passed": 4,
+      "failed": 0,
+      "expected": 4,
+      "ok": true,
+      "seconds": 0.6069231659639627,
+      "evidence": "retained/ui_identity.json"
+    },
+    {
+      "name": "firstlogin",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.6652053749421611,
+      "evidence": "retained/firstlogin.json"
+    },
+    {
+      "name": "people_actions",
+      "passed": 12,
+      "failed": 0,
+      "expected": 12,
+      "ok": true,
+      "seconds": 0.7374557089060545,
+      "evidence": "retained/people_actions.json"
+    },
+    {
+      "name": "avatar_state",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.673638500040397,
+      "evidence": "retained/avatar_state.json"
+    },
+    {
+      "name": "feedback_send",
+      "passed": 5,
+      "failed": 0,
+      "expected": 5,
+      "ok": true,
+      "seconds": 0.8870977909537032,
+      "evidence": "retained/feedback_send.json"
+    },
+    {
+      "name": "fun_picker",
+      "passed": 7,
+      "failed": 0,
+      "expected": 7,
+      "ok": true,
+      "seconds": 0.7501785840140656,
+      "evidence": "retained/fun_picker.json"
+    },
+    {
+      "name": "final_edges",
+      "passed": 7,
+      "failed": 0,
+      "expected": 7,
+      "ok": true,
+      "seconds": 0.8084583749296144,
+      "evidence": "retained/final_edges.json"
+    },
+    {
+      "name": "connect_reveal",
+      "passed": 3,
+      "failed": 0,
+      "expected": 3,
+      "ok": true,
+      "seconds": 0.6338134169345722,
+      "evidence": "retained/connect_reveal.json"
+    },
+    {
+      "name": "settings-actions",
+      "passed": 19,
+      "failed": 0,
+      "expected": 19,
+      "ok": true,
+      "seconds": 1.1824477079790086,
+      "evidence": "retained/settings-actions.json"
+    },
+    {
+      "name": "settings-views",
+      "passed": 10,
+      "failed": 0,
+      "expected": 10,
+      "ok": true,
+      "seconds": 1.1086016249610111,
+      "evidence": "retained/settings-views.json"
+    },
+    {
+      "name": "server-actions",
+      "passed": 18,
+      "failed": 0,
+      "expected": 18,
+      "ok": true,
+      "seconds": 1.1832977089798078,
+      "evidence": "retained/server-actions.json"
+    },
+    {
+      "name": "server-views",
+      "passed": 9,
+      "failed": 0,
+      "expected": 9,
+      "ok": true,
+      "seconds": 2.054781417013146,
+      "evidence": "retained/server-views.json"
+    },
+    {
+      "name": "profile",
+      "passed": 7,
+      "failed": 0,
+      "expected": 7,
+      "ok": true,
+      "seconds": 0.7762068749871105,
+      "evidence": "retained/profile.json"
+    }
+  ],
+  "passed": 280,
+  "failed": 0,
+  "seconds": 31.8853619589936
+}

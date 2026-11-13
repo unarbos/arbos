@@ -33,9 +33,11 @@ struct RootView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack {
             if model.isPaired {
                 MainShellView()
+                    .id(model.accountLifetime.ticket)
             } else {
                 SignInView()
             }
@@ -44,6 +46,7 @@ struct RootView: View {
             // into the greeting bubble of the chat underneath.
             if model.isPaired, let firstLogin = model.firstLogin {
                 FirstLoginView(state: firstLogin)
+                    .id(model.accountLifetime.ticket)
                     .zIndex(10)
                     .transition(.asymmetric(insertion: .identity, removal: .opacity))
             }
@@ -82,8 +85,9 @@ struct RootView: View {
         // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for
         // the name before the first chat; the notifications primer waits for both.
         .sheet(isPresented: Binding(get: { model.needsProfileSetup },
-                                    set: { model.needsProfileSetup = $0 })) {
+                                    set: { if model.acceptsAccountWork(work) { model.needsProfileSetup = $0 } })) {
             ProfileEditView(onboarding: true)
+                    .id(model.accountLifetime.ticket)
                 .environmentObject(model)
                 .environment(\.theme, theme)
                 .presentationDetents([.height(420), .large])
@@ -93,11 +97,22 @@ struct RootView: View {
                 .interactiveDismissDisabled(true)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+        // The wallet's once-only steps (Sync/Wallet.swift) wait for profile setup and the
+        // first-login screen, like the primer.
+        .sheet(item: Binding(get: { model.needsProfileSetup || model.firstLogin != nil ? nil : model.walletPrompt },
+                             set: { model.walletPrompt = $0 })) { prompt in
+            WalletPromptSheet(prompt: prompt)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.large])
+                .presentationBackground(theme.bg)
+        }
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
-        .sheet(item: $model.profile, onDismiss: { model.profilePath = [] }) { target in
+        .sheet(item: $model.profile, onDismiss: { if model.acceptsAccountWork(work) { model.profilePath = [] } }) { target in
             ProfileSheet(target: target)
+                    .id(model.accountLifetime.ticket)
                 .environmentObject(model)
                 .environment(\.theme, theme)
                 .presentationDetents([.large])
@@ -114,7 +129,7 @@ struct RootView: View {
                 InCallOverlay(expected: expectedPeople)
                     .environmentObject(model)
                     .environment(\.theme, theme)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.fromTop)
             }
         }
         .animation(.spring(duration: 0.3), value: calls.isPresented)
@@ -131,14 +146,15 @@ struct RootView: View {
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
         .sheet(isPresented: $feedback.isPresented) {
-            FeedbackSheet().environmentObject(model).environment(\.theme, theme)
+            FeedbackSheet()
+                    .id(model.accountLifetime.ticket).environmentObject(model).environment(\.theme, theme)
         }
         // Shake or a system screenshot → Send feedback (TestFlight-style screenshot path).
         .onReceive(NotificationCenter.default.publisher(for: FeedbackCenter.shake)) { _ in
-            openFeedbackFromGesture()
+            openFeedbackFromGesture(work: work)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
-            openFeedbackFromGesture()
+            openFeedbackFromGesture(work: work)
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: model.firstLogin == nil) { _, _ in schedulePrimer(model.isPaired) }
@@ -150,20 +166,41 @@ struct RootView: View {
             // After `.background`, rooms redial so Syncing… cannot stick
             // ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
             model.noteScenePhase(phase)
-            if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread(); await CallManager.shared.sendVoipTokenIfNeeded(); await model.checkForUpdate() } }
+            if phase == .active {
+                // Force-upload VoIP + APNs tokens every time we come to the front
+                // ([feedback closed-app-call-ring-2026-11-11], TestFlight
+                // AFjyB3HHRZ7GzKtZHyvxIUw). The relay drops dead tokens
+                // (BadDeviceToken / Unregistered); without `force` the phone keeps
+                // its local "already registered" mark and never puts them back —
+                // callers then see "isn't open — they'll see a missed call" and the
+                // closed-app ring (PushKit / CallKit) never fires again.
+                Task {
+                    await push.refreshStatus()
+                    await push.sendTokenIfNeeded(force: true)
+                    await model.refreshUnread()
+                    await CallManager.shared.sendVoipTokenIfNeeded(force: true)
+                    await model.checkForUpdate()
+                }
+            }
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
         .onOpenURL { url in
             // Invite links (D88): arbos://join/<code> — what arbos.life/s/<code> hands to the app.
             if url.scheme == "arbos", url.host == "join" {
                 let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinFromLink(code: code) }
+                Task {
+                    guard model.acceptsAccountWork(work) else { return }
+                    await model.joinFromLink(code: code, expectedOwner: work?.owner)
+                }
                 return
             }
             // Group invite links: arbos://join-group/<code> — what arbos.life/g/<code> hands to the app.
             if url.scheme == "arbos", url.host == "join-group" {
                 let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinGroupFromLink(code: code) }
+                Task {
+                    guard model.acceptsAccountWork(work) else { return }
+                    await model.joinGroupFromLink(code: code, expectedOwner: work?.owner)
+                }
                 return
             }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
@@ -174,20 +211,39 @@ struct RootView: View {
     private var expectedPeople: [CallPerson] { calls.call.map(model.expectedCallPeople) ?? [] }
 
     /// Shake / screenshot → capture the current screen and open the feedback sheet.
-    private func openFeedbackFromGesture() {
+    ///
+    /// The chat is read from the topmost chat anywhere in the path, not from `path.last`,
+    /// because a profile now pushes over the chat it was opened from: reading only the top
+    /// would have named the screen a chat and carried no chat id at all.
+    private func openFeedbackFromGesture(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard model.isPaired else { return }
-        feedback.open(screen: model.path.isEmpty ? "home" : "chat",
-                      chatId: model.path.last.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
-                      projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
+        let screen: String
+        switch model.path.last {
+        case .none: screen = "home"
+        case .profile?: screen = "profile"
+        case .ownProfile?: screen = "settings"
+        case .newMessage?: screen = "new-message"
+        case .chat?, .server?: screen = "chat"
+        }
+        let chat = model.path.last(where: { (route: AppModel.Route) -> Bool in
+            if case .chat = route { return true } else { return false }
+        })
+        feedback.open(screen: screen,
+                      chatId: chat.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
+                      projectId: chat.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
     }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
     private func schedulePrimer(_ paired: Bool) {
         guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer,
               model.firstLogin == nil else { return }
+        let work = model.accountWork()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard model.acceptsAccountWork(work) else { return }
             // Never on top of another sheet (feedback, settings, profile setup…) or the first-login screen.
-            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil { showPrimer = true }
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil,
+               model.walletPrompt == nil { showPrimer = true }
         }
     }
 
@@ -214,32 +270,32 @@ struct MainShellView: View {
 /// The profile sheet: a NavigationStack rooted on the page so a tapped member
 /// (or an agent's owner) is pushed and its back chevron (the page's own
 /// `ProfileTopBar`) pops to the page as it was.
+///
+/// Since 2026-11-01 a profile reached from a chat, the home list or a channel list is a
+/// push onto the root stack instead (Jacob's ruling). This sheet is left for the one case
+/// that cannot push: a profile opened from inside another sheet, which has no route onto
+/// the stack underneath it. Everything in it runs with `profileHost` as `.sheet`, so the
+/// member rows of a page shown here push into this stack rather than the root's.
 private struct ProfileSheet: View {
     @EnvironmentObject private var model: AppModel
     let target: ProfileTarget
 
     var body: some View {
-        if target.pushesPeople {
-            NavigationStack(path: $model.profilePath) {
-                page(target)
-                    .toolbar(.hidden, for: .navigationBar)
-                    .navigationDestination(for: ProfileTarget.self) { pushed in
-                        page(pushed).toolbar(.hidden, for: .navigationBar)
-                    }
-            }
-        } else {
-            page(target)
-        }
+        content.environment(\.profileHost, .sheet)
     }
 
     @ViewBuilder
-    private func page(_ target: ProfileTarget) -> some View {
-        switch target {
-        case .user(let p): UserProfileView(person: p)
-        case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
-        case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
-        case .server(let sid): ServerProfileView(serverId: sid)
-        case .channel(let cid): ChannelProfileView(channelId: cid)
+    private var content: some View {
+        if target.pushesPeople {
+            NavigationStack(path: $model.profilePath) {
+                ProfilePage(target: target)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationDestination(for: ProfileTarget.self) { pushed in
+                        ProfilePage(target: pushed).toolbar(.hidden, for: .navigationBar)
+                    }
+            }
+        } else {
+            ProfilePage(target: target)
         }
     }
 }

@@ -1,0 +1,94 @@
+{
+  "scope": "Root replay of frozen public adapters against the assembled live phase4 source",
+  "calls": {
+    "tests": 66,
+    "failed": 0,
+    "cases": [
+      {
+        "file": "check_swift.py",
+        "tests": 14,
+        "seconds": 2.0577108750585467
+      },
+      {
+        "file": "check_api.py",
+        "tests": 5,
+        "seconds": 0.870325917028822
+      },
+      {
+        "file": "check_mac.py",
+        "tests": 6,
+        "seconds": 1.8379208340775222
+      },
+      {
+        "file": "check_engine.py",
+        "tests": 6,
+        "seconds": 5.451794374966994
+      },
+      {
+        "file": "check_relay.py",
+        "tests": 17,
+        "seconds": 6.932990916073322
+      },
+      {
+        "file": "check_owned_http.py",
+        "tests": 4,
+        "seconds": 4.403286541928537
+      },
+      {
+        "file": "check_requests.py",
+        "tests": 3,
+        "seconds": 4.572779249981977
+      },
+      {
+        "file": "check_store_owner.py",
+        "tests": 11,
+        "seconds": 0.459389082971029
+      }
+    ]
+  },
+  "session_adapters": {
+    "ui": {
+      "exit_code": 0,
+      "stdout_sha256": "8cc6c391401c0cfa25860f53d88f14d12265532b728353fa75182a981b336106",
+      "selected_result": {
+        "seconds": 6.251134457997978,
+        "source_sha256": "6adb872142aad6c8db71aec2c4a9027bfbbf02a9323c0fad37cf9ae677538b84"
+      }
+    },
+    "backend": {
+      "exit_code": 0,
+      "stdout_sha256": "34809520b163ba1cd8dcc07edf9435b1a2541256c34910e5225c223b117b252b",
+      "selected_result": {
+        "seconds": 11.679778750054538
+      }
+    },
+    "matrix": {
+      "exit_code": 0,
+      "stdout_sha256": "5b9ed5733595ab19a9335dfc5236dea45800eb70c271eaf9698312b238e4720c",
+      "selected_result": {
+        "compile_exit": 0,
+        "seconds": 1.3074818750610575
+      }
+    },
+    "swift-auth": {
+      "exit_code": 0,
+      "stdout_sha256": "884c85b6d5ac5c9405c72f052e4b5848722f1f67ba48d7a69ced4cc8e2c1bb40",
+      "selected_result": {
+        "compile_seconds": 0.9551969160092995,
+        "compile_exit": 0
+      }
+    }
+  },
+  "generated_laws": {
+    "tests": 8,
+    "passed": 8,
+    "failed": 0,
+    "seeded_cases": 1792,
+    "duration_seconds": 3.916991208,
+    "strict_typescript_exit": 0
+  },
+  "limitations": [
+    "Source-extracted controllers use synthetic effect edges; no GUI/media/server behavior claimed.",
+    "Compiler/native helper gates are separate in NATIVE-GATES.json."
+  ]
+}

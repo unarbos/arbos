@@ -124,11 +124,7 @@ pub fn render(
         // person's pane opens, a second click — here or on their name in a
         // bubble — closes it.
         let part = profile_target::mark(
-            name_part(
-                people::avatar(image, person, AVATAR_HEADER, &theme),
-                label,
-                &theme,
-            ),
+            name_part(people::avatar(image, person, AVATAR_HEADER, &theme), label),
             &person.display_name(),
             state.profile_shows(&page),
         );
@@ -142,7 +138,6 @@ pub fn render(
         name_part(
             groups::picture(space, state, AVATAR_HEADER, &theme),
             name_label(space.name.clone(), &theme).into_any_element(),
-            &theme,
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
@@ -214,7 +209,7 @@ pub fn render(
             &theme,
             cx,
         );
-        let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
+        let part = profile_target::mark(name_part(picture, name_el), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
@@ -253,6 +248,13 @@ pub fn render(
 /// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
 /// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
 /// right pad (tighter when a "+" follows the name).
+///
+/// This box is the pill's **one** shape: the glass rim, the accent ring and
+/// the hover / pressed wash are all drawn on it (`highlight::washed` over the
+/// glass fill, the token's rule for a filled control). The wash used to sit on
+/// `name_part`'s smaller box instead, which lit a second rounded outline
+/// inside the rim and off its centre ([feedback header-pill-double-outline],
+/// Jacob 2026-11-05).
 pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
     let pill = div()
         .id("header-title")
@@ -268,9 +270,18 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
         } else {
             gpui::transparent_black()
         })
-        .min_w_0();
-    glass::header_surface(pill, theme)
+        .min_w_0()
+        .debug_selector(|| PILL_SURFACE.into());
+    highlight::washed(
+        glass::header_surface(pill, theme),
+        glass::header_style(theme).fill,
+        theme,
+    )
 }
+
+/// The debug selector of the pill's one highlighted shape — the box that wears
+/// the glass rim, the accent ring and the hover wash alike (`pill_frame`).
+pub(crate) const PILL_SURFACE: &str = "chat-header-pill-surface";
 
 /// The chat kinds the header serves. The connection capsule's rule is written
 /// per kind ([feedback offline-chip-group-header-2026-10-27]) so a new kind
@@ -551,7 +562,9 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
                 .mt(px(metrics::PILL_MT))
                 .child(
                     div()
-                        .flex_shrink_0()
+                        // Shrinks with a narrow chat column (the name inside truncates)
+                        // instead of running over the panes beside it.
+                        .min_w_0()
                         .max_w(px(460.0))
                         .debug_selector(|| "chat-header-pill".into())
                         .child(pill),
@@ -600,7 +613,6 @@ pub fn render_channel(
     let name_part = name_part(
         sidebar::server_picture(server, state, AVATAR_HEADER, &theme),
         title.into_any_element(),
-        &theme,
     )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.members_open = false;
@@ -662,15 +674,24 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
 /// The pill's picture + name for every chat kind: the one `identity::row`
 /// (fixed 22 pt slot, Grok's header gap), its own hit region so the tab
 /// segment and "+" can sit beside it.
-fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stateful<Div> {
+///
+/// A hit region only — it paints nothing. Its box is the pill's content box:
+/// a near-copy of the pill, 2 pt in top and bottom but 6 pt in on the left
+/// against `2 + pr` on the right. A `rounded_full` fill here therefore drew
+/// the pill's own outline a second time, off its centre ([feedback
+/// header-pill-double-outline]). The pill carries the highlight (`pill_frame`).
+fn name_part(picture: impl IntoElement, name: AnyElement) -> Stateful<Div> {
     identity::row(AVATAR_HEADER, identity::HEADER_GAP, picture, name)
         .id("header-name")
+        .debug_selector(|| NAME_PART.into())
         .h_full()
         .cursor_pointer()
-        .rounded_full()
-        .map(|el| highlight::button(el, theme))
         .pr(px(4.0))
 }
+
+/// The debug selector of the pill's name part, for the geometry that forbids a
+/// fill on it (`pill_highlight_tests`).
+pub(crate) const NAME_PART: &str = "chat-header-name";
 
 fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
@@ -1517,6 +1538,7 @@ mod glass_tests {
             assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
         }
         // Over the flat Matte page the pill is a step above it, not a plate.
+        // glass-lint: allow (a contrast measurement in a test; it paints nothing)
         let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
         assert!(
             (6.0..=24.0).contains(&lift),
@@ -1582,6 +1604,142 @@ mod glass_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+/// [feedback header-pill-double-outline] (Jacob, 2026-11-05, 10:40 CR, the
+/// Arbonites group): hovering the group or contact name pill drew **two**
+/// rounded outlines, the inner one off the outer one's centre, where one clean
+/// highlight belongs.
+///
+/// Two boxes were drawing one control's edge. The pill's own box carries the
+/// 1 pt glass rim (`glass::header_surface`) and the accent ring, and
+/// `name_part`'s box carried the highlight token's hover wash on a
+/// `rounded_full` of its own — the pill's content box, so the same shape and
+/// all but 4 pt of the height, but 6 pt in on the left against 12 on the right.
+/// Measured on Jacob's shot at 2 px/pt: the pill's rim spans x 39.5–271.5 and
+/// the wash ends at 248.5, 11.5 pt short of it. The wash is on the pill's box
+/// now; the name part is a hit region that paints nothing.
+#[cfg(test)]
+mod pill_highlight_tests {
+    use gpui::{div, prelude::*, px, Bounds, Pixels, TestAppContext};
+
+    use super::{bar_frame, metrics, name_part, pill_frame, NAME_PART, PILL_SURFACE};
+    use crate::ui::glass;
+    use crate::ui::theme::{Appearance, Surface, Theme, AVATAR_HEADER, TEXT_SMALL};
+
+    /// The pill of Jacob's shot: the real `pill_frame` and `name_part`, a
+    /// picture and "Arbonites", nothing beside them — a people group and a DM
+    /// carry no tab segment and no "+", so the name part is the pill's one
+    /// child and its 10 pt right pad is the pill's.
+    const PEOPLE_PR: f32 = 10.0;
+    /// `pill_frame`'s `border_2` — the accent ring's width, which insets the
+    /// pill's content box whether or not the ring is coloured in.
+    const BORDER: f32 = 2.0;
+
+    struct Pill;
+
+    impl gpui::Render for Pill {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let picture = div().size(px(AVATAR_HEADER)).rounded_full();
+            let name = div()
+                .text_size(px(TEXT_SMALL))
+                .child("Arbonites")
+                .into_any_element();
+            let pill = pill_frame(&theme, false, PEOPLE_PR).child(name_part(picture, name));
+            div().w(px(884.0)).h(px(200.0)).child(bar_frame(
+                None,
+                glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill),
+            ))
+        }
+    }
+
+    fn boxes(cx: &mut TestAppContext) -> (Bounds<Pixels>, Bounds<Pixels>) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Pill);
+        vcx.run_until_parked();
+        (
+            vcx.debug_bounds(PILL_SURFACE).expect("the pill is drawn"),
+            vcx.debug_bounds(NAME_PART).expect("the name part is drawn"),
+        )
+    }
+
+    /// The geometry that forbids a fill on the name part: it is the pill's
+    /// shape, near enough that its edge is read as the pill's, and it is not
+    /// concentric with it — 6 pt in on the left against 14 on the right. No
+    /// offset to tune here; only one of the two boxes may be lit, and it has to
+    /// be the one the rim is on.
+    #[gpui::test]
+    fn the_name_parts_box_is_an_offset_near_copy_of_the_pills(cx: &mut TestAppContext) {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for surface in [Surface::Glass, Surface::Matte] {
+                cx.update(|cx| cx.set_global(Theme::with(appearance, surface)));
+                let (pill, name) = boxes(cx);
+                let at = format!("{appearance:?} {surface:?}");
+                let f = |p: Pixels| -> f32 { p.into() };
+                let left = f(name.left()) - f(pill.left());
+                let right = f(pill.right()) - f(name.right());
+                let top = f(name.top()) - f(pill.top());
+                let bottom = f(pill.bottom()) - f(name.bottom());
+                assert_eq!(
+                    f(pill.size.height),
+                    metrics::PILL_HEIGHT,
+                    "pill height, {at}"
+                );
+                // The pill's 2 pt border and its pads: 4 pt on the left, `pr`
+                // on the right. Not concentric, so the two shapes can never
+                // agree, whatever offset anyone tunes.
+                assert_eq!(left, BORDER + 4.0, "name part's left inset, {at}");
+                assert_eq!(right, BORDER + PEOPLE_PR, "right inset, {at}");
+                assert_eq!(
+                    top, bottom,
+                    "the border insets it evenly top and bottom, {at}"
+                );
+                assert_eq!(
+                    f(pill.size.height) - f(name.size.height),
+                    2.0 * BORDER,
+                    "the name part is the pill's own shape, all but the border, {at}"
+                );
+            }
+        }
+    }
+
+    /// The body of a top-level `fn` in this file: its signature line to the
+    /// closing brace in column 0.
+    fn body(name: &str) -> String {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/header.rs"))
+            .expect("header.rs");
+        let head = format!("fn {name}(");
+        let mut lines = src.lines().skip_while(|l| !l.contains(&head));
+        let signature = lines
+            .next()
+            .unwrap_or_else(|| panic!("`fn {name}` is in this file"));
+        let rest: Vec<&str> = lines.take_while(|l| *l != "}").collect();
+        format!("{signature}\n{}", rest.join("\n"))
+    }
+
+    /// One source of truth for the pill's edge: the box `glass::header_surface`
+    /// draws the rim on is the box the highlight token washes, and the name
+    /// part paints nothing. A fill back on the name part brings the doubled
+    /// outline back, so it fails here.
+    #[test]
+    fn only_the_pill_itself_wears_the_pills_highlight() {
+        let name = body("name_part");
+        assert!(
+            !name.contains("highlight::") && !name.contains(".bg("),
+            "the name part is a hit region: it paints no fill of its own, because its box is not the pill's shape\n{name}"
+        );
+        let frame = body("pill_frame");
+        for owns in ["glass::header_surface(", "highlight::washed("] {
+            assert!(
+                frame.contains(owns),
+                "the pill's own box carries `{owns}` — rim and wash on one shape\n{frame}"
+            );
         }
     }
 }

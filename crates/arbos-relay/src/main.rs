@@ -1,4 +1,8 @@
 mod admin;
+mod agent_link;
+mod agent_link_read;
+mod agent_link_stream;
+mod agent_link_write;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -11,13 +15,13 @@ mod avatar_image;
 mod blobs;
 #[cfg(test)]
 mod box_row_tests;
+mod boxd;
 mod boxes;
 mod browser;
 mod calls;
 mod channels;
 mod connectors;
 mod credits;
-mod daytona;
 mod db;
 mod db_accounts;
 mod db_agent_messages;
@@ -37,6 +41,8 @@ mod fleet;
 mod gifs;
 mod goals;
 #[cfg(test)]
+mod group_access_tests;
+#[cfg(test)]
 mod group_name_tests;
 mod groups;
 mod image_sniff;
@@ -44,10 +50,13 @@ mod images;
 mod inspect;
 mod link_icons;
 mod livekit;
+#[cfg(test)]
+mod load_gate;
 mod local;
 mod matrix;
-mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;
@@ -58,11 +67,18 @@ mod people;
 mod perf;
 mod pins;
 #[cfg(test)]
-mod preview_token_tests;
+mod project_lookup_tests;
+#[cfg(test)]
+mod provider_retired_tests;
 mod proxy;
+mod proxy_trace;
+#[cfg(test)]
+mod proxy_trace_tests;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
+mod restart_lifetime;
 mod room_health;
 mod rooms;
 mod routines;
@@ -73,17 +89,15 @@ mod signin;
 mod site_icons;
 mod sites;
 mod skills;
-mod smoke;
 mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
-mod upgrade_carry;
-#[cfg(test)]
-mod upgrade_rollback_tests;
+mod usage;
 mod vault;
 mod vaults;
 mod voice;
+mod wallets;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -103,7 +117,7 @@ use crate::state::{AppState, AuthMode, Config};
 #[command(
     name = "arbos-relay",
     version,
-    about = "Arbos relay: registry, pairing, sync rooms, blobs, model proxy, Daytona"
+    about = "Arbos relay: registry, pairing, sync rooms, blobs, model proxy, boxes"
 )]
 struct Args {
     /// Listen address.
@@ -118,16 +132,18 @@ struct Args {
     /// Admin token for `POST /pair/new`; generated and printed when absent.
     #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
     admin_token: Option<String>,
-    /// Daytona snapshot name for new boxes.
+    /// Snapshot name new boxes are made from. It names the agentd image version
+    /// (`arbos-agent-<version>` → `…/arbos-agent:<version>`, `fleet::image_for_snapshot`).
+    ///
+    /// The variable keeps Daytona's name: the deploy worker writes it into relay.env on every
+    /// image roll and every live relay reads it, so renaming it here would need a config change on
+    /// the host rather than a code change.
     #[arg(
         long,
         env = "ARBOS_DAYTONA_SNAPSHOT",
         default_value = "arbos-agent-0.1.11"
     )]
-    daytona_snapshot: String,
-    /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
-    #[arg(long, env = "ARBOS_DAYTONA_DOCKERFILE")]
-    daytona_dockerfile: Option<PathBuf>,
+    default_snapshot: String,
     /// Directory served to boxes at /bootstrap/{file} (arbos-agentd, arbos-pi-ext.tar).
     #[arg(long, env = "ARBOS_BOOTSTRAP_DIR")]
     bootstrap_dir: Option<PathBuf>,
@@ -164,15 +180,6 @@ enum Cmd {
     Serve,
     /// Print a one-time pairing code (writes to the same SQLite file).
     PairCode,
-    /// D25 lifecycle check against the live Daytona API with timings (create → stop → start → archive → start → delete).
-    DaytonaSmoke {
-        /// Snapshot name; when absent, an inline Dockerfile (node:24 + pi) is built by Daytona.
-        #[arg(long)]
-        snapshot: Option<String>,
-        /// Keep the sandbox instead of deleting it.
-        #[arg(long)]
-        keep: bool,
-    },
 }
 
 #[tokio::main]
@@ -202,9 +209,6 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     let openai_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let daytona_key = std::env::var("DAYTONA_API_KEY")
         .ok()
         .filter(|s| !s.is_empty());
     let anthropic_base = args.anthropic_base.clone().unwrap_or_else(|| {
@@ -255,13 +259,13 @@ async fn main() -> anyhow::Result<()> {
         ),
         openai_images_base: args.openai_images_base.clone(),
         anthropic_base,
-        daytona_snapshot: args.daytona_snapshot.clone(),
-        daytona_dockerfile: args.daytona_dockerfile.clone(),
+        default_snapshot: args.default_snapshot.clone(),
         bootstrap_dir: args.bootstrap_dir.clone(),
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
         default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
+        boxd: boxd::Boxd::from_env()?,
         fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
@@ -291,16 +295,9 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         github_client_id,
         github_client_secret,
-        auth_redirects: env_nonempty("ARBOS_AUTH_REDIRECTS")
-            .map(|s| {
-                s.split(',')
-                    .map(|p| p.trim().to_owned())
-                    .filter(|p| !p.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        auth_redirects: auth_redirects_from_env(),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
-        default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
+        default_account_limit: credits::SpendLimit::from_env("ARBOS_DEFAULT_DAILY_CAP_USD"),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
         global_machine_daily_cap_usd: env_f64("ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD", 400.0),
         always_on: match env_nonempty("ARBOS_ALWAYS_ON").as_deref() {
@@ -325,17 +322,6 @@ async fn main() -> anyhow::Result<()> {
         Some(k) => connectors::crypto::RelayKey::derive(&k).subkey("jwt"),
         None => relay_key.subkey("jwt"),
     };
-    let daytona = daytona_key.map(|k| {
-        daytona::Daytona::new(
-            k,
-            std::env::var("DAYTONA_API_URL").ok(),
-            std::env::var("DAYTONA_ORG_ID").ok(),
-        )
-    });
-    if let Some(Cmd::DaytonaSmoke { snapshot, keep }) = args.cmd {
-        let dt = daytona.ok_or_else(|| anyhow::anyhow!("DAYTONA_API_KEY is required"))?;
-        return smoke::run(&dt, snapshot, keep).await;
-    }
     let data_dir_for_voice = args.data.clone();
     let state = AppState {
         db: db.clone(),
@@ -343,12 +329,12 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(300))
             .build()?,
-        daytona,
         rooms: Arc::new(RwLock::new(HashMap::new())),
         box_states: Arc::new(RwLock::new(HashMap::new())),
         local_children: Arc::new(Mutex::new(HashMap::new())),
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
+        wake_kick: Arc::default(),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
         decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -359,7 +345,6 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
-        upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
         push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
@@ -368,8 +353,8 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
-        fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
+        last_turn: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
@@ -377,12 +362,14 @@ async fn main() -> anyhow::Result<()> {
         default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
         started_at: std::time::Instant::now(),
         restart: Arc::new(crate::state::RestartSignal::default()),
+        revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         voice_inbox: crate::voice::VoiceInbox::default(),
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
+        link_hub: Arc::new(agent_link_stream::LinkHub::load(&db)),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     people::rename_agents_that_shadow_people(&state);
@@ -424,7 +411,8 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
-    upgrade::spawn_history_sweeper(state.clone()).await;
+    boxd::spawn_idle_sleeper(state.clone()).await;
+    boxd::spawn_cold_tier(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;
@@ -443,6 +431,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
+        .route(
+            "/auth/sign-out-everywhere",
+            post(signin::sign_out_everywhere),
+        )
         .route(
             "/auth/devices",
             get(signin::devices_list).post(export::mint_reader),
@@ -512,10 +504,18 @@ async fn main() -> anyhow::Result<()> {
             post(matrix::appservice::push_notify),
         )
         .route("/me/matrix", get(matrix::servers::me_matrix))
+        .route("/me/matrix/people", get(matrix::servers::me_matrix_people))
+        .route(
+            "/chats/{id}/matrix/history",
+            get(matrix::history::page).post(matrix::history::report),
+        )
         .route(
             "/_matrix/client/{*rest}",
             axum::routing::any(matrix::servers::proxy),
         )
+        // A file of an encrypted people chat is uploaded as ciphertext; the SDK has only this
+        // path for it (downloads are under /_matrix/client/v1/media).
+        .route("/_matrix/media/v3/upload", post(matrix::servers::proxy))
         .route(
             "/servers",
             get(matrix::servers::list).post(matrix::servers::create),
@@ -576,6 +576,10 @@ async fn main() -> anyhow::Result<()> {
             put(matrix::appservice::set_reads),
         )
         .route(
+            "/admin/matrix/people/{user}",
+            put(matrix::appservice::set_people_native),
+        )
+        .route(
             "/admin/matrix/pushers",
             post(matrix::appservice::backfill_pushers),
         )
@@ -589,10 +593,6 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{id}/voice",
             get(voice::get_agent_settings).put(voice::put_agent_settings),
-        )
-        .route(
-            "/admin/users/{id}/voice",
-            axum::routing::put(voice::put_user_cap),
         )
         .route("/voice/worker/hello", post(voice::worker_hello))
         .route("/voice/calls/{id}/inbox", get(voice::call_inbox))
@@ -621,12 +621,51 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/socket", get(outside::socket))
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/approvals/{id}", get(outside::approval_read))
         .route("/asp/connect/{id}", get(outside::connect_page))
         // Sidecar support (#2189): members, and the public texts an agent is handed.
         .route("/asp/chats/{id}/members", get(outside_sidecar::members))
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        .route("/acp/install.sh", get(outside_sidecar::acp_install_sh))
+        // Agent access links. The owner side takes an ordinary device bearer; the
+        // `/agent-link/*` routes take a `LinkPrincipal` and are the only routes an `arbl_`
+        // token can reach, because Axum will not call a handler whose extractor does not
+        // resolve. Default-deny by construction rather than by allowlist.
+        .route(
+            "/me/agent-links",
+            get(agent_link::list).post(agent_link::mint),
+        )
+        .route("/me/agent-links/{id}", delete(agent_link::revoke))
+        .route("/me/agent-links/{id}/activity", get(agent_link::activity))
+        .route("/agent-link/open/{secret}", get(agent_link::open_sheet))
+        .route("/agent-link/me", get(agent_link::me))
+        // PR 3: what a link may read. Every one takes a `LinkPrincipal`, so an `arbl_` bearer
+        // reaches these and nothing else in the relay.
+        .route("/agent-link/chats", get(agent_link_read::chats))
+        .route("/agent-link/chats/{id}", get(agent_link_read::chat))
+        .route(
+            "/agent-link/chats/{id}/messages",
+            get(agent_link_read::messages).post(agent_link_write::send),
+        )
+        .route("/agent-link/agents", get(agent_link_read::agents))
+        .route(
+            "/agent-link/agents/{id}/log",
+            get(agent_link_read::agent_log),
+        )
+        .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
+        .route("/agent-link/stream", get(agent_link_stream::stream))
+        // PR 5: what a `reply` link may write. A `read` link is refused by the handler, and the
+        // refusal is in the owner's activity log.
+        .route(
+            "/agent-link/chats/{id}/reactions",
+            post(agent_link_write::react),
+        )
+        .route(
+            "/agent-link/chats/{id}/typing",
+            post(agent_link_write::typing),
+        )
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))
@@ -637,14 +676,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
+        .route("/users/{id}/wallet", get(wallets::user_wallet))
+        .route(
+            "/me/wallet",
+            put(wallets::put_wallet).delete(wallets::delete_wallet),
+        )
         .route("/avatar-colors", get(people::avatar_colors))
-        .route("/avatar-leaves", get(people::avatar_leaves))
+        .route("/avatar-discs", get(people::avatar_discs))
         .route(
             "/chats",
             get(people::chats_list).post(people::chats_create_group),
         )
         .route("/chats/dm", post(people::dm_create))
         .route("/chats/join", post(people::group_join))
+        .route("/chats/search/messages", get(people::messages_search))
         .route(
             "/chats/{id}",
             get(people::chat_get)
@@ -708,6 +753,10 @@ async fn main() -> anyhow::Result<()> {
         // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
         // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
         .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/landed",
+            post(agent_messages::landed),
+        )
         .route(
             "/projects/{id}/agent-messages/{mid}/reply",
             post(agent_messages::reply),
@@ -790,14 +839,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/machine", get(api::machine))
         .route("/machine/start", post(api::machine_start))
         .route("/machine/stop", post(api::machine_stop))
-        .route("/machine/migrate", post(api::machine_migrate))
         .route("/machine/restart", post(api::machine_restart))
         .route("/machine/upgrade", post(upgrade::machine_upgrade))
         .route(
             "/admin/users/{id}/box/upgrade",
             post(upgrade::admin_upgrade),
         )
-        .route("/admin/users/{id}/box/repair", post(upgrade::admin_repair))
         .route(
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box).delete(api::admin_delete_user_box),
@@ -822,10 +869,6 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(admin::set_credits),
         )
         .route(
-            "/admin/projects/{id}/spend-cap",
-            axum::routing::put(admin::set_project_cap),
-        )
-        .route(
             "/admin/killswitch",
             get(admin::get_kill_switch).put(admin::set_kill_switch),
         )
@@ -835,6 +878,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/push", post(api::push))
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))
+        .route("/projects/{id}/sessions/usage", get(api::sessions_usage))
+        .route(
+            "/projects/{id}/sessions/{session}/usage",
+            get(api::session_usage),
+        )
         .route("/projects/{id}/timings", post(api::record_timing))
         .route("/projects/{id}/activity", post(api::set_activity))
         .route(
@@ -881,6 +929,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
+        )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(
@@ -1098,6 +1150,31 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// `ARBOS_AUTH_REDIRECTS`: the extra origins `/auth/github/start` may send the browser to.
+///
+/// Each entry has to name an origin (`https://arbos.life`), because that is how the relay
+/// compares it — scheme, host and port, never the start of the redirect. An entry that is not a
+/// URL with an origin would simply never match, so say so at start instead of letting sign-in
+/// fail later with a bare 400.
+fn auth_redirects_from_env() -> Vec<String> {
+    let Some(raw) = env_nonempty("ARBOS_AUTH_REDIRECTS") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .inspect(|entry| {
+            if signin::origin_of(entry).is_none() {
+                tracing::warn!(
+                    entry = %entry,
+                    "ARBOS_AUTH_REDIRECTS: not an origin (want scheme://host[:port]); this entry allows nothing"
+                );
+            }
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 fn env_f64(name: &str, default: f64) -> f64 {

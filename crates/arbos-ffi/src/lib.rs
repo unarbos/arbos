@@ -10,6 +10,7 @@ use arbos_client::room::{
     self as client_room, RoomAction as ClientAction, RoomSession as ClientSession,
 };
 use arbos_core::doc::{self, decode_vv, encode_vv, ChatDoc as CoreChatDoc};
+use arbos_core::poll::Poll;
 use arbos_core::wire::{self, Frame, FrameType as WireFrameType};
 use loro::Subscription;
 use serde_json::Value;
@@ -23,6 +24,8 @@ pub mod markdown;
 pub mod matrix;
 pub mod search;
 pub mod settings_search;
+pub mod transcript;
+pub mod wallet;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -268,6 +271,13 @@ pub struct DecodedFrame {
     pub ty: FrameType,
     pub header_json: String,
     pub payload: Vec<u8>,
+}
+
+/// A poll's plain-text form (the message text, the notification), or `None` when the fields
+/// are not a poll within bounds — the composer's one validity check (`docs/polls.md`).
+#[uniffi::export]
+pub fn poll_text(question: String, options: Vec<String>, multiple: bool) -> Option<String> {
+    Poll::new(&question, &options, multiple).map(|p| p.fallback_text())
 }
 
 /// Encode one binary room frame. `header_json` must be a JSON object.
@@ -861,6 +871,36 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
+    /// Append a poll message (`docs/polls.md`): its text part is the poll in plain words.
+    /// Does not commit. Errors when the fields are not a poll within bounds.
+    pub fn insert_poll_message(
+        &self,
+        id: String,
+        question: String,
+        options: Vec<String>,
+        multiple: bool,
+        device_id: String,
+        opts: UserMessageOptsRecord,
+    ) -> Result<(), FfiError> {
+        let poll = Poll::new(&question, &options, multiple)
+            .ok_or_else(|| write_err("not a poll within bounds"))?;
+        self.lock_doc()
+            .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
+            .map_err(write_err)
+    }
+
+    /// `sender`'s vote on a poll, replacing any earlier one; empty retracts. Does not commit.
+    pub fn set_poll_vote(
+        &self,
+        message_id: String,
+        sender: String,
+        selections: Vec<String>,
+    ) -> Result<(), FfiError> {
+        self.lock_doc()
+            .set_poll_vote(&message_id, &sender, &selections)
+            .map_err(write_err)
+    }
+
     /// Remove one message from the shared list (delete for everyone). Does not
     /// commit. Callers must not announce — peers learn via room sync only.
     pub fn delete_message(&self, message_id: String) -> Result<(), FfiError> {
@@ -1203,6 +1243,53 @@ mod tests {
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
         assert_eq!(row["parts"][0]["text"], "hello edited");
         assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
+    }
+
+    /// The iPhone's whole poll path: compose, read the projected part, vote, change the vote.
+    #[test]
+    fn a_poll_is_inserted_read_as_a_part_and_voted_on() {
+        let options = vec!["Lisbon".to_owned(), "Berlin".to_owned()];
+        assert_eq!(
+            poll_text("Where?".into(), options.clone(), false).as_deref(),
+            Some("Poll: Where?\n1. Lisbon\n2. Berlin")
+        );
+        assert!(poll_text("Where?".into(), vec!["Lisbon".into()], false).is_none());
+
+        let doc = ChatDoc::open();
+        let opts = UserMessageOptsRecord {
+            sender: Some("user:a".into()),
+            ..Default::default()
+        };
+        assert!(doc
+            .insert_poll_message(
+                "p0".into(),
+                " ".into(),
+                options.clone(),
+                false,
+                "dev".into(),
+                opts.clone()
+            )
+            .is_err());
+        doc.insert_poll_message(
+            "p1".into(),
+            "Where?".into(),
+            options,
+            false,
+            "dev".into(),
+            opts,
+        )
+        .unwrap();
+        doc.set_poll_vote("p1".into(), "user:a".into(), vec!["1".into()])
+            .unwrap();
+        doc.set_poll_vote("p1".into(), "user:a".into(), vec!["2".into()])
+            .unwrap();
+        assert!(doc
+            .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into(), "2".into()])
+            .is_err());
+        doc.commit();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["parts"][1]["kind"], "poll");
+        assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+{
+  "sha256": "4c2a1605fda2e759f83f8e56769bff17ddf36eda752f55f8662d175744c26001",
+  "bytes": 35847,
+  "files": [
+    "scripts/deploy/arbos-deploy-worker",
+    "scripts/deploy/test_deploy_lanes.py",
+    "scripts/deploy/test_image_activation.py",
+    "docs/deployment-lanes.md"
+  ],
+  "new_public_files": [
+    "scripts/deploy/test_image_activation.py"
+  ],
+  "apply_check": true,
+  "base": "frozen conditional-publication successor after H7 core"
+}

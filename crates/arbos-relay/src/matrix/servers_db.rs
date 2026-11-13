@@ -73,9 +73,11 @@ pub struct Server {
     pub created_at: i64,
     /// Anyone on Arbos can find and join without an invite link.
     pub is_open: bool,
-    /// D92 amendment: the server's leaf picture (0–8) and disc colour (0–9) from the Create
-    /// screen; `None` = initials. An `image_key` picture wins.
+    /// Dormant: the leaf avatars' shape pick. Always written `None` and never read; the column
+    /// stays so a relay on the previous binary still reads this table.
     pub avatar_leaf: Option<i64>,
+    /// The server's disc colour (0–9) from the Create screen; `None` = initials. An `image_key`
+    /// picture wins.
     pub avatar_leaf_color: Option<i64>,
 }
 
@@ -307,12 +309,14 @@ impl Db {
         })
     }
 
-    /// D92 amendment: the server's leaf picture (`None` = none).
-    pub fn update_server_leaf(&self, id: &str, leaf: Option<(i64, i64)>) -> Result<()> {
+    /// The server's disc colour (`None` = none).
+    /// `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
+    /// companion `avatar_leaf` shape column is dormant and nothing reads it.
+    pub fn update_server_disc_color(&self, id: &str, color: Option<i64>) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE servers SET avatar_leaf = ?2, avatar_leaf_color = ?3 WHERE id = ?1",
-                params![id, leaf.map(|l| l.0), leaf.map(|l| l.1)],
+                "UPDATE servers SET avatar_leaf_color = ?2 WHERE id = ?1",
+                params![id, color],
             )?;
             Ok(())
         })
@@ -464,30 +468,56 @@ impl Db {
             if banned.is_some() {
                 return Ok(false);
             }
+            // Re-join as `member`, which is what the row says on a first insert: without the
+            // role in the conflict branch, a departed admin's role outlived their membership
+            // and came back with them. The owner's row keeps `owner` — only a delete ends that.
             c.execute(
                 "INSERT INTO server_members(server_id, user_id, role, added_by, joined_at)
                  VALUES (?1, ?2, 'member', ?3, ?4)
-                 ON CONFLICT(server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = excluded.joined_at",
+                 ON CONFLICT(server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = excluded.joined_at,
+                    role = CASE WHEN server_members.role = 'owner' THEN 'owner' ELSE 'member' END",
                 params![server_id, user_id, added_by, now_ms()],
             )?;
             Ok(true)
         })
     }
 
+    /// Set someone's role. Not scoped to live rows: the role a removal left behind is exactly
+    /// what an owner needs to reach, and scoping this to `left_at IS NULL` is what put it out
+    /// of reach.
     pub fn set_server_role(&self, server_id: &str, user_id: &str, role: &str) -> Result<bool> {
         self.with(|c| {
             Ok(c.execute(
-                "UPDATE server_members SET role = ?3 WHERE server_id = ?1 AND user_id = ?2 AND left_at IS NULL",
+                "UPDATE server_members SET role = ?3 WHERE server_id = ?1 AND user_id = ?2 AND role != 'owner'",
                 params![server_id, user_id, role],
             )? > 0)
         })
     }
 
+    /// Departed rows that still carry a role above `member`. Residue from before removal reset
+    /// the role: invisible to `server_members`, so the owner could not see what they would get
+    /// back if the person rejoined. Ordered oldest departure first.
+    pub fn departed_members_with_role(&self, server_id: &str) -> Result<Vec<ServerMember>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT server_id, user_id, role, joined_at, banned_at FROM server_members
+                 WHERE server_id = ?1 AND left_at IS NOT NULL AND role NOT IN ('member', 'owner')
+                 ORDER BY left_at",
+            )?;
+            let rows = st.query_map(params![server_id], member_from_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Remove (or ban) a member, and put their role back to `member`. The role has to go with
+    /// the membership: leaving it set meant a removed admin came back an admin on the next
+    /// join, and nothing in the owner's UI showed that it would.
     pub fn remove_server_member(&self, server_id: &str, user_id: &str, ban: bool) -> Result<bool> {
         self.with(|c| {
             let now = now_ms();
             Ok(c.execute(
-                "UPDATE server_members SET left_at = ?3, banned_at = CASE WHEN ?4 THEN ?3 ELSE banned_at END
+                "UPDATE server_members SET left_at = ?3, banned_at = CASE WHEN ?4 THEN ?3 ELSE banned_at END,
+                    role = CASE WHEN role = 'owner' THEN 'owner' ELSE 'member' END
                  WHERE server_id = ?1 AND user_id = ?2 AND left_at IS NULL",
                 params![server_id, user_id, now, ban],
             )? > 0)

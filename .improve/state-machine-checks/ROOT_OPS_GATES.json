@@ -1,0 +1,33 @@
+{
+  "actual_applied_source": [
+    {
+      "name": "publication",
+      "command": [
+        "/usr/bin/python3",
+        "-B",
+        "scripts/release/test_publication.py"
+      ],
+      "exit_code": 0,
+      "seconds": 14.387506540981121,
+      "passed": 21,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "slots",
+      "command": [
+        "python3",
+        "-B",
+        "scripts/runner/tests/test_slot_lifecycle.py"
+      ],
+      "exit_code": 0,
+      "seconds": 20.812553333002143,
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "source_identity": "exact hashes match reviewed H8/H9 frozen candidates",
+  "scope": "isolated fixtures and fake effect adapters; no real release or shared runner action",
+  "swift_fence": "three exact reviewed Phase3 blobs; 12 helper tests pass in 1.531s"
+}

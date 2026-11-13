@@ -96,7 +96,11 @@ extension AppModel {
         allMessages[c] = [
             user("c1", c, "That was really great what we set up with Alan. However, I think we need to be a little more careful about the way in which we type in Discord, not to write massive, verbose responses. Try to write in my style do things that make it seem like it's not an agent that's writing the response. so maybe you can rewrite messages that go through our Discord.", at: t0),
             assistant("c2", c, "Makes sense. I'll pull a sample of your own Discord messages to get your style, then set it so everything going through Discord gets rewritten to sound like you first.", at: t0 + 20_000),
-            handoff("c3", c, name: "Affine", at: t0 + 40_000, messages: 1),
+            // Destination ids let a tap on "Messaged ◉ Affine" push Affine's chat and
+            // highlight the landed row ([feedback iphone-messaged-notice-nav-2026-11-10]).
+            handoff("c3", c, name: "Affine", at: t0 + 40_000, messages: 1,
+                    toProjectId: "fx-affine", destChatId: "fx-affine-main",
+                    destMessageId: "fx-affine-from-comms", deliveryId: "am-c3"),
             assistant("c4", c, "From now on, anything I send on your Discord gets rewritten to sound like you first. That means short, casual one-liners like \"Can be done in a day\" or \"nice work with 10\", sometimes split into two or three quick messages. It also means no lists, no long blocks, and no \"— Arbos\" sign-off. I've told Affine to keep its answers to the key points too, and I'll stick to this style for anything else I send on your Discord.", at: t0 + 90_000),
             user("c5", c, "Hey", at: t0 + 120_000),
             streaming("c6", c, at: t0 + 125_000),
@@ -138,9 +142,22 @@ extension AppModel {
                                               grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
                                               label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
         // Affine's chat shows the card types: file, voice memo, question, stop.
+        // The row Comms's hand-off ("Messaged ◉ Affine") points at — tap opens here.
         let a = "fx-affine-main"
         let a0 = now - 19 * 60_000
+        var fromComms = Message(id: "fx-affine-from-comms", chatId: a, role: .project, sender: "project:fx-comms",
+                                status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
+                                inReplyTo: nil, usage: [:], model: nil, createdAt: t0 + 41_000, completedAt: t0 + 41_000,
+                                pending: false,
+                                parts: [.text(id: "fx-affine-from-comms-t",
+                                              text: "Rewrite Discord replies in Jacob's short casual voice.")],
+                                hiddenCount: 0)
+        fromComms.senderName = "Comms"
+        fromComms.senderHandle = "comms"
+        fromComms.agentMessage = AgentMessageRef(id: "am-c3", toProjectId: "fx-affine", toName: "Affine",
+                                                 status: "delivered", chatId: a, messageId: "fx-affine-from-comms")
         allMessages[a] = [
+            fromComms,
             user("a1", a, "Pull the board deck numbers from Salesforce, Mercury and QuickBooks and send me the deck.", at: a0 - 15 * 60_000),
             assistant("a2", a, "Updated the numbers based on today's pull from Salesforce, Mercury, QuickBooks, and Hex.", at: a0 - 14 * 60_000),
             attachment("a3", a, name: "Q3 board deck v4.pdf", mime: "application/pdf", at: a0 - 13 * 60_000),
@@ -200,8 +217,7 @@ extension AppModel {
         if DebugHooks.fixtureForeignAgent {
             var testAgent = Project(id: "fx-foreign-testagent", name: "TestAgent", icon: "T", color: "#8b7cf6", state: .awake, stateSince: nil,
                                     stateDetail: nil, model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil)
-            testAgent.avatarLeaf = 3
-            testAgent.avatarLeafColor = 7
+            testAgent.avatarDiscColor = 7
             testAgent.avatarColorIndexEffective = 3
             groupAgents.insert(ChatMember(id: testAgent.id, kind: .agent, member: "agent:\(testAgent.id)", role: "agent", handle: "testagent", avatarUrl: nil,
                                           name: "TestAgent", status: "member", joinedAt: now - 86_400_000, project: testAgent, ownerId: "gh_459",
@@ -341,6 +357,11 @@ extension AppModel {
         }
         if let spec = DebugHooks.perfOpens {
             Task { await fixtureOpens(spec) }
+        }
+        if DebugHooks.fixtureMachineWaking {
+            machine.state = .waking
+            machine.since = nowMs()
+            Task { await fixtureWakes() }
         }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
         // snapshot exported from the relay), so the transcript has the true shape —
@@ -532,6 +553,18 @@ extension AppModel {
         ]
         link = .live
         seedFixtureSecrets(now: now)
+        if let delay = DebugHooks.fixtureRowsDelayMs {
+            let held = messages
+            messages = held.mapValues { _ in [] }
+            Task { await fixtureDelayRows(held, ms: delay) }
+        }
+    }
+
+    /// `ARBOS_FIXTURE_ROWS_DELAY=<ms>`: hand every chat its rows that long after launch, so a
+    /// chat opened before then is on screen when they land.
+    private func fixtureDelayRows(_ held: [Id: [Message]], ms: Int) async {
+        try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+        messages = held
     }
 
     /// Settings → Secrets demo (D83), the Mac fixture's twin: a Stripe key for Affine and
@@ -782,25 +815,44 @@ extension AppModel {
         }
         let t = nowMs()
         if received {
-            var from = Message(id: newId(), chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
+            let landedId = newId()
+            var from = Message(id: landedId, chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
                                decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
                                createdAt: t, completedAt: t, pending: false,
                                parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")], hiddenCount: 0)
             from.senderName = "Comms"
             from.senderHandle = "comms"
+            from.agentMessage = AgentMessageRef(id: "am-fixture-recv", toProjectId: "", toName: "",
+                                                status: "delivered", chatId: chatId, messageId: landedId)
             var reply = assistant(newId(), chatId, "Hello back, Jacob — and hi Comms! Ready whenever you want the shortlist sent.", at: t + 15_000)
             reply.agentReplyTo = "Comms"
             list += [from, reply]
         } else {
-            let sent = Message(id: newId(), chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
+            let handoffId = newId()
+            let destChat = "fx-affine-main"
+            let destMsg = "fx-affine-landed-\(handoffId)"
+            var sent = Message(id: handoffId, chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
                                subagentId: nil, subagentName: "Affine", handoffMessages: 2, inReplyTo: nil, usage: [:], model: nil,
                                createdAt: t + 5_000, completedAt: t + 5_000, pending: false, parts: [], hiddenCount: 1)
+            sent.agentMessage = AgentMessageRef(id: "am-\(handoffId)", toProjectId: "fx-affine", toName: "Affine",
+                                                status: "delivered", chatId: destChat, messageId: destMsg)
             list += [
                 user(newId(), chatId, "send Affine a hello", at: t),
                 sent,
                 assistant(newId(), chatId, "Sent to Affine.", at: t + 6_000),
                 assistant(newId(), chatId, "Affine says hello back — and it's ready whenever you want the shortlist sent.", at: t + 40_000),
             ]
+            // Land the words in Affine's chat so a tap highlights them.
+            var landed = Message(id: destMsg, chatId: destChat, role: .project, sender: "project:fx-comms", status: .done,
+                                 turn: nil, decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:],
+                                 model: nil, createdAt: t + 5_500, completedAt: t + 5_500, pending: false,
+                                 parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")],
+                                 hiddenCount: 0)
+            landed.senderName = "Comms"
+            landed.senderHandle = "comms"
+            landed.agentMessage = AgentMessageRef(id: "am-\(handoffId)", toProjectId: "fx-affine", toName: "Affine",
+                                                  status: "delivered", chatId: destChat, messageId: destMsg)
+            messages[destChat, default: []].append(landed)
         }
         messages[chatId] = list
     }
@@ -1011,6 +1063,14 @@ extension AppModel {
         }
     }
 
+    /// `ARBOS_FIXTURE_MACHINE=waking`: the box reaches awake 3 s after launch, so the transcript's
+    /// waking banner leaves while a chat is already on screen.
+    private func fixtureWakes() async {
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        machine.state = .awake
+        machine.since = nowMs()
+    }
+
     /// `ARBOS_PERF_OPENS=<chat>[,<chat>…]:<n>` (perf baseline): from 6 s after launch, n chat
     /// opens through `open(peopleChat:)`, the chats in turn — 1.5 s on the chat list, then
     /// 3.5 s in the chat. No XCUITest in the loop, so a profile of an open holds only the
@@ -1059,10 +1119,24 @@ extension AppModel {
                 pending: false, parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0)
     }
 
-    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64, messages: Int = 2) -> Message {
-        Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new", subagentId: "sub-1",
+    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64, messages: Int = 2,
+                         toProjectId: Id? = nil, destChatId: Id? = nil, destMessageId: Id? = nil,
+                         deliveryId: String? = nil) -> Message {
+        var m = Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new", subagentId: "sub-1",
                 subagentName: name, handoffMessages: messages, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at + 5_000, pending: false,
                 parts: [.status(id: "\(id)-s", code: .handoff, message: "Handed to subagent \(name)")], hiddenCount: 2)
+        let pid = toProjectId ?? projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id
+        if let pid {
+            m.agentMessage = AgentMessageRef(
+                id: deliveryId ?? "am-\(id)",
+                toProjectId: pid,
+                toName: name,
+                status: "delivered",
+                chatId: destChatId,
+                messageId: destMessageId
+            )
+        }
+        return m
     }
 
     private func attachment(_ id: Id, _ chat: Id, name: String, mime: String, at: Int64) -> Message {
@@ -1082,19 +1156,19 @@ extension AppModel {
                        parts: [.question(id: "\(id)-w", question: q), .status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
     }
 
-    /// #1544: an `approval` part as agentd writes it for `cd /tmp && rm -rf …` outside scratch —
-    /// `grant_options` make the card offer A once / B in its workspace / C anywhere / D deny.
+    /// #1544: an `approval` part as agentd writes it for an `rm -rf` outside the agent's own
+    /// workspace — `grant_options` make the card offer A once / C anywhere / D deny.
     private func shellCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let command = "cd /opt/vendor && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"
         let pm: [String: Any] = [
             "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
             "title": "Run a destructive command (file-delete)", "risk": "destructive",
-            "summary": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src",
+            "summary": command,
             "payload": [
-                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
-                "why": "deletes files outside /work/tmp",
-                "input": ["command": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"],
+                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "anywhere",
+                "why": "deletes files outside the agent's own workspace",
+                "input": ["command": command],
                 "grant_options": [
-                    ["path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch"],
                     ["path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box"],
                 ],
             ],

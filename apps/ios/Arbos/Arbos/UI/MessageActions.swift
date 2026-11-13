@@ -62,6 +62,114 @@ struct RowFrameKey: PreferenceKey {
     }
 }
 
+/// The finger that held a bubble into its menu, for as long as it stays down. The overlay
+/// lights what it is over and acts where it lifts, so one hold can slide straight to a
+/// reaction or a menu row (iMessage). Points are in global space.
+@MainActor
+final class HeldFinger: ObservableObject {
+    static let shared = HeldFinger()
+    /// A finger that has not left this radius of where it pressed is still holding, not
+    /// choosing: lifting it leaves the menu open.
+    static let slack: CGFloat = 12
+
+    private(set) var start: CGPoint?
+    /// Where the last touch in the window was (`TouchWatch`): where a hold begins.
+    var last: CGPoint?
+    /// Where the finger is, once it has slid away from where it pressed.
+    @Published private(set) var point: CGPoint?
+    /// Where it lifted, if it had slid; consumed by the overlay.
+    @Published private(set) var lifted: CGPoint?
+
+    var isDown: Bool { start != nil }
+
+    func press(at p: CGPoint) { start = p; point = nil; lifted = nil }
+
+    func move(to p: CGPoint) {
+        guard let start else { return }
+        if point != nil || hypot(p.x - start.x, p.y - start.y) > Self.slack { point = p }
+    }
+
+    func lift() {
+        guard isDown else { return }
+        lifted = point; start = nil; point = nil
+    }
+
+    func reset() { start = nil; point = nil; lifted = nil }
+}
+
+/// Reports every touch in its window to `HeldFinger` and takes none: the recognizer never
+/// leaves `.possible`, so it competes with no scroll, tap or long-press. A SwiftUI drag
+/// sequenced after the row's long-press did the same job and stopped the transcript
+/// scrolling from a bubble.
+struct TouchWatch: UIViewRepresentable {
+    func makeUIView(context: Context) -> Host { Host() }
+    func updateUIView(_ view: Host, context: Context) {}
+
+    final class Host: UIView {
+        private let watcher = Watcher(target: nil, action: nil)
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            watcher.view?.removeGestureRecognizer(watcher)
+            window?.addGestureRecognizer(watcher)
+            isUserInteractionEnabled = false
+        }
+    }
+
+    final class Watcher: UIGestureRecognizer {
+        override init(target: Any?, action: Selector?) {
+            super.init(target: target, action: action)
+            cancelsTouchesInView = false
+            delaysTouchesBegan = false
+            delaysTouchesEnded = false
+        }
+
+        // Neither side of the usual rule: another recognizer recognizing does not fail this
+        // one (it would stop hearing the touch the moment the long-press fired), and this
+        // one stops no other.
+        override func canBePrevented(by other: UIGestureRecognizer) -> Bool { false }
+        override func canPrevent(_ other: UIGestureRecognizer) -> Bool { false }
+
+        private func at(_ touches: Set<UITouch>) -> CGPoint? { touches.first?.location(in: nil) }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            HeldFinger.shared.last = at(touches)
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+            guard let p = at(touches) else { return }
+            HeldFinger.shared.last = p
+            HeldFinger.shared.move(to: p)
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+            HeldFinger.shared.lift()
+            state = .failed
+        }
+
+        /// A touch the system took back is not a choice.
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+            if HeldFinger.shared.isDown { HeldFinger.shared.reset() }
+            state = .failed
+        }
+    }
+}
+
+/// What a point in the actions overlay is over.
+enum MessageActionsTarget: Equatable {
+    /// A capsule cell: the palette in order, then the add-emoji control.
+    case cell(Int)
+    case row(MessageMenuItem)
+
+    /// `capsule` and `menu` are the two groups' origins in the same space as `point`.
+    static func at(_ point: CGPoint, capsule: CGPoint, menu: CGPoint, rows: MessageActionsMenuRows) -> MessageActionsTarget? {
+        let inCapsule = CGPoint(x: point.x - capsule.x, y: point.y - capsule.y)
+        if let i = ReactionCapsule.cellFrames.firstIndex(where: { $0.contains(inCapsule) }) { return .cell(i) }
+        let inMenu = CGPoint(x: point.x - menu.x, y: point.y - menu.y)
+        return rows.rows.first { $0.labelRect.contains(inMenu) }.map { .row($0.item) }
+    }
+}
+
 struct MessageActionsOverlay<Bubble: View>: View {
     @Environment(\.theme) private var theme
     let row: Row
@@ -81,11 +189,16 @@ struct MessageActionsOverlay<Bubble: View>: View {
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
+    /// The capsule and the menu grow out of the held bubble as the overlay arrives.
+    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
     @State private var pressedFrame: CGRect?
     @ObservedObject private var keyboard = KeyboardFrameObserver.shared
+    @ObservedObject private var finger = HeldFinger.shared
+    private static var sideInset: CGFloat { 16 }
 
     private var mine: Bool { row.role == .user }
     private var gap: CGFloat { 8 }
@@ -106,15 +219,28 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 safeBottom: safeBottom,
                 keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
             ))
+            // What the held finger is over: both groups hug the bubble's side of the chat.
+            let origin = geo.frame(in: .global).origin
+            let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
+            let target: (CGPoint?) -> MessageActionsTarget? = { point in
+                guard let point else { return nil }
+                let x: (CGFloat) -> CGFloat = { mine ? width - Self.sideInset - $0 : Self.sideInset }
+                return MessageActionsTarget.at(
+                    CGPoint(x: point.x - origin.x, y: point.y - origin.y),
+                    capsule: CGPoint(x: x(ReactionCapsule.width), y: layout.capsuleY),
+                    menu: CGPoint(x: x(menuWidth), y: layout.menuY), rows: rows)
+            }
+            let hot = target(finger.point)
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .fill(.ultraThinMaterial)
                     .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
                     .ignoresSafeArea()
                     .onTapGesture { onDismiss() }
-                capsule
+                capsule(hot: hot)
                     .frame(width: width, alignment: mine ? .trailing : .leading)
                     .offset(y: layout.capsuleY)
+                    .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .bottomTrailing : .bottomLeading)
                     .accessibilityIdentifier("message-actions-capsule")
                 bubble()
                     .frame(width: width)
@@ -122,13 +248,29 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
                     .clipped()
                     .offset(y: layout.bubbleY)
-                menu
+                menu(hot: hot)
                     .frame(width: width, alignment: mine ? .trailing : .leading)
                     .offset(y: layout.menuY)
+                    .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .topTrailing : .topLeading)
                     .accessibilityIdentifier("message-actions-menu")
             }
             .animation(.easeOut(duration: 0.2), value: layout)
-            .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+            .onAppear {
+                if pressedFrame == nil { pressedFrame = frame }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { shown = true }
+            }
+            .onChange(of: hot) { _, now in if now != nil { Haptics.pick() } }
+            // The held finger lifted over a cell or a row: that is the choice.
+            .onChange(of: finger.lifted) { _, point in
+                guard let point else { return }
+                finger.reset()
+                switch target(point) {
+                case .cell(let i) where i < ReactionCapsule.palette.count: onReact(ReactionCapsule.palette[i])
+                case .cell: pickOpen = true
+                case .row(let item): onMenu(item)
+                case nil: break
+                }
+            }
         }
         .ignoresSafeArea()
         .overlay {
@@ -149,9 +291,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
     // through. `.contentShape(Rectangle())` over the full frame fixes that; the pressed
     // highlight comes from `MenuRowButtonStyle` / `CapsuleCellButtonStyle`.
 
-    private var capsule: some View {
+    private func capsule(hot: MessageActionsTarget?) -> some View {
         HStack(spacing: 0) {
-            ForEach(ReactionCapsule.palette, id: \.self) { emoji in
+            ForEach(Array(ReactionCapsule.palette.enumerated()), id: \.element) { index, emoji in
                 Button {
                     onReact(emoji)
                 } label: {
@@ -161,7 +303,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), hot: hot == .cell(index)))
                 .accessibilityLabel("React \(emoji)")
             }
             Button {
@@ -179,7 +321,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), hot: hot == .cell(ReactionCapsule.palette.count)))
             .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
@@ -187,10 +329,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .overlay(Capsule(style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
         .overlay { hitRectsOverlay(ReactionCapsule.cellFrames) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Self.sideInset)
     }
 
-    private var menu: some View {
+    private func menu(hot: MessageActionsTarget?) -> some View {
         let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
         return VStack(spacing: 0) {
             ForEach(rows.rows, id: \.item) { row in
@@ -223,16 +365,19 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove))
+                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove, hot: hot == .row(row.item)))
                 .accessibilityIdentifier("message-menu-\(row.item.label.lowercased().replacingOccurrences(of: " ", with: "-"))")
             }
         }
         .frame(width: menuWidth, height: rows.height)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
+        // The pressed tint is a plain rectangle: cut to the menu's corners, it no longer
+        // squares off the first and last rows.
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
         .overlay { hitRectsOverlay(rows.rows.map(\.hitRect)) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Self.sideInset)
     }
 
     /// Rig only (`ARBOS_HIT_RECTS=1`): strokes each hit rect so a shot shows what a tap reaches.
@@ -258,11 +403,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
 struct MenuRowButtonStyle: ButtonStyle {
     let pressed: Color
     let bandAbove: CGFloat
+    /// The held finger is over this row.
+    var hot = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(alignment: .bottom) {
-                if configuration.isPressed {
+                if configuration.isPressed || hot {
                     Rectangle().fill(pressed).frame(height: MessageActionsMenuRows.rowHeight)
                 }
             }
@@ -272,12 +419,15 @@ struct MenuRowButtonStyle: ButtonStyle {
 /// A capsule cell's pressed state: a soft disc under the emoji.
 struct CapsuleCellButtonStyle: ButtonStyle {
     let pressed: Color
+    /// The held finger is over this cell.
+    var hot = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(Circle().fill(configuration.isPressed ? pressed : Color.clear))
-            .scaleEffect(configuration.isPressed ? 1.12 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        let down = configuration.isPressed || hot
+        return configuration.label
+            .background(Circle().fill(down ? pressed : Color.clear))
+            .scaleEffect(down ? 1.12 : 1)
+            .animation(.easeOut(duration: 0.12), value: down)
     }
 }
 
@@ -397,9 +547,16 @@ extension View {
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             // A hold on a chart plot reads a value instead (`ChartTouch`).
+            // The finger is still down when the menu opens: `TouchWatch` follows it from
+            // here, so the hold can slide to a reaction or a menu row.
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
+                    .onEnded { _ in
+                        guard !ChartTouch.holding else { return }
+                        ChatGestures.heldIntoMenu = true
+                        if let at = HeldFinger.shared.last { HeldFinger.shared.press(at: at) }
+                        onLongPress()
+                    },
                 enabled: ChatGestures.longPress
             )
             // Double-tap toggles a heart under the bubble (Telegram / iMessage;

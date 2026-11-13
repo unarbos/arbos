@@ -92,8 +92,8 @@ pub struct Sender {
     pub user_id: Option<String>,
     /// Agent's initials-colour override (D79); people never have one.
     pub avatar_color_index: Option<i64>,
-    /// Agent's leaf avatar in effect (D92: shape 0–8, disc colour 0–9); people never have one.
-    pub leaf: Option<arbos_core::avatar::leaf::LeafPick>,
+    /// Agent's solid disc colour in effect (D92: 0–9); people never have one.
+    pub disc_color: Option<u8>,
 }
 
 impl Sender {
@@ -104,6 +104,10 @@ impl Sender {
             .ok()
             .flatten()
             .unwrap_or_default();
+        Self::from_user_card(user_id, card)
+    }
+
+    pub(crate) fn from_user_card(user_id: &str, card: arbos_core::api::UserCardDto) -> Self {
         let handle = if card.handle.is_empty() {
             user_id.to_owned()
         } else {
@@ -123,7 +127,7 @@ impl Sender {
             avatar_url: card.avatar_url,
             user_id: Some(user_id.to_owned()),
             avatar_color_index: None,
-            leaf: None,
+            disc_color: None,
         }
     }
 
@@ -144,7 +148,7 @@ impl Sender {
             avatar_url: None,
             user_id: None,
             avatar_color_index: p.avatar_color_index,
-            leaf: Some(crate::avatar::effective_leaf(p)),
+            disc_color: Some(crate::avatar::effective_disc(p)),
         }
     }
 
@@ -162,8 +166,7 @@ impl Sender {
                 &self.id,
                 self.avatar_color_index,
             )),
-            avatar_leaf_effective: self.leaf.map(|l| i64::from(l.leaf)),
-            avatar_leaf_color_effective: self.leaf.map(|l| i64::from(l.color)),
+            avatar_disc_color_effective: self.disc_color.map(i64::from),
         }
     }
 
@@ -429,6 +432,13 @@ pub async fn announce_with(
     reply_ref: Option<&ReplyRefBody>,
     mentions: &[String],
 ) -> Option<i64> {
+    // The sender as every rule downstream names it, resolved from the principal by `sender_for`
+    // and never from the row the client wrote. `moderation` reads it back out of
+    // `message_authors` to decide whose message this is.
+    let member = match sender.kind {
+        "agent" => format!("agent:{}", sender.id),
+        _ => format!("user:{}", sender.id),
+    };
     let event_id = state
         .db
         .insert_chat_event(
@@ -436,6 +446,7 @@ pub async fn announce_with(
             chat.project_id.as_deref(),
             message_id,
             sender.user_id.as_deref(),
+            &member,
         )
         .ok()
         .flatten()?;
@@ -444,10 +455,6 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
-    let member = match sender.kind {
-        "agent" => format!("agent:{}", sender.id),
-        _ => format!("user:{}", sender.id),
-    };
     // The announce is the writing client's account of its own message, and no app fills
     // `mentions` in: each resolves them into the row it writes and then posts the message id
     // and the text alone. The relay has the roster, so it resolves them here rather than
@@ -458,6 +465,9 @@ pub async fn announce_with(
     let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
     // Outside agents in this chat get the message as an ASP event (#2140).
     crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
+    // An agent holding an access link gets it on its SSE stream. Returns after one read lock
+    // when no account on this relay holds a live link, which is the normal case.
+    crate::agent_link_stream::on_announce(state, chat, sender, message_id, text, None, mentions);
     state.matrix.message(
         state,
         &chat.chat_id,
@@ -560,7 +570,9 @@ pub async fn announce_with(
 }
 
 /// One alert to one device (the Matrix push-gateway path, stage B): same payload, focus and
-/// archive rules as [`announce`], for a message the homeserver told us about.
+/// archive rules as [`announce`], for a message the homeserver told us about. `sealed` is
+/// the room and the event when it is encrypted ([`payload::with_sealed`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn alert_device(
     state: &AppState,
     chat: &ChatRef,
@@ -569,6 +581,7 @@ pub async fn alert_device(
     text: &str,
     badge: i64,
     device_id: &str,
+    sealed: Option<(&str, &Value)>,
 ) {
     if !state.push.is_on() || device_focused(state, device_id, &chat.chat_id).await {
         return;
@@ -602,6 +615,10 @@ pub async fn alert_device(
         badge,
         &chat_meta(state, chat, &user_id),
     );
+    let p = match sealed {
+        Some((room_id, ev)) => payload::with_sealed(p, room_id, ev),
+        None => p,
+    };
     state
         .push
         .enqueue(vec![message_push(&t, chat, message_id, p)]);
@@ -1101,9 +1118,9 @@ pub async fn notify_people_chat(
         &b.mentions,
     )
     .await;
-    if out.is_some() {
-        crate::voice::call_update(&state, &chat, &sender, &b).await;
-    }
+    // Voice wake is independent of push dedupe: a live call must hear the bubble even when
+    // `chat_events` already had this message_id (announce returns None). CallUpdates dedupes.
+    crate::voice::call_update(&state, &chat, &sender, &b).await;
     notify_response(out)
 }
 
@@ -1139,9 +1156,9 @@ pub async fn notify_project_chat(
         &b.mentions,
     )
     .await;
-    if out.is_some() {
-        crate::voice::call_update(&state, &chat, &sender, &b).await;
-    }
+    // Voice wake is independent of push dedupe: a live call must hear the bubble even when
+    // `chat_events` already had this message_id (announce returns None). CallUpdates dedupes.
+    crate::voice::call_update(&state, &chat, &sender, &b).await;
     notify_response(out)
 }
 

@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS secrets (
   kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', hosts TEXT NOT NULL DEFAULT '[]',
   ask_every_time INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, current_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_used_at INTEGER,
+  -- `daytona_secrets` held the id of each field mirrored to the retired provider's Secrets
+  -- (D28). Nothing writes or reads it any more; the column stays so an existing database needs
+  -- no migration.
   daytona_secrets TEXT NOT NULL DEFAULT '{}', inject_env INTEGER NOT NULL DEFAULT 0,
   others_ask TEXT NOT NULL DEFAULT 'refuse',
   source_kind TEXT NOT NULL DEFAULT 'settings', source_project_id TEXT, source_chat_id TEXT
@@ -166,8 +169,6 @@ pub struct Secret {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_used_at: Option<i64>,
-    /// field → Daytona secret id, when mirrored as Daytona Secrets (D28).
-    pub daytona_secrets: Value,
     /// "Real value in the agent's environment": agents with Access get the value itself as
     /// `$ENV` in their box, no card per use (D83 decision 2 as decided 2026-10-18).
     pub inject_env: bool,
@@ -253,7 +254,7 @@ pub struct Access {
     pub last_used_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretRequest {
     pub id: String,
     pub user_id: String,
@@ -285,6 +286,13 @@ impl SecretRequest {
             "allowed_once" | "allowed_chat" | "allowed_always"
         )
     }
+}
+
+/// Proof that this caller atomically spent one exact one-use authorization.
+/// It cannot be cloned or constructed outside this storage boundary. Dropping it
+/// never restores a grant: an admitted sensitive effect may have an uncertain outcome.
+pub(crate) struct OneUseReceipt {
+    _private: (),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -348,7 +356,7 @@ fn to_json_list(v: &[String]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask, source_kind, source_project_id, source_chat_id";
+const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, inject_env, others_ask, source_kind, source_project_id, source_chat_id";
 
 fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
     Ok(Secret {
@@ -365,12 +373,11 @@ fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
         last_used_at: r.get(12)?,
-        daytona_secrets: serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
-        inject_env: r.get::<_, i64>(14)? != 0,
-        others_ask: r.get(15)?,
-        source_kind: r.get(16)?,
-        source_project_id: r.get(17)?,
-        source_chat_id: r.get(18)?,
+        inject_env: r.get::<_, i64>(13)? != 0,
+        others_ask: r.get(14)?,
+        source_kind: r.get(15)?,
+        source_project_id: r.get(16)?,
+        source_chat_id: r.get(17)?,
     })
 }
 
@@ -483,13 +490,13 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "INSERT INTO secrets(id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version,
-                   created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask,
+                   created_at, updated_at, last_used_at, inject_env, others_ask,
                    source_kind, source_project_id, source_chat_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 params![
                     s.id, s.user_id, s.name, s.env, s.kind, s.note, to_json_list(&s.hosts),
                     s.ask_every_time as i64, s.expires_at, s.current_version, s.created_at, s.updated_at,
-                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask,
+                    s.last_used_at, s.inject_env as i64, s.others_ask,
                     s.source_kind, s.source_project_id, s.source_chat_id
                 ],
             )?;
@@ -501,17 +508,17 @@ impl Db {
         })
     }
 
-    /// Metadata update (name, env, note, hosts, ask_every_time, inject_env, expires_at, daytona
-    /// ids); the owner, kind and version are untouched.
+    /// Metadata update (name, env, note, hosts, ask_every_time, inject_env, expires_at); the
+    /// owner, kind and version are untouched.
     pub fn update_secret(&self, s: &Secret) -> Result<()> {
         self.with(|c| {
             c.execute(
                 "UPDATE secrets SET name = ?3, env = ?4, note = ?5, hosts = ?6, ask_every_time = ?7, expires_at = ?8,
-                   updated_at = ?9, daytona_secrets = ?10, inject_env = ?11, others_ask = ?12
+                   updated_at = ?9, inject_env = ?10, others_ask = ?11
                  WHERE id = ?1 AND user_id = ?2",
                 params![
                     s.id, s.user_id, s.name, s.env, s.note, to_json_list(&s.hosts), s.ask_every_time as i64,
-                    s.expires_at, now_ms(), s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask
+                    s.expires_at, now_ms(), s.inject_env as i64, s.others_ask
                 ],
             )
             .map(|_| ())
@@ -982,14 +989,57 @@ impl Db {
         })
     }
 
-    /// An `allowed_once` grant is spent by its one use.
-    pub fn consume_allowed_once(&self, id: &str) -> Result<()> {
+    /// Atomically spend a unique set of exact observed authorizations for one operation.
+    /// A changed, expired, spent or duplicate grant rolls the whole set back.
+    pub(crate) fn claim_allowed_once_batch(
+        &self,
+        requests: &[&SecretRequest],
+    ) -> Result<Option<Vec<OneUseReceipt>>> {
+        if requests.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut ids = std::collections::HashSet::new();
+        if requests
+            .iter()
+            .any(|request| request.status != "allowed_once" || !ids.insert(&request.id))
+        {
+            return Ok(None);
+        }
         self.with(|c| {
-            c.execute(
-                "UPDATE secret_requests SET status = 'expired' WHERE id = ?1 AND status = 'allowed_once'",
-                params![id],
-            )
-            .map(|_| ())
+            let transaction = c.unchecked_transaction()?;
+            let mut receipts = Vec::with_capacity(requests.len());
+            for request in requests {
+                let n = transaction.execute(
+                    "UPDATE secret_requests SET status = 'expired'
+                 WHERE id = ?1 AND user_id = ?2 AND project_id = ?3 AND chat_id = ?4
+                   AND target_kind = ?5 AND target_id IS ?6 AND target_ref = ?7
+                   AND use_kind = ?8 AND host IS ?9 AND asked_by IS ?10
+                   AND decided_by IS ?11 AND decided_at IS ?12 AND expires_at = ?13
+                   AND status = 'allowed_once' AND expires_at >= ?14",
+                    params![
+                        request.id,
+                        request.user_id,
+                        request.project_id,
+                        request.chat_id,
+                        request.target_kind,
+                        request.target_id,
+                        request.target_ref,
+                        request.use_kind,
+                        request.host,
+                        request.asked_by,
+                        request.decided_by,
+                        request.decided_at,
+                        request.expires_at,
+                        now_ms()
+                    ],
+                )?;
+                if n != 1 {
+                    return Ok(None); // the transaction's drop rolls earlier claims back
+                }
+                receipts.push(OneUseReceipt { _private: () });
+            }
+            transaction.commit()?;
+            Ok(Some(receipts))
         })
     }
 
@@ -1376,7 +1426,6 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             last_used_at: None,
-            daytona_secrets: serde_json::json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
             source_kind: "settings".into(),
@@ -1505,7 +1554,7 @@ mod tests {
             .allowed_once_for("p1", "s1", Some("evil.example"), "header")
             .unwrap()
             .is_none());
-        db.consume_allowed_once("r1").unwrap();
+        assert!(db.claim_allowed_once_batch(&[&decided]).unwrap().is_some());
         assert!(db
             .allowed_once_for("p1", "s1", Some("api.stripe.com"), "header")
             .unwrap()

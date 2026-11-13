@@ -1,0 +1,56 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "44df2eeb3bbf93d8b9f65e597cf2feeffb79e342734ddfdd2e9f42735142c932",
+    "apps/ios/Arbos/Arbos/UI/ServerChannelsView.swift": "23d167a1c23206ae5e339fc56a698a365924cd8ddce1680b2b9811c2cb17b335"
+  },
+  "fixture_sha256": "d2982c31734572feaf3c89b85f8b948cb28eafa3053f8b362004186599a1171a",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 9,
+    "results": [
+      {
+        "name": "queued-channel-form-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "late-channel-form-no-dismiss-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "current-channel-form-control",
+        "pass": true
+      },
+      {
+        "name": "queued-join-form-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "late-join-form-no-completion-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "current-join-form-control",
+        "pass": true
+      },
+      {
+        "name": "retired-search-keeps-current-results-and-busy",
+        "pass": true
+      },
+      {
+        "name": "older-query-reply-cannot-overwrite-new-query",
+        "pass": true
+      },
+      {
+        "name": "current-search-control",
+        "pass": true
+      }
+    ],
+    "total": 9
+  },
+  "seconds": 2.0071467499947175
+}

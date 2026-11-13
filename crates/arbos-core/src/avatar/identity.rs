@@ -2,19 +2,19 @@
 //!
 //! A people-chat row from an agent carries `sender: "agent:<project id>"`, a
 //! `senderHandle` (`@slug`) and a `senderName`. The chat roster carries the
-//! agent's project card (leaf picks, uploaded picture, display name). The
+//! agent's project card (disc colour, uploaded picture, display name). The
 //! viewer's own project list carries the same card for agents they own. Before
 //! this module each surface picked its own subset of those sources — the
 //! iPhone bubble read only the viewer's projects and fell back to initials
 //! seeded by the handle, while the working row read the roster and drew the
-//! leaf; the old working line printed the raw handle (#1592). The rule below
+//! disc; the old working line printed the raw handle (#1592). The rule below
 //! is what the Mac, the iPhone (through `arbos-ffi`) and the relay roster all
 //! run, so no surface guesses.
 //!
 //! Precedence, first hit wins: a card whose id is the sender's project id →
 //! a card whose `@slug` is the row's handle → a card whose name slugs to that
 //! handle → a card whose `@slug` is the slug of the row's name → no card: the
-//! id seeds the automatic leaf (D92) and colour (D79) and the row's own name
+//! id seeds the automatic disc colour (D92) and colour (D79) and the row's own name
 //! is shown. Callers order the cards: the open chat's roster first (it is the
 //! relay's current truth for that chat), then the viewer's projects, then
 //! other chats' rosters.
@@ -29,7 +29,7 @@
 //! the one drawn; equal stamps keep the caller's order. A copy from a source
 //! without the stamp counts as version 0, so a stamped copy always wins it.
 
-use super::leaf::{self, LeafPick};
+use super::disc;
 
 /// What a roster row or a project record knows about an agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,9 +40,8 @@ pub struct AgentCard {
     pub name: String,
     /// `@slug`, empty when the source has none (derived from the name then).
     pub handle: String,
-    /// D92 picks (`None` = automatic).
-    pub leaf: Option<u8>,
-    pub leaf_color: Option<u8>,
+    /// D92 disc colour pick (`None` = automatic, `Some(disc::NEUTRAL)` = no picture).
+    pub disc_color: Option<u8>,
     /// D79 override (`None` = derived from the id).
     pub color_index: Option<u8>,
     /// Uploaded / generated picture: a blob key in the project's slot.
@@ -66,21 +65,22 @@ pub struct AgentQuery<'a> {
 /// The one answer every surface draws from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentIdentity {
-    /// Bare project id; seeds the leaf and the colour.
+    /// Bare project id; seeds the disc colour and the D79 colour.
     pub id: String,
     /// What a caption, a presence line or a chip shows. Never the bare handle while a
     /// name is known anywhere.
     pub name: String,
     /// `@slug` (without the `@`).
     pub handle: String,
-    /// The leaf in effect (owner's picks or the automatic pair). Meaningless while `neutral`.
-    pub leaf: LeafPick,
-    /// The card says "no leaf" (`leaf::NEUTRAL`, Jacob 2026-10-25): draw the name's initial on
-    /// a neutral disc instead of `leaf`.
+    /// The disc colour in effect (owner's pick or the automatic one). Meaningless while
+    /// `neutral`.
+    pub disc_color: u8,
+    /// The card says "no picture" (`disc::NEUTRAL`, Jacob 2026-10-25): draw the name's initial
+    /// on a neutral grey disc instead of the colour.
     pub neutral: bool,
-    /// D79 colour index when the leaf set is off.
+    /// D79 colour index, for the surfaces that draw initials.
     pub color_index: u8,
-    /// The picture that wins over the leaf, when the agent has one.
+    /// The picture that wins over the disc, when the agent has one.
     pub image_key: Option<String>,
     /// The stamp of the copy drawn (see `AgentCard::avatar_version`); `0` when unknown.
     /// Part of any picture cache key, so a change never serves the old bytes.
@@ -153,8 +153,8 @@ pub fn resolve<'c>(
                 id: card.id.clone(),
                 name: display_name(Some(&card.name), handle),
                 handle: card_handle,
-                leaf: leaf::pick_for(&card.id, card.leaf, card.leaf_color),
-                neutral: leaf::is_neutral(card.leaf),
+                disc_color: disc::color_for(&card.id, card.disc_color),
+                neutral: disc::is_neutral(card.disc_color),
                 color_index: super::index_for(&card.id, card.color_index),
                 image_key: card.image_key.clone().filter(|k| !k.is_empty()),
                 avatar_version: card.avatar_version,
@@ -164,7 +164,7 @@ pub fn resolve<'c>(
         None => {
             // No card: the bare id seeds the picture; a row without an id (an older box's
             // handle-only attribution) seeds it with the handle, else the name, so the same
-            // row always draws the same leaf on every surface.
+            // row always draws the same disc on every surface.
             let seed = if !id.is_empty() {
                 id
             } else {
@@ -177,7 +177,7 @@ pub fn resolve<'c>(
                     .map(str::to_string)
                     .or_else(|| name.map(agent_slug))
                     .unwrap_or_default(),
-                leaf: leaf::default_pick(seed),
+                disc_color: disc::default_color(seed),
                 neutral: false,
                 color_index: super::color_index(seed),
                 image_key: None,
@@ -256,8 +256,7 @@ mod tests {
         let roster = [
             AgentCard {
                 image_key: Some("avatar-1.jpg".into()),
-                leaf: Some(3),
-                leaf_color: Some(7),
+                disc_color: Some(7),
                 ..card("01TEST", "TestAgent")
             },
             card("01HOME", "Home"),
@@ -276,7 +275,7 @@ mod tests {
         );
         assert_eq!(by_id.name, "TestAgent");
         assert_eq!(by_id.handle, "testagent");
-        assert_eq!(by_id.leaf, LeafPick { leaf: 3, color: 7 });
+        assert_eq!(by_id.disc_color, 7);
         assert_eq!(by_id.image_key.as_deref(), Some("avatar-1.jpg"));
         assert!(by_id.known);
 
@@ -348,8 +347,7 @@ mod tests {
         assert_eq!(unknown.id, "01GHOST");
         assert_eq!(unknown.name, "Ghost Writer");
         assert_eq!(unknown.handle, "ghost");
-        assert_eq!(unknown.leaf, leaf::default_pick("01GHOST"));
-        assert_ne!(unknown.leaf, leaf::default_pick("agent:01GHOST"));
+        assert_eq!(unknown.disc_color, disc::default_color("01GHOST"));
         assert_eq!(unknown.color_index, super::super::color_index("01GHOST"));
         assert_eq!(unknown.image_key, None);
 
@@ -375,7 +373,7 @@ mod tests {
         assert_eq!(nothing.handle, "");
 
         // 7b. No id at all (an older box's handle-only row): the handle seeds the picture, so
-        //     the bubble and the row still draw one leaf.
+        //     the bubble and the row still draw one disc.
         let handle_seeded = resolve(
             &AgentQuery {
                 sender: "",
@@ -385,7 +383,7 @@ mod tests {
             cards(),
         );
         assert_eq!(handle_seeded.id, "ghost");
-        assert_eq!(handle_seeded.leaf, leaf::default_pick("ghost"));
+        assert_eq!(handle_seeded.disc_color, disc::default_color("ghost"));
 
         // 8. A card without a handle gets one from its name; an empty image key is no picture.
         let no_handle = [AgentCard {
@@ -405,10 +403,9 @@ mod tests {
         assert_eq!(r.image_key, None);
         assert!(!r.neutral);
 
-        // 9. A neutral card (Create sheet, nothing picked) says so; its `leaf` is not drawn.
+        // 9. A neutral card (Create sheet, nothing picked) says so; its colour is not drawn.
         let neutral = [AgentCard {
-            leaf: Some(leaf::NEUTRAL),
-            leaf_color: Some(leaf::NEUTRAL),
+            disc_color: Some(disc::NEUTRAL),
             ..card("01N", "Field notes")
         }];
         let r = resolve(
@@ -469,7 +466,7 @@ mod tests {
             }
         }
 
-        // Reset to the leaf: the newest copy has no picture, and it still wins over a
+        // Reset to the disc: the newest copy has no picture, and it still wins over a
         // stale copy that has one.
         let reset = AgentCard {
             image_key: None,

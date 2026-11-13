@@ -83,7 +83,9 @@ extension AppModel {
         UserDefaults.standard.set(true, forKey: AppModel.pendingKey)
         // Always-on (D73): the relay starts the machine at sign-in; asking again is
         // a no-op there and covers relays (and test accounts) that did not.
-        Task { await startMachineQuietly() }
+        if let owner = accountLifetime.ticket {
+            Task { await startMachineQuietly(expectedOwner: owner) }
+        }
         startFirstLoginPolling()
     }
 
@@ -113,7 +115,7 @@ extension AppModel {
         }
         firstLogin = fl
         // `ARBOS_ONBOARDING_AUTOPLAY=1`: walk every stage on a timer (rig recordings).
-        if DebugHooks.onboardingAutoplay {
+        if DebugHooks.onboardingAutoplay, let owner = accountLifetime.ticket {
             firstLoginTask = Task { [weak self] in
                 let steps: [(FirstLogin.Stage, String?)] = [
                     (.agent, "Starting Home’s workspace · arbos-agent"),
@@ -121,31 +123,34 @@ extension AppModel {
                 ]
                 for (stage, detail) in steps {
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    guard let self, var fl = self.firstLogin else { return }
+                    guard let self, self.accountLifetime.accepts(owner), var fl = self.firstLogin else { return }
                     fl.stage = stage; fl.detail = detail; fl.stageSince = Date()
                     self.firstLogin = fl
                 }
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
-                guard let self, var fl = self.firstLogin else { return }
+                guard let self, self.accountLifetime.accepts(owner), var fl = self.firstLogin else { return }
                 fl.stage = .finishing; fl.finishStartedAt = Date(); fl.stageSince = Date()
                 self.firstLogin = fl
                 try? await Task.sleep(nanoseconds: UInt64((FirstLogin.finishSeconds + 0.1) * 1_000_000_000))
+                guard self.accountLifetime.accepts(owner) else { return }
                 self.endFirstLogin()
             }
         }
     }
 
     private func startFirstLoginPolling() {
+        guard let owner = accountLifetime.ticket else { return }
         firstLoginTask?.cancel()
         firstLoginTask = Task { [weak self] in
             // Fast lane while provisioning: the 15 s registry poll is too slow
             // for stage changes that take seconds.
             var tick = 0
             while !Task.isCancelled {
-                guard let self, self.firstLogin != nil else { return }
+                guard let self, self.accountLifetime.accepts(owner), self.firstLogin != nil else { return }
                 if tick % 3 == 0, !self.firstLoginIsDemo {
-                    await self.refreshRegistry()
+                    await self.refreshRegistry(expectedOwner: owner)
                 }
+                guard self.accountLifetime.accepts(owner), !Task.isCancelled else { return }
                 self.firstLoginTick()
                 tick += 1
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -167,7 +172,7 @@ extension AppModel {
     /// Retry from the S14 block: ask the relay to (re)start the machine and
     /// run the stages again from the top.
     func retryFirstLogin() {
-        guard var fl = firstLogin else { return }
+        guard var fl = firstLogin, let owner = accountLifetime.ticket else { return }
         let now = Date()
         fl.stage = .computer
         fl.stageSince = now
@@ -177,8 +182,11 @@ extension AppModel {
         fl.awakeSince = nil
         firstLogin = fl
         Task {
-            await startMachineQuietly()
-            await refreshRegistry()
+            guard accountLifetime.accepts(owner) else { return }
+            await startMachineQuietly(expectedOwner: owner)
+            guard accountLifetime.accepts(owner) else { return }
+            await refreshRegistry(expectedOwner: owner)
+            guard accountLifetime.accepts(owner) else { return }
             firstLoginTick()
         }
         if firstLoginTask == nil { startFirstLoginPolling() }
@@ -245,19 +253,23 @@ extension AppModel {
                 fl.projectId = own.id
                 fl.agentName = own.name
             } else {
+                guard let owner = accountLifetime.ticket else { return }
                 fl.creating = true
                 firstLogin = fl
                 Task { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.accountLifetime.accepts(owner) else { return }
                     do {
-                        try await self.createFirstProject(name: FirstLogin.agentName)
+                        try await self.createFirstProject(name: FirstLogin.agentName, expectedOwner: owner)
                     } catch {
+                        guard self.accountLifetime.accepts(owner) else { return }
                         // 409: another device of this account made it first.
                         if (error as? RelayError)?.status != 409 {
                             NSLog("first login: create project failed: \(error.localizedDescription)")
                         }
                     }
-                    await self.refreshRegistry()
+                    guard self.accountLifetime.accepts(owner) else { return }
+                    await self.refreshRegistry(expectedOwner: owner)
+                    guard self.accountLifetime.accepts(owner) else { return }
                     if var fl = self.firstLogin {
                         fl.creating = false
                         self.firstLogin = fl

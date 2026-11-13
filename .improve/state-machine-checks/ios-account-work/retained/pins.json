@@ -1,0 +1,42 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "3e8e43ab1e4d8eee1f5f9391c5581cd5bb8e1f6c5f6f785201abebd03c5a9108",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 6,
+    "results": [
+      {
+        "name": "late-pin-list-cannot-paint-B",
+        "pass": true
+      },
+      {
+        "name": "late-empty-pins-cannot-migrate-into-B",
+        "pass": true
+      },
+      {
+        "name": "late-pin-migration-cannot-mark-or-apply-B",
+        "pass": true
+      },
+      {
+        "name": "late-pin-entry-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "current-pin-list-control",
+        "pass": true
+      },
+      {
+        "name": "current-pin-migration-control",
+        "pass": true
+      }
+    ],
+    "total": 6
+  },
+  "seconds": 0.6761161669855937
+}

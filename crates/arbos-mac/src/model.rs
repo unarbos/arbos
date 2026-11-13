@@ -119,12 +119,10 @@ pub struct Project {
     /// D79: the owner's explicit pick (`avatar_color_index`), `None` = automatic.
     #[serde(default)]
     pub avatar_color_override: Option<u8>,
-    /// D92: the owner's leaf pick (`avatar_leaf`, 0–8), `None` = automatic.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    /// D92: the owner's leaf disc colour pick (`avatar_leaf_color`, 0–9), `None` = automatic.
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the owner's disc colour pick (0–9), `None` = automatic. The alias reads an
+    /// on-disk store written by a build that called this field `avatar_leaf_color`.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     /// A group's custom picture (`PATCH /chats/{id} {image_key}`), as a URL
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
@@ -674,11 +672,9 @@ pub struct Sender {
     /// D79: the agent's avatar gradient in effect (0–6), when the relay sends it.
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
-    /// D92: the agent's leaf avatar in effect (shape, disc colour), when the relay sends it.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the agent's disc colour in effect, when the relay sends it.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
 }
@@ -701,10 +697,8 @@ struct SenderWire {
     avatar_color_index: Option<u8>,
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color_effective: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color_effective")]
+    avatar_disc_color_effective: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     avatar_url: String,
 }
@@ -722,8 +716,7 @@ impl From<SenderWire> for Sender {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
-            avatar_leaf: w.avatar_leaf_effective,
-            avatar_leaf_color: w.avatar_leaf_color_effective,
+            avatar_disc_color: w.avatar_disc_color_effective,
             avatar_url: w.avatar_url,
         }
     }
@@ -772,8 +765,7 @@ impl Sender {
             avatar: None,
             avatar_color: None,
             avatar_color_index: p.avatar_color_index,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             avatar_url: p.avatar_url.clone(),
         }
     }
@@ -787,8 +779,7 @@ impl Sender {
             avatar: a.avatar.clone(),
             avatar_color: a.avatar_color.clone(),
             avatar_color_index: a.avatar_color_index,
-            avatar_leaf: a.avatar_leaf,
-            avatar_leaf_color: a.avatar_leaf_color,
+            avatar_disc_color: a.avatar_disc_color,
             avatar_url: String::new(),
         }
     }
@@ -819,8 +810,7 @@ pub fn call_people(space: &Project, me_id: &str, call_agents: &[Sender]) -> Vec<
             avatar: space.avatar.clone(),
             avatar_color: space.avatar_color.clone(),
             avatar_color_index: space.avatar_color_index,
-            avatar_leaf: space.avatar_leaf,
-            avatar_leaf_color: space.avatar_leaf_color,
+            avatar_disc_color: space.avatar_disc_color,
             avatar_url: String::new(),
         });
     }
@@ -1105,13 +1095,11 @@ pub struct AgentMember {
     /// D79: the agent's avatar gradient in effect (0–6).
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
-    /// D92: the agent's leaf avatar in effect (shape 0–8, disc colour 0–9).
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the agent's disc colour in effect (0–9).
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     /// D92 amendment: the agent's uploaded / generated picture, as a URL the avatar loader
-    /// fetches; wins over the leaf.
+    /// fetches; wins over the disc.
     #[serde(default)]
     pub image_url: Option<String>,
     /// The relay's stamp of the agent's last avatar change (same value as the owner's
@@ -1154,14 +1142,10 @@ struct AgentMemberWire {
     avatar_color_index: Option<u8>,
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color_effective: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color")]
+    avatar_disc_color: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color_effective")]
+    avatar_disc_color_effective: Option<u8>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -1172,7 +1156,7 @@ struct AgentMemberWire {
     /// persisted as JSON). Until 2026-10-26 this wire struct dropped both, so every roster
     /// copy came back from a relaunch without its picture; with the stamps equal (agents
     /// whose avatar predates #1813 carry 0) that lossy copy won the resolver and every
-    /// people-chat surface drew the leaf until the next registry read.
+    /// people-chat surface drew the disc until the next registry read.
     #[serde(default)]
     image_url: Option<String>,
     #[serde(default)]
@@ -1196,8 +1180,7 @@ impl From<AgentMemberWire> for AgentMember {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
-            avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
-            avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
+            avatar_disc_color: w.avatar_disc_color_effective.or(w.avatar_disc_color),
             image_url: w.image_url,
             avatar_version: w.avatar_version,
             description: w.description,
@@ -1827,6 +1810,16 @@ pub enum Part {
         #[serde(flatten)]
         preview: Box<LinkPreview>,
     },
+    /// A poll (`docs/polls.md`) as `arbos_core::doc::project_poll` folds it: the options and
+    /// who holds each. The message's text part is the same poll in plain words.
+    Poll {
+        id: Id,
+        question: String,
+        options: Vec<arbos_core::poll::PollOption>,
+        max: usize,
+        #[serde(default)]
+        votes: std::collections::BTreeMap<String, Vec<String>>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -1934,7 +1927,10 @@ fn de_widget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Widget>, D
 /// One skill of the library (F5); the relay's `Skill` shape, reused as the client view.
 pub type Skill = arbos_core::skill::Skill;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// `Deserialize` is derived so an unrecognised wire value lands on `Unrecognised` instead of being
+/// absorbed by `Other`, which is a category a producer can legitimately choose. `Serialize` is
+/// written by hand for the sentinel's sake: see the impl below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalRisk {
     Send,
@@ -1942,9 +1938,28 @@ pub enum ApprovalRisk {
     Money,
     Credential,
     Computer,
+    /// A real category, which agentd may send and which round-trips as `"other"`.
+    ///
+    /// `#[default]` covers a part with no `risk` key, which is a third fact again — "nothing was
+    /// said" rather than "other" or "something I do not know". That conflation is real but
+    /// invisible, and no producer in the tree omits the key (`arbos_core::doc` always inserts it,
+    /// the impl below always emits it, `arbos-acp` always sets it). **Do not tidy `#[default]`
+    /// onto `Unrecognised`**: the sentinel has no wire form, so an absent key would make the part
+    /// unserializable, and `write_parts` *skips* a part that refuses to serialise — trading an
+    /// invisible mislabel for a part dropped from a write. Giving "unspecified" its own fact means
+    /// `#[serde(default = "…")]` on the field rather than a default variant here (AF-1355).
     #[default]
-    #[serde(other)]
     Other,
+    /// A category only a newer box knows, kept distinct from `Other` so this build cannot
+    /// overwrite a value it merely failed to recognise.
+    ///
+    /// Nothing in this tree gates on a risk, so there is no branch for this variant to be
+    /// cautious in; it renders as itself and the card keeps its buttons (see
+    /// `unrecognised_approval_risk_tests`). The first surface that *does* gate on a risk must give
+    /// this variant the most restrictive branch it offers — and must say so explicitly, because no
+    /// `_` arm matches this enum anywhere, so that surface cannot compile without deciding.
+    #[serde(other)]
+    Unrecognised,
 }
 
 impl ApprovalRisk {
@@ -1956,18 +1971,66 @@ impl ApprovalRisk {
             ApprovalRisk::Credential => "credential",
             ApprovalRisk::Computer => "computer",
             ApprovalRisk::Other => "other",
+            // Not promoted to the gravest known category: the audit line reports what the
+            // producer said, and substituting `destructive` for a risk it called something else
+            // would put a category nobody sent into the one artifact whose value is that it says
+            // what happened.
+            ApprovalRisk::Unrecognised => "unrecognised",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// Hand-written so `Unrecognised` has no wire form, while the six real categories — `Other`
+/// included — serialise byte-identically to the derive this replaced.
+///
+/// A derived impl would emit `"unrecognised"` and overwrite the category it merely failed to
+/// parse. Returning an error instead makes that write unrepresentable rather than discouraged.
+///
+/// **The precondition:** no caller writes back a part it decoded. The only `Part` → JSON path in
+/// this crate is `sync/fixture.rs`, the local offline source, and it writes parts it authored
+/// itself; the relay path writes a decision (`append_approval_command`), not a part. A refusal is
+/// therefore unreachable for any part a caller legitimately built. A future caller that *does*
+/// write a decoded part back turns this correct refusal into a failure — under `write_parts` the
+/// part is skipped — so such a caller has to carry the original value rather than this sentinel.
+impl Serialize for ApprovalRisk {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let name = match self {
+            ApprovalRisk::Send => "send",
+            ApprovalRisk::Destructive => "destructive",
+            ApprovalRisk::Money => "money",
+            ApprovalRisk::Credential => "credential",
+            ApprovalRisk::Computer => "computer",
+            ApprovalRisk::Other => "other",
+            ApprovalRisk::Unrecognised => {
+                return Err(serde::ser::Error::custom(
+                    "a risk category this build does not know cannot be written back",
+                ))
+            }
+        };
+        s.serialize_str(name)
+    }
+}
+
+/// `Deserialize` is derived so an unrecognised wire state lands on `Unknown` instead of failing
+/// the field — a failed field discards the whole message row, card and prose together. `Serialize`
+/// is written by hand for the opposite reason: see the impl below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
     #[default]
     Pending,
     Approved,
     Rejected,
+    /// Agent cards no longer expire, so this arrives only from the relay's outside-agent cards,
+    /// which do keep a window. Kept for the cards already in older documents.
     Expired,
+    /// The question stopped mattering before it was answered — its job was cancelled. The card
+    /// closes unanswered, like an expired one, but nothing timed out.
+    Cancelled,
+    /// A state only a newer agentd knows, kept so the row survives. This client cannot say what
+    /// it means, so it renders inert and is never written back.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ApprovalState {
@@ -1977,7 +2040,51 @@ impl ApprovalState {
             ApprovalState::Approved => "Approved",
             ApprovalState::Rejected => "Rejected",
             ApprovalState::Expired => "Expired",
+            ApprovalState::Cancelled => "Cancelled",
+            ApprovalState::Unknown => "Unrecognised",
         }
+    }
+
+    /// Whether the card was closed with an outcome this client can name. `Unknown` is neither
+    /// pending nor decided: something closed the card, but reporting *what* would be a guess.
+    ///
+    /// `Cancelled` is decided for the same reason `Expired` is, and not because this predicate
+    /// is only about whether the user is still being asked: `shell.rs`'s audit row is gated on
+    /// it precisely so an unnameable close cannot invent an outcome. A cancelled card names its
+    /// own — `cancelled`, with `decided_by` `arbos:cancelled` — so the row it writes invents
+    /// nothing. That is the line this predicate draws: nameable, not merely closed.
+    pub fn decided(self) -> bool {
+        match self {
+            ApprovalState::Approved
+            | ApprovalState::Rejected
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled => true,
+            ApprovalState::Pending | ApprovalState::Unknown => false,
+        }
+    }
+}
+
+/// Hand-written so `Unknown` has no wire form at all.
+///
+/// A derived impl would emit `"unknown"` and overwrite the state it merely failed to parse,
+/// which is worse than dropping the row: the client would destroy a fact it did not understand.
+/// Returning an error instead makes that write unrepresentable rather than merely discouraged —
+/// every caller that serialises a part already declines to write when this fails.
+impl Serialize for ApprovalState {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let name = match self {
+            ApprovalState::Pending => "pending",
+            ApprovalState::Approved => "approved",
+            ApprovalState::Rejected => "rejected",
+            ApprovalState::Expired => "expired",
+            ApprovalState::Cancelled => "cancelled",
+            ApprovalState::Unknown => {
+                return Err(serde::ser::Error::custom(
+                    "an approval state this build does not know cannot be written back",
+                ))
+            }
+        };
+        s.serialize_str(name)
     }
 }
 
@@ -2018,6 +2125,28 @@ pub struct JobRef {
     pub id: String,
     #[serde(default)]
     pub title: String,
+}
+
+/// Agent-to-agent hand-off payload (`agentMessage` on a spawn / receive row).
+/// The send-side row names the destination; the receive-side copy keeps the
+/// same `id` so a tap on "Messaged ◉ X" can find the landed message.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessageRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub to_project_id: String,
+    #[serde(default)]
+    pub to_name: String,
+    #[serde(default)]
+    pub status: String,
+    /// Destination chat when agentd recorded it (absent on older notices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// Destination message when agentd recorded it (absent on older notices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// Where an open job is in its life — the two states the relay lists
@@ -2420,6 +2549,10 @@ pub struct Message {
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
     pub agent_reply_to: Option<String>,
+    /// Agent-to-agent hand-off / receive payload (`agentMessage`): tap target for
+    /// "Messaged ◉ X" and the matching id on the destination agent's copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_message: Option<AgentMessageRef>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
@@ -2876,6 +3009,7 @@ impl Message {
                 | Part::Approval { .. }
                 | Part::SecretRedacted { .. }
                 | Part::Chart { .. }
+                | Part::Poll { .. }
                 | Part::LinkPreview { .. } => false,
             })
     }
@@ -3448,6 +3582,73 @@ pub struct DevicesView {
     pub error: Option<crate::sync::user_error::UserError>,
 }
 
+/// One agent token of my account (`GET /me/agent-links`). Covers both the
+/// agent access links and the read-only reader tokens that predate them; the
+/// relay tells them apart with `origin` and this section lists both, because
+/// "tokens I gave an agent" is one question with one answer.
+///
+/// No field here is or can be a secret: the relay's list route never returns
+/// a bearer or a URL, on any row, ever (`docs/agent-access-link-spec.md` §6.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct AgentLinkView {
+    pub id: String,
+    /// `link` (an agent access link) or `export` (a migrated reader token).
+    #[serde(default)]
+    pub origin: String,
+    /// The owner's name for it, shown in the list and in the audit.
+    #[serde(default)]
+    pub label: String,
+    /// `read` | `reply`.
+    #[serde(default)]
+    pub scope: String,
+    pub created_at: i64,
+    /// `None` on a reader token, which never expires.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// Set the moment something fetched the URL. `None` = nobody has yet.
+    #[serde(default)]
+    pub opened_at: Option<i64>,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// The relay's own verdict: not revoked and not past its expiry.
+    #[serde(default)]
+    pub live: bool,
+    /// `waiting` | `in_use` | `revoked` | `expired`.
+    #[serde(default)]
+    pub state: String,
+    /// What the relay wants said about this row (a reader token keeps no
+    /// activity record, and the list says so rather than implying one).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Settings → Agent access link state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentLinksView {
+    pub items: Vec<AgentLinkView>,
+    pub loaded: bool,
+    /// A mint is in flight: the Create button is spent until the relay answers.
+    pub minting: bool,
+    /// Why the list could not be read, when it could not.
+    pub error: Option<crate::sync::user_error::UserError>,
+}
+
+/// The copy sheet, the one screen a new link's URL exists on. Closed, it is
+/// unrecoverable — which is why Done waits for the Copy (`one-copy` §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentLinkReveal {
+    /// The whole URL, for the clipboard.
+    pub url: String,
+    pub label: String,
+    pub scope: String,
+    /// "7 days", for the sheet's one-line restatement of what was granted.
+    pub expires_in: String,
+    /// Copy has been pressed: the capsule reads "Copied" and Done is live.
+    pub copied: bool,
+}
+
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecretsView {
@@ -3890,6 +4091,20 @@ pub struct Machine {
     /// D89: the host is full and this account is in line for a machine (`/me` →
     /// `machine.waitlisted` / `machine.waitlist_position`). None = not waitlisted.
     pub waitlist_position: Option<u32>,
+    /// `lifecycle_state`: where a machine that sleeps by itself was last left (`warm`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold`, …). None for every other machine.
+    pub lifecycle: Option<String>,
+    /// `storage`: what its disk held when it last went to sleep. The relay keeps it, so it is
+    /// there for a machine that is asleep or in cold storage too.
+    pub storage: Option<MachineStorage>,
+}
+
+/// `GET /machine` `storage`, in bytes.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct MachineStorage {
+    pub files: u64,
+    pub scratch: Option<u64>,
+    pub trash: Option<u64>,
 }
 
 impl Machine {
@@ -4268,11 +4483,9 @@ pub struct ServerInfo {
     /// by the relay client; not on the wire.
     #[serde(skip)]
     pub image_url: Option<String>,
-    /// D92 amendment: the leaf picture from the Create screen; `None` = initials.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92 amendment: the disc colour from the Create screen; `None` = initials.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     #[serde(default)]
     pub owner_user_id: String,
     #[serde(default)]
@@ -4428,6 +4641,7 @@ impl OptimisticNotice {
             job: None,
             hidden: false,
             agent_reply_to: None,
+            agent_message: None,
             reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
@@ -5013,5 +5227,289 @@ mod group_call_ring_tests {
         assert_eq!(expected.len(), 1);
         assert_eq!(expected[0].identity(), "a_proj_forest");
         assert_eq!(expected[0].handle, "forest");
+    }
+}
+
+#[cfg(test)]
+mod unknown_approval_state_tests {
+    //! A state only a newer agentd knows must never cost the user a message, and must never be
+    //! written back over the real value. `cancelled` is the live instance: #2890 makes it the
+    //! only way a card closes unanswered, and it reaches this client through the document.
+
+    use super::*;
+    use serde_json::json;
+
+    fn row(state: &str) -> serde_json::Value {
+        json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "done",
+            "parts": [
+                { "kind": "text", "id": "p0", "text": "I need your approval to send this." },
+                {
+                    "kind": "approval",
+                    "id": "p1",
+                    "approvalId": "apr_1",
+                    "title": "Send the draft",
+                    "risk": "send",
+                    "state": state,
+                    "decidedBy": "arbos:cancelled",
+                }
+            ],
+        })
+    }
+
+    fn card(m: &Message) -> ApprovalState {
+        m.parts
+            .iter()
+            .find_map(|p| match p {
+                Part::Approval { state, .. } => Some(*state),
+                _ => None,
+            })
+            .expect("the card survived")
+    }
+
+    /// The bug this exists to stop: a field this build cannot parse fails the whole row, and
+    /// `SyncDoc::read_message` discards it with `.ok()?` — so the user loses the assistant's
+    /// prose along with the card, on every read, for as long as the value stands.
+    ///
+    /// `cancelled` left this list in #2890, which made it a known state: a product word here
+    /// becomes a real variant later and silently shrinks the population while the test stays
+    /// green. Replacements are synthetic for that reason. `superseded` is the next one to go
+    /// the same way — approval supersession is live work — and it is still here.
+    #[test]
+    fn a_state_this_build_does_not_know_keeps_its_whole_row() {
+        for state in ["something_from_2029", "superseded", "something_from_2027"] {
+            let m: Message = serde_json::from_value(row(state))
+                .unwrap_or_else(|e| panic!("`{state}` cost the user the row: {e}"));
+            assert_eq!(m.parts.len(), 2, "`{state}` dropped a part");
+            assert!(
+                matches!(m.parts[0], Part::Text { .. }),
+                "`{state}` cost the user the prose"
+            );
+            assert_eq!(card(&m), ApprovalState::Unknown);
+        }
+    }
+
+    /// The known states still parse as themselves, so tolerance did not widen into vagueness.
+    #[test]
+    fn the_four_known_states_still_parse_as_themselves() {
+        for (wire, want) in [
+            ("pending", ApprovalState::Pending),
+            ("approved", ApprovalState::Approved),
+            ("rejected", ApprovalState::Rejected),
+            ("expired", ApprovalState::Expired),
+        ] {
+            let m: Message = serde_json::from_value(row(wire)).expect("known state");
+            assert_eq!(card(&m), want, "`{wire}` stopped parsing as itself");
+        }
+        // An absent state is still a pending card, as before.
+        let mut v = row("pending");
+        v["parts"][1].as_object_mut().unwrap().remove("state");
+        let m: Message = serde_json::from_value(v).expect("stateless card");
+        assert_eq!(card(&m), ApprovalState::Pending);
+    }
+
+    /// **The property that matters.** A state this client does not understand has no wire form
+    /// at all, so the client cannot overwrite a fact it merely failed to read.
+    ///
+    /// This fails if anyone maps `Unknown` onto a real variant, or re-derives `Serialize`:
+    /// either change makes these writes succeed, which is precisely the destruction being
+    /// prevented. It is an assertion about what this client is *unable* to say.
+    ///
+    /// It did exactly that in #2890, which gave `Serialize` a `Cancelled => "cancelled"` arm
+    /// and turned the card below into a writable one. The invariant is unchanged — a state
+    /// this build cannot name still has no wire form — so the literal moved to a synthetic
+    /// value rather than the assertion being weakened. A product word here becomes a real
+    /// variant later; `model.rs`'s sibling list still carries `superseded`, and approval
+    /// supersession is live work, so that one is next.
+    #[test]
+    fn an_unknown_state_can_never_be_written_back() {
+        assert!(
+            serde_json::to_value(ApprovalState::Unknown).is_err(),
+            "an unknown state gained a wire form, so it can now overwrite the real one"
+        );
+
+        let m: Message = serde_json::from_value(row("something_from_2030")).expect("row survives");
+        let unknown_card = m
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Approval { .. }))
+            .expect("card");
+        assert!(
+            serde_json::to_value(unknown_card).is_err(),
+            "a card in an unknown state serialised, so writing it back would destroy the state"
+        );
+
+        // And the whole row cannot be written back either, so no caller can launder it.
+        assert!(serde_json::to_value(&m).is_err());
+    }
+
+    /// The hand-written `Serialize` must be byte-identical to the derive it replaced, for
+    /// states *and* risks, so neither this change nor the `ApprovalRisk` follow-up can move the
+    /// wire without a test saying so.
+    #[test]
+    fn the_known_states_and_risks_keep_their_exact_wire_names() {
+        for (state, wire) in [
+            (ApprovalState::Pending, "\"pending\""),
+            (ApprovalState::Approved, "\"approved\""),
+            (ApprovalState::Rejected, "\"rejected\""),
+            (ApprovalState::Expired, "\"expired\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect(wire), wire);
+            assert_eq!(
+                serde_json::from_str::<ApprovalState>(wire).expect(wire),
+                state,
+                "{wire} no longer round-trips"
+            );
+        }
+
+        for (risk, wire) in [
+            (ApprovalRisk::Send, "\"send\""),
+            (ApprovalRisk::Destructive, "\"destructive\""),
+            (ApprovalRisk::Money, "\"money\""),
+            (ApprovalRisk::Credential, "\"credential\""),
+            (ApprovalRisk::Computer, "\"computer\""),
+            (ApprovalRisk::Other, "\"other\""),
+        ] {
+            assert_eq!(serde_json::to_string(&risk).expect(wire), wire);
+            assert_eq!(
+                serde_json::from_str::<ApprovalRisk>(wire).expect(wire),
+                risk,
+                "{wire} no longer round-trips"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod unrecognised_approval_risk_tests {
+    //! The write-side half of `unknown_approval_state_tests`, one field over, with one thing it
+    //! must not copy.
+    //!
+    //! `other` is three facts at once in the old enum: the category a producer chose, the
+    //! category this build failed to recognise, and the absent field. Only the middle one is a
+    //! defect, and only on the way out: an unrecognised value was re-serialised as `"other"`, so
+    //! a category a newer box sent was destroyed for every participant rather than merely
+    //! misread here.
+    //!
+    //! **The thing not to copy.** A mitigation is justified by the field's role, not inherited
+    //! because the field beside it had one. An unknown *state* earned inertness because the state
+    //! is what makes a card actionable; an unknown *risk* is descriptive, so the card renders and
+    //! keeps its buttons. Copying inertness across would strand the user on an answerable card
+    //! for no gain — the expiry stall, rebuilt out of caution.
+
+    use super::*;
+    use serde_json::json;
+
+    fn row(risk: &str) -> serde_json::Value {
+        json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "done",
+            "parts": [
+                { "kind": "text", "id": "p0", "text": "I need your approval to do this." },
+                {
+                    "kind": "approval",
+                    "id": "p1",
+                    "approvalId": "apr_1",
+                    "title": "Do the thing",
+                    "risk": risk,
+                    "state": "pending",
+                }
+            ],
+        })
+    }
+
+    fn card(m: &Message) -> (ApprovalRisk, ApprovalState) {
+        m.parts
+            .iter()
+            .find_map(|p| match p {
+                Part::Approval { risk, state, .. } => Some((*risk, *state)),
+                _ => None,
+            })
+            .expect("the card survived")
+    }
+
+    /// The distinction the old enum could not make. `other` is a category a producer may choose
+    /// and must keep meaning exactly that; a value this build has never heard of is a different
+    /// fact and lands on the sentinel.
+    ///
+    /// This fails if anyone moves `#[serde(other)]` back onto `Other`, which is the edit that
+    /// silently restores the overload.
+    #[test]
+    fn an_unrecognised_risk_is_not_the_other_category() {
+        for wire in ["legal", "privacy", "something_from_2027"] {
+            let m: Message = serde_json::from_value(row(wire))
+                .unwrap_or_else(|e| panic!("`{wire}` cost the user the row: {e}"));
+            assert_eq!(
+                card(&m).0,
+                ApprovalRisk::Unrecognised,
+                "`{wire}` was absorbed by a category the producer did not send"
+            );
+        }
+        let m: Message = serde_json::from_value(row("other")).expect("a stated `other`");
+        assert_eq!(
+            card(&m).0,
+            ApprovalRisk::Other,
+            "a producer that said `other` must still be heard as saying it"
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalRisk::Other).expect("`other` is writable"),
+            "\"other\"",
+            "the real category lost its wire form"
+        );
+    }
+
+    /// **The property that matters.** A category this build does not understand has no wire form,
+    /// so no write can replace it with one that was never sent.
+    ///
+    /// This fails if anyone re-derives `Serialize` or maps the sentinel onto `Other`: either
+    /// change makes these writes succeed, which is the destruction being prevented.
+    #[test]
+    fn an_unrecognised_risk_can_never_be_written_back() {
+        assert!(
+            serde_json::to_value(ApprovalRisk::Unrecognised).is_err(),
+            "an unrecognised risk gained a wire form, so it can now overwrite the real one"
+        );
+
+        let m: Message = serde_json::from_value(row("legal")).expect("row survives");
+        let unknown_card = m
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Approval { .. }))
+            .expect("card");
+        assert!(
+            serde_json::to_value(unknown_card).is_err(),
+            "a card with an unrecognised risk serialised, so writing it back would destroy it"
+        );
+        // And the whole row cannot be written back either, so no caller can launder it.
+        assert!(serde_json::to_value(&m).is_err());
+    }
+
+    /// The asymmetry with `ApprovalState::Unknown`, asserted so the next person cannot copy the
+    /// inertness across without a test objecting. A pending card whose risk this build cannot
+    /// name is still a card the user must be able to answer.
+    #[test]
+    fn an_unrecognised_risk_keeps_the_card_answerable() {
+        let m: Message = serde_json::from_value(row("legal")).expect("row survives");
+        assert_eq!(m.parts.len(), 2, "the row lost a part");
+        assert!(
+            matches!(m.parts[0], Part::Text { .. }),
+            "the row lost the prose"
+        );
+        let (risk, state) = card(&m);
+        assert_eq!(risk, ApprovalRisk::Unrecognised);
+        assert_eq!(
+            state,
+            ApprovalState::Pending,
+            "an unrecognised risk must not close a card the user still has to answer"
+        );
+        assert_eq!(
+            m.pending_approvals().count(),
+            1,
+            "the card dropped out of the pending set, so nothing will ask the user"
+        );
+        assert_eq!(risk.label(), "unrecognised");
     }
 }

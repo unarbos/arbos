@@ -1,0 +1,35 @@
+{
+  "app": {
+    "project_swift_sources": 93,
+    "swiftpm_swift_sources": 93,
+    "missing_from_compile": [],
+    "extra_compile_sources": [],
+    "project_sha256": "835d1e3265e273de9a2c2d98ee90f7cff71375cd6c8d1a18b627b50b6ab72657",
+    "sdk_compile_source_unchanged": true
+  },
+  "tests": {
+    "project_sha256": "835d1e3265e273de9a2c2d98ee90f7cff71375cd6c8d1a18b627b50b6ab72657",
+    "targets": {
+      "ArbosTests": {
+        "project_build_entries": 85,
+        "unique_swift_sources": 85,
+        "missing": [],
+        "extra": [],
+        "counter_parity": true,
+        "duplicates": {}
+      },
+      "ArbosUITests": {
+        "project_build_entries": 14,
+        "unique_swift_sources": 13,
+        "missing": [],
+        "extra": [],
+        "counter_parity": true,
+        "duplicates": {
+          "apps/ios/Arbos/ArbosUITests/AvatarBackSwipeUITests.swift": 2
+        }
+      }
+    },
+    "source": "actual frozen live-P4 pbx copied before compile and independently parsed with plutil; counts preserve duplicate build-file entries",
+    "parity_transfer": "Same exact pbx835d1e bytes as independent plutil Counter proof; current full test sources submitted with unchanged85/14entry counts."
+  }
+}

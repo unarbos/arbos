@@ -1,7 +1,11 @@
-//! Box lifecycle: providers (Daytona, local process, local Docker, gVisor sandboxes on the relay
-//! host — D89, `fleet.rs`), wake jobs, keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
+//! Box lifecycle: providers (gVisor sandboxes on the relay host — D89, `fleet.rs` — local process,
+//! local Docker), wake jobs, keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
+//!
+//! Daytona is retired (Jacob, 2026-11-09): no box is created, started, stopped or rolled on it any
+//! more, and the relay holds no Daytona credentials. [`RETIRED_PROVIDER`] names it so a `boxes` row
+//! left on it is reported plainly instead of being mistaken for a local box.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -14,57 +18,98 @@ use arbos_core::auth::{hash, mint, TokenKind};
 use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
-use crate::daytona::{CreateSandbox, SandboxState};
 use crate::db::Sandbox;
-use crate::state::{AppState, CreatingGuard};
+use crate::state::{AppState, CreatingGuard, CreationPermit};
+
+/// The provider name no box may be created, started or rolled on any more. Stored rows and
+/// `box_history` entries keep the name, so a leftover row is recognised and reported.
+pub const RETIRED_PROVIDER: &str = "daytona";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    Daytona,
     Process,
     Docker,
     /// A gVisor (`runsc`) container on the relay host with a per-user `/work` image (D89).
     Gvisor,
+    /// An OCI bundle under the host's `arbos-boxd` daemon (docs/box-scaling.md, `boxd.rs`). Works
+    /// only with `ARBOS_BOXD_URL` set; no box is on it unless an operator names it.
+    Boxd,
 }
 
 impl Provider {
+    /// Every provider a box may be created on, for the messages that list the choices.
+    pub const NAMES: &'static str = "process|docker|gvisor|boxd";
+    /// `None` for anything this relay cannot run, including [`RETIRED_PROVIDER`]. A caller holding
+    /// a stored row uses [`provider_of`] instead, so the retirement shows up in the message.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "daytona" => Some(Provider::Daytona),
             "process" => Some(Provider::Process),
             "docker" => Some(Provider::Docker),
             "gvisor" => Some(Provider::Gvisor),
+            "boxd" => Some(Provider::Boxd),
             _ => None,
         }
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Provider::Daytona => "daytona",
             Provider::Process => "process",
             Provider::Docker => "docker",
             Provider::Gvisor => "gvisor",
+            Provider::Boxd => "boxd",
         }
     }
 }
 
+/// Is this row one the relay only reads? The sandboxes left on the retired provider belong to an
+/// operator step outside the relay, so nothing here starts, stops, rolls or replaces them — and
+/// nothing deletes the row either, because the row is what names the sandbox to delete.
+///
+/// Reading them is normal: `GET /machine`, the project status, the admin listings and the fleet
+/// views all show such a box as it is. Only the paths that would drive it are closed.
+pub fn read_only_row(sb: &Sandbox) -> bool {
+    sb.provider == RETIRED_PROVIDER
+}
+
+/// The same question when only the user id is at hand. A row that cannot be read answers `false`:
+/// the caller then meets the real error on its own path rather than being silently skipped here.
+fn read_only_box(state: &AppState, user_id: &str) -> bool {
+    matches!(state.db.user_box(user_id), Ok(Some(sb)) if read_only_row(&sb))
+}
+
+/// The provider of a stored box row. A row still on the retired provider says so rather than
+/// failing as an unknown name: it is the one case an operator meets while old rows exist.
+pub fn provider_of(sb: &Sandbox) -> Result<Provider> {
+    Provider::parse(&sb.provider).ok_or_else(|| {
+        if sb.provider == RETIRED_PROVIDER {
+            anyhow!(
+                "box {} is on the retired {RETIRED_PROVIDER} provider; this relay does not start, stop or roll it",
+                sb.user_id
+            )
+        } else {
+            anyhow!("bad provider {}", sb.provider)
+        }
+    })
+}
+
 /// Where a user without a box gets one: `ARBOS_DEFAULT_PROVIDER` when set (D89: `gvisor` on the
-/// arbos.life host), else Daytona when it is configured, else a local process.
+/// arbos.life host), else a local process. The retired provider is never the answer, whatever the
+/// environment names.
 pub fn default_provider(state: &AppState) -> Provider {
-    match state
-        .cfg
-        .default_provider
-        .as_deref()
-        .and_then(Provider::parse)
-    {
-        Some(p) => p,
-        None if state.daytona.is_some() => Provider::Daytona,
+    match state.cfg.default_provider.as_deref() {
+        Some(p) => Provider::parse(p).unwrap_or_else(|| {
+            tracing::warn!(
+                provider = p,
+                "ARBOS_DEFAULT_PROVIDER names no provider this relay runs; new boxes go to a local process"
+            );
+            Provider::Process
+        }),
         None => Provider::Process,
     }
 }
 
 /// Where THIS user's next box goes: the admin override (`users.box_provider`) when set, else
-/// [`default_provider`]. The override exists so a scratch user can get a Daytona box on a host
-/// whose default is gVisor (the carry e2e of ARB-339); it never moves an existing box.
+/// [`default_provider`]. The override exists so a scratch user can get a local box on a host whose
+/// default is gVisor; it never moves an existing box, and it cannot name the retired provider.
 pub fn provider_for_user(state: &AppState, user_id: &str) -> Provider {
     state
         .db
@@ -118,44 +163,24 @@ pub(crate) fn box_env(
     env
 }
 
-/// Create the user's box (one Daytona computer per user; created with the user's first project,
-/// D32). `snapshot` overrides the relay default (per-user class).
-pub async fn create_box(
+/// Create the user's box (one computer per user; created with the user's first project, D32)
+/// under an already admitted per-user lease; never reacquire it inside the pipeline.
+/// `snapshot` overrides the relay default (per-user class).
+pub(crate) async fn create_box(
     state: &AppState,
-    user_id: &str,
+    permit: &mut CreationPermit,
     provider: Provider,
     snapshot: Option<&str>,
 ) -> Result<Sandbox> {
-    create_box_row(state, user_id, provider, snapshot, true).await
-}
-
-/// A Daytona sandbox for the user whose row is NOT written: the upgrade carries `/work` onto it
-/// while the row stays on the source, and writes the returned row itself once the carry is in.
-pub async fn create_staged_box(
-    state: &AppState,
-    user_id: &str,
-    snapshot: Option<&str>,
-) -> Result<Sandbox> {
-    create_box_row(state, user_id, Provider::Daytona, snapshot, false).await
-}
-
-async fn create_box_row(
-    state: &AppState,
-    user_id: &str,
-    provider: Provider,
-    snapshot: Option<&str>,
-    write_row: bool,
-) -> Result<Sandbox> {
-    if !write_row && provider != Provider::Daytona {
-        return Err(anyhow!("only a Daytona box can be created staged"));
-    }
+    let user = permit.user_id().to_owned();
+    let user_id = user.as_str();
     let snapshot_name = snapshot
         .map(str::to_owned)
         .unwrap_or_else(|| state.default_snapshot());
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
     let replacing = state.db.user_box(user_id)?.and_then(|r| r.sandbox_id);
-    let _creating = CreatingGuard::new(&state.restart, user_id);
+    let _creating = CreatingGuard::new(permit);
     let mut sb = Sandbox {
         user_id: user_id.to_owned(),
         provider: provider.as_str().to_owned(),
@@ -174,125 +199,84 @@ async fn create_box_row(
         migrated_from: Vec::new(),
     };
     // A first box gets its row (and token hash) now, so the box can dial in at once. A row that
-    // already names a sandbox (upgrade, repair) is left alone until the new sandbox id is known
-    // and the whole new row is written in one go: a restart in between leaves the user on the
-    // box they had, never on a row without a sandbox (#2262). The new box's early hellos are
-    // refused until then and agentd retries every 3 s.
-    if replacing.is_none() && write_row {
+    // already names a sandbox (a recreate) is left alone until the new sandbox id is known and the
+    // whole new row is written in one go: a restart in between leaves the user on the box they
+    // had, never on a row without a sandbox (#2262). The new box's early hellos are refused until
+    // then and agentd retries every 3 s.
+    if replacing.is_none() {
         state.db.upsert_box(&sb)?;
     }
     state
         .set_box_state(user_id, BoxState::Waking, Some("creating"))
         .await;
+    // The create ledger (#2262): the sandbox this is about to make is named in the database before
+    // the provider is asked for it, so a relay killed mid-create leaves a row an operator can
+    // read. It used to cover Daytona creates only; every provider writes it now.
+    let sandbox_name = match provider {
+        Provider::Process => format!("local-{user_id}"),
+        Provider::Docker => format!("arbos-box-{}", user_id.to_ascii_lowercase()),
+        Provider::Gvisor => crate::fleet::container_name(user_id),
+        // The daemon's id for it, dot and all (`arbos-boxd` `Boxd::paths`).
+        Provider::Boxd => format!("arbos-box-{user_id}."),
+    };
+    state.db.begin_box_create(
+        user_id,
+        &sandbox_name,
+        provider.as_str(),
+        Some(&snapshot_name),
+        replacing.as_deref(),
+    )?;
+    tracing::info!(user = %user_id, sandbox_name, replacing = ?replacing, snapshot = %snapshot_name, provider = provider.as_str(), "creating box");
     let t0 = Instant::now();
+    let made = create_on_provider(
+        state,
+        user_id,
+        provider,
+        &mut sb,
+        &snapshot_name,
+        &box_token,
+        &mcp_token,
+        replacing.as_deref(),
+        t0,
+    )
+    .await;
+    let _ = state.db.end_box_create(user_id);
+    made?;
+    state
+        .wake_started
+        .lock()
+        .await
+        .insert(user_id.to_owned(), now_ms());
+    Ok(sb)
+}
+
+/// Make the sandbox itself. Split out of [`create_box_row`] so the create ledger is cleared on
+/// every exit, including a provider that fails.
+///
+/// Every arm holds #2262's rule: on a recreate (`replacing` is set) the row is written only once
+/// the new sandbox is up, so a create that fails or is cut short leaves the user on the box they
+/// have. Each provider's start step writes the finished row.
+#[allow(clippy::too_many_arguments)]
+async fn create_on_provider(
+    state: &AppState,
+    user_id: &str,
+    provider: Provider,
+    sb: &mut Sandbox,
+    snapshot_name: &str,
+    box_token: &str,
+    mcp_token: &str,
+    replacing: Option<&str>,
+    t0: Instant,
+) -> Result<()> {
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let relay_url = state.cfg.public_url.clone();
-            let env = box_env(state, user_id, &box_token, &mcp_token, &relay_url);
-            let snapshot_ok = dt.get_snapshot(&snapshot_name).await.is_ok();
-            let inline = match (&state.cfg.daytona_dockerfile, snapshot_ok) {
-                (Some(p), false) => Some(
-                    std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?,
-                ),
-                _ => None,
-            };
-            // Unique per sandbox: a retained old sandbox (upgrade fallback) keeps its name, and
-            // Daytona refuses a duplicate with 409.
-            let suffix = arbos_core::ids::ulid().to_ascii_lowercase();
-            let sandbox_name = format!(
-                "arbos-{}-{}",
-                user_id
-                    .to_ascii_lowercase()
-                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
-                &suffix[suffix.len().saturating_sub(6)..]
-            );
-            let mut body = CreateSandbox {
-                name: Some(sandbox_name.clone()),
-                snapshot: if inline.is_none() {
-                    Some(snapshot_name.clone())
-                } else {
-                    None
-                },
-                cpu: inline.as_ref().map(|_| 4),
-                memory: inline.as_ref().map(|_| 8),
-                disk: inline.as_ref().map(|_| 40),
-                build_info: inline.map(|d| json!({ "dockerfileContent": d })),
-                // Always-on (default in GitHub mode): Daytona never stops the box by itself.
-                auto_stop_interval: Some(if state.cfg.always_on { 0 } else { 30 }),
-                auto_archive_interval: Some(7 * 24 * 60),
-                auto_delete_interval: Some(-1),
-                ttl_minutes: Some(0),
-                ..Default::default()
-            };
-            for (k, v) in env {
-                body.env.insert(k, Value::String(v));
-            }
-            body.labels
-                .insert("arbos.user".into(), Value::String(user_id.to_owned()));
-            state.db.begin_box_create(
-                user_id,
-                &sandbox_name,
-                provider.as_str(),
-                Some(&snapshot_name),
-                replacing.as_deref(),
-            )?;
-            tracing::info!(user = %user_id, sandbox_name, replacing = ?replacing, snapshot = %snapshot_name, "creating box sandbox");
-            let created = match dt.create(&body).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = state.db.end_box_create(user_id);
-                    return Err(e);
-                }
-            };
-            sb.sandbox_id = Some(created.id.clone());
-            sb.device_id = format!("box:{}", created.id);
-            sb.snapshot = Some(snapshot_name.clone());
-            sb.daytona_state = Some(format!("{:?}", created.state).to_ascii_lowercase());
-            if write_row {
-                state.db.upsert_box(&sb)?;
-            }
-            let _ = state.db.end_box_create(user_id);
-            let started = match dt
-                .wait_for(&created.id, Duration::from_secs(180), |s| {
-                    s.state == SandboxState::Started
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    if !write_row {
-                        discard_empty_staged(state, dt, &sb).await;
-                    }
-                    return Err(e);
-                }
-            };
-            sb.daytona_state = Some(format!("{:?}", started.state).to_ascii_lowercase());
-            sb.last_started_at = Some(now_ms());
-            if let Ok(p) = dt.preview_url(&created.id, 7788).await {
-                sb.box_url = Some(p.url);
-                sb.preview_token = Some(p.token);
-            }
-            if write_row {
-                state.db.upsert_box(&sb)?;
-            }
-            push_relay_url(state, dt, &created.id).await;
-            state.db.record_timing(
-                &timing_key(user_id),
-                "daytona_create_to_started_ms",
-                t0.elapsed().as_millis() as i64,
-                created.runner_id.as_deref(),
-            )?;
-        }
         Provider::Process => {
             sb.sandbox_id = Some(format!("local-{user_id}"));
             sb.device_id = format!("box:local-{user_id}");
-            state.db.upsert_box(&sb)?;
-            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
-            start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
+            if replacing.is_none() {
+                state.db.upsert_box(sb)?;
+            }
+            save_local_tokens(state, user_id, box_token, mcp_token)?;
+            start_process(state, user_id, sb, box_token, mcp_token).await?;
             state.db.record_timing(
                 &timing_key(user_id),
                 "local_create_ms",
@@ -304,9 +288,11 @@ async fn create_box_row(
             let name = format!("arbos-box-{}", user_id.to_ascii_lowercase());
             sb.sandbox_id = Some(name.clone());
             sb.device_id = format!("box:{name}");
-            state.db.upsert_box(&sb)?;
-            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
-            start_docker(state, user_id, &mut sb, &box_token, &mcp_token, true).await?;
+            if replacing.is_none() {
+                state.db.upsert_box(sb)?;
+            }
+            save_local_tokens(state, user_id, box_token, mcp_token)?;
+            start_docker(state, user_id, sb, box_token, mcp_token, true).await?;
             state.db.record_timing(
                 &timing_key(user_id),
                 "docker_create_ms",
@@ -315,8 +301,11 @@ async fn create_box_row(
             )?;
         }
         Provider::Gvisor => {
-            if let Err(e) =
-                crate::fleet::create_box(state, user_id, &mut sb, &box_token, &mcp_token).await
+            // The per-user box class (`users.box_snapshot`, set by `PUT /admin/users/{id}/box`)
+            // reaches the sandbox through the row: `fleet::create_box` keeps a snapshot the row
+            // already names and falls back to the relay default only without one.
+            sb.snapshot = Some(snapshot_name.to_owned());
+            if let Err(e) = crate::fleet::create_box(state, user_id, sb, box_token, mcp_token).await
             {
                 // A half-made sandbox must not count as a resident: the next attempt starts clean.
                 if replacing.is_none() {
@@ -331,36 +320,30 @@ async fn create_box_row(
                 None,
             )?;
         }
-    }
-    state
-        .wake_started
-        .lock()
-        .await
-        .insert(user_id.to_owned(), now_ms());
-    Ok(sb)
-}
-
-/// Delete a staged sandbox that never became the user's box and holds no user data. When Daytona
-/// refuses (a 502, a state in transition) it is recorded in `box_history`, due now, so the hourly
-/// sweeper retries the delete instead of leaving it running with no record.
-pub async fn discard_empty_staged(
-    state: &AppState,
-    dt: &crate::daytona::Daytona,
-    staged: &Sandbox,
-) {
-    let Some(id) = staged.sandbox_id.as_deref() else {
-        return;
-    };
-    let _ = dt.stop(id, true).await;
-    match dt.delete(id).await {
-        Ok(_) => tracing::info!(user = %staged.user_id, sandbox = %id, "empty staged box deleted"),
-        Err(e) => {
-            tracing::warn!(user = %staged.user_id, sandbox = %id, error = %e, "empty staged box delete failed; the history sweeper retries it");
-            if let Err(e) = state.db.insert_partial_box_history(staged, now_ms()) {
-                tracing::error!(user = %staged.user_id, sandbox = %id, error = %e, "could not record the staged box for the sweeper");
+        Provider::Boxd => {
+            sb.snapshot = Some(snapshot_name.to_owned());
+            if let Err(e) = crate::boxd::create_box(state, user_id, sb, box_token, mcp_token).await
+            {
+                // As for gVisor: a box that was not made leaves no row to be woken later. Nor is
+                // anything waking: left at that, the stale-box detector bounces a box that does
+                // not exist and reports that it cannot reach the relay.
+                if replacing.is_none() {
+                    let _ = state.db.delete_box_row(user_id);
+                    state
+                        .set_box_state(user_id, BoxState::Asleep, Some("create failed"))
+                        .await;
+                }
+                return Err(e);
             }
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_create_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
         }
     }
+    Ok(())
 }
 
 /// Box-level timings are recorded under the user key (`GET /projects/{id}/timings` merges them in).
@@ -416,7 +399,7 @@ async fn start_process(
     let env = box_env(state, user_id, box_token, mcp_token, &state.cfg.public_url);
     let mut cmd = tokio::process::Command::new(&state.cfg.agentd_bin);
     // D2 also holds for a local box: start from an empty environment and pass an allow-list, so the
-    // relay's provider and Daytona keys never reach agentd or its children.
+    // relay's own keys never reach agentd or its children.
     cmd.env_clear();
     for (k, v) in std::env::vars() {
         let pass = matches!(
@@ -453,7 +436,7 @@ async fn start_process(
     sb.box_url = Some(format!("http://127.0.0.1:{port}"));
     sb.last_started_at = Some(now_ms());
     state.db.upsert_box(sb)?;
-    // The relay URL file for a local box: same contract as Daytona, written straight to disk.
+    // The relay URL file a box reads at boot, written straight to disk for a local box.
     let _ = std::fs::create_dir_all(work.join(".arbos"));
     let _ = std::fs::write(
         work.join(".arbos").join("relay-url"),
@@ -465,6 +448,42 @@ async fn start_process(
         .await
         .insert(user_id.to_owned(), child);
     Ok(())
+}
+
+/// The `docker run` argument list for a local Docker box (everything after `docker`).
+fn local_run_args(name: &str, env: &BTreeMap<String, String>, image: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-p",
+        "127.0.0.1::7788",
+    ]
+    .iter()
+    .map(|a| (*a).to_owned())
+    .collect();
+    for (k, v) in env {
+        args.push("-e".to_owned());
+        args.push(format!("{k}={v}"));
+    }
+    args.push(image.to_owned());
+    args
+}
+
+/// What a failed `docker` call may say about itself, here and in [`crate::fleet`]. A box's run
+/// arguments carry its whole environment as `-e NAME=value`, so the command is only ever
+/// rendered through [`arbos_core::redact::redact_argv`] and docker's own stderr is scrubbed:
+/// a `docker run` that fails must not put the box token, the MCP token or a model-provider key
+/// into the journal (2026-11-09).
+pub(crate) fn docker_failure(args: &[String], detail: &str) -> anyhow::Error {
+    anyhow!(
+        "docker {} failed: {}",
+        arbos_core::redact::redact_argv(args),
+        arbos_core::redact::scrub(detail.trim())
+    )
 }
 
 async fn start_docker(
@@ -483,39 +502,30 @@ async fn start_docker(
             .replace("127.0.0.1", "host.docker.internal")
             .replace("localhost", "host.docker.internal");
         let env = box_env(state, user_id, box_token, mcp_token, &relay_url);
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args([
-            "run",
-            "-d",
-            "--name",
-            &name,
-            "--add-host",
-            "host.docker.internal:host-gateway",
-            "-p",
-            "127.0.0.1::7788",
-        ]);
-        for (k, v) in env {
-            cmd.arg("-e").arg(format!("{k}={v}"));
-        }
-        cmd.arg(&state.cfg.local_box_image);
-        let out = cmd.output().await.context("docker run")?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "docker run failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-    } else {
-        let out = tokio::process::Command::new("docker")
-            .args(["start", &name])
+        let args = local_run_args(&name, &env, &state.cfg.local_box_image);
+        let out = match tokio::process::Command::new("docker")
+            .args(&args)
             .output()
             .await
-            .context("docker start")?;
+        {
+            Ok(out) => out,
+            Err(e) => return Err(docker_failure(&args, &e.to_string())),
+        };
         if !out.status.success() {
-            return Err(anyhow!(
-                "docker start failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+            return Err(docker_failure(&args, &String::from_utf8_lossy(&out.stderr)));
+        }
+    } else {
+        let args = vec!["start".to_owned(), name.clone()];
+        let out = match tokio::process::Command::new("docker")
+            .args(&args)
+            .output()
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => return Err(docker_failure(&args, &e.to_string())),
+        };
+        if !out.status.success() {
+            return Err(docker_failure(&args, &String::from_utf8_lossy(&out.stderr)));
         }
     }
     let out = tokio::process::Command::new("docker")
@@ -570,7 +580,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
+    let provider = provider_of(&sb)?;
     state
         .wake_started
         .lock()
@@ -579,66 +589,10 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
     state
         .set_box_state(user_id, BoxState::Waking, Some("starting"))
         .await;
-    // The box token is minted once per box (Daytona env is fixed at create). Local providers re-inject it
-    // from tokens.json; the relay DB holds only the hash.
+    // The box token is minted once per box. Local providers re-inject it from tokens.json; the
+    // relay DB holds only the hash.
     let tokens = load_local_tokens(state, user_id)?;
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let id = sb
-                .sandbox_id
-                .clone()
-                .ok_or_else(|| anyhow!("no sandbox id"))?;
-            let t0 = Instant::now();
-            let cur = dt.get(&id).await?;
-            let from = cur.state;
-            if cur.state == SandboxState::Started {
-                // The sandbox runs but agentd is gone (Daytona's daemon does not restart a dead
-                // entrypoint): bounce it so the entrypoint session starts again.
-                tracing::warn!(%user_id, "sandbox is started but the box is silent; restarting it");
-                dt.stop(&id, true).await?;
-                dt.wait_for(&id, Duration::from_secs(120), |s| {
-                    s.state == SandboxState::Stopped
-                })
-                .await?;
-            }
-            dt.start(&id).await?;
-            let s = dt
-                .wait_for(&id, Duration::from_secs(180), |s| {
-                    s.state == SandboxState::Started
-                })
-                .await?;
-            sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
-            if let Ok(p) = dt.preview_url(&id, 7788).await {
-                sb.box_url = Some(p.url);
-                sb.preview_token = Some(p.token);
-            }
-            sb.last_started_at = Some(now_ms());
-            if !state.db.write_back_box(&sb, Some(&id))? {
-                // The row moved on while this start ran (an upgrade swapped or rolled back): the
-                // sandbox just started is not the user's box, so it goes back to sleep.
-                tracing::warn!(%user_id, sandbox = %id, "box row moved to another sandbox while this start ran; not writing it back");
-                let _ = dt.stop(&id, false).await;
-                return Err(anyhow!(
-                    "the box row moved to another sandbox while {id} was starting"
-                ));
-            }
-            state.fresh_preview_tokens.lock().await.remove(&id);
-            if state.cfg.always_on {
-                // Boxes created before always-on still carry a 30-minute autostop.
-                let _ = dt.set_autostop(&id, 0).await;
-            }
-            state.db.record_timing(
-                &timing_key(user_id),
-                &format!("daytona_start_from_{:?}_ms", from).to_ascii_lowercase(),
-                t0.elapsed().as_millis() as i64,
-                None,
-            )?;
-            push_relay_url(state, dt, &id).await;
-        }
         Provider::Process => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
             start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
@@ -657,6 +611,16 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                 None,
             )?;
         }
+        Provider::Boxd => {
+            let t0 = Instant::now();
+            crate::boxd::start_box(state, user_id, &mut sb).await?;
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_start_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
@@ -667,45 +631,8 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
         .db
         .user_box(user_id)?
         .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
-    let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
+    let provider = provider_of(&sb)?;
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let id = sb
-                .sandbox_id
-                .clone()
-                .ok_or_else(|| anyhow!("no sandbox id"))?;
-            let t0 = Instant::now();
-            dt.stop(&id, force).await?;
-            if force {
-                let _ = dt.update_secrets(&id, vec![]).await;
-            }
-            let mut s = dt
-                .wait_for(&id, Duration::from_secs(120), |s| {
-                    matches!(s.state, SandboxState::Stopped | SandboxState::Archived)
-                })
-                .await?;
-            if user_id.starts_with("test_") && matches!(s.state, SandboxState::Stopped) {
-                // Test users' boxes (rigs, evals, demo accounts) do not need a warm restart: archive
-                // them off the disk quota as soon as they stop; `start` restores an archived sandbox.
-                match dt.archive(&id).await {
-                    Ok(a) => s = a,
-                    Err(e) => {
-                        tracing::warn!(user = %user_id, sandbox = %id, error = %e, "archive of a stopped test box")
-                    }
-                }
-            }
-            sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
-            state.db.record_timing(
-                &timing_key(user_id),
-                "daytona_stop_ms",
-                t0.elapsed().as_millis() as i64,
-                None,
-            )?;
-        }
         Provider::Process => {
             if let Some(mut child) = state.local_children.lock().await.remove(user_id) {
                 if let Some(pid) = child.id() {
@@ -734,6 +661,10 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
             let name = sb.sandbox_id.clone().unwrap_or_default();
             // One agentd stops every workspace's children; give it the full grace.
             crate::fleet::stop_box(&name, 30).await?;
+        }
+        Provider::Boxd => {
+            // Unforced, a box agentd calls busy keeps running, and the caller is told so.
+            crate::boxd::stop_box(state, user_id, force).await?;
         }
     }
     sb.last_stopped_at = Some(now_ms());
@@ -796,47 +727,6 @@ pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(Stri
     )))
 }
 
-/// A client needs the box: queue a wake obligation unless it is already awake or waking.
-/// The sandbox env bakes `ARBOS_RELAY_URL` at create time; the relay's public URL can change
-/// (quick tunnels do on every restart). After every start the current URL goes into the box as
-/// `/home/daytona/.arbos/relay-url` (and the legacy `/work/.arbos/relay-url` when that directory
-/// exists), which agentd prefers over its env at boot. Written with `sudo` through the toolbox
-/// shell: the plain toolbox upload runs as the sandbox user and failed with "permission denied"
-/// both under the root-owned `/work` (D70) and against a root-written file in a sticky directory.
-pub const RELAY_URL_FILE: &str = "/home/daytona/.arbos/relay-url";
-
-async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
-    let url = state.cfg.public_url.trim_end_matches('/').to_owned();
-    // Written through a root shell rather than the toolbox upload: the upload runs as the
-    // sandbox user and cannot replace a file agentd (root) wrote. The file ends up owned by the
-    // sandbox user, world-readable, in a non-sticky directory, so either side can rewrite it.
-    let dir = std::path::Path::new(RELAY_URL_FILE)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "/home/daytona/.arbos".to_owned());
-    let legacy_dir = "/work/.arbos";
-    let cmd = format!(
-        "sudo -n sh -c 'mkdir -p {dir} && printf \"%s\\n\" \"{url}\" > {file} && chown daytona:daytona {dir} {file} 2>/dev/null; chmod 0777 {dir}; chmod 0666 {file}; \
-         if [ -d {legacy_dir} ]; then printf \"%s\\n\" \"{url}\" > {legacy_dir}/relay-url 2>/dev/null && chmod 0666 {legacy_dir}/relay-url 2>/dev/null; fi; echo ok'",
-        file = RELAY_URL_FILE,
-    );
-    for attempt in 1..=4u32 {
-        match dt.toolbox_exec(sandbox_id, &cmd, 30).await {
-            Ok(out) if out.get("exitCode").and_then(Value::as_i64).unwrap_or(1) == 0 => {
-                tracing::info!(sandbox_id, %url, attempt, "relay url pushed into the box");
-                return;
-            }
-            Ok(out) => {
-                tracing::warn!(sandbox_id, attempt, result = ?out.get("result"), "relay url push failed");
-            }
-            Err(e) => {
-                tracing::warn!(sandbox_id, attempt, error = %e, "relay url push failed");
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(1500 * attempt as u64)).await;
-    }
-}
-
 /// A started box must say hello within this long, or it is treated as unable to reach the relay.
 pub const HELLO_DEADLINE_MS: i64 = 60_000;
 /// A wake timer older than this is stale and is not recorded as `wake_to_box_connected_ms`.
@@ -868,10 +758,20 @@ pub struct ServingAgent {
 /// box: the rows waiting in the room are the work.
 pub const CHAT_OPEN_PUSH: &str = "chat_open";
 pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
+/// Tells a box to open one workspace's project-doc room (`{reason}`). The project doc is not a
+/// chat — it has no `chats` row — so `chat_open` cannot name it. A box that still holds every
+/// project doc open never needs this; one that predates the kind logs it as unknown.
+pub const PROJECT_DOC_OPEN_PUSH: &str = "project_doc_open";
 
 /// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
 /// upserts title / pin / created_at from it (a bare id would reset them).
-fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
+///
+/// `head_seq` is how far the room has got. The box holds its own cursor, so the two together
+/// say how many rows it is behind — which is how it knows, before the room is even connected,
+/// that a turn is owed and pi's session can be switched now rather than after the catch-up.
+/// A seq and nothing else: no row content is read here and none leaves the relay.
+fn chat_open_payload(state: &AppState, chat: &crate::db::Chat, reason: &str) -> Value {
+    let room = arbos_core::wire::room_name(&chat.project_id, &chat.id);
     json!({
         "chat_id": chat.id,
         "project_id": chat.project_id,
@@ -880,6 +780,7 @@ fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
         "is_pinned": chat.is_pinned,
         "created_at": chat.created_at,
         "forked_from": chat.forked_from,
+        "head_seq": state.db.room_head(&room).unwrap_or(0),
     })
 }
 
@@ -889,7 +790,7 @@ pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
     match state.db.enqueue_push_once(
         &chat.project_id,
         CHAT_OPEN_PUSH,
-        &chat_open_payload(chat, "created"),
+        &chat_open_payload(state, chat, "created"),
     ) {
         Ok(added) => added,
         Err(e) => {
@@ -912,6 +813,16 @@ pub async fn after_person_row(
     agents: &[ServingAgent],
 ) -> usize {
     let mut queued = 0;
+    // How many agents each owner serves in this chat. A people room is one shared room
+    // (`people/{chat_id}`), so two workspaces of the same user can both be agents of it, and
+    // `Room.boxes` is keyed by owner alone — one workspace's socket is indistinguishable from
+    // the other's. Comparing the socket count against the number of agents that owner serves
+    // is what makes presence mean something: only when every one of them is accounted for can
+    // the relay conclude they are all on the room.
+    let mut serving: HashMap<&str, usize> = HashMap::new();
+    for a in agents {
+        *serving.entry(a.owner.as_str()).or_default() += 1;
+    }
     for a in agents {
         state
             .last_client_push
@@ -919,7 +830,12 @@ pub async fn after_person_row(
             .await
             .insert(a.owner.clone(), now_ms());
         ensure_awake(state, &a.owner, "send").await;
-        if room.has_box(&a.owner) {
+        // Fail open on ambiguity. With fewer sockets than agents, at least one of this owner's
+        // agents is off the room and the relay cannot tell which — so every one of them is
+        // told to open it. The redundant push costs the box a fetch it no-ops; the alternative
+        // is a row that the missing agent never learns about (`enqueue_push_once` also drops a
+        // duplicate that is still waiting).
+        if room.box_count(&a.owner) as usize >= serving[a.owner.as_str()] {
             continue;
         }
         let (kind, payload) = match &chat.project_id {
@@ -932,7 +848,10 @@ pub async fn after_person_row(
                 let Ok(Some(row)) = state.db.chat(pid, &chat.chat_id) else {
                     continue;
                 };
-                (CHAT_OPEN_PUSH, chat_open_payload(&row, "rows_pending"))
+                (
+                    CHAT_OPEN_PUSH,
+                    chat_open_payload(state, &row, "rows_pending"),
+                )
             }
         };
         match state.db.enqueue_push_once(&a.project_id, kind, &payload) {
@@ -958,6 +877,7 @@ pub async fn ensure_user_box(
     user_id: &str,
     provider: Provider,
 ) -> Result<Sandbox> {
+    let mut permit = state.restart.admit_creation(user_id).await;
     if let Some(sb) = state.db.user_box(user_id)? {
         return Ok(sb);
     }
@@ -965,10 +885,19 @@ pub async fn ensure_user_box(
         return Err(anyhow!(crate::fleet::WAITLISTED));
     }
     let snapshot = state.db.user_snapshot(user_id)?;
-    create_box(state, user_id, provider, snapshot.as_deref()).await
+    create_box(state, &mut permit, provider, snapshot.as_deref()).await
 }
 
 pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
+    // A box on the retired provider is read-only (see `read_only_row`): the relay cannot start it
+    // and must not make a replacement, so the wake stops here instead of queueing a job that can
+    // only fail. The box's state is left as it stands — whether that sandbox is running is no
+    // longer something this relay can say. Always-on asks for every user every minute, so this is
+    // also what keeps those rows out of the wake log.
+    if read_only_box(state, user_id) {
+        tracing::debug!(%user_id, reason, "wake skipped: this box is on the retired provider");
+        return;
+    }
     let (st, since) = state.box_state(user_id).await;
     if st == BoxState::Awake {
         // Nothing to wake; a timer left from an earlier attempt would only mislabel the next
@@ -1020,6 +949,7 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     state
         .set_box_state(user_id, BoxState::Waking, Some(reason))
         .await;
+    state.wake_kick.notify_one();
 }
 
 /// Stale-box detector (runs from the liveness sweep and from `ensure_awake`): a box that has been
@@ -1142,7 +1072,8 @@ pub async fn box_disconnected(state: &AppState, user_id: &str) {
     e.1 = now_ms();
 }
 
-/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen),
+/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen,
+/// or still polls over HTTP: agentd closes idle room sockets and stays up),
 /// and a box waking past the hello deadline goes through the stale-box detector.
 pub async fn sweep_box_liveness(state: &AppState) {
     let waking: Vec<(String, i64)> = state
@@ -1192,7 +1123,11 @@ pub async fn sweep_box_liveness(state: &AppState) {
         state.box_http_seen.lock().await.remove(&user_id);
     }
     for (user_id, n, last) in snapshot {
-        if n == 0 && last > 0 && now_ms() - last > state.cfg.box_idle_grace_ms {
+        if n == 0
+            && last > 0
+            && now_ms() - last > state.cfg.box_idle_grace_ms
+            && !box_reachable(state, &user_id).await
+        {
             let (st, _) = state.box_state(&user_id).await;
             if st == BoxState::Awake {
                 state
@@ -1225,64 +1160,20 @@ fn safe_work_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// The preview token to send to this box: one learned after a 401 wins over the row's.
-pub(crate) async fn preview_token_for(state: &AppState, sb: &Sandbox) -> Option<String> {
-    if let Some(id) = &sb.sandbox_id {
-        if let Some(t) = state.fresh_preview_tokens.lock().await.get(id) {
-            return Some(t.clone());
-        }
-    }
-    sb.preview_token.clone()
-}
-
-/// Daytona's current preview token for the box when it differs from `used`, remembered in memory.
-async fn fresh_preview_token(state: &AppState, sb: &Sandbox, used: Option<&str>) -> Option<String> {
-    if sb.provider != Provider::Daytona.as_str() {
-        return None;
-    }
-    let (dt, id) = (state.daytona.as_ref()?, sb.sandbox_id.as_ref()?);
-    let token = match dt.preview_url(id, 7788).await {
-        Ok(p) => p.token,
-        Err(e) => {
-            tracing::warn!(user = %sb.user_id, sandbox = %id, error = %e, "box answered 401; preview token lookup failed");
-            return None;
-        }
-    };
-    if used == Some(token.as_str()) {
-        return None;
-    }
-    tracing::warn!(user = %sb.user_id, sandbox = %id, "box answered 401 to a stale preview token; using Daytona's current one");
-    state
-        .fresh_preview_tokens
-        .lock()
-        .await
-        .insert(id.clone(), token.clone());
-    Some(token)
-}
-
-/// Send one request to the user's box URL. Daytona gives a sandbox a new preview token every time
-/// it stops and starts, and the row learns it only when a start run by the relay finishes. A start
-/// that timed out, or one Daytona completed later, leaves the row's token stale and the proxy
-/// answers 401 to every call while the box itself is fine (2026-10-29 16:05–16:45, four boxes).
-/// On a 401 the current token is read from Daytona and the request is sent once more.
+/// Send one request to the user's box URL.
+///
+/// Daytona's proxy needed a per-sandbox preview token that went stale on every stop and start, so
+/// this used to carry one and retry a 401 with a freshly read token. Every remaining provider is
+/// reached directly — a gVisor sandbox on this host, or a local port — and none mints a token, so
+/// the request goes as the caller built it. The `boxes.preview_token` column is kept for the rows
+/// that still hold one; nothing reads it.
 pub(crate) async fn send_to_box(
     state: &AppState,
     sb: &Sandbox,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> reqwest::Result<reqwest::Response> {
-    let with = |t: Option<&str>| match t {
-        Some(t) => build().header("x-daytona-preview-token", t),
-        None => build(),
-    };
-    let used = preview_token_for(state, sb).await;
-    let r = with(used.as_deref()).send().await?;
-    if r.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(r);
-    }
-    match fresh_preview_token(state, sb, used.as_deref()).await {
-        Some(fresh) => with(Some(&fresh)).send().await,
-        None => Ok(r),
-    }
+    let _ = (state, sb);
+    build().send().await
 }
 
 /// Ask agentd to stop (hold) or restart (release) one workspace on the user box.
@@ -1344,11 +1235,11 @@ pub async fn copy_workspace_for_fork(
     if source_project_id == dest_project_id {
         return;
     }
-    // Up to ~90s for a just-woken box to expose box_url / toolbox.
+    // Up to ~90s for a just-woken box to expose its url.
     let mut sb = None;
     for _ in 0..45 {
         match state.db.user_box(user_id) {
-            Ok(Some(s)) if s.box_url.is_some() || s.provider != "daytona" => {
+            Ok(Some(s)) if s.box_url.is_some() => {
                 sb = Some(s);
                 break;
             }
@@ -1361,51 +1252,8 @@ pub async fn copy_workspace_for_fork(
         tracing::info!(%user_id, "fork copy: no box yet; nothing to copy");
         return;
     };
-    match (
-        Provider::parse(&sb.provider),
-        &state.daytona,
-        &sb.sandbox_id,
-    ) {
-        (Some(Provider::Daytona), Some(dt), Some(id)) => {
-            // Hold both so agentd does not seed an empty dest while we copy, and so the
-            // source SQLite is quiet enough for a consistent folder copy.
-            let _ = hold_workspace(state, &sb, dest_project_id, true).await;
-            let _ = hold_workspace(state, &sb, source_project_id, true).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let cmd = format!(
-                "sudo -n sh -c 'if [ ! -d /work/{src} ]; then echo missing; exit 0; fi; \
-                 for i in 1 2 3 4 5; do sudo -n rm -rf /work/{dst} && break; sleep 1; done; \
-                 sudo -n cp -a /work/{src} /work/{dst} && \
-                 sudo -n rm -rf /work/{dst}/.arbos/pi/sessions /work/{dst}/.arbos/prime/sessions \
-                   /work/{dst}/.arbos/claude/sessions 2>/dev/null; \
-                 sudo -n mkdir -p /work/{dst}/.arbos/pi/sessions; \
-                 sudo -n rm -f /work/{dst}/.arbos/.owner; echo ok'",
-                src = source_project_id,
-                dst = dest_project_id
-            );
-            let result = dt.toolbox_exec(id, &cmd, 600).await;
-            let _ = hold_workspace(state, &sb, source_project_id, false).await;
-            let _ = hold_workspace(state, &sb, dest_project_id, false).await;
-            match result {
-                Ok(v) => {
-                    let text = v
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim()
-                        .to_owned();
-                    if text.contains("missing") {
-                        tracing::info!(%user_id, source_project_id, "fork copy: source workspace empty");
-                    } else if v.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
-                        tracing::warn!(%user_id, source_project_id, dest_project_id, %text, "fork copy failed");
-                    } else {
-                        tracing::info!(%user_id, source_project_id, dest_project_id, "fork copy done");
-                    }
-                }
-                Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
-            }
-        }
-        (Some(Provider::Gvisor), _, Some(name)) => {
+    match (Provider::parse(&sb.provider), &sb.sandbox_id) {
+        (Some(Provider::Gvisor), Some(name)) => {
             let _ = hold_workspace(state, &sb, dest_project_id, true).await;
             let _ = hold_workspace(state, &sb, source_project_id, true).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1430,7 +1278,7 @@ pub async fn copy_workspace_for_fork(
                 Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
             }
         }
-        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+        (Some(Provider::Process), _) | (Some(Provider::Docker), _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(source_project_id);
             let dst = base.join(dest_project_id);
@@ -1461,33 +1309,15 @@ pub async fn copy_workspace_for_fork(
     }
 }
 
-/// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (Daytona
-/// through the toolbox shell, local providers on disk). Best effort: the purge removes whatever
+/// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (in the
+/// sandbox for gVisor, on disk for the local providers). Best effort: the purge removes whatever
 /// is left seven days later.
 pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: &str) {
     let Ok(Some(sb)) = state.db.user_box(user_id) else {
         return;
     };
-    match (
-        Provider::parse(&sb.provider),
-        &state.daytona,
-        &sb.sandbox_id,
-    ) {
-        (Some(Provider::Daytona), Some(dt), Some(id)) => {
-            // Give the box's poll a moment to stop the workspace first.
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            let cmd = format!(
-                "sudo -n sh -c 'mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok'",
-                p = project_id
-            );
-            match dt.toolbox_exec(id, &cmd, 120).await {
-                Ok(_) => {
-                    tracing::info!(%user_id, project_id, "workspace folder archived on the box")
-                }
-                Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
-            }
-        }
-        (Some(Provider::Gvisor), _, Some(name)) => {
+    match (Provider::parse(&sb.provider), &sb.sandbox_id) {
+        (Some(Provider::Gvisor), Some(name)) => {
             tokio::time::sleep(Duration::from_secs(20)).await;
             let cmd = format!(
                 "mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok",
@@ -1500,7 +1330,7 @@ pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: 
                 Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
             }
         }
-        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+        (Some(Provider::Process), _) | (Some(Provider::Docker), _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(project_id);
             if src.exists() {
@@ -1533,16 +1363,6 @@ pub async fn spawn_project_purge(state: AppState) {
                                 Duration::from_secs(120),
                             )
                             .await;
-                        }
-                    } else if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-                        if sb.provider == "daytona" {
-                            let _ = dt
-                                .toolbox_exec(
-                                    id,
-                                    &format!("sudo -n rm -rf /work/.archive/{project_id}; echo ok"),
-                                    120,
-                                )
-                                .await;
                         }
                     } else {
                         let _ = std::fs::remove_dir_all(
@@ -1593,6 +1413,13 @@ pub async fn spawn_always_on(state: AppState) {
                 }
                 // Waitlisted (D89): no box until the admission tick frees a slot.
                 if state.db.is_waitlisted(&user_id).unwrap_or(false) {
+                    continue;
+                }
+                // A `boxd` box sleeps when idle and wakes when something needs it
+                // (`boxd::spawn_idle_sleeper`); keeping it up is not this sweep's to do.
+                if state.cfg.boxd.is_some()
+                    && matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str())
+                {
                     continue;
                 }
                 tracing::info!(%user_id, "always-on: waking");
@@ -1685,48 +1512,108 @@ pub async fn spawn_sandboxless_box_check(state: AppState) {
 /// Wake-job runner: 3 attempts with backoff, then S13 error (crdt-sync §8.4 step 5).
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
+        let mut waking = Waking::new();
         loop {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            let jobs = match state.db.due_wake_jobs() {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            for (user_id, reason, attempts) in jobs {
-                let (st, _) = state.box_state(&user_id).await;
-                if st == BoxState::Awake || st == BoxState::Error {
-                    // Awake: the dial finished it. Error: the stale-box detector gave up; only an
-                    // explicit wake/start re-arms it.
-                    let _ = state.db.finish_wake_job(&user_id);
-                    continue;
-                }
-                if state.upgrading.lock().await.contains_key(&user_id) {
-                    // The upgrade starts the box it ends on (or the old one on rollback). A start
-                    // from here would bounce a box mid-carry and write back a row read before
-                    // the new box landed in it (#2262); the job waits for the upgrade.
-                    continue;
-                }
-                // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-                let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
-                tracing::info!(%user_id, %reason, attempts, "waking box");
-                match start_box(&state, &user_id).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!(%user_id, error = %e, "wake failed");
-                        let n = state
-                            .db
-                            .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
-                            .unwrap_or(99);
-                        if n >= 3 {
-                            let _ = state.db.finish_wake_job(&user_id);
-                            state
-                                .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
-                                .await;
-                        }
-                    }
-                }
+            // A job just queued is run now: a user is waiting on it. The timer is for the jobs
+            // that come due by themselves (a retry, a cold box on its way back).
+            tokio::select! {
+                _ = state.wake_kick.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
             }
+            start_wake_jobs(&state, &mut waking).await;
         }
     });
+}
+
+/// The `boxd` wakes under way, by user.
+type Waking = HashMap<String, tokio::task::JoinHandle<()>>;
+
+/// One pass over the wake jobs that are due, to the end of each.
+#[cfg(test)]
+pub(crate) async fn run_wake_jobs(state: &AppState) {
+    let mut waking = Waking::new();
+    start_wake_jobs(state, &mut waking).await;
+    for (_, wake) in waking {
+        let _ = wake.await;
+    }
+}
+
+/// Start the wake jobs that are due. The wake of a `boxd` box runs on a task of its own, so no
+/// box waits for another's: how many a node wakes at once is the node's to say
+/// (`boxd::WAKES_PER_NODE`), and a box whose wake is still under way is not started again. Every
+/// other wake runs here, one after another, as it always has; so does the making of a box, whose
+/// placement reads each node's free disk and must see the box made before it.
+async fn start_wake_jobs(state: &AppState, waking: &mut Waking) {
+    let jobs = match state.db.due_wake_jobs() {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    waking.retain(|_, wake| !wake.is_finished());
+    for job in jobs {
+        if waking.contains_key(&job.0) {
+            continue;
+        }
+        let on_boxd = matches!(state.db.user_box(&job.0), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str());
+        if on_boxd {
+            let state = state.clone();
+            let user_id = job.0.clone();
+            let wake = tokio::spawn(async move { run_wake_job(&state, job).await });
+            waking.insert(user_id, wake);
+        } else {
+            run_wake_job(state, job).await;
+        }
+    }
+}
+
+/// One wake job that is due.
+async fn run_wake_job(state: &AppState, (user_id, reason, attempts): (String, String, i64)) {
+    let (st, _) = state.box_state(&user_id).await;
+    if st == BoxState::Awake || st == BoxState::Error {
+        // Awake: the dial finished it. Error: the stale-box detector gave up; only an
+        // explicit wake/start re-arms it.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if read_only_box(state, &user_id) {
+        // A job queued before the provider was retired. It can only fail three times and end
+        // as `error`, which says nothing true about that box, so it ends here and the state is
+        // left as it stands.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if state.upgrading.lock().await.contains_key(&user_id) {
+        // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
+        // and write back a row read before the new sandbox landed in it (#2262); the job waits
+        // for the upgrade.
+        return;
+    }
+    // Mark the job as in flight by pushing its due time out; the box dial finishes it.
+    let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+    tracing::info!(%user_id, %reason, attempts, "waking box");
+    match start_box(state, &user_id).await {
+        Ok(()) => {}
+        Err(e) if e.to_string() == crate::boxd::FETCHING => {
+            // Not a failed wake: the daemon is bringing a cold box back from the object
+            // store. Look again shortly. Each look restarts the waking clock (`start_box`
+            // does), so the box is not called unreachable for not having dialled in yet.
+            let _ = state
+                .db
+                .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
+        }
+        Err(e) => {
+            tracing::warn!(%user_id, error = %e, "wake failed");
+            let n = state
+                .db
+                .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
+                .unwrap_or(99);
+            if n >= 3 {
+                let _ = state.db.finish_wake_job(&user_id);
+                state
+                    .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
+                    .await;
+            }
+        }
+    }
 }
 
 /// Keep-alive from the box while a turn runs (design §4.6): forward as "update last activity".
@@ -1736,25 +1623,18 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
         let mut t = state.turn_running.lock().await;
         if turn_running {
             t.insert(user_id.to_owned(), now_ms());
+            let mut last = state.last_turn.lock().await;
+            last.insert(user_id.to_owned(), now_ms());
         } else {
             t.remove(user_id);
         }
     }
-    let sb = state
+    // No provider is told about the turn any more: Daytona's autostop timer was the only thing
+    // that needed refreshing, and every remaining box runs until the relay stops it.
+    state
         .db
         .user_box(user_id)?
         .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
-    if sb.provider == "daytona" {
-        if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-            dt.refresh_activity(id).await?;
-            let minutes = if state.cfg.always_on || turn_running {
-                0
-            } else {
-                30
-            };
-            let _ = dt.set_autostop(id, minutes).await;
-        }
-    }
     state.db.touch_box(user_id)?;
     Ok(())
 }
@@ -1765,22 +1645,271 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
         Ok(Some(s)) => s,
         _ => return json!({ "provider": null }),
     };
-    let mut v = json!({
+    let mut status = json!({
         "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url, "user_id": sb.user_id,
         "migrated_from": sb.migrated_from,
         "last_started_at": sb.last_started_at, "last_stopped_at": sb.last_stopped_at, "last_seen_at": sb.last_seen_at,
     });
-    if sb.provider == "daytona" {
-        if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-            if let Ok(s) = dt.get(id).await {
-                v["daytona_state"] = json!(s.state);
-                v["daytona_arbos_state"] = json!(s.state.arbos_state());
-                v["auto_stop_interval"] = json!(s.auto_stop_interval);
-                v["last_activity_at"] = json!(s.last_activity_at);
-            }
+    // A `boxd` box also says where its daemon last left it (docs/box-scaling.md §4.2). No other
+    // box has these, and what it shows is as it was.
+    if let Ok(Some((node_id, lifecycle_state, storage))) = state.db.box_lifecycle(user_id) {
+        status["node_id"] = json!(node_id);
+        status["lifecycle_state"] = json!(lifecycle_state);
+        status["storage"] = storage
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+    }
+    status
+}
+
+/// A person's row landed in `project_id`'s project doc (a settings change): a box with no socket
+/// on that room is told to open it, the same obligation [`after_person_row`] meets for chats.
+/// Without it a project doc the box closed for being idle would never learn of the row. Returns
+/// whether a push was queued.
+pub fn after_project_doc_row(
+    state: &AppState,
+    room: &crate::state::Room,
+    project_id: &str,
+) -> bool {
+    let Some(owner) = state.user_of(project_id) else {
+        return false;
+    };
+    if room.box_count(&owner) > 0 {
+        return false;
+    }
+    match state.db.enqueue_push_once(
+        project_id,
+        PROJECT_DOC_OPEN_PUSH,
+        &json!({ "reason": "rows_pending" }),
+    ) {
+        Ok(true) => {
+            tracing::info!(project = %project_id, %owner, "row landed with no box socket on the project doc; told the box to open it");
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(project = %project_id, error = %e, "project_doc_open push not queued");
+            false
         }
     }
-    v
+}
+
+#[cfg(test)]
+mod sibling_workspace_reopen_tests {
+    //! Whether a box is "on" a people room has to be decided per agent, not per owner. One box
+    //! serves every workspace of its user, a `people/{chat_id}` room is shared by every agent
+    //! of the chat, and the sockets carry no workspace — so an owner's socket count is the only
+    //! evidence there is, and it only settles the question when it covers every agent.
+
+    use super::*;
+    use crate::notify::ChatRef;
+    use crate::people;
+    use crate::people::tests_support::{group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::ids::ulid;
+
+    /// The shape that drops a message. Two workspaces of one user are both agents of the same
+    /// people chat; A holds the socket, B has closed its room. Keyed by owner alone, A's socket
+    /// read as presence for B too, and B's reopen push was never queued — B never learned the
+    /// row existed. Against the per-owner check this fails with `left: 0, right: 2`.
+    #[tokio::test]
+    async fn one_workspaces_socket_on_a_people_room_does_not_suppress_a_siblings_reopen_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project_a = project_of(&state, &alice, "WorkspaceA");
+        let project_b = project_of(&state, &alice, "WorkspaceB");
+        let g = group(&state, &[&alice]);
+        for p in [&project_a, &project_b] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", &alice, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 2, "both workspaces serve this people chat");
+
+        // A is live on the people room; B has closed its room on the very same chat.
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&alice);
+
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project_a).unwrap();
+        let _ = state.db.take_pushes(&project_b).unwrap();
+
+        // One socket, two agents: the relay cannot tell which of them is on the room, so both
+        // are told to open it. B's push is the one that matters — without it B drops the row.
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            2,
+            "the sibling workspace with no socket on this room must get its reopen push"
+        );
+        let pushes = state.db.take_pushes(&project_b).unwrap();
+        assert_eq!(pushes.len(), 1, "the closed sibling's push: {pushes:?}");
+        assert_eq!(pushes[0].1, PEOPLE_CHAT_OPEN_PUSH);
+        assert_eq!(pushes[0].2["chat_id"], json!(g));
+        // The accepted cost of failing open: A is on the room and is told anyway, because
+        // nothing on the wire says the socket is A's. `join_people_chat` no-ops an open room.
+        assert_eq!(state.db.take_pushes(&project_a).unwrap().len(), 1);
+    }
+
+    /// The other side of the same rule, and what keeps the fix from pushing on every row: once
+    /// every agent of the owner is on the room, the count settles it and nothing is queued.
+    #[tokio::test]
+    async fn both_workspaces_on_the_room_need_no_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project_a = project_of(&state, &alice, "WorkspaceA");
+        let project_b = project_of(&state, &alice, "WorkspaceB");
+        let g = group(&state, &[&alice]);
+        for p in [&project_a, &project_b] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", &alice, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&alice);
+        people_room.box_joined(&alice);
+
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project_a).unwrap();
+        let _ = state.db.take_pushes(&project_b).unwrap();
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            0,
+            "both agents are accounted for; the rows reach them live"
+        );
+
+        // One of them leaves: the count no longer covers both, so both are told again.
+        people_room.box_left(&alice);
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            2
+        );
+    }
+
+    /// An owner with a single agent in the chat is unchanged by any of this: one socket is
+    /// unambiguous, so presence still means exactly what it used to.
+    #[tokio::test]
+    async fn a_lone_agent_behaves_exactly_as_before() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "WorkspaceA");
+        let g = group(&state, &[&alice]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{project}"), "agent", &alice, &json!({}))
+            .expect("agent member");
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 1);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project).unwrap();
+
+        // Off the room: told to open it.
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            1
+        );
+        let _ = state.db.take_pushes(&project).unwrap();
+        // On the room: nothing queued.
+        people_room.box_joined(&alice);
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            0
+        );
+    }
+
+    /// Two different people's boxes in one chat stay independent: Bob being on the room says
+    /// nothing about Alice, and never did.
+    #[tokio::test]
+    async fn another_persons_socket_is_not_this_owners_presence() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _d1) = person(&state, 1);
+        let (bob, _d2) = person(&state, 2);
+        let pa = project_of(&state, &alice, "Alice");
+        let pb = project_of(&state, &bob, "Bob");
+        let g = group(&state, &[&alice, &bob]);
+        for (p, u) in [(&pa, &alice), (&pb, &bob)] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", u, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 2);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&bob);
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&pa).unwrap();
+        let _ = state.db.take_pushes(&pb).unwrap();
+
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            1,
+            "only Alice's box is off the room"
+        );
+        assert_eq!(state.db.take_pushes(&pa).unwrap().len(), 1);
+        assert!(state.db.take_pushes(&pb).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod project_doc_reopen_tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::wire::{room_name, PROJECT_DOC_CHAT_ID};
+
+    /// A row into a project doc the box holds no socket on queues exactly one reopen push for
+    /// that workspace; a socket on the room — and only on that room — means it arrives live.
+    #[tokio::test]
+    async fn a_row_into_a_project_doc_with_no_box_socket_tells_the_box_to_open_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let a = project_of(&state, &alice, "WorkspaceA");
+        let b = project_of(&state, &alice, "WorkspaceB");
+        let room_a = state.room(&room_name(&a, PROJECT_DOC_CHAT_ID)).await;
+        let room_b = state.room(&room_name(&b, PROJECT_DOC_CHAT_ID)).await;
+        let _ = state.db.take_pushes(&a).unwrap();
+
+        // The box is on B's project doc only: that says nothing about A's.
+        room_b.box_joined(&alice);
+        assert!(after_project_doc_row(&state, &room_a, &a));
+        assert!(
+            !after_project_doc_row(&state, &room_a, &a),
+            "one is already waiting"
+        );
+        let pushes = state.db.take_pushes(&a).unwrap();
+        assert_eq!(pushes.len(), 1, "{pushes:?}");
+        assert_eq!(pushes[0].1, PROJECT_DOC_OPEN_PUSH);
+        assert!(!after_project_doc_row(&state, &room_b, &b), "B is live");
+
+        room_a.box_joined(&alice);
+        assert!(!after_project_doc_row(&state, &room_a, &a));
+    }
 }
 
 #[cfg(test)]
@@ -1831,6 +1960,31 @@ mod zero_project_tests {
         assert!(state.wake_started.lock().await.get(&user).is_none());
 
         // The heartbeat stops (box died): after the grace period it is asleep, not "error".
+        state
+            .box_http_seen
+            .lock()
+            .await
+            .insert(user.clone(), now_ms() - 120_000);
+        sweep_box_liveness(&state).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+    }
+
+    #[tokio::test]
+    async fn box_that_closed_its_idle_sockets_but_still_polls_stays_awake() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+
+        // agentd closed its last room socket well past the grace period, and keeps polling.
+        box_connected(&state, &user).await;
+        box_disconnected(&state, &user).await;
+        state.box_conns.lock().await.get_mut(&user).unwrap().1 = now_ms() - 120_000;
+        box_seen_http(&state, &user).await;
+        for _ in 0..3 {
+            sweep_box_liveness(&state).await;
+            assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        }
+
+        // The polls stop too (box died): asleep on the next sweep.
         state
             .box_http_seen
             .lock()

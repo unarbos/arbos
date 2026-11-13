@@ -1,52 +1,18 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and the "+" circle (right), then All | Agents | People | Servers and the chat
-// list (avatar, name, time, preview). One machine: its state is the small dot
-// on the account circle; the machine details live in Settings. The bottom edge
-// holds one app-wide search bar and nothing else (Jacob, 2026-10-25, [feedback
-// iphone-bottom-search-bar-2026-10-25]; `GlobalSearchView.swift`).
+// and the "+" circle (right), then one linear chat list — agents, people and
+// servers together (avatar, name, time, preview). No All / Agents / People /
+// Servers selector ([feedback chat-list-no-filter-ios-2026-11-10]). One machine:
+// its state is the small dot on the account circle; the machine details live in
+// Settings. The bottom edge holds one app-wide search bar and nothing else
+// (Jacob, 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25];
+// `GlobalSearchView.swift`).
 
 import ArbosFFI
 import SwiftUI
 
-/// Selection above the home list: All | Agents | People | Servers. The Mac
-/// sidebar carries the same four segments (`sidebar::ListFilter` in
-/// crates/arbos-mac); the scope rules here are the shared contract.
-enum HomeListFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case agents = "Agents"
-    case people = "People"
-    case servers = "Servers"
-    var id: String { rawValue }
-
-    /// Agent (project) rows are listed under All and Agents.
-    var showsProjects: Bool { self == .all || self == .agents }
-    /// People chats (DMs, groups) are listed under All and People.
-    var showsPeople: Bool { self == .all || self == .people }
-    /// Servers are listed under All and Servers.
-    var showsServers: Bool { self == .all || self == .servers }
-
-    /// Agents: my agents only — an agent shared in by someone else stays out.
-    func admitsProject(shared: Bool) -> Bool {
-        showsProjects && !(self == .agents && shared)
-    }
-
-    /// Copy for an empty list under this segment (no query typed).
-    var emptyCopy: String {
-        switch self {
-        case .all: return "No conversations yet"
-        case .agents: return "No agents yet"
-        case .people: return "No people chats yet"
-        case .servers: return "No servers yet"
-        }
-    }
-}
-
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @State private var showNewChat = false
-    /// Settings is a sheet from the account circle (as before the 2026-10-23 tab bar).
-    @State private var showSettings = false
     /// The bottom bar's text; the results replace the list while it is focused or filled.
     @State private var query = ""
     @State private var slowConnect = false
@@ -61,9 +27,6 @@ struct HomeView: View {
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
-    /// Home list scope: All mixes agents, people and servers; Agents is your
-    /// own agents only (no people chats / other users); People is DMs and groups.
-    @State private var listFilter: HomeListFilter = .all
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
@@ -87,6 +50,7 @@ struct HomeView: View {
     private var searching: Bool { searchFocused || !query.isEmpty }
 
     var body: some View {
+        let work = model.accountWork()
         let _ = FrameProbe.count(.homeBody)
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
@@ -112,12 +76,14 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
+                guard model.acceptsAccountWork(work) else { return }
                 // Quiet for 4 s after a from-disk launch → say so; live again → hide.
                 guard model.showingSavedCopy else {
                     withAnimation(.easeOut(duration: 0.2)) { offlineHint = false }
                     return
                 }
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 if !Task.isCancelled, model.showingSavedCopy {
                     withAnimation(.easeOut(duration: 0.2)) { offlineHint = true }
                 }
@@ -135,6 +101,26 @@ struct HomeView: View {
                     // D88: the server's channel list (the slid-in left pane).
                     ServerChannelsView(serverId: serverId)
                         .id(serverId)
+                case .profile(let target):
+                    // Jacob 2026-11-01: a profile comes in from the right like any other
+                    // page. `backSwipeToPop` is what gives it the stack's back swipe —
+                    // the pages draw their own `ProfileTopBar` instead of the system bar,
+                    // so without it they would have no swipe back of any kind.
+                    ProfilePage(target: target)
+                        .id(target.id)
+                        .backSwipeToPop()
+                case .ownProfile(let landing):
+                    // My own pane comes in from the right like the other profile items
+                    // (Jacob 2026-11-04), so it carries the same `backSwipeToPop` — it
+                    // draws its own `ProfileTopBar` instead of the system bar.
+                    SettingsView(landing: landing ?? DebugHooks.settingsPage)
+                        .backSwipeToPop()
+                        .onAppear { PerfSignpost.endAfterCommit(.settingsPage) }
+                case .newMessage:
+                    // Home's "+" — New Message — pushes in from the right like a chat
+                    // ([feedback iphone-compose-nav-push-2026-11-10]).
+                    NewChatSheet()
+                        .backSwipeToPop()
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
@@ -151,64 +137,55 @@ struct HomeView: View {
                     .environmentObject(model)
                     .environment(\.theme, theme)
             }
-            .sheet(isPresented: $showNewChat) {
-                NewChatSheet().environmentObject(model).environment(\.theme, theme)
-            }
-            .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
-                SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
-                    .environmentObject(model).environment(\.theme, theme)
-                    .onAppear { PerfSignpost.endAfterCommit(.settingsSheet) }
-            }
-            // A Settings row picked in search: the sheet opens straight on that page.
-            .onChange(of: model.pendingSettingsLanding) { _, landing in
-                if landing != nil, !showSettings { showSettings = true }
-            }
         }
         .task {
+                guard model.acceptsAccountWork(work) else { return }
             if DebugHooks.demo, model.isFixture {
                 try? await Task.sleep(nanoseconds: 2_600_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 if let p = model.project("fx-comms") { model.open(project: p) }
             }
             if DebugHooks.liveDemo, let id = DebugHooks.openProject {
-                while model.project(id) == nil || model.machine.reported == false { try? await Task.sleep(nanoseconds: 300_000_000) }
+                while model.acceptsAccountWork(work) && (model.project(id) == nil || model.machine.reported == false) { try? await Task.sleep(nanoseconds: 300_000_000) }
                 try? await Task.sleep(nanoseconds: 5_500_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 if let p = model.project(id) { model.open(project: p) }
             }
             if let id = DebugHooks.openPeople {
-                while !model.peopleChats.contains(where: { $0.id == id }) { try? await Task.sleep(nanoseconds: 300_000_000) }
+                while model.acceptsAccountWork(work) && !model.peopleChats.contains(where: { $0.id == id }) { try? await Task.sleep(nanoseconds: 300_000_000) }
                 try? await Task.sleep(nanoseconds: 800_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 if let c = model.peopleChats.first(where: { $0.id == id }) { model.open(peopleChat: c) }
             }
         }
-        .task { await model.refreshGoals() }
+        .task {
+            guard model.acceptsAccountWork(work) else { return }
+            await model.refreshGoals(expectedOwner: work?.owner)
+        }
         .onAppear {
-            // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
+            guard model.acceptsAccountWork(work) else { return }
+            // Rig: New Message (pushed), which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
             if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; model.showNewMessage() }
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; showHidden = true }
             }
             if DebugHooks.show == "settings", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showSettings = true }
-            }
-            // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
-            if let raw = DebugHooks.homeFilter,
-               let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
-                listFilter = f
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; model.showOwnProfile() }
             }
             // Rig: `ARBOS_SEARCH=<text>` opens the bottom search with that query
             // (`ARBOS_SEARCH=-` focuses the empty bar).
             if let q = DebugHooks.search, DebugHooks.openProject == nil {
                 model.paintTranscriptsForSearch()
                 query = q == "-" ? "" : q
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { searchFocused = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard model.acceptsAccountWork(work) else { return }; searchFocused = true }
             }
             #if DEBUG
             if DebugHooks.show == "notify", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { guard model.acceptsAccountWork(work) else { return }; model.postSampleNotifications() }
             }
             #endif
             if !DebugHooks.liveDemo, DebugHooks.openProject == peopleSlot, let cid = DebugHooks.openChat, model.path.isEmpty, let c = model.peopleChat(cid) {
@@ -218,24 +195,31 @@ struct HomeView: View {
             }
         }
         .onChange(of: model.projects.count) { _, _ in
+            guard model.acceptsAccountWork(work) else { return }
             if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
             }
         }
         .onChange(of: model.peopleChats.count) { _, _ in
+            guard model.acceptsAccountWork(work) else { return }
             if DebugHooks.openProject == peopleSlot, model.path.isEmpty, let cid = DebugHooks.openChat, let c = model.peopleChat(cid) {
                 model.open(peopleChat: c)
             }
         }
         .onChange(of: searchFocused) { _, focused in
+            guard model.acceptsAccountWork(work) else { return }
             // Rooms may finish a checkpoint while the field is focused — paint
             // any still-unpublished transcripts so message search can see them;
             // and load the directory so people without a DM can be found.
             guard focused else { return }
             model.paintTranscriptsForSearch()
-            Task { await model.loadDirectory() }
+            Task {
+                guard model.acceptsAccountWork(work) else { return }
+                await model.loadDirectory(expectedOwner: work?.owner)
+            }
         }
         .onChange(of: query) { _, _ in
+            guard model.acceptsAccountWork(work) else { return }
             if !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
         }
     }
@@ -261,12 +245,13 @@ struct HomeView: View {
     /// below it alike ([feedback sidebar-pinning-ios-2026-10-28]).
     @ViewBuilder
     private func homeRow(_ entry: HomeEntry) -> some View {
+        let work = model.accountWork()
         switch entry.row {
         case .project(let project):
             let pinned = model.isHomePinned(projectId: project.id)
             // borderless (not .plain): .plain steals the list swipe /
             // long-press on recent iOS, so archive and the menu fail.
-            Button { openSearchHit(project, hit: entry.hit) } label: {
+            Button { guard model.acceptsAccountWork(work) else { return }; openSearchHit(project, hit: entry.hit) } label: {
                 AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
                          previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                          streaming: model.isStreaming(project: project.id),
@@ -279,7 +264,7 @@ struct HomeView: View {
                 // Long-press: Pin (also on leading swipe), reorder when
                 // pinned, Fork (owned), Archive (also on trailing swipe),
                 // then Delete for owned agents. Profile is the chat header.
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(projectId: project.id) }
                         else { model.pinHome(projectId: project.id) }
@@ -289,19 +274,19 @@ struct HomeView: View {
                 }
                 if let pinIndex = model.homePinIndex(projectId: project.id) {
                     if pinIndex > 0 {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinToTop(projectId: project.id) }
                         } label: {
                             Label("Move to top", systemImage: "arrow.up.to.line")
                         }
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinUp(projectId: project.id) }
                         } label: {
                             Label("Move up", systemImage: "arrow.up")
                         }
                     }
                     if pinIndex + 1 < model.pinnedHomeIds.count {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinDown(projectId: project.id) }
                         } label: {
                             Label("Move down", systemImage: "arrow.down")
@@ -309,18 +294,18 @@ struct HomeView: View {
                     }
                 }
                 if !project.shared {
-                    Button { model.duplicateProject(project) } label: {
+                    Button { guard model.acceptsAccountWork(work) else { return }; model.duplicateProject(project) } label: {
                         Label("Fork", systemImage: "arrow.triangle.branch")
                     }
                 }
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation { model.archive(project.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
                 }
                 if !project.shared {
                     Divider()
-                    Button(role: .destructive) { model.deleteProject(project.id) } label: {
+                    Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteProject(project.id) } label: {
                         Label("Delete", systemImage: "trash")
                     }
                 }
@@ -329,7 +314,7 @@ struct HomeView: View {
             .listRowSeparator(.hidden)
             .listRowBackground(theme.bg)
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(projectId: project.id) }
                         else { model.pinHome(projectId: project.id) }
@@ -342,7 +327,7 @@ struct HomeView: View {
             // Trailing = swipe left. Full-swipe archives (Telegram-easy).
             // Archive alone so a destructive Delete cannot steal the full swipe.
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation { model.archive(project.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
@@ -351,8 +336,8 @@ struct HomeView: View {
             }
         case .people(let chat):
             let pinned = model.isHomePinned(peopleChatId: chat.id)
-            Button { model.open(peopleChat: chat) } label: {
-                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+            Button { guard model.acceptsAccountWork(work) else { return }; model.open(peopleChat: chat) } label: {
+                PeopleRow(chat: chat, preview: entry.hit.reason ?? HomeView.peoplePreview(chat, in: model), time: timeLabel(ms: peopleActivity(chat)),
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
                           count: model.unreadCount(for: chat), me: model.user?.id,
@@ -363,7 +348,7 @@ struct HomeView: View {
             .contextMenu {
                 // Long-press: Pin, reorder when pinned, Archive,
                 // Mute (groups), Profile/Group info, Delete.
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(peopleChatId: chat.id) }
                         else { model.pinHome(peopleChatId: chat.id) }
@@ -373,39 +358,39 @@ struct HomeView: View {
                 }
                 if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
                     if pinIndex > 0 {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
                         } label: {
                             Label("Move to top", systemImage: "arrow.up.to.line")
                         }
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
                         } label: {
                             Label("Move up", systemImage: "arrow.up")
                         }
                     }
                     if pinIndex + 1 < model.pinnedHomeIds.count {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
                         } label: {
                             Label("Move down", systemImage: "arrow.down")
                         }
                     }
                 }
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation { model.archive(peopleChatId: chat.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
                 }
                 if chat.isGroup {
                     if model.isPeopleChatMuted(chat.id) {
-                        Button { model.unmutePeopleChat(chat.id) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.unmutePeopleChat(chat.id) } label: {
                             Label("Unmute", systemImage: "bell")
                         }
                     } else {
                         Menu {
                             ForEach(ChatMuteDuration.allCases) { duration in
-                                Button(duration.title) {
+                                Button(duration.title) { guard model.acceptsAccountWork(work) else { return };
                                     model.mutePeopleChat(chat.id, for: duration)
                                 }
                             }
@@ -415,11 +400,11 @@ struct HomeView: View {
                     }
                 }
                 if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
-                    Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                    Button { guard model.acceptsAccountWork(work) else { return }; model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
                 } else {
-                    Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
+                    Button { guard model.acceptsAccountWork(work) else { return }; model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                 }
-                Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
+                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteOrLeavePeopleChat(chat) } label: {
                     Label("Delete", systemImage: "trash")
                 }
             }
@@ -427,7 +412,7 @@ struct HomeView: View {
             .listRowSeparator(.hidden)
             .listRowBackground(theme.bg)
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(peopleChatId: chat.id) }
                         else { model.pinHome(peopleChatId: chat.id) }
@@ -440,7 +425,7 @@ struct HomeView: View {
             // Trailing = swipe left. Full-swipe archives (same as agents).
             // Archive alone so Delete stays on long-press / Hidden chats.
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation { model.archive(peopleChatId: chat.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
@@ -452,7 +437,7 @@ struct HomeView: View {
             // time, unread dot; no counts, badges or disclosure. Tap → its
             // channel list; the user then opens a channel.
             let pinned = model.isHomePinned(serverId: server.id)
-            Button { model.open(server: server) } label: {
+            Button { guard model.acceptsAccountWork(work) else { return }; model.open(server: server) } label: {
                 ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
                           time: timeLabel(ms: model.serverActivity(server)),
                           unread: model.serverUnread(server),
@@ -463,7 +448,7 @@ struct HomeView: View {
             .contextMenu {
                 // Long-press: Pin (servers too since the synced pins, Jacob 2026-10-28),
                 // reorder when pinned, Server info, Archive.
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(serverId: server.id) }
                         else { model.pinHome(serverId: server.id) }
@@ -473,29 +458,29 @@ struct HomeView: View {
                 }
                 if let pinIndex = model.homePinIndex(serverId: server.id) {
                     if pinIndex > 0 {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinToTop(serverId: server.id) }
                         } label: {
                             Label("Move to top", systemImage: "arrow.up.to.line")
                         }
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinUp(serverId: server.id) }
                         } label: {
                             Label("Move up", systemImage: "arrow.up")
                         }
                     }
                     if pinIndex + 1 < model.pinnedHomeIds.count {
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             withAnimation { model.moveHomePinDown(serverId: server.id) }
                         } label: {
                             Label("Move down", systemImage: "arrow.down")
                         }
                     }
                 }
-                Button { model.showProfile(.server(serverId: server.id)) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; model.showProfile(.server(serverId: server.id)) } label: {
                     Label("Server info", systemImage: "person.2")
                 }
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation { model.archive(serverId: server.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
@@ -505,7 +490,7 @@ struct HomeView: View {
             .listRowSeparator(.hidden)
             .listRowBackground(theme.bg)
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     withAnimation {
                         if pinned { model.unpinHome(serverId: server.id) }
                         else { model.pinHome(serverId: server.id) }
@@ -539,9 +524,10 @@ struct HomeView: View {
     }
 
     private var homeList: some View {
-            ScrollViewReader { proxy in
+        let work = model.accountWork()
+            return ScrollViewReader { proxy in
                 List {
-                    Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
+                    Color.clear.frame(height: HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -552,7 +538,9 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                     } else if homeRows.isEmpty {
-                        Text(listFilter.emptyCopy)
+                        // Everything is archived: the list itself is empty, Hidden chats
+                        // still holds the rows.
+                        Text("No conversations yet")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
@@ -560,7 +548,7 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                            .accessibilityIdentifier("home-filter-empty")
+                            .accessibilityIdentifier("home-list-empty")
                     } else {
                         if let update = model.availableUpdate {
                             UpdateCard(update: update)
@@ -623,7 +611,10 @@ struct HomeView: View {
                 // List `.mask`, which clips the scroll indicator — feedback
                 // app-01M5MY2Y9HTFR019WAEPPDCNYS).
                 .scrollIndicators(.visible)
-                .refreshable { await model.refreshRegistry() }
+                .refreshable {
+                    guard model.acceptsAccountWork(work) else { return }
+                    await model.refreshRegistry(expectedOwner: work?.owner)
+                }
                 .rigListScroll(proxy, ids: homeRows.map(\.id))
             }
     }
@@ -663,12 +654,13 @@ struct HomeView: View {
 
     /// Planned tasks by agent: agent name, task text — tap opens the goal.
     private var plannedTasksSection: some View {
-        Section {
+        let work = model.accountWork()
+        return Section {
             ForEach(plannedTasks) { task in
-                Button { openGoalId = task.goalId } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; openGoalId = task.goalId } label: {
                     HStack(spacing: 12) {
                         if let project = model.project(task.projectId) {
-                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                            AgentAvatar(project: project, theme: theme, size: 28)
                         } else {
                             Image(systemName: "checklist")
                                 .font(.system(size: 14, weight: .semibold))
@@ -695,7 +687,7 @@ struct HomeView: View {
                 .listRowBackground(theme.bg)
                 .accessibilityLabel("\(task.agentName), \(task.text)")
             }
-            Button { showGoals = true } label: {
+            Button { guard model.acceptsAccountWork(work) else { return }; showGoals = true } label: {
                 HStack(spacing: 8) {
                     Text("All goals")
                         .font(theme.font(Theme.small))
@@ -723,7 +715,8 @@ struct HomeView: View {
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
     /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
     private var hiddenFooter: some View {
-        Button { showHidden = true } label: {
+        let work = model.accountWork()
+        return Button { guard model.acceptsAccountWork(work) else { return }; showHidden = true } label: {
             HStack(spacing: 8) {
                 Text("Hidden chats")
                     .font(theme.font(Theme.small))
@@ -744,33 +737,22 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
-    /// The filter tabs are fixed chrome under the bar (not a list row) whenever there is
-    /// anything to filter; the search results replace them.
-    private var showsFilterBar: Bool {
-        !searching && !(model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty)
-    }
-
-    /// Account circle (→ Settings) left, the + circle right, the All · Agents · People ·
-    /// Servers tabs under them. Search lives in the bottom bar, so the header carries no
-    /// search disc.
+    /// Account circle (→ Settings) left, the + circle right. Search lives in the bottom
+    /// bar, so the header carries no search disc and no list filter
+    /// ([feedback chat-list-no-filter-ios-2026-11-10]).
     private var topBar: some View {
-        VStack(spacing: 0) {
-            topBarRow
-            if showsFilterBar {
-                // The tabs' hit bands are the chrome's own 8 over / 4 under
-                // (`HomeChrome.filterBand`), so every tab is 44 pt tall end to end.
-                listFilterBar
-                    .padding(.horizontal, 20)
-            }
-        }
-        .zIndex(1)
+        topBarRow
+            .zIndex(1)
     }
 
     private var topBarRow: some View {
-        HStack(spacing: 10) {
+        let work = model.accountWork()
+        return HStack(spacing: 10) {
             Button {
-                PerfSignpost.begin(.settingsSheet)
-                showSettings = true
+                guard model.acceptsAccountWork(work) else { return }
+                // [feedback iphone-settings-nav-push-2026-11-10]
+                PerfSignpost.begin(.settingsPage)
+                model.showOwnProfile()
             } label: {
                 // My picture with the machine mark through the one presence badge (in
                 // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
@@ -794,7 +776,7 @@ struct HomeView: View {
                             .accessibilityIdentifier("offline-hint")
                     }
                 }
-            Button { showNewChat = true } label: {
+            Button { guard model.acceptsAccountWork(work) else { return }; model.showNewMessage() } label: {
                 // The chat header's real glass (not the 0.85 legacy tint), beside the clear
                 // search capsule ([feedback iphone-composer-glass-2026-10-28]).
                 GlassCircle(material: ChatHeaderGlass.material(surface: theme.surface)) {
@@ -815,11 +797,15 @@ struct HomeView: View {
     // MARK: Empty / error
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
+        let work = model.accountWork()
+        return VStack(spacing: 10) {
             if let err = model.registryError {
                 // Home's note where the list would be: the shared element with Try again.
                 ErrorNote(id: "home-registry-error", error: err, detailsOpen: $model.registryErrorDetailsOpen,
-                          onTryAgain: { Task { await model.refreshRegistry() } })
+                          onTryAgain: { Task {
+                              guard model.acceptsAccountWork(work) else { return }
+                              await model.refreshRegistry(expectedOwner: work?.owner)
+                          } })
                     .padding(.horizontal, 16)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
@@ -827,9 +813,12 @@ struct HomeView: View {
                     .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                 if slowConnect {
-                    Button("Retry") {
+                    Button("Retry") { guard model.acceptsAccountWork(work) else { return };
                         slowConnect = false
-                        Task { await model.refreshRegistry() }
+                        Task {
+                              guard model.acceptsAccountWork(work) else { return }
+                              await model.refreshRegistry(expectedOwner: work?.owner)
+                          }
                     }
                     .font(theme.font(Theme.small, weight: .semibold))
                     .foregroundStyle(theme.text)
@@ -848,10 +837,12 @@ struct HomeView: View {
         .padding(.top, 160)
         .padding(.horizontal, 24)
         .task(id: model.link) {
+                guard model.acceptsAccountWork(work) else { return }
             // "Loading your agents…" must not spin forever: after 10 s offer a retry.
             slowConnect = false
             guard model.link == .connecting else { return }
             try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard model.acceptsAccountWork(work) else { return }
             if !Task.isCancelled && model.link == .connecting { slowConnect = true }
         }
     }
@@ -873,8 +864,7 @@ struct HomeView: View {
     }
 
     /// One home row. Every row is a plain `title` hit: the list is no longer
-    /// narrowed by typed text (search is the bottom bar, as the Mac's palette);
-    /// the segment alone scopes it.
+    /// narrowed by typed text (search is the bottom bar, as the Mac's palette).
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
@@ -882,13 +872,13 @@ struct HomeView: View {
     }
 
     /// Projects, DMs and servers in one list: pinned first (in the user's pin
-    /// order), then newest activity. `listFilter` scopes the rows: Agents hides
-    /// people and servers, People hides agents and servers, Servers shows only
-    /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
+    /// order), then newest activity. Archived rows stay out (Hidden chats).
+    /// No segment filter — agents, people and servers always sit together
+    /// ([feedback chat-list-no-filter-ios-2026-11-10]).
     private var homeRows: [HomeEntry] { pinnedRows + restRows }
 
-    /// The Pinned section: the pins the filter admits, in the user's order (never re-sorted
-    /// by activity); empty → no header, no hairline.
+    /// The Pinned section: every pin, in the user's order (never re-sorted by
+    /// activity); empty → no header, no hairline.
     private var pinnedRows: [HomeEntry] {
         rankedRows.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
     }
@@ -902,45 +892,21 @@ struct HomeView: View {
         // pinRank: strip index when pinned (0 = top), Int.max when not.
         var rows: [(Int, Int64, HomeEntry)] = []
         let hit = HomeSearch.Hit(kind: .title)
-        if listFilter.showsProjects {
-            for p in model.projects {
-                // Agents: my agents only (`!shared`) — no shared-in agents.
-                if !listFilter.admitsProject(shared: p.shared) { continue }
-                if model.isArchived(p.id) { continue }
-                let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
-            }
+        for p in model.projects {
+            if model.isArchived(p.id) { continue }
+            let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
+            rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
         }
-        if listFilter.showsPeople {
-            for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
-                let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
-            }
+        for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
+            let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
+            rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
         }
-        if listFilter.showsServers {
-            // D88: servers sort among the chats by last activity (rule 1); the
-            // Servers segment shows them alone (Mac parity, 2026-10-24).
-            for s in model.servers where !model.isArchived(serverId: s.id) {
-                let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
-                rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
-            }
+        // D88: servers sort among the chats by last activity (rule 1).
+        for s in model.servers where !model.isArchived(serverId: s.id) {
+            let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
+            rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
         }
         return rows
-    }
-
-    /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
-    private var listFilterBar: some View {
-        let selected = Binding(
-            get: { listFilter.rawValue },
-            set: { raw in
-                guard let next = HomeListFilter(rawValue: raw) else { return }
-                Haptics.pick()
-                withAnimation(.snappy(duration: 0.2)) { listFilter = next }
-            }
-        )
-        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected,
-                        hitAbove: HomeChrome.filterTop, hitBelow: HomeChrome.filterBottom)
-            .accessibilityIdentifier("home-list-filter")
     }
 
     /// Open the chat the row points at, else the agent's landing chat.
@@ -967,17 +933,44 @@ struct HomeView: View {
         max(c.lastActivityAt, model.messages(of: c.id).last?.createdAt ?? 0)
     }
 
-    private func peoplePreview(_ c: PeopleChat) -> String {
-        // Skip group deletion audits (hidden in the chat; Activity only) so the
-        // home row matches what you see when you open the conversation.
+    /// The one builder behind every people row's preview line — Home's list and the
+    /// Hidden chats list both call it, so the line can only ever be composed one way.
+    /// It used to be written out twice, and the copies drifted: the block filter of
+    /// [feedback blocked-state-ios-2026-10-26] reached the hidden list alone, and the
+    /// `@handle` rule had to be stated in both.
+    ///
+    /// Skips group deletion audits (hidden in the chat; Activity only) and rows hidden
+    /// for me (someone I blocked), so a row matches what opening the chat shows.
+    ///
+    /// A file with no words is the newest message all the same, and previews by the word
+    /// its notification has (`arbos_matrix::preview`): the row used to keep the text before it.
+    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
+        func isFile(_ m: Message) -> Bool {
+            m.parts.contains { if case .attachment = $0 { return true } else { return false } }
+        }
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+            !$0.voice && (!$0.plainText.isEmpty || isFile($0))
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? (isFile(m) ? "Attachment" : "")
+        let who = previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
+                             sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+    }
+
+    /// The label before a people row's preview text: "You" for my own line, `@handle`
+    /// for anyone else — but not for the other person of a 1:1 chat, whom the row's own
+    /// header already names. Labelling them there printed the handle twice, "Affinity @Z"
+    /// over "@Z: hahahaha" ([feedback doubled-sender-prefix-2026-10-30], seen again
+    /// 2026-11-05). A group row is headed by the group and carries no handle, and an
+    /// agent in a 1:1 chat is not the person the header names, so both keep their label.
+    static func previewWho(group: Bool, mine: Bool, sender: String, handle: String?) -> String {
+        if mine { return "You" }
+        if !group, sender.hasPrefix("user:") { return "" }
+        return handle.map { "@\($0)" } ?? ""
     }
 
     /// Newest message with prose (or an open question) across the project's chats.
@@ -1142,6 +1135,7 @@ struct HiddenChatsView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             List {
@@ -1163,17 +1157,17 @@ struct HiddenChatsView: View {
                 ForEach(hidden) { row in
                     switch row {
                     case .project(let project):
-                        Button { model.open(project: project) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(project: project) } label: {
                             AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
                                      streaming: model.isStreaming(project: project.id), unread: false)
                         }
                         .buttonStyle(.borderless)
                         .contextMenu {
-                            Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(project.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             if !project.shared {
-                                Button(role: .destructive) { model.deleteProject(project.id) } label: {
+                                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteProject(project.id) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
@@ -1183,27 +1177,27 @@ struct HiddenChatsView: View {
                         .listRowBackground(theme.bg)
                         // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(project.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
                             if !project.shared {
-                                Button(role: .destructive) { model.deleteProject(project.id) } label: {
+                                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteProject(project.id) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
                         }
                     case .people(let chat):
-                        Button { model.open(peopleChat: chat) } label: {
-                            PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(peopleChat: chat) } label: {
+                            PeopleRow(chat: chat, preview: HomeView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
                         }
                         .buttonStyle(.borderless)
                         .contextMenu {
-                            Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
-                            Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
+                            Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteOrLeavePeopleChat(chat) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
@@ -1212,21 +1206,21 @@ struct HiddenChatsView: View {
                         .listRowBackground(theme.bg)
                         // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
-                            Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
+                            Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; model.deleteOrLeavePeopleChat(chat) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
                     case .server(let server):
-                        Button { model.open(server: server) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(server: server) } label: {
                             ServerRow(server: server, preview: model.serverPreview(server), time: "", unread: false)
                         }
                         .buttonStyle(.borderless)
                         .contextMenu {
-                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(serverId: server.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                         }
@@ -1234,7 +1228,7 @@ struct HiddenChatsView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                            Button { guard model.acceptsAccountWork(work) else { return }; withAnimation { model.unarchive(serverId: server.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
@@ -1249,7 +1243,7 @@ struct HiddenChatsView: View {
             ListTopFade(screen: .hiddenChats)
             // Grok page header: back circle left, title centred in a pill.
             HStack {
-                Button { dismiss() } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; dismiss() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
                             .font(theme.font(Controls.glyph, weight: .semibold))
@@ -1292,20 +1286,6 @@ struct HiddenChatsView: View {
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 
-    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews. Deletion
-        // audits stay out too — same filter as the open chat (Transcript).
-        guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty
-                && !model.hidesMessage($0, chatId: c.id)
-                && !GroupActivity.isAuditLine($0.plainText)
-        }) else {
-            return c.pending ? "Invited · opens when they sign in" : "Say hi"
-        }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
-    }
 }
 
 struct AgentRow: View {
@@ -1432,14 +1412,14 @@ struct PeopleRow: View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    // The group's picture through the resolver (its upload, else the leaf or
+                    // The group's picture through the resolver (its upload, else the colour or
                     // neutral initial from the Create screen, else the two-person disc).
                     GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
                 if let a = chat.agents.first {
-                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
+                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }
@@ -1450,10 +1430,15 @@ struct PeopleRow: View {
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
-                    Text(label)
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.muted)
-                        .lineLimit(1)
+                        // The handle gives way before the name does.
+                        .layoutPriority(1)
+                    // A person with no display name: the title already is the handle.
+                    if label != title {
+                        Text(label)
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(theme.muted)
+                            .lineLimit(1)
+                    }
                     Spacer()
                     if pinned {
                         Image(systemName: "pin.fill")
@@ -1492,12 +1477,14 @@ struct PeopleRow: View {
 struct PulseDot: View {
     let color: Color
     @State private var on = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
-            .fill(color.opacity(on ? 1 : 0.35))
+            .fill(color.opacity(on || reduceMotion ? 1 : 0.35))
             .frame(width: 7, height: 7)
             .onAppear {
+                guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true }
             }
     }

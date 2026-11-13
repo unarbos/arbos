@@ -23,7 +23,7 @@ use arbos_core::approval::{ApprovalRequest, Risk};
 use arbos_core::widget::WIDGET_SCHEMA_JSON;
 
 use crate::agent::Agent;
-use crate::approval::WaitMode;
+use crate::approval::WaitDelivery;
 
 type S = Arc<Agent>;
 
@@ -31,7 +31,19 @@ const MAX_HITS: i64 = 20;
 const PAGE_TOKENS_CHARS: usize = 32_000; // ≈ 8k tokens
 const DRAFT_CHANNELS: &[&str] = &["email", "slack", "telegram", "whatsapp", "sms"];
 
-fn tools() -> Value {
+/// The `send_message` description. `chat_text_max` is this box's configured character limit for
+/// one chat message, or `None` for no limit — which is the default and the truth about the box:
+/// see `config::chat_text_max_with`. The figure here is the one the refusal names, so the model
+/// has a real number to quote instead of the invented one of Test5 round 5 (bug Q).
+fn send_message_description(chat_text_max: Option<usize>) -> String {
+    let size = match chat_text_max {
+        Some(max) => format!("One message holds at most {max} characters on this box; over that the call is refused and names the limit."),
+        None => "There is no size limit: one call posts the whole thing, however long — a 1,500-row markdown table goes in one message. Never split an answer because you believe a limit exists, and never tell the user one does.".to_owned(),
+    };
+    format!("Message another agent, or post to this chat. The words go in `text` (`message` is accepted as the same field). `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to` outside a group, the text is posted in this chat for the user, as its own bubble — this is how a job posts a progress note in the chat it runs beside, and the only way its words are shown before its result. {size}")
+}
+
+fn tools(chat_text_max: Option<usize>) -> Value {
     let mut list = json!([
         { "name": "context_search", "description": "Search this agent's memory tree: raw events (every past message, tool call and result) plus index cards of episodes and threads. Returns ids for context_open / context_around. Scoped to what this chat may see.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] } },
@@ -61,8 +73,8 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": ["string","null"] } }, "required": ["name"] } },
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to`, the progress-note `send_message(text)` is for the user in this chat only.",
-          "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
+        { "name": "send_message", "description": send_message_description(chat_text_max),
+          "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string", "description": "The words to post or send" }, "message": { "type": "string", "description": "Alias of `text`, accepted so a call does not fail on the field name" } } } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Prefer for long or research-heavy work.",
@@ -88,8 +100,27 @@ fn tools() -> Value {
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
         a.extend(crate::disk::tool_specs());
+        a.extend(crate::app::tool_specs());
     }
     list
+}
+
+/// The tool definitions this box serves, fixed for the life of the process.
+///
+/// Tool definitions sit inside the model's cached prefix — on this box about 27,900 tokens of
+/// system prompt and tools, ahead of every turn of every chat. A definition that moves while a
+/// chat is live throws that cache away for the chat and for each of its later turns: the
+/// prompt-size measurement of 2026-11-05 caught a request whose only change was one tool's
+/// definition, and it read nothing from cache and paid about $0.14 to write the prefix again.
+///
+/// So the one part of the block that is not a literal is read once. `send_message`'s size
+/// sentence comes from the `chat_text_max` knob, which is read from disk at every call and can
+/// therefore be written under a running box; pinning it here means an operator's edit reaches
+/// the model at the next start, the same moment the rest of the prefix may move, rather than
+/// at whatever turn a pi child happens to re-list the tools on.
+fn pinned_tools(chat_text_max: Option<usize>) -> &'static Value {
+    static PINNED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| tools(chat_text_max))
 }
 
 fn widget_schema() -> Value {
@@ -103,18 +134,133 @@ pub enum SessionRole {
     Subagent,
 }
 
+/// The bearer a request presented, trimmed; `""` when it presented none.
+fn bearer(headers: &HeaderMap) -> &str {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Which role a bearer token earns here, or `None` for no role at all.
+///
+/// The same check the hook server makes (`hooks::role_for_token`), which this one must not drift
+/// from: both verifiers answer one question from one pair of tokens, so a session either admits
+/// to both or to neither.
+///
+/// Both guards fail closed before any comparison. `ARBOS_MCP_TOKEN` defaults to empty
+/// (`config.rs`) and an absent header reads as `""`, so the bare comparison this replaced matched
+/// the main arm for a request carrying no credential — the highest role, granted anonymously. The
+/// subagent arm was no safer, because `subagent_mcp_token()` hashes the configured value and so is
+/// a constant anyone can compute offline once that value is empty. A workspace that was given a
+/// token refuses nothing it used to accept.
+fn role_for_token(configured: &str, derived: &str, headers: &HeaderMap) -> Option<SessionRole> {
+    if configured.trim().is_empty() {
+        return None;
+    }
+    let tok = bearer(headers);
+    if tok.is_empty() {
+        return None;
+    }
+    if tok == configured {
+        Some(SessionRole::Main)
+    } else if tok == derived {
+        Some(SessionRole::Subagent)
+    } else {
+        None
+    }
+}
+
 /// Tools only the main agent may use: anything that talks to another agent (D69 — subagents
 /// never reach the cross-project surface). `group_send` / `projects_send` are the old names,
 /// still accepted from older sessions.
 const MAIN_ONLY_TOOLS: &[&str] = &["send_message", "group_send", "projects_send"];
 
-/// `Some(reason)` when `role` may not call `tool`.
-pub fn refusal_for(role: SessionRole, tool: &str) -> Option<String> {
+/// `Some(reason)` when `role` may not call `tool` addressed at `to`.
+///
+/// `send_message` is two tools under one name. With `to` it speaks to another Project, which
+/// stays the main agent's alone (D69). Without `to` it posts a bubble in the caller's own chat,
+/// which is not a cross-project surface at all — refusing that is bug T of Test5 round 6
+/// (r6cardjob): a job asked to name the approval card it waited on called
+/// `mcp__arbos__send_message`, was told the tool belonged to the main agent, and stopped. The
+/// user was told nothing, by anyone.
+///
+/// The refusal that remains names the open door, so a model that hits the wall is not left to
+/// guess that the same tool answers without `to`.
+pub fn refusal_for(role: SessionRole, tool: &str, to: Option<&str>) -> Option<String> {
     match role {
         SessionRole::Main => None,
-        SessionRole::Subagent => MAIN_ONLY_TOOLS
-            .contains(&tool)
-            .then(|| format!("{tool} is available to the main agent only; report back and let it speak for the Project")),
+        SessionRole::Subagent => {
+            let addressed = to.map(str::trim).is_some_and(|t| !t.is_empty());
+            (MAIN_ONLY_TOOLS.contains(&tool) && addressed).then(|| {
+                format!(
+                    "{tool} with `to` reaches another Project and is available to the main agent only; report back and let it speak for the Project. To post in your own chat — a progress note, the card you are waiting on — call {tool} with `text` and no `to`."
+                )
+            })
+        }
+    }
+}
+
+/// The pi session a request belongs to (`X-Arbos-Session`, written into `mcp.json` by
+/// `workspace::seed_state` and filled from the child's `ARBOS_SESSION_ID`). For a worker it is
+/// the subagent id, which is how a job's `send_message` finds the chat it runs beside; the main
+/// session needs none, because it has the running turn.
+const SESSION_HEADER: &str = "x-arbos-session";
+
+fn session_of(headers: &HeaderMap) -> String {
+    headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+/// Which chat a chat-scoped call belongs to, and the job behind it when a worker is calling.
+///
+/// The main agent is in its turn's chat. A worker is never in that turn: a job runs beside the
+/// chat, the turn that started it ended long before, and `Agent::turn` holds the one turn state
+/// of the box's main agent — so reading it for a worker would hand a job whatever chat the main
+/// agent happens to be answering in. Bug W of Test5 round 7 is the quiet version of that: with
+/// no turn at all the hint was the literal `"shared"`, and the routine went to the project's
+/// main chat.
+///
+/// An unknown worker session (an older pi child that sends no header) resolves to no chat, which
+/// is the behaviour this replaced: the relay still picks. It never borrows the main agent's turn.
+pub(crate) async fn caller_for(
+    a: &Arc<Agent>,
+    role: SessionRole,
+    session: &str,
+) -> crate::routines::Caller {
+    match role {
+        SessionRole::Main => crate::routines::Caller {
+            chat_id: a.turn.lock().await.as_ref().map(|t| t.chat_id.clone()),
+            job_id: None,
+        },
+        SessionRole::Subagent => {
+            if session.is_empty() {
+                return crate::routines::Caller::default();
+            }
+            // The job row first, so `job_id` is set for the refusal; a worker running no job
+            // still has the chat it was spawned for.
+            if let Some(job) = a.store.job_for_subagent(session).ok().flatten() {
+                return crate::routines::Caller {
+                    chat_id: Some(job.chat_id),
+                    job_id: Some(job.id),
+                };
+            }
+            crate::routines::Caller {
+                chat_id: a
+                    .store
+                    .subagent(session)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.chat_id),
+                job_id: None,
+            }
+        }
     }
 }
 
@@ -126,15 +272,34 @@ pub(crate) fn err_result(msg: impl std::fmt::Display) -> Value {
     json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true })
 }
 
+/// Head of `s`, counted in characters, like the `clip` in `local.rs` and `connectors.rs`.
+///
+/// Counting bytes here cut inside multi-byte characters and panicked, which `peek` could reach
+/// with any slice over 16,000 bytes of non-ASCII text — one curly apostrophe across the cut is
+/// enough. Characters are also what `peek` slices by and what the suffix below claims to count.
 fn clip(s: &str, max: usize) -> String {
+    // A string never holds more characters than bytes, so this fast path is exact.
     if s.len() <= max {
-        s.to_owned()
-    } else {
-        format!("{}…[{} more chars]", &s[..max], s.len() - max)
+        return s.to_owned();
     }
+    let chars = s.chars().count();
+    if chars <= max {
+        return s.to_owned();
+    }
+    format!(
+        "{}…[{} more chars]",
+        s.chars().take(max).collect::<String>(),
+        chars - max
+    )
 }
 
-async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
+async fn call_tool(
+    a: &Arc<Agent>,
+    name: &str,
+    args: &Value,
+    role: SessionRole,
+    session: &str,
+) -> Value {
     let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
     let chat_for_scratch = a
         .turn
@@ -171,6 +336,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             | "request_secret"
             | "secrets_save_from_message"
             | "browser_fill"
+            // Destructive cmds are gated inside `app::call_tool` (approval card per command).
+            | "arbos_app"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
             return err_result(format!("not executed: {refusal}"));
@@ -276,8 +443,11 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             let chat_id = s("chat_id")
                 .filter(|c| !c.trim().is_empty())
                 .unwrap_or_else(|| chat_for_scratch.clone());
-            let Some(host) = a.sync.host(&chat_id).await else {
-                return err_result(format!("no open chat {chat_id} on this box"));
+            // Any chat of this project, not only the one the turn runs in, so the idle close may
+            // well have taken its room (#2367). Opening it is the difference between reading the
+            // history and telling the agent the chat does not exist.
+            let Ok(host) = a.room(&chat_id).await else {
+                return err_result(format!("no chat {chat_id} on this box"));
             };
             let all = { host.lock().await.doc.messages() };
             let row = |m: &arbos_core::doc::MessageView, full: bool| -> Value {
@@ -558,22 +728,28 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 .map(|c| String::from_utf8_lossy(c).into_owned())
                 .collect();
             let mut parts = Vec::new();
+            // `sub_llm` is the agent reading something for itself, so it reads on the agent's
+            // own model, not on the id the box booted with (Jacob, 2026-11-04).
+            let context = match a
+                .model_usage_context((role == SessionRole::Subagent).then_some(session))
+                .await
+            {
+                Ok(context) => context,
+                Err(e) => return err_result(e),
+            };
+            let llm = a.llm.with_context(context).with_purpose("sub-llm");
+            let model = a.model_for(crate::settings::ModelRole::Talking).await;
             for (i, c) in chunks.iter().enumerate().take(32) {
-                match a
-                    .llm
-                    .complete(&a.cfg.talking_model, &instruction, c, 1500)
-                    .await
-                {
+                match llm.complete(&model, &instruction, c, 1500).await {
                     Ok((t, _)) => parts.push(format!("[chunk {}]\n{t}", i + 1)),
                     Err(e) => return err_result(e),
                 }
             }
             let mut joined = parts.join("\n\n");
             if parts.len() > 1 && joined.len() > 8000 {
-                if let Ok((t, _)) = a
-                    .llm
+                if let Ok((t, _)) = llm
                     .complete(
-                        &a.cfg.talking_model,
+                        &model,
                         &format!(
                             "Reduce these per-chunk results into one answer for: {instruction}"
                         ),
@@ -626,13 +802,28 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             Err(e) => err_result(e),
         },
         "send_message" | "group_send" | "projects_send" => {
-            let text = s("text").unwrap_or_default();
+            // `message` is the field name every other chat API uses, so it is the one a model
+            // reaches for first — the r6cardjob call spent its only attempt on it. Accepting it
+            // as an alias costs one line; the refusal below still names `text`, so the canonical
+            // field is what gets learned rather than quietly replaced.
+            let text = s("text").or_else(|| s("message")).unwrap_or_default();
             let to = s("to")
                 .map(|t| t.trim().to_owned())
                 .filter(|t| !t.is_empty());
-            match a.send_message_from_turn(to.as_deref(), &text).await {
-                Ok(t) => text_result(t),
-                Err(e) => err_result(e),
+            if text.trim().is_empty() {
+                err_result("text required: put the words in `text` (`message` is accepted as the same field)")
+            } else {
+                // `to` is the main agent's alone and `refusal_for` has already refused it for a
+                // worker, so a worker reaching here is posting in its own chat. It has no turn
+                // to post into: its chat is the one its job runs beside.
+                let posted = match role {
+                    SessionRole::Main => a.send_message_from_turn(to.as_deref(), &text).await,
+                    SessionRole::Subagent => a.post_to_job_chat(session, &text).await,
+                };
+                match posted {
+                    Ok(t) => text_result(t),
+                    Err(e) => err_result(e),
+                }
             }
         }
         "ask_user" => {
@@ -784,7 +975,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
             };
             match a
-                .begin_approval(&chat_for_scratch, req, WaitMode::Deferred, None)
+                .begin_approval(&chat_for_scratch, req, WaitDelivery::Deferred)
                 .await
             {
                 Ok(id) => text_result(format!(
@@ -818,11 +1009,13 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
-            crate::routines::call_tool(a, name, args, &chat_for_scratch).await
+            let caller = caller_for(a, role, session).await;
+            crate::routines::call_tool(a, name, args, &caller).await
         }
         "goals_list" | "goals_create" | "goals_update" | "goals_log" | "goals_delete" => {
             crate::goals::call_tool(a, name, args, &chat_for_scratch).await
         }
+        "arbos_app" => crate::app::call_tool(a, args, &chat_for_scratch).await,
         _ => err_result(format!("unknown tool {name}")),
     }
 }
@@ -882,17 +1075,8 @@ pub(crate) fn materialize_handle(a: &Agent, chat_id: &str, note: &str, text: &st
 }
 
 async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> Response {
-    let tok = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let role = if tok == a.cfg.mcp_token {
-        SessionRole::Main
-    } else if tok == a.cfg.subagent_mcp_token() {
-        SessionRole::Subagent
-    } else {
-        tracing::warn!(got = %tok.chars().take(8).collect::<String>(), "mcp: bad token");
+    let Some(role) = role_for_token(&a.cfg.mcp_token, &a.cfg.subagent_mcp_token(), &headers) else {
+        tracing::warn!(got = %bearer(&headers).chars().take(8).collect::<String>(), "mcp: bad token");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     };
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -902,16 +1086,17 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         "initialize" => json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} }, "serverInfo": { "name": "arbos", "version": env!("CARGO_PKG_VERSION") } }),
         "notifications/initialized" | "notifications/cancelled" => return StatusCode::ACCEPTED.into_response(),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": pinned_tools(a.cfg.chat_text_max()) }),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match refusal_for(role, name) {
+            let to = args.get("to").and_then(Value::as_str);
+            match refusal_for(role, name, to) {
                 Some(reason) => {
                     tracing::info!(tool = name, ?role, "mcp: refused for role");
                     err_result(reason)
                 }
-                None => call_tool(&a, name, &args).await,
+                None => call_tool(&a, name, &args, role, &session_of(&headers)).await,
             }
         }
         _ => return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("unknown method {method}") } })).into_response(),
@@ -927,15 +1112,466 @@ pub fn router(agent: Arc<Agent>) -> Router {
 mod tests {
     use super::*;
 
-    /// D69: a subagent-role session may not speak for the Project to other Projects.
+    /// The tool block is the cached prefix, so the bar is identity rather than presence: the
+    /// bytes a later `tools/list` answers must be the bytes of the first one, name for name,
+    /// description for description, schema for schema and in the same order. A tool whose
+    /// definition merely still exists, reworded or moved, has already cost the chat its cache.
+    ///
+    /// The one way this block could move under a live box is the `chat_text_max` knob, which
+    /// `send_message`'s description quotes and which is read from disk at every call. Here that
+    /// knob is written between two calls, as an operator may write it at any moment.
     #[test]
-    fn subagent_cannot_reach_other_projects() {
-        assert!(refusal_for(SessionRole::Subagent, "send_message").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "group_send").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "projects_send").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "history_search").is_none());
-        assert!(refusal_for(SessionRole::Main, "send_message").is_none());
-        assert!(refusal_for(SessionRole::Main, "group_send").is_none());
-        assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    fn the_tool_block_a_later_call_gets_is_the_one_the_first_call_got() {
+        let first = serde_json::to_string(pinned_tools(None)).expect("the tool block");
+        let after_a_knob_change =
+            serde_json::to_string(pinned_tools(Some(4_000))).expect("the tool block");
+        assert_eq!(
+            first, after_a_knob_change,
+            "a knob written under a running box must not move the tool block: it takes effect at the next start"
+        );
+
+        let names: Vec<&str> = pinned_tools(None)
+            .as_array()
+            .expect("a list of tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a named tool"))
+            .collect();
+        assert!(
+            names.contains(&"send_message") && names.len() > 20,
+            "the pinned block is the real one, not an empty list: {names:?}"
+        );
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "and no tool is defined twice, which would make the block's order ambiguous: {names:?}"
+        );
+    }
+
+    /// `clip` used to slice by byte, so a cut landing inside a multi-byte character panicked.
+    /// Every offset below is one a caller really passes: the approval-card summary 160, the
+    /// per-call argument log 200, search snippets 300, `sub_llm` 2,000, `history_read` and
+    /// `page_rows` 8,000, `peek` 16,000.
+    #[test]
+    fn clip_cuts_between_characters_never_inside_one() {
+        for max in [160, 200, 300, 2_000, 8_000, 16_000] {
+            // Three bytes per character, so no multiple of a byte offset is a boundary.
+            let cjk = "日".repeat(max);
+            let out = clip(&cjk, max / 2);
+            assert_eq!(out.chars().filter(|c| *c == '日').count(), max / 2);
+            assert!(out.ends_with(&format!("…[{} more chars]", max - max / 2)));
+
+            // The realistic case: ordinary prose with one curly apostrophe across the cut.
+            let mut prose = "a".repeat(max - 1);
+            prose.push('\u{2019}');
+            prose.push_str(&"b".repeat(max));
+            assert!(clip(&prose, max).ends_with(&format!("…[{max} more chars]")));
+        }
+    }
+
+    /// The suffix says "chars", so it must count characters. It used to print `s.len() - max`,
+    /// a byte delta, which overstated the remainder by the multi-byte overhead.
+    #[test]
+    fn clip_reports_the_remainder_in_characters() {
+        assert_eq!(clip("日日日日", 1), "日…[3 more chars]");
+        assert_eq!(clip("abcd", 2), "ab…[2 more chars]");
+    }
+
+    /// The quiet half, on its own. The cut here lands on a character boundary, so the old
+    /// byte-slicing `clip` did not panic and returned this exact head — it just called the
+    /// three remaining characters nine. A correct slice with a lying count is still wrong.
+    #[test]
+    fn clip_counted_the_remainder_in_bytes_even_when_it_did_not_panic() {
+        let s = "aaaa日日日";
+        assert!(s.is_char_boundary(4), "the old byte cut was legal here");
+        assert_eq!(s.len() - 4, 9, "the old count would have said nine");
+        assert_eq!(clip(s, 4), "aaaa…[3 more chars]");
+    }
+
+    /// Text that fits comes back untouched, including text whose byte length exceeds `max`.
+    #[test]
+    fn clip_leaves_short_text_alone() {
+        assert_eq!(clip("abc", 8), "abc");
+        assert_eq!(clip("日日", 8), "日日");
+        assert_eq!(clip("日日", 2), "日日");
+    }
+
+    /// A markdown table of `rows` data rows, in the shape the apps draw.
+    fn sensor_table(rows: usize) -> String {
+        let mut t = String::from("| # | sensor | reading | note |\n| --- | --- | --- | --- |");
+        for i in 1..=rows {
+            t.push_str(&format!(
+                "\n| {i} | sensor-{i:04} | {}.{:02} | steady |",
+                i % 90,
+                i % 100
+            ));
+        }
+        t
+    }
+
+    /// Jacob, Test5 round 5 (bug Q, r5giant 20:22). The user asked for a 1,500-row table in one
+    /// chat message. The turn built it in a `codemode` script and posted it with
+    /// `mcp__arbos__send_message({text})` — the only text surface a script has, since the
+    /// harness `send_message` is direct-only. The call was refused ("say who to message …") and
+    /// the turn told the user the table was too big for one chat message, and that an earlier
+    /// 200-row table had therefore needed four. Both claims were invented.
+    ///
+    /// Nothing bounds a bubble's text, so the whole table goes out as one row, inside one relay
+    /// frame, and a history fetch afterwards is healthy.
+    #[tokio::test]
+    async fn a_fifty_one_thousand_character_table_posts_as_one_row_in_this_chat() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATBIGTABLE00000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+
+        let table = sensor_table(1_500);
+        let chars = table.chars().count();
+        assert!(
+            chars >= 51_000,
+            "the round-5 table was 51,372 chars; this one is {chars}"
+        );
+        let out = call_tool(
+            &agent,
+            "send_message",
+            &json!({ "text": table }),
+            SessionRole::Main,
+            "",
+        )
+        .await;
+        assert!(out.get("isError").is_none(), "the table was refused: {out}");
+
+        let rows: Vec<arbos_core::doc::MessageView> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.has_visible_content())
+                .collect()
+        };
+        assert_eq!(rows.len(), 1, "one message, one row: {} rows", rows.len());
+        assert_eq!(rows[0].text(), table, "the row is not the table verbatim");
+
+        // The one real bound on the path, for scale: a push frame. One table is a few per cent
+        // of it, and a backlog over it is cut into frames that fit (#2762) rather than refused.
+        let update = {
+            let h = host.lock().await;
+            h.doc.export_updates_since(&loro::VersionVector::default())
+        };
+        assert!(
+            update.len() <= arbos_core::wire::ROW_MAX,
+            "{chars} chars exported to {} bytes, over the {} a frame holds",
+            update.len(),
+            arbos_core::wire::ROW_MAX
+        );
+
+        // A history fetch afterwards is healthy: a message past one page comes back as its head
+        // plus a handle for `peek`, the same way every large output does, not as an error.
+        let fetched = call_tool(
+            &agent,
+            "chat_messages",
+            &json!({ "chat_id": chat, "message_id": rows[0].id }),
+            SessionRole::Main,
+            "",
+        )
+        .await;
+        assert!(fetched.get("isError").is_none(), "{fetched}");
+        let body: Value = serde_json::from_str(
+            fetched["content"][0]["text"]
+                .as_str()
+                .expect("one text part"),
+        )
+        .expect("the row is json");
+        let head = body["text"].as_str().unwrap_or_default();
+        assert!(
+            head.starts_with("| # | sensor | reading | note |"),
+            "the fetch lost the head of the table"
+        );
+        assert!(
+            head.contains(&format!("of {chars} chars")),
+            "the fetch must name the message's true size: {head:?}"
+        );
+        assert!(
+            body["handle"].as_str().is_some_and(|h| !h.is_empty()),
+            "a message past one page must come back with a handle to peek: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The description is where the model learns whether a limit exists, so it states the truth
+    /// either way: no number when there is none, the exact number when an operator set one.
+    #[test]
+    fn the_send_message_description_names_a_limit_only_when_one_exists() {
+        let none = send_message_description(None);
+        assert!(none.contains("There is no size limit"), "{none}");
+        assert!(
+            none.contains("posted in this chat for the user"),
+            "the no-`to` behaviour is undocumented: {none}"
+        );
+        let capped = send_message_description(Some(4_000));
+        assert!(
+            capped.contains("at most 4000 characters on this box"),
+            "{capped}"
+        );
+        assert!(
+            !capped.contains("no size limit"),
+            "a capped box must not also claim there is none: {capped}"
+        );
+        let listed = tools(Some(4_000));
+        let spec = listed
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["name"] == "send_message"))
+            .expect("send_message is listed");
+        assert_eq!(spec["description"], json!(capped));
+    }
+
+    /// D69: a subagent-role session may not speak for the Project to other Projects. What it may
+    /// do is post in its own chat, which is the same tool without `to` (bug T) — and the refusal
+    /// of the cross-project form says so, because a sentence that only closes a door leaves the
+    /// model to guess that the open one exists.
+    #[test]
+    fn subagent_cannot_reach_other_projects_but_may_post_in_its_own_chat() {
+        for tool in ["send_message", "group_send", "projects_send"] {
+            let refused = refusal_for(SessionRole::Subagent, tool, Some("lane-b"))
+                .unwrap_or_else(|| panic!("{tool} with `to` is the main agent's"));
+            assert!(
+                refused.contains("with `text` and no `to`"),
+                "the refusal must name the path that is open: {refused}"
+            );
+            assert!(
+                refusal_for(SessionRole::Subagent, tool, None).is_none(),
+                "{tool} with no `to` posts in this chat and is open to a worker"
+            );
+            assert!(
+                refusal_for(SessionRole::Subagent, tool, Some("  ")).is_none(),
+                "a blank `to` is no `to`"
+            );
+            assert!(refusal_for(SessionRole::Main, tool, Some("lane-b")).is_none());
+        }
+        assert!(refusal_for(SessionRole::Subagent, "history_search", None).is_none());
+    }
+
+    /// The r6cardjob call, replayed through the surface it was made on. A job's script reached
+    /// `mcp__arbos__send_message` with a `message` argument and got two walls: the field name
+    /// was wrong, and the tool was the main agent's. Both are gone — the alias lands, the words
+    /// are in the job's chat, and a call with neither field is told which one to use.
+    #[tokio::test]
+    async fn a_jobs_script_posts_through_the_mcp_tool_with_either_field_name() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATMCPJOBNOTE000001";
+        let ask = "01TESTASKMCPJOBNOTE0000001";
+        let worker = "01TESTWORKERMCPJOBNOTE0001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    ask,
+                    "Name the card you wait on.",
+                    "dev-mac",
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .store
+            .insert_subagent(
+                worker,
+                "job-name-the-card-0001",
+                "name the card",
+                "pi",
+                chat,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                "01TESTJOBMCPJOBNOTE0000001",
+                chat,
+                ask,
+                "Naming the card",
+                "ops",
+                "Raise the card and name it in the chat.",
+                &[],
+            )
+            .unwrap();
+        agent
+            .store
+            .set_job_subagent("01TESTJOBMCPJOBNOTE0000001", worker)
+            .unwrap();
+
+        let note = "Waiting on the card \"Delete 12 stale branches\".";
+        let out = call_tool(
+            &agent,
+            "send_message",
+            &json!({ "message": note }),
+            SessionRole::Subagent,
+            worker,
+        )
+        .await;
+        assert!(out.get("isError").is_none(), "the call was refused: {out}");
+
+        let rows: Vec<String> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.role == "assistant" && m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(rows, vec![note.to_owned()], "the note is in the job's chat");
+
+        let empty = call_tool(
+            &agent,
+            "send_message",
+            &json!({}),
+            SessionRole::Subagent,
+            worker,
+        )
+        .await;
+        let said = empty["content"][0]["text"].as_str().unwrap_or_default();
+        assert_eq!(empty["isError"], json!(true), "{empty}");
+        assert!(
+            said.contains("put the words in `text`"),
+            "the refusal must name the field: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The session header is the only thing that tells this server which worker is calling: one
+    /// subagent token is shared by every worker on the box, so without it a job's note has no
+    /// chat to go to. pi fills it from `ARBOS_SESSION_ID`, which `PiAdapter::envs` always sets.
+    #[test]
+    fn the_mcp_config_asks_pi_for_the_session_id() {
+        let root = std::env::temp_dir().join(format!("arbos-mcpcfg-{}", arbos_core::ids::ulid()));
+        let bx = crate::config::BoxConfig {
+            user_id: Some("u-test".into()),
+            relay_url: "http://127.0.0.1:1".into(),
+            box_token: "test-token".into(),
+            mcp_token: "test-mcp".into(),
+            work_root: root.clone(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: "/nonexistent/pi".into(),
+            prime_bin: "/nonexistent/prime-agent".into(),
+            claude_bin: "/nonexistent/claude".into(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "mock-talking".into(),
+            default_subagent_model: "mock-sub".into(),
+            legacy_project_id: None,
+        };
+        let cfg = bx.workspace(
+            &json!({ "id": "01TESTPROJECTMCPCONFIG0000", "name": "Doug" }),
+            0,
+        );
+        crate::workspace::seed_state(&cfg).expect("seed");
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(cfg.pi_dir().join("mcp.json")).expect("mcp.json"),
+        )
+        .expect("mcp.json is json");
+        let headers = &written["mcpServers"]["arbos"]["headers"];
+        assert_eq!(headers["Authorization"], json!("Bearer ${ARBOS_MCP_TOKEN}"));
+        assert_eq!(headers["X-Arbos-Session"], json!("${ARBOS_SESSION_ID}"));
+        assert_eq!(
+            crate::harness::PiAdapter::envs(&cfg, "01TESTWORKERENVSESSION0001", "subagent")
+                .into_iter()
+                .find(|(k, _)| k == "ARBOS_SESSION_ID")
+                .map(|(_, v)| v),
+            Some("01TESTWORKERENVSESSION0001".to_owned()),
+            "the header resolves from this env var, so every pi child must carry it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn auth(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            value.parse().expect("header value"),
+        );
+        h
+    }
+
+    /// `sub_` + sha256("subagent:" + token), as `Config::subagent_mcp_token` derives it.
+    fn derive(token: &str) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(format!("subagent:{token}").as_bytes());
+        format!("sub_{}", hex::encode(&digest[..16]))
+    }
+
+    /// An unconfigured daemon authenticates nobody. `ARBOS_MCP_TOKEN` defaults to empty and an
+    /// absent header reads as `""` too, so the bare comparison this guard replaced handed the
+    /// main role to a request carrying no credential at all. The subagent arm was no safer: it
+    /// hashes the configured value, so with nothing configured it is a constant computable
+    /// offline — asserted here with that very constant, not with a placeholder.
+    #[test]
+    fn an_unset_token_authenticates_nobody() {
+        let computable = derive("");
+        assert_eq!(role_for_token("", &computable, &HeaderMap::new()), None);
+        assert_eq!(role_for_token("", &computable, &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token("", &computable, &auth(&format!("Bearer {computable}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token("   ", &computable, &auth("Bearer    ")),
+            None
+        );
+    }
+
+    /// A configured workspace still refuses a request that brings no token.
+    #[test]
+    fn a_request_without_a_token_earns_no_role() {
+        let main = "mcp_0123456789abcdef";
+        assert_eq!(role_for_token(main, &derive(main), &HeaderMap::new()), None,);
+        assert_eq!(role_for_token(main, &derive(main), &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token(main, &derive(main), &auth("Basic xyz")),
+            None
+        );
+    }
+
+    /// One workspace's token is not another's. Since #2630 each workspace derives its own
+    /// `mcp_…` value, and this is the comparison that has to hold the line: a sibling's token,
+    /// and the sibling's subagent token, earn no role here.
+    #[test]
+    fn one_workspaces_token_is_not_anothers() {
+        let (mine, sibling) = ("mcp_aaaaaaaaaaaaaaaa", "mcp_bbbbbbbbbbbbbbbb");
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {mine}"))),
+            Some(SessionRole::Main),
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(mine))),
+            ),
+            Some(SessionRole::Subagent),
+        );
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {sibling}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(sibling))),
+            ),
+            None,
+        );
     }
 }

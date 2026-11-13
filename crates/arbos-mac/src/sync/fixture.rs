@@ -4,15 +4,16 @@
 //! appended in 120 ms frames, a final status. The UI cannot tell it apart from
 //! the relay path.
 
+use crate::mentions::text_has_at_token;
+
+use super::work_lifetime::WorkLifetime;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use arbos_core::approval::{
-    ApprovalRequest, ApprovalState as CoreApprovalState, Risk, APPROVAL_TTL_MS,
-};
+use arbos_core::approval::{ApprovalRequest, ApprovalState as CoreApprovalState, Risk};
 use arbos_core::doc::{
     ChatDoc as CoreDoc, MessageStatus as CoreStatus, UserAttachment, UserMessageOpts,
 };
@@ -21,6 +22,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::chat_title::title_from;
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, MediaPick, Person,
     ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
@@ -59,6 +61,10 @@ pub const CHAT_ARBOS_MEDIA: &str = "01J9CHAT0MEDIA000000000000";
 pub const CHAT_ARBOS_VOICE: &str = "01J9CHAT0VOICE000000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
+/// Shared `agentMessage.id` for the fixture agent-to-agent scene (send + receive).
+pub const AGENT_MESSAGE_DELIVERY: &str = "01J9AGENTMSGDELIVERY0000000";
+/// Destination message id in Comms' chat for that delivery.
+pub const AGENT_MESSAGE_DEST: &str = "01J9AGENTMSGDEST00000000000";
 /// F6 demo: a group hosted by Arbos with Affine and Comms.
 pub const CHAT_ARBOS_GROUP: &str = "01J9CHAT0GROUP000000000000";
 
@@ -93,6 +99,8 @@ struct Shared {
     shell_grants: Mutex<HashMap<Id, Vec<crate::model::ShellGrant>>>,
     /// Settings → Devices: this account's signed-in devices (this Mac first).
     devices: Mutex<Vec<DeviceView>>,
+    /// Settings → Agent access link: every agent token of the account.
+    agent_links: Mutex<Vec<crate::model::AgentLinkView>>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
@@ -156,6 +164,7 @@ impl SyncSource for FixtureSource {
                 secrets: Mutex::new(seed_secrets()),
                 shell_grants: Mutex::new(seed_shell_grants()),
                 devices: Mutex::new(seed_devices()),
+                agent_links: Mutex::new(seed_agent_links()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
@@ -188,6 +197,8 @@ impl SyncSource for FixtureSource {
                     cpu: Some(4),
                     mem_gib: Some(8),
                     image: Some("arbos-agent-0.1.7".into()),
+                    lifecycle: None,
+                    storage: None,
                 }),
             });
             for doc in seed_chat_docs().into_iter().chain(seed_people_chat_docs()) {
@@ -200,6 +211,9 @@ impl SyncSource for FixtureSource {
                 .extend(seed_people_projects());
             shared.chats.lock().unwrap().extend(seed_people_chats());
 
+            let _ = events.send(SyncEvent::CallAccount(
+                WorkLifetime::default().ticket().unwrap(),
+            ));
             let _ = events.send(SyncEvent::Link(Link::Connecting));
             // The signed-in user, so Settings shows its profile header and credits.
             let _ = events.send(SyncEvent::Account(Some(crate::model::AccountView {
@@ -591,8 +605,7 @@ fn testagent_member() -> AgentMember {
         avatar: None,
         avatar_color: None,
         avatar_color_index: Some(3),
-        avatar_leaf: Some(3),
-        avatar_leaf_color: Some(7),
+        avatar_disc_color: Some(7),
         image_url: None,
         avatar_version: 0,
         description: None,
@@ -603,12 +616,12 @@ fn testagent_member() -> AgentMember {
 
 /// Extra agents for the Launch week group beyond the seeded Arbos, so the
 /// group has `ARBOS_FIXTURE_WORKING` agents to show working.
-fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
-    const EXTRA: [(&str, &str, &str, u8, u8); 4] = [
-        ("01J9PROJLIUM00000000000000", "Lium", "lium", 2, 3),
-        ("01J9PROJHOME00000000000000", "Home", "home", 5, 6),
-        ("01J9PROJDOUG00000000000000", "Doug", "doug", 7, 1),
-        ("01J9PROJNOVA00000000000000", "Nova", "nova", 1, 8),
+fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8)> {
+    const EXTRA: [(&str, &str, &str, u8); 4] = [
+        ("01J9PROJLIUM00000000000000", "Lium", "lium", 3),
+        ("01J9PROJHOME00000000000000", "Home", "home", 6),
+        ("01J9PROJDOUG00000000000000", "Doug", "doug", 1),
+        ("01J9PROJNOVA00000000000000", "Nova", "nova", 8),
     ];
     EXTRA
         .into_iter()
@@ -1162,6 +1175,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         return;
     }
     match cmd {
+        ClientCommand::BindUi { .. } | ClientCommand::Scoped { .. } => {}
         // Handled above; listed so a new variant still fails to compile here.
         ClientCommand::SearchPeople { .. }
         | ClientCommand::StartDm { .. }
@@ -1176,8 +1190,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
-        | ClientCommand::SetMessageGrant { .. }
-        | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::ConnectAgent { .. }
@@ -1190,11 +1202,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
-        | ClientCommand::SetGroupLeaf { .. }
+        | ClientCommand::SetGroupDisc { .. }
         | ClientCommand::SetProjectImage { .. }
         | ClientCommand::SetGroupImageKey { .. }
         | ClientCommand::SetServerImage { .. }
-        | ClientCommand::SetServerLeaf { .. }
+        | ClientCommand::SetServerDisc { .. }
         | ClientCommand::GenerateImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // D88 servers live on the relay only; the fixture has none.
@@ -1217,7 +1229,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
-        | ClientCommand::ChannelMarkRead { .. } => {}
+        | ClientCommand::ChannelMarkRead { .. }
+        | ClientCommand::MatrixRestore { .. } => {}
         // The relay keeps the pin list and answers with it; the fixture echoes
         // the list it was given, capped like the relay.
         ClientCommand::SetPins { pins } => {
@@ -1248,9 +1261,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         // Calls v1 against a local `livekit-server --dev` (devkey/secret):
         // the fixture mints the join token itself.
-        ClientCommand::StartCall { chat_id, kind } => {
+        ClientCommand::StartCall {
+            attempt,
+            chat_id,
+            kind,
+        } => {
             let call = fixture_call(shared, &chat_id, kind);
             let _ = shared.events.send(SyncEvent::CallReady {
+                attempt,
                 call: call.clone(),
                 created: true,
                 reachable: Vec::new(),
@@ -1265,18 +1283,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = shared.events.send(SyncEvent::CallInfo(joined));
             });
         }
-        ClientCommand::JoinCall { call_id } => {
+        ClientCommand::JoinCall { attempt, call_id } => {
             let chat_id = call_id
                 .strip_prefix("call_fixture_")
                 .unwrap_or(DM_SAM)
                 .to_string();
             let _ = shared.events.send(SyncEvent::CallReady {
+                attempt,
                 call: fixture_call(shared, &chat_id, CallKind::Video),
                 created: false,
                 reachable: Vec::new(),
             });
         }
-        ClientCommand::LeaveCall { call_id } => {
+        ClientCommand::LeaveCall {
+            attempt: _,
+            call_id,
+        } => {
             let chat_id = call_id
                 .strip_prefix("call_fixture_")
                 .unwrap_or(DM_SAM)
@@ -1486,7 +1508,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Ok(()) => {
                     let open_external = quick_look || !cfg!(target_os = "macos");
                     if open_external {
-                        crate::ui::attachments::open_with_system(&path, quick_look);
+                        crate::external_open::open_with_system(&path, quick_look);
                     }
                     opened_path = Some(path);
                 }
@@ -1701,6 +1723,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = doc
                     .core
                     .transact(|d| d.set_reaction(&message_id, &emoji, &me, on));
+            }
+        }
+        ClientCommand::SendPoll {
+            chat_id,
+            message_id,
+            poll,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let opts = arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{ME_ID}")),
+                    ..Default::default()
+                };
+                let _ = doc
+                    .core
+                    .transact(|d| d.append_poll_message(&message_id, &poll, "fixture", &opts));
+            }
+        }
+        ClientCommand::VotePoll {
+            chat_id,
+            message_id,
+            selections,
+        } => {
+            let me = format!("user:{ME_ID}");
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc
+                    .core
+                    .transact(|d| d.set_poll_vote(&message_id, &me, &selections));
             }
         }
         ClientCommand::DeleteMessage {
@@ -1925,16 +1976,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatarLeaf {
-            project_id,
-            leaf,
-            color,
-        } => {
+        ClientCommand::SetAvatarDisc { project_id, color } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_leaf = leaf;
-                    p.avatar_leaf_color = color;
+                    p.avatar_disc_color = color;
                     p.image_url = None;
                 }
             }
@@ -2068,6 +2114,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::Pair { .. } | ClientCommand::SignIn { .. } => {
+            let _ = shared.events.send(SyncEvent::CallAccount(
+                WorkLifetime::default().ticket().unwrap(),
+            ));
             let _ = shared.events.send(SyncEvent::Paired {
                 device_id: DEVICE.into(),
             });
@@ -2081,7 +2130,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
-            leaf,
+            disc_color,
             picture,
             source_project_id: _,
             description,
@@ -2130,8 +2179,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_index: avatar_color_index
                     .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
                 avatar_color_override: avatar_color_index,
-                avatar_leaf: leaf.map(|l| l.leaf),
-                avatar_leaf_color: leaf.map(|l| l.color),
+                avatar_disc_color: disc_color,
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
@@ -2328,6 +2376,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             // path (Sign out does that); the fixture mirrors it.
             crate::ui::devices::remove_other(&mut shared.devices.lock().unwrap(), &id);
             emit_devices(shared);
+        }
+        ClientCommand::AgentLinksRefresh => emit_agent_links(shared),
+        ClientCommand::AgentLinkMint {
+            label,
+            scope,
+            ttl_hours,
+        } => {
+            let now = now_ms() as i64;
+            let id = format!("lnk-fx-{now}");
+            shared.agent_links.lock().unwrap().insert(
+                0,
+                crate::model::AgentLinkView {
+                    id,
+                    origin: "link".into(),
+                    label: label.clone(),
+                    scope: scope.to_owned(),
+                    created_at: now,
+                    expires_at: Some(now + ttl_hours * 3_600_000),
+                    opened_at: None,
+                    revoked_at: None,
+                    last_seen_at: None,
+                    live: true,
+                    state: "waiting".into(),
+                    note: None,
+                },
+            );
+            let _ = shared.events.send(SyncEvent::AgentLinkMinted(Ok(
+                crate::model::AgentLinkReveal {
+                    // The shape the relay returns, so the sheet shortens a
+                    // real URL rather than a stand-in that happens to fit.
+                    url: "https://relay.arbos.life/agent-link/open/Kq2vB7xZ9kT2vQ".into(),
+                    label,
+                    scope: scope.to_owned(),
+                    expires_in: crate::agent_link_expiry::expiry_label(ttl_hours).to_owned(),
+                    copied: false,
+                },
+            )));
+            emit_agent_links(shared);
+        }
+        ClientCommand::AgentLinkRevoke { id } => {
+            crate::ui::agent_links::remove(&mut shared.agent_links.lock().unwrap(), &id);
+            emit_agent_links(shared);
         }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let view = shared.secrets.lock().unwrap().clone();
@@ -3006,8 +3096,62 @@ fn emit_devices(shared: &Shared) {
     let _ = shared.events.send(SyncEvent::Devices(Ok(list)));
 }
 
+fn emit_agent_links(shared: &Shared) {
+    let list = shared.agent_links.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::AgentLinks(Ok(list)));
+}
+
+/// The approved mockup's three rows: a reply-as-me link an agent is using, a
+/// read-only link nobody has opened, and the migrated `GrokBot-Arbos` reader
+/// token — the `kind: "reader"` device that used to sit under Settings →
+/// Devices, here under its own name with the same "read only" tag a new
+/// read-only link wears.
+pub fn seed_agent_links() -> Vec<crate::model::AgentLinkView> {
+    let now = now_ms() as i64;
+    let link = |id: &str, label: &str, scope: &str| crate::model::AgentLinkView {
+        id: id.into(),
+        origin: "link".into(),
+        label: label.into(),
+        scope: scope.into(),
+        created_at: now - 2 * 24 * 3_600_000,
+        expires_at: Some(now + 5 * 24 * 3_600_000),
+        opened_at: None,
+        revoked_at: None,
+        last_seen_at: None,
+        live: true,
+        state: "waiting".into(),
+        note: None,
+    };
+    vec![
+        crate::model::AgentLinkView {
+            opened_at: Some(now - 3 * 3_600_000),
+            last_seen_at: Some(now - 2 * 3_600_000),
+            state: "in_use".into(),
+            ..link("lnk-fx-claude", "Jacob's Claude", "reply")
+        },
+        link("lnk-fx-codex", "Codex debugger", "read"),
+        crate::model::AgentLinkView {
+            origin: "export".into(),
+            created_at: now - 9 * 24 * 3_600_000,
+            // A reader token never expires, which is one reason it is not
+            // pretended to be a link.
+            expires_at: None,
+            opened_at: Some(now - 9 * 24 * 3_600_000),
+            last_seen_at: Some(now - 3 * 24 * 3_600_000),
+            state: "in_use".into(),
+            note: Some(
+                "This token predates agent links: it never expires and keeps no activity record."
+                    .into(),
+            ),
+            ..link("dev-fx-grokbot", "GrokBot-Arbos", "read")
+        },
+    ]
+}
+
 /// Three devices: this Mac (current), an iPhone seen an hour ago, and a
-/// read-only Grok Bot reader (`kind: "reader"`) from last week.
+/// read-only Grok Bot reader (`kind: "reader"`) from last week. The reader is
+/// seeded because the relay still holds it as a `devices` row; the Devices
+/// page leaves it out, and Agent access link lists it instead.
 pub fn seed_devices() -> Vec<DeviceView> {
     let now = now_ms() as i64;
     vec![
@@ -3896,19 +4040,6 @@ fn maybe_retitle(shared: &Shared, chat_id: &str, text: &str) {
     }
 }
 
-fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
-    }
-}
-
 async fn wake_project(shared: &Arc<Shared>, project_id: &str) {
     let state = project_state(shared, project_id);
     if !state.is_asleep() && state != BoxState::Error {
@@ -4496,12 +4627,7 @@ async fn run_turn(
                 let request = draft_request(channel, to, subject, body);
                 with_doc(shared, chat_id, |doc| {
                     doc.core.transact(|d| {
-                        d.add_approval_part(
-                            &id,
-                            &new_id(),
-                            &request,
-                            now_ms() as i64 + APPROVAL_TTL_MS,
-                        );
+                        d.add_approval_part(&id, &new_id(), &request, None);
                         d.add_status_part(&id, "waiting_approval", &request.title);
                         d.set_message_fields(&id, &[("waitingApproval", json!(true))]);
                     });
@@ -4729,7 +4855,6 @@ fn approval_card(
     state: ApprovalState,
     decided_at: Option<u64>,
 ) -> Part {
-    let now = now_ms();
     let request = draft_request(channel, to, subject, body);
     Part::Approval {
         id: new_id(),
@@ -4739,7 +4864,8 @@ fn approval_card(
         risk: ApprovalRisk::Send,
         payload: request.payload,
         state,
-        expires_at: Some(decided_at.unwrap_or(now) + APPROVAL_TTL_MS as u64),
+        // No deadline: a card waits for the person, so the fixture must not draw one.
+        expires_at: None,
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
@@ -4759,7 +4885,11 @@ fn decide_approval(
     let (kind, core_state) = match state {
         ApprovalState::Approved => ("approve", CoreApprovalState::Approved),
         ApprovalState::Rejected => ("reject", CoreApprovalState::Rejected),
-        ApprovalState::Pending | ApprovalState::Expired => return,
+        // None of these is a decision: there is nothing to mirror or report.
+        ApprovalState::Pending
+        | ApprovalState::Expired
+        | ApprovalState::Cancelled
+        | ApprovalState::Unknown => return,
     };
     let reason = reason.filter(|r| !r.trim().is_empty());
     let found = with_doc(shared, &chat_id, |doc| {
@@ -4813,7 +4943,10 @@ fn decide_approval(
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         )],
-        ApprovalState::Pending | ApprovalState::Expired => return,
+        ApprovalState::Pending
+        | ApprovalState::Expired
+        | ApprovalState::Cancelled
+        | ApprovalState::Unknown => return,
     };
     let project_id = project_of(shared, &chat_id);
     let shared = shared.clone();
@@ -5089,7 +5222,10 @@ fn write_parts(core: &CoreDoc, msg_id: &str, parts: &[Part], hidden: bool) -> Ve
     parts
         .iter()
         .filter_map(|part| {
-            let mut v = serde_json::to_value(part).unwrap_or(json!({}));
+            // A part that refuses to serialise is skipped, not written as `{}`:
+            // `add_part_from_json` takes an empty object and appends a part carrying only a
+            // generated id and no `kind`, which is worse than writing nothing.
+            let mut v = serde_json::to_value(part).ok()?;
             if let (true, Some(obj)) = (hidden, v.as_object_mut()) {
                 obj.insert("hidden".into(), Value::Bool(true));
             }
@@ -5344,8 +5480,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -5385,8 +5520,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -5426,8 +5560,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -5800,7 +5933,8 @@ impl Seeder<'_> {
     }
 
     /// Agent-to-agent messaging, sender side: the hand-off row agentd writes after
-    /// `send_message` (what the box writes, byte for byte in shape).
+    /// `send_message` (what the box writes, byte for byte in shape). Carries the
+    /// destination chat/message so a tap can reveal the landed copy.
     fn agent_message_sent(&mut self, to_name: &str, text: &str) -> Id {
         self.t += 6_000;
         let id = new_id();
@@ -5815,7 +5949,17 @@ impl Seeder<'_> {
                     ("turn", json!({ "kind": "spawn" })),
                     ("subagentName", json!(to_name)),
                     ("handoffMessages", json!(2)),
-                    ("agentMessage", json!({ "id": new_id(), "toName": to_name })),
+                    (
+                        "agentMessage",
+                        json!({
+                            "id": AGENT_MESSAGE_DELIVERY,
+                            "toProjectId": PROJECT_COMMS,
+                            "toName": to_name,
+                            "status": "delivered",
+                            "chatId": CHAT_COMMS_MAIN,
+                            "messageId": AGENT_MESSAGE_DEST,
+                        }),
+                    ),
                     ("createdAt", json!(self.t)),
                     ("completedAt", json!(self.t)),
                 ],
@@ -5824,18 +5968,20 @@ impl Seeder<'_> {
                 &id,
                 "agent_message_sent",
                 text,
-                &json!({ "toName": to_name }),
+                &json!({ "toName": to_name, "to": PROJECT_COMMS }),
             );
         });
         id
     }
 
     /// Agent-to-agent messaging, receiving side: another agent's words in this chat.
+    /// Shares [`AGENT_MESSAGE_DELIVERY`] with the sender-side hand-off so a tap can
+    /// find this row by `agentMessage.id`.
     fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) {
         self.t += 30_000;
         self.doc.core.transact(|d| {
             d.append_project_message(
-                &new_id(),
+                AGENT_MESSAGE_DEST,
                 text,
                 DEVICE,
                 &format!("project:{from_id}"),
@@ -5844,7 +5990,10 @@ impl Seeder<'_> {
                     ("senderHandle", json!(Project::mention_slug(from_name))),
                     (
                         "agentMessage",
-                        json!({ "id": new_id(), "fromProjectId": from_id }),
+                        json!({
+                            "id": AGENT_MESSAGE_DELIVERY,
+                            "fromProjectId": from_id,
+                        }),
                     ),
                     ("createdAt", json!(self.t)),
                     ("completedAt", json!(self.t)),
@@ -6462,11 +6611,11 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         drafts
             .core
             .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
-        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its four
-        // standing rows, as agentd posts it for `rm -rf` outside scratch.
+        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its standing
+        // rows, as agentd posts it for an `rm -rf` outside the agent's own workspace.
         if std::env::var("ARBOS_FIXTURE_SHELL_CARD").as_deref() == Ok("1") {
             s.user("clone arbos into /tmp and list the top level");
-            let command = "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
+            let command = "cd /opt/vendor && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
             let shell = s.assistant(
                 TurnKind::Act,
                 MessageStatus::Done,
@@ -6479,16 +6628,15 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                         summary: command.into(),
                         risk: ApprovalRisk::Destructive,
                         payload: json!({
-                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
-                            "why": "deletes files outside /work/tmp",
+                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "anywhere",
+                            "why": "deletes files outside the agent's own workspace",
                             "input": { "command": command },
                             "grant_options": [
-                                { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },
                                 { "path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box" }
                             ]
                         }),
                         state: ApprovalState::Pending,
-                        expires_at: Some(s.t + APPROVAL_TTL_MS as u64),
+                        expires_at: None,
                         decided_at: None,
                         decided_by: None,
                         reason: None,
@@ -6801,8 +6949,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
@@ -6830,8 +6977,7 @@ fn launch_week() -> Project {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         image_url: None,
         avatar_version: 0,
         description: None,
@@ -6845,7 +6991,7 @@ fn launch_week() -> Project {
     }
     // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
     // the presence row can show several of them working at once.
-    for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
+    for (project_id, name, handle, color) in fixture_working_extra_agents() {
         agents.push(AgentMember {
             project_id: project_id.into(),
             name: name.into(),
@@ -6858,8 +7004,7 @@ fn launch_week() -> Project {
             avatar: None,
             avatar_color: None,
             avatar_color_index: Some(color),
-            avatar_leaf: Some(leaf),
-            avatar_leaf_color: Some(color),
+            avatar_disc_color: Some(color),
             image_url: None,
             avatar_version: 0,
             description: None,
@@ -6929,8 +7074,7 @@ fn seed_people_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -7031,6 +7175,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         job: None,
         hidden: false,
         agent_reply_to: None,
+        agent_message: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
@@ -7067,6 +7212,58 @@ fn text_part(text: &str) -> Part {
     Part::Text {
         id: new_id(),
         text: text.into(),
+    }
+}
+
+fn quiet_day_fixture() -> bool {
+    std::env::var("ARBOS_FIXTURE_QUIET_DAY").is_ok_and(|v| v == "1")
+}
+
+/// `ARBOS_FIXTURE_QUIET_DAY=1`: the DM with Sam as one quiet evening — fourteen
+/// messages six to twenty-two minutes apart, running from before a midnight to
+/// after it. The rig for the time-divider pair ([feedback
+/// time-dividers-2026-11-05]): the old rule put a centred stamp through this
+/// conversation every hour, though it never pauses for an hour, and put none at
+/// the day change; the rule draws one at the day change and nowhere else.
+///
+/// The times are built from **yesterday's** local midnight, so the day change
+/// is real in whatever zone the shot is taken in and the whole evening is in
+/// the past whatever hour the rig runs at.
+fn seed_quiet_day(doc: &ChatDoc) {
+    use chrono::{Days, Local, TimeZone};
+    let midnight = Local
+        .from_local_datetime(
+            &Local::now()
+                .date_naive()
+                .checked_sub_days(Days::new(1))
+                .expect("yesterday")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight"),
+        )
+        .earliest()
+        .expect("local midnight")
+        .timestamp_millis()
+        .max(0) as u64;
+    let at = |minutes: i64| -> u64 { (midnight as i64 + minutes * 60_000).max(0).unsigned_abs() };
+    let (sam, me) = (sam(), me());
+    for (minutes, mine, text) in [
+        (-170, false, "Did the invite copy land?"),
+        (-152, true, "Just pushed it — the short version."),
+        (-130, false, "Reading now."),
+        (-108, false, "The second line is doing two jobs at once."),
+        (-90, true, "Agreed. I'll split it."),
+        (-72, false, "Better."),
+        (-52, true, "Shipping that, then."),
+        (-35, false, "One more thing before you do."),
+        (-18, false, "The footer still says beta."),
+        (-6, true, "Fixing it tonight."),
+        (9, false, "You're still up?"),
+        (21, true, "Last one, then bed."),
+        (34, false, "Same. Talk tomorrow."),
+        (50, true, "Night."),
+    ] {
+        let who = if mine { &me } else { &sam };
+        insert_message_via_core(doc, &human_message(DM_SAM, who, text, at(minutes)));
     }
 }
 
@@ -7174,33 +7371,37 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     let mut out = Vec::new();
     let base = now_ms().saturating_sub(40 * 60_000);
     let doc = ChatDoc::new(DM_SAM, "people");
-    insert_message_via_core(
-        &doc,
-        &human_message(
+    if quiet_day_fixture() {
+        seed_quiet_day(&doc);
+    } else {
+        insert_message_via_core(
+            &doc,
+            &human_message(
+                DM_SAM,
+                &sam(),
+                "Hey — are you around? I want to go over the beta invite copy before it ships.",
+                base,
+            ),
+        );
+        // Sam reacted to my line (one chip); a seed for the reaction rows.
+        let mut mine = human_message(
+            DM_SAM,
+            &me(),
+            "Here now. Paste what you have and I'll read it.",
+            base + 90_000,
+        );
+        mine.reactions
+            .entry("👍".into())
+            .or_default()
+            .insert(format!("user:{}", sam().id), true);
+        insert_message_via_core(&doc, &mine);
+        insert_message_via_core(&doc, &human_message(
             DM_SAM,
             &sam(),
-            "Hey — are you around? I want to go over the beta invite copy before it ships.",
-            base,
-        ),
-    );
-    // Sam reacted to my line (one chip); a seed for the reaction rows.
-    let mut mine = human_message(
-        DM_SAM,
-        &me(),
-        "Here now. Paste what you have and I'll read it.",
-        base + 90_000,
-    );
-    mine.reactions
-        .entry("👍".into())
-        .or_default()
-        .insert(format!("user:{}", sam().id), true);
-    insert_message_via_core(&doc, &mine);
-    insert_message_via_core(&doc, &human_message(
-        DM_SAM,
-        &sam(),
-        "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
-        base + 150_000,
-    ));
+            "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+            base + 150_000,
+        ));
+    }
     if std::env::var("ARBOS_FIXTURE_LINKS").is_ok_and(|v| v == "1") {
         // Sam's Links tab ([feedback link-icons-mac-tile-2026-10-27] shots): a brand with a
         // mono mark, one with a colour, X, and a site with no bundled mark.
@@ -7617,15 +7818,6 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     out
 }
 
-/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
-fn text_has_at_token(lower: &str, token: &str) -> bool {
-    let t = format!("@{token}");
-    lower.match_indices(&t).any(|(i, _)| {
-        let after = lower[i + t.len()..].chars().next();
-        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-    })
-}
-
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
@@ -7850,7 +8042,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             handles,
             agent_ids,
             title: draft_title,
-            leaf,
+            disc_color,
             picture,
         } => {
             let mut members: Vec<Person> = Vec::new();
@@ -7891,8 +8083,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
-                                avatar_leaf: p.avatar_leaf,
-                                avatar_leaf_color: p.avatar_leaf_color,
+                                avatar_disc_color: p.avatar_disc_color,
                                 image_url: None,
                                 avatar_version: 0,
                                 description: None,
@@ -7941,8 +8132,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let mut space = people_space(&id, seed, agents);
             space.kind = SpaceKind::Group;
             space.name = title.clone();
-            space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
-            space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
+            space.avatar_disc_color = *disc_color;
             if let Some(url) = picture.as_ref().map(|p| draft_picture_url("group", p)) {
                 emit_avatar(shared, &url);
                 space.image_url = Some(url);
@@ -8024,8 +8214,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar: p.avatar.clone(),
                             avatar_color: p.avatar_color.clone(),
                             avatar_color_index: p.avatar_color_index,
-                            avatar_leaf: p.avatar_leaf,
-                            avatar_leaf_color: p.avatar_leaf_color,
+                            avatar_disc_color: p.avatar_disc_color,
                             image_url: None,
                             avatar_version: 0,
                             description: None,
@@ -8141,56 +8330,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_blocked(shared);
             true
         }
-        // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
-        ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        } => {
-            let mut projects = shared.projects.lock().unwrap();
-            if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == *grantee) {
-                    g.enabled = *enabled;
-                } else {
-                    let handle = grantee.trim_start_matches('@').to_lowercase();
-                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                        drop(projects);
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(no_such_user("give access", &handle)));
-                        return true;
-                    };
-                    p.message_grants.push(crate::model::MessageGrant {
-                        grantee: format!("user:{}", other.id),
-                        kind: "person".into(),
-                        id: other.id.clone(),
-                        name: other.name.clone(),
-                        handle: Some(other.handle.clone()),
-                        avatar_url: other.avatar_url.clone(),
-                        enabled: *enabled,
-                        note: String::new(),
-                        created_at: now_ms() as i64,
-                        last_at: None,
-                    });
-                }
-            }
-            drop(projects);
-            emit_projects(shared);
-            true
-        }
-        ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                    p.message_grants.retain(|g| g.grantee != *grantee);
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::InviteToProject { project_id, handle } => {
             let handle = handle.trim().trim_start_matches('@').to_lowercase();
             let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
@@ -8242,8 +8381,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
-                                avatar_leaf: p.avatar_leaf,
-                                avatar_leaf_color: p.avatar_leaf_color,
+                                avatar_disc_color: p.avatar_disc_color,
                                 image_url: None,
                                 avatar_version: 0,
                                 description: None,
@@ -8310,12 +8448,11 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+        ClientCommand::SetGroupDisc { chat_id, color } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    p.avatar_leaf = pick.map(|l| l.leaf);
-                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.avatar_disc_color = *color;
                     p.image_url = None;
                 }
             }
@@ -8405,7 +8542,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::SetServerImage { .. } | ClientCommand::SetServerLeaf { .. } => true,
+        ClientCommand::SetServerImage { .. } | ClientCommand::SetServerDisc { .. } => true,
         _ => false,
     }
 }
@@ -8572,8 +8709,7 @@ fn sender_of(p: &Person) -> Sender {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         avatar_url: p.avatar_url.clone(),
     }
 }
@@ -8863,7 +8999,7 @@ mod seed_parity_tests {
                 &id,
                 &approval_id,
                 &draft_request("email", "a@b.c", "Hi", "Body"),
-                0,
+                None,
             );
             d.set_approval_state(
                 &approval_id,
@@ -8966,7 +9102,7 @@ mod create_group_tests {
             handles: vec!["sam".into()],
             agent_ids: vec![PROJECT_ARBOS.into()],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();
@@ -9000,7 +9136,7 @@ mod create_group_tests {
             handles: vec![],
             agent_ids: vec![PROJECT_ARBOS.into(), PROJECT_COMMS.into()],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();
@@ -9025,7 +9161,7 @@ mod create_group_tests {
             handles: vec![],
             agent_ids: vec![],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();

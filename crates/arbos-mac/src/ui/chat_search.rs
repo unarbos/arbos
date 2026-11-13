@@ -18,6 +18,7 @@ use gpui::{actions, div, prelude::*, px, AnyElement, Context, Focusable, Hsla, S
 use crate::app::AppState;
 use crate::chat_search::Sender;
 use crate::ui::avatars;
+use crate::ui::composer::Backspace;
 use crate::ui::glass;
 use crate::ui::highlight;
 use crate::ui::select::SearchMarks;
@@ -140,6 +141,13 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 cx.stop_propagation();
             }),
         )
+        // The token field's key rule, the composer strip's
+        // (`Composer::delete_key_on_strip`): a ⌫ the field had nothing to
+        // delete for propagates, and the chip's owner takes the chip. Handled
+        // here, not in the field's key routing.
+        .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+            this.chat_search_backspace(cx);
+        }))
         .child(sf_symbols::glyph(
             "magnifyingglass",
             metrics::GLYPH,
@@ -274,6 +282,8 @@ fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui:
     div()
         .id(id)
         .flex_shrink_0()
+        // A long name must not take the text field's room in a narrow chat column.
+        .max_w(px(220.0))
         .h(px(metrics::CHIP_HEIGHT))
         .rounded_full()
         .pl(px(3.0))
@@ -292,7 +302,12 @@ fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui:
             metrics::CHIP_AVATAR,
             theme,
         ))
-        .child(format!("From {}", sender.name))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(format!("From {}", sender.name)),
+        )
 }
 
 /// The pinned sender: accent chip with a ✕ that unpins it.
@@ -497,6 +512,12 @@ mod tests {
                 .as_ref()
                 .map(|c| c.hits.clone())
                 .unwrap_or_default()
+        })
+    }
+
+    fn field_text(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> String {
+        shell.read_with(vcx, |sh, cx| {
+            sh.chat_search_input.read(cx).text().to_owned()
         })
     }
 
@@ -796,6 +817,107 @@ mod tests {
             state.read_with(&*vcx, |s, _| s.chat_search_offer().is_none()),
             "no offer once pinned"
         );
+    }
+
+    /// ⌫ on the empty field takes the pinned sender, the way it takes the last
+    /// staged attachment off the composer's strip ([feedback
+    /// composer-attachment-removal-2026-10-27]): one press, no select-first
+    /// step, and the search re-runs without the filter — the rows the chip was
+    /// holding stop being hits, so no filter outlives its chip. With text in
+    /// the field ⌫ is the field's own; with nothing pinned it does nothing.
+    #[gpui::test]
+    fn backspace_on_the_empty_field_unpins_the_sender_and_searches_unfiltered(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("riv");
+        settle(&state, &shell, vcx);
+        vcx.dispatch_action(super::PinSender);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        assert_eq!(hits(&state, vcx), vec!["d1", "d3"], "Sam AND canvas");
+
+        // Text in the field: ⌫ is the field's, one character, chip untouched.
+        vcx.dispatch_action(crate::ui::composer::Backspace);
+        settle(&state, &shell, vcx);
+        assert_eq!(field_text(&shell, vcx), "canva");
+        assert!(
+            vcx.debug_bounds("chat-search-sender").is_some(),
+            "the chip stays while there is text to delete"
+        );
+
+        // Empty the field: Sam's rows are the hits, the filter is on.
+        shell.update(vcx, |sh, cx| {
+            sh.chat_search_input.update(cx, |i, cx| i.clear(cx))
+        });
+        settle(&state, &shell, vcx);
+        assert_eq!(hits(&state, vcx), vec!["d1", "d3"], "all of Sam's rows");
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.chat_search_count()),
+            "2 of 2"
+        );
+
+        // ⌫ on the empty field: the chip goes and the search re-runs with no
+        // sender — not Sam's two rows with the chip hidden.
+        vcx.dispatch_action(crate::ui::composer::Backspace);
+        settle(&state, &shell, vcx);
+        assert!(
+            state.read_with(&*vcx, |s, _| s
+                .chat_search
+                .as_ref()
+                .is_some_and(|c| c.query.sender.is_none())),
+            "⌫ unpinned the sender"
+        );
+        assert!(
+            vcx.debug_bounds("chat-search-sender").is_none(),
+            "the chip is gone from the bar"
+        );
+        assert!(
+            hits(&state, vcx).is_empty(),
+            "the filter went with the chip: Sam's rows are no longer hits"
+        );
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.chat_search_count()),
+            "",
+            "nothing to search for"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.highlight_message.is_none()),
+            "the marks went too"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "the bar is still up, the field still has the keyboard"
+        );
+        let handle = shell.read_with(&*vcx, |sh, cx| {
+            sh.chat_search_input.read(cx).focus_handle(cx)
+        });
+        assert!(vcx.update(|window, _| handle.is_focused(window)));
+
+        // Typing again searches the whole chat, not Sam's part of it.
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            hits(&state, vcx),
+            vec!["d1", "d3", "d4"],
+            "unfiltered: my row hits too"
+        );
+
+        // Nothing pinned and nothing typed: ⌫ is a no-op, not a close.
+        shell.update(vcx, |sh, cx| {
+            sh.chat_search_input.update(cx, |i, cx| i.clear(cx))
+        });
+        settle(&state, &shell, vcx);
+        vcx.dispatch_action(crate::ui::composer::Backspace);
+        settle(&state, &shell, vcx);
+        assert!(
+            state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "⌫ with nothing to take leaves the bar alone"
+        );
+        assert!(hits(&state, vcx).is_empty());
     }
 
     /// A server channel: ‹ on the oldest loaded hit asks the relay for older

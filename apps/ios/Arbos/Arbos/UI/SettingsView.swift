@@ -3,7 +3,8 @@
 // short grouped cards of icon-tile rows that push to subpages. Everything that
 // was on the old flat form is still here, regrouped:
 //
-//   Account              Credits · Connected apps · On this iPhone
+//   Account              Credits · Secrets · Devices · On this iPhone
+//                        (Connected apps hidden until implemented — same as Mac)
 //   Agents & Computer    Machine
 //   Notifications        Notifications (system permission + relay push)
 //   Appearance           Theme · Surface (Glass / Matte)
@@ -18,13 +19,79 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
+/// A rendered Settings action keeps its account authority, including explicit local-only modes.
+@MainActor
+private enum SettingsOrigin {
+    case account(AccountWork)
+    case fixture(WorkLifetime.Ticket?, WorkLifetime.State)
+    case unpaired(String, WorkLifetime.State)
+    case unavailable
+
+    init(_ model: AppModel) {
+        guard !Task.isCancelled else { self = .unavailable; return }
+        if model.isFixture { self = .fixture(model.accountLifetime.ticket, model.accountLifetime.state) }
+        else if let work = model.accountWork() { self = .account(work) }
+        else if model.credentials == nil { self = .unpaired(model.relayUrl, model.accountLifetime.state) }
+        else { self = .unavailable }
+    }
+
+    var work: AccountWork? {
+        if case .account(let work) = self { return work }
+        return nil
+    }
+
+    var expectedOwner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let work): return work.owner
+        case .fixture(let owner, _): return owner
+        case .unpaired, .unavailable: return nil
+        }
+    }
+
+    func accepts(_ model: AppModel, allowUnpaired: Bool = false) -> Bool {
+        guard !Task.isCancelled else { return false }
+        switch self {
+        case .account(let work): return model.acceptsAccountWork(work)
+        case .fixture(let owner, let lifetime):
+            return model.isFixture && model.accountLifetime.ticket == owner && model.accountLifetime.state == lifetime
+        case .unpaired(let relay, let lifetime):
+            return allowUnpaired && !model.isFixture && model.credentials == nil && model.relayUrl == relay && model.accountLifetime.state == lifetime
+        case .unavailable: return false
+        }
+    }
+}
+
+private struct SettingsSignOut: Identifiable {
+    let id = UUID()
+    let origin: SettingsOrigin
+}
+
+private struct SettingsDeviceSelection: Identifiable {
+    let device: AuthDevice
+    let origin: SettingsOrigin
+    let id = UUID()
+}
+
+private struct SettingsConnectorDisconnect: Identifiable {
+    let id = UUID()
+    let connectorId: String
+    let label: String
+    let origin: SettingsOrigin
+}
+
+private struct SettingsConnectorToken {
+    let provider: String
+    let origin: SettingsOrigin
+    var value = ""
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var push = PushManager.shared
-    @State private var confirmUnpair = false
+    @State private var signOut: SettingsSignOut?
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
     @State private var connectorError: UserError?
     /// The avatar picker (Generate | Upload, Reset) over my picture — the agents' sheet
@@ -48,13 +115,17 @@ struct SettingsView: View {
     @State private var showPrivacyPage: Bool
     @State private var showAboutPage: Bool
     @State private var showDevicesPage: Bool
+    @State private var showAgentLinksPage: Bool
     @State private var showRelayPage: Bool
     @State private var showSecretsPage: Bool
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
     /// the structure test checks the shared index finds each of them.
+    /// Connected apps stays off this list (and out of search) until the feature
+    /// ships — same rule as the Mac me-pane Settings tab
+    /// ([feedback connected-apps-hidden-until-implemented-2026-11-10]).
     static let listedPages: [GlobalSearch.SettingsPageRoute] = [
-        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+        .credits, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
     ]
 
     init(landing: String? = DebugHooks.settingsPage) {
@@ -69,111 +140,121 @@ struct SettingsView: View {
         _showPrivacyPage = State(initialValue: landing == "privacy")
         _showAboutPage = State(initialValue: landing == "about")
         _showDevicesPage = State(initialValue: landing == "devices")
+        _showAgentLinksPage = State(initialValue: landing?.hasPrefix("agent-links") == true)
         _showRelayPage = State(initialValue: landing == "relay")
         _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
     }
 
     var body: some View {
-        NavigationStack {
-            // The shared pane (D93): my picture (tap → the photo picker), name,
-            // @handle; Profile | Settings; Sign out pinned under Settings — the
-            // Mac me pane, row for row.
-            ZStack(alignment: .top) {
-                theme.bg.ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 18) {
-                        Color.clear.frame(height: PaneKit.pageTop)
-                        ProfilePane(
-                            hero: PaneHero(
-                                picture: .image(AnyView(profilePicture)),
-                                name: model.user?.name ?? model.user?.login ?? "Arbos",
-                                subtitle: who
-                            ),
-                            tabs: PaneKinds.ownProfile,
-                            selected: $tab,
-                            body: tab == "Profile" ? profileSections : settingsSections,
-                            footer: tab == "Profile" ? [] : settingsFooter
-                        )
-                        Color.clear.frame(height: 40)
-                    }
+        let origin = SettingsOrigin(model)
+        // The shared pane (D93): my picture (tap → the photo picker), name,
+        // @handle; Profile | Settings; Sign out pinned under Settings — the
+        // Mac me pane, row for row.
+        //
+        // This page is pushed onto Home's own stack (`AppModel.Route.ownProfile`), so it
+        // has no NavigationStack of its own: the rows below push their sub-pages onto the
+        // stack it was pushed onto, as the other profile pages' rows do.
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .image(AnyView(profilePicture)),
+                            name: model.user?.name.flatMap { $0.isEmpty ? nil : $0 } ?? model.user?.login ?? "Arbos",
+                            subtitle: who
+                        ),
+                        tabs: PaneKinds.ownProfile,
+                        selected: $tab,
+                        body: tab == "Profile" ? profileSections : settingsSections,
+                        footer: tab == "Profile" ? [] : settingsFooter
+                    )
+                    Color.clear.frame(height: 40)
                 }
-                .scrollIndicators(.visible)
-                // Settings is a sheet (from Home's account circle): back closes it.
-                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .navigationBarBackButtonHidden(true)
-            .confirm(ConfirmSpec(
+            .scrollIndicators(.visible)
+            // The page's own back chevron pops it, like every other profile page's.
+            ProfileTopBar(screen: .ownProfile) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .confirm(item: $signOut, spec: { _ in
+            ConfirmSpec(
                 title: "Sign out?",
                 message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
                 action: "Sign out"
-            ), isPresented: $confirmUnpair) {
-                if model.tokens != nil { model.signOut() } else { model.unpair() }
-                dismiss()
-            }
-            .onAppear {
-                model.refreshConnectors()
-                Task { await push.refreshStatus() }
-                Task { await model.refreshSecrets() }
-                Task { await model.refreshDevices() }
-                Task { await model.refreshGoals() }
-                if let page = landing, page.hasPrefix("avatar") {
-                    tab = "Profile"
-                    let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
+            )
+        }, isCurrent: { origin.accepts(model, allowUnpaired: true) }) { pending in
+            guard origin.accepts(model, allowUnpaired: true), pending.origin.accepts(model, allowUnpaired: true) else { return }
+            if model.tokens != nil { model.signOut() } else { model.unpair() }
+            dismiss()
+        }
+        .onAppear {
+            if origin.accepts(model) { model.refreshConnectors() }
+            Task { await push.refreshStatus() }
+            Task { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshSecrets(expectedOwner: owner) }
+            Task { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshDevices(expectedOwner: owner) }
+            Task { guard origin.accepts(model) else { return }; await model.refreshAgentLinks() }
+            Task { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshGoals(expectedOwner: owner) }
+            if let page = landing, page.hasPrefix("avatar") {
+                tab = "Profile"
+                let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    guard origin.accepts(model) else { return }
+                    showAvatarPicker = initial
                 }
-            }
-            // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    model.refreshConnectors()
-                    Task { await push.refreshStatus() }
-                }
-            }
-            // The sheet's own toast layer (Jacob 2026-10-26): a failure while Settings is up —
-            // Connect, a picture save, a secret — is the shared note at the top of this sheet,
-            // not an alert and not a toast hidden under it.
-            .overlay(alignment: .top) {
-                ToastHost()
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
-            }
-            .sheet(item: $showAvatarPicker) { initial in
-                AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
-            }
-            .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
-            .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
-            .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
-            .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
-            .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
-            .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
-            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
-            .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
-            .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
-            .navigationDestination(isPresented: $showRelayPage) {
-                // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
-                #if DEBUG
-                RelayPage()
-                #else
-                EmptyView()
-                #endif
-            }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
-            .sheet(isPresented: $showProfileEdit) {
-                NavigationStack {
-                    ProfileEditView()
-                }
-                .environmentObject(model)
-                .environment(\.theme, theme)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
             }
         }
+        // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                if origin.accepts(model) { model.refreshConnectors() }
+                Task { await push.refreshStatus() }
+            }
+        }
+        // Settings' own toast layer (Jacob 2026-10-26): a failure while Settings is up —
+        // Connect, a picture save, a secret — is the shared note at the top of this page,
+        // not an alert and not a toast hidden under it.
+        .overlay(alignment: .top) {
+            ToastHost()
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+        .sheet(item: $showAvatarPicker) { initial in
+            AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
+        }
+        .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
+        .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
+        .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
+        .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: { project in openAgentFromSettings(project, origin: origin) }) }
+        .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
+        .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+        .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
+        .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
+        .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
+        .navigationDestination(isPresented: $showAgentLinksPage) { AgentAccessLinkPage(landing: landing) }
+        .navigationDestination(isPresented: $showRelayPage) {
+            // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
+            #if DEBUG
+            RelayPage()
+            #else
+            EmptyView()
+            #endif
+        }
+        .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
+        .sheet(isPresented: $showProfileEdit) {
+            NavigationStack {
+                ProfileEditView()
+            }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(theme.bg)
+            .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .tint(theme.text)
-        .preferredColorScheme(theme.isDark ? .dark : .light)
-        .presentationBackground(theme.bg)
     }
 
     /// "@login", or where we are pointed when not signed in.
@@ -183,24 +264,48 @@ struct SettingsView: View {
 
     /// Settings: the grouped cards (the Mac me pane's Settings tab).
     private var settingsSections: [PaneSection] {
+        let origin = SettingsOrigin(model)
         let inset = SettingsRow.separatorInset
         var out: [PaneSection] = []
         var account: [AnyView] = [
-            AnyView(NavigationLink { CreditsPage() } label: {
+            // Button + `showCreditsPage`, not NavigationLink: links under PaneCard are
+            // visible to XCTest but not hittable / do not push (same fix as Agent access link).
+            AnyView(Button {
+                showCreditsPage = true
+            } label: {
                 SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
-            }),
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-credits")),
         ]
         if model.credentials != nil {
-            account.append(AnyView(NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
-                SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
-            }))
-            // D83: a secret is "an app you connected by key"; it sits right after.
+            // Connected apps stays off the list until the feature ships (Mac already
+            // hides it; the Connectors page remains reachable from the rig only).
+            // D83: a secret is "an app you connected by key".
             account.append(AnyView(NavigationLink { SecretsPage() } label: {
                 SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
+        // The wallet comes with encrypted people chats (`ensureKeys`), not before them.
+        if model.credentials != nil, model.peopleNative {
+            account.append(AnyView(NavigationLink { WalletPage() } label: {
+                SettingsRow(icon: "wallet.bifold.fill", title: "Wallet")
+            }))
+        }
         if model.credentials != nil || model.isFixture {
+            // Agent access link (Nov 3): the one place an outside agent is given a way in,
+            // and the one place every agent token is listed — including the reader tokens
+            // that used to show under Devices. A Button drives the same
+            // `showAgentLinksPage` destination the rig lands on (NavigationLink taps under
+            // PaneCard were visible to XCTest but did not push).
+            account.append(AnyView(Button {
+                showAgentLinksPage = true
+            } label: {
+                SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-agent-links")))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)
@@ -211,7 +316,7 @@ struct SettingsView: View {
         }
         out.append(.card(account, separatorInset: inset))
         out.append(.card([
-            AnyView(NavigationLink { MachinePage(openAgent: openAgentFromSettings) } label: {
+            AnyView(NavigationLink { MachinePage(openAgent: { project in openAgentFromSettings(project, origin: origin) }) } label: {
                 SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, mark: machineMark(model.machine.state))
             }),
         ], separatorInset: inset))
@@ -234,8 +339,12 @@ struct SettingsView: View {
         ], separatorInset: inset))
         var about: [AnyView] = [
             AnyView(Button {
+                guard origin.accepts(model, allowUnpaired: true) else { return }
                 dismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                    guard origin.accepts(model, allowUnpaired: true) else { return }
+                    FeedbackCenter.shared.open(screen: "settings")
+                }
             } label: {
                 SettingsRow(icon: "exclamationmark.bubble.fill", title: "Send feedback")
             }
@@ -256,26 +365,35 @@ struct SettingsView: View {
     /// Pinned under Settings: Sign out.
     /// Settings › Machine › "Ask X to free space": close the sheet, then land in that
     /// agent's chat (the Send-feedback row's timing).
-    private func openAgentFromSettings(_ project: Project) {
+    private func openAgentFromSettings(_ project: Project, origin: SettingsOrigin) {
+        guard origin.accepts(model) else { return }
         dismiss()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { model.open(project: project) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard origin.accepts(model) else { return }
+            model.open(project: project)
+        }
     }
 
     private var settingsFooter: [PaneSection] {
-        [.card([AnyView(PaneDangerRow(title: model.tokens != nil ? "Sign out" : "Sign out this device") { confirmUnpair = true })])]
+        let origin = SettingsOrigin(model)
+        return [.card([AnyView(PaneDangerRow(title: model.tokens != nil ? "Sign out" : "Sign out this device") {
+            guard origin.accepts(model, allowUnpaired: true) else { return }
+            signOut = SettingsSignOut(origin: origin)
+        })])]
     }
 
     /// Profile: who I am on the relay — Name and Handle (tap → the edit sheet),
     /// Remove picture when one was uploaded; the Mac me pane's Profile tab.
     private var profileSections: [PaneSection] {
+        let origin = SettingsOrigin(model)
         let canEdit = model.user != nil && !model.isFixture
         let rows: [AnyView] = [
-            AnyView(Button { editProfile() } label: {
-                PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
+            AnyView(Button { editProfile(origin: origin) } label: {
+                PaneRow(title: "Name", value: model.user?.name.flatMap { $0.isEmpty ? nil : $0 } ?? model.user?.login ?? "Arbos", valueTint: theme.text)
             }
             .buttonStyle(.plain)
             .disabled(!canEdit)),
-            AnyView(Button { editProfile() } label: {
+            AnyView(Button { editProfile(origin: origin) } label: {
                 PaneRow(title: "Handle", value: who, valueTint: theme.text)
             }
             .buttonStyle(.plain)
@@ -287,8 +405,8 @@ struct SettingsView: View {
         ]
     }
 
-    private func editProfile() {
-        guard model.user != nil, !model.isFixture else { return }
+    private func editProfile(origin: SettingsOrigin) {
+        guard origin.accepts(model), model.user != nil, !model.isFixture else { return }
         showProfileEdit = true
     }
 
@@ -297,7 +415,8 @@ struct SettingsView: View {
     /// The hero picture with the crayon: tap → the avatar picker (Generate | Upload, Reset),
     /// the same sheet an agent's picture opens.
     private var profilePicture: some View {
-        Button { showAvatarPicker = .generate } label: {
+        let origin = SettingsOrigin(model)
+        return Button { guard origin.accepts(model) else { return }; showAvatarPicker = .generate } label: {
             PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: PaneKit.heroAvatar,
                          name: model.user?.name, id: model.user?.id,
                          colorIndex: model.user?.avatarColorIndexEffective)
@@ -311,21 +430,24 @@ struct SettingsView: View {
     // MARK: Row summaries
 
     private var devicesSummary: String? {
-        switch AuthDevice.visible(model.devices).count {
+        switch AuthDevice.signedIn(model.devices).count {
         case 0: return nil
         case 1: return "1 device"
         case let n: return "\(n) devices"
         }
     }
 
+    private var agentLinksSummary: String? {
+        switch model.agentLinkRows.count {
+        case 0: return nil
+        case 1: return "1 link"
+        case let n: return "\(n) links"
+        }
+    }
+
     private var creditsSummary: String? {
         guard let c = model.credits else { return nil }
         return String(format: "$%.0f left", c.balanceUsd)
-    }
-
-    private var connectorsSummary: String? {
-        let n = model.connectors.items.filter { $0.status == .connected }.count
-        return n == 0 ? nil : "\(n) connected"
     }
 
     private var machineSummary: String {
@@ -432,25 +554,11 @@ struct SettingsPage<Content: View>: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
-        // Custom back hides the system edge-swipe; ScrollView in this sheet also
-        // eats InteractivePopGestureEnabler. Same swipe-right → back as ChatView.
-        .simultaneousGesture(settingsBackSwipe)
-    }
-
-    /// Swipe right pops a pushed settings page (Credits, Machine, …). Root
-    /// Settings passes `onBack` to dismiss the sheet — leave that to the
-    /// back button / sheet drag so a casual swipe does not close Settings.
-    private var settingsBackSwipe: some Gesture {
-        DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in
-                guard onBack == nil else { return }
-                let dx = value.translation.width
-                let absX = abs(dx), absY = abs(value.translation.height)
-                let vx = value.velocity.width, vy = value.velocity.height
-                if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-                    dismiss()
-                }
-            }
+        // Custom back hides the system edge-swipe; `backSwipeToPop` re-enables
+        // `interactivePopGestureRecognizer` and the full-screen right swipe, the
+        // same path every chat and profile page uses ([feedback
+        // iphone-settings-nav-push-2026-11-10]).
+        .backSwipeToPop()
     }
 
     /// Strip under the back button + title — Apple Account always frosts what
@@ -586,6 +694,7 @@ struct CreditsPage: View {
     @State private var showTopUpFeedback = false
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         SettingsPage(title: "Credits") {
             if let c = model.credits {
                 SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.") {
@@ -601,6 +710,7 @@ struct CreditsPage: View {
             }
             SettingsGroup {
                 SettingsActionRow(title: "Request a top-up") {
+                    guard origin.accepts(model, allowUnpaired: true) else { return }
                     FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "credits")
                     FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
                     showTopUpFeedback = true
@@ -632,6 +742,7 @@ struct MachinePage: View {
     private var live: BoxReport? { report.flatMap { $0.reachable ? $0 : nil } }
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         let m = model.machine
         let plan = MachineMetrics.plan(machine: m, waitlisted: model.waitlistPosition != nil, report: report, breakdownOpen: breakdownOpen)
         SettingsPage(title: "Machine") {
@@ -643,10 +754,10 @@ struct MachinePage: View {
                             MachineWarningRow(warning: w)
                         case .askToFreeSpace:
                             if let ws = MachineMetrics.biggestDiskUser(r), let project = model.project(ws.projectId) {
-                                SettingsActionRow(title: "Ask \(ws.name) to free space") { askToFreeSpace(project) }
+                                SettingsActionRow(title: "Ask \(ws.name) to free space") { askToFreeSpace(project, origin: origin) }
                             }
                         case .requestBiggerMachineInWarning:
-                            SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                            SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine(origin: origin) }
                         default:
                             EmptyView()
                         }
@@ -697,6 +808,14 @@ struct MachinePage: View {
                     }
                 }
             }
+            if !plan.storage.isEmpty {
+                SettingsGroup(header: "Storage") {
+                    ForEach(Array(plan.storage.enumerated()), id: \.offset) { _, row in
+                        SettingsValueRow(row == .files ? "Your files" : row == .scratch ? "Scratch" : "Trash",
+                                         value: MachineMetrics.storageValue(m, row) ?? "")
+                    }
+                }
+            }
             if !plan.resources.isEmpty {
                 SettingsGroup(header: "Resources") {
                     ForEach(Array(plan.resources.enumerated()), id: \.offset) { _, row in
@@ -737,7 +856,7 @@ struct MachinePage: View {
                             SettingsValueRow("Background jobs", value: MachineMetrics.jobsValue(r.jobsRunning ?? 0))
                         case .breakdown:
                             Button {
-                                withAnimation(.easeInOut(duration: 0.2)) { breakdownOpen.toggle() }
+                                withAnimation(.easeOut(duration: 0.2)) { breakdownOpen.toggle() }
                             } label: {
                                 HStack(spacing: 12) {
                                     Text("Per-agent usage").font(theme.font(Theme.body)).foregroundStyle(theme.text)
@@ -769,25 +888,27 @@ struct MachinePage: View {
                 ForEach(Array(plan.actions.enumerated()), id: \.offset) { _, row in
                     switch row {
                     case .requestBiggerMachine:
-                        SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                        SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine(origin: origin) }
                     case .restart:
-                        SettingsActionRow(title: "Restart machine", disabled: model.machineBusy) { model.restartMachine() }
+                        SettingsActionRow(title: "Restart machine", disabled: model.machineBusy) { guard origin.accepts(model) else { return }; model.restartMachine() }
                     case .start:
-                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
+                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { guard origin.accepts(model) else { return }; model.startMachine() }
                     case .stop:
-                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
+                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { guard origin.accepts(model) else { return }; model.stopMachine() }
                     default:
                         EmptyView()
                     }
                 }
             }
         }
-        .task {
+        .task(id: origin.expectedOwner) {
             // The poll: fetch now, then every `pollSeconds` until the page leaves the screen
             // (SwiftUI cancels this task on disappear).
             while !Task.isCancelled {
-                await model.refreshBoxReport()
-                await model.refreshMachine()
+                guard origin.accepts(model), let owner = origin.expectedOwner else { return }
+                await model.refreshBoxReport(expectedOwner: owner)
+                guard origin.accepts(model) else { return }
+                await model.refreshMachine(expectedOwner: owner)
                 try? await Task.sleep(nanoseconds: UInt64(MachineMetrics.pollSeconds * 1_000_000_000))
             }
         }
@@ -801,6 +922,7 @@ struct MachinePage: View {
     /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26), as a duration
     /// (the Computer tab's), not "1 hr. ago".
     private func stateText(_ m: Machine) -> String {
+        if let word = MachineMetrics.stateWord(m), m.rawState != .awake { return word }
         if m.state == .awake, let since = m.since, since > 0 {
             return "\(m.label) · \(AgentPane.durationS(max(0, (nowMs() - since) / 1000)))"
         }
@@ -809,7 +931,8 @@ struct MachinePage: View {
 
     /// A request to Jacob through the feedback sheet, as the Credits page's top-up (a Daytona
     /// snapshot carries a fixed spec; the resize is manual).
-    private func requestBiggerMachine() {
+    private func requestBiggerMachine(origin: SettingsOrigin) {
+        guard origin.accepts(model, allowUnpaired: true) else { return }
         FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "machine")
         FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
         showBiggerMachineFeedback = true
@@ -817,7 +940,8 @@ struct MachinePage: View {
 
     /// That agent's chat with the ask drafted in the composer (agentd's disk gate answers
     /// "free space" itself, #1641).
-    private func askToFreeSpace(_ project: Project) {
+    private func askToFreeSpace(_ project: Project, origin: SettingsOrigin) {
+        guard origin.accepts(model) else { return }
         if let chat = model.singleChat(of: project.id), model.composerDraft(for: chat.id).isEmpty {
             model.setComposerDraft(MachineMetrics.freeSpaceAsk, for: chat.id)
         }
@@ -901,9 +1025,10 @@ struct MachineAgentRow: View {
     var body: some View {
         HStack(spacing: PaneKit.gap) {
             if let project {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar, still: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar)
             } else {
-                NeutralAvatar(name: workspace.name, size: PaneKit.avatar)
+                // No project record yet, but the workspace knows the id the colour comes from.
+                DiscAvatar(color: DiscArt.pick(seed: workspace.projectId), size: PaneKit.avatar)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
@@ -939,12 +1064,12 @@ struct ConnectorsPage: View {
     @Binding var connectorError: UserError?
     @State private var connectorErrorDetailsOpen = false
     /// Provider whose token paste field is open (`nil` = none).
-    @State private var tokenFor: String?
-    @State private var tokenDraft = ""
+    @State private var tokenDraft: SettingsConnectorToken?
     /// Connected pill tapped: (connector id, label) awaiting the Disconnect confirmation.
-    @State private var disconnecting: (String, String)?
+    @State private var disconnecting: SettingsConnectorDisconnect?
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         SettingsPage(title: "Connected apps") {
             // The page's note: under the page header, before the first card.
             if let connectorError {
@@ -956,7 +1081,7 @@ struct ConnectorsPage: View {
                 }
             }
         }
-        .onAppear { model.refreshConnectors() }
+        .onAppear { guard origin.accepts(model) else { return }; model.refreshConnectors() }
     }
 
     /// Full relay catalog (Google, Slack, GitHub, Harness Comms), or stand-ins before load.
@@ -980,9 +1105,11 @@ struct ConnectorsPage: View {
     /// paste field directly; a connected pill asks before disconnecting.
     @ViewBuilder
     private func connectorRow(_ p: ConnectorProvider) -> some View {
+        let origin = SettingsOrigin(model)
+        let confirmation = disconnecting
         let cn = model.connectors.connector(for: p.provider)
         let connected = cn?.status == .connected
-        let tokenOpen = tokenFor == p.provider
+        let tokenOpen = tokenDraft?.provider == p.provider && tokenDraft?.origin.accepts(model) == true
         let busy = model.connectorsBusy || model.isFixture
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 14) {
@@ -1005,7 +1132,8 @@ struct ConnectorsPage: View {
                 Spacer(minLength: 8)
                 if connected, let id = cn?.id {
                     Button {
-                        disconnecting = (id, p.label)
+                        guard origin.accepts(model) else { return }
+                        disconnecting = SettingsConnectorDisconnect(connectorId: id, label: p.label, origin: origin)
                     } label: {
                         connectorPill(text: "Connected", check: true, on: true)
                     }
@@ -1013,29 +1141,38 @@ struct ConnectorsPage: View {
                     .disabled(model.connectorsBusy)
                 } else if tokenOpen {
                     Button {
-                        tokenFor = nil
-                        tokenDraft = ""
+                        guard origin.accepts(model) else { return }
+                        tokenDraft = nil
                     } label: { connectorPill(text: "Cancel", check: false, on: false) }
                     .buttonStyle(.plain)
                 } else if p.hasOauth && p.acceptsToken {
                     Menu {
-                        Button("Sign in with \(shortName(p))") { startOauth(p) }
-                        Button("Paste a token…") { openToken(p) }
+                        Button("Sign in with \(shortName(p))") { startOauth(p, origin: origin) }
+                        Button("Paste a token…") { openToken(p, origin: origin) }
                     } label: { connectorPill(text: "Connect", check: false, on: false) }
                     .disabled(busy)
                 } else if p.hasOauth {
-                    Button { startOauth(p) } label: { connectorPill(text: "Connect", check: false, on: false) }
+                    Button { startOauth(p, origin: origin) } label: { connectorPill(text: "Connect", check: false, on: false) }
                         .buttonStyle(.plain)
                         .disabled(busy)
                 } else if p.acceptsToken {
-                    Button { openToken(p) } label: { connectorPill(text: "Connect", check: false, on: false) }
+                    Button { openToken(p, origin: origin) } label: { connectorPill(text: "Connect", check: false, on: false) }
                         .buttonStyle(.plain)
                         .disabled(busy)
                 }
             }
             if tokenOpen {
                 HStack(spacing: 8) {
-                    SecureField("Paste a token, then Save", text: $tokenDraft)
+                    SecureField("Paste a token, then Save", text: Binding(
+                        get: {
+                            guard origin.accepts(model), tokenDraft?.provider == p.provider, tokenDraft?.origin.accepts(model) == true else { return "" }
+                            return tokenDraft?.value ?? ""
+                        },
+                        set: { value in
+                            guard origin.accepts(model), tokenDraft?.provider == p.provider, tokenDraft?.origin.accepts(model) == true else { return }
+                            tokenDraft?.value = value
+                        }
+                    ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(theme.font(Theme.small))
@@ -1047,11 +1184,11 @@ struct ConnectorsPage: View {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .strokeBorder(theme.fieldBorder, lineWidth: 1) // control-size: exception inlineChips
                         )
-                    Button("Save") { saveToken(p) }
+                    Button("Save") { saveToken(p, origin: origin) }
                         .font(theme.font(Theme.small, weight: .semibold))
                         .buttonStyle(.borderless)
                         .foregroundStyle(theme.accent)
-                        .disabled(busy || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(busy || (tokenDraft?.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .padding(.leading, SettingsRow.tile + 14)
             }
@@ -1061,16 +1198,20 @@ struct ConnectorsPage: View {
         .frame(minHeight: 56)
         // On the connector's own row: anchored to the control, so it stays a dialog.
         .confirmationDialog( // confirm: anchored
-            "Disconnect \(disconnecting?.1 ?? "")?",
-            isPresented: Binding(get: { disconnecting != nil && disconnecting?.1 == p.label },
-                                 set: { if !$0 { disconnecting = nil } }),
+            "Disconnect \(confirmation?.label ?? "")?",
+            isPresented: Binding(get: { confirmation != nil && disconnecting?.id == confirmation?.id && confirmation?.label == p.label },
+                                 set: { if !$0, disconnecting?.id == confirmation?.id { disconnecting = nil } }),
             titleVisibility: .visible
         ) {
             Button("Disconnect", role: .destructive) {
-                if let id = disconnecting?.0 { model.disconnectConnector(id: id) }
+                guard origin.accepts(model), let pending = confirmation,
+                      disconnecting?.id == pending.id, pending.origin.accepts(model) else { return }
                 disconnecting = nil
+                model.disconnectConnector(id: pending.connectorId)
             }
-            Button("Keep", role: .cancel) { disconnecting = nil }
+            Button("Keep", role: .cancel) {
+                if disconnecting?.id == confirmation?.id { disconnecting = nil }
+            }
         } message: {
             Text("Your agents stop using it until you connect it again.")
         }
@@ -1110,23 +1251,21 @@ struct ConnectorsPage: View {
         }
     }
 
-    private func openToken(_ p: ConnectorProvider) {
-        tokenFor = p.provider
-        tokenDraft = ""
+    private func openToken(_ p: ConnectorProvider, origin: SettingsOrigin) {
+        guard origin.accepts(model) else { return }
+        tokenDraft = SettingsConnectorToken(provider: p.provider, origin: origin)
     }
 
-    private func startOauth(_ p: ConnectorProvider) {
-        tokenFor = nil
-        tokenDraft = ""
-        // Stand-ins claim oauth is ready; tapping Connect before the catalog
-        // lands hits a 409 and surfaces env-var names. Wait, then explain.
+    private func startOauth(_ p: ConnectorProvider, origin: SettingsOrigin) {
+        guard origin.accepts(model) else { return }
+        tokenDraft = nil
+        // The rendered provider belongs to this account; prefer its live catalog row.
         if !model.connectors.mock {
             if !model.connectors.loaded {
                 model.refreshConnectors()
                 connectorError = UserError.refused("connect \(p.label)", "Still loading connected apps. Try Connect again in a moment.")
                 return
             }
-            // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
             let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
             if !live.oauthConfigured {
                 connectorError = UserError.refused("connect \(live.label)", "The OAuth client is not configured on the relay."
@@ -1139,11 +1278,12 @@ struct ConnectorsPage: View {
         model.connectConnector(provider: p.provider)
     }
 
-    private func saveToken(_ p: ConnectorProvider) {
-        let token = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func saveToken(_ p: ConnectorProvider, origin: SettingsOrigin) {
+        guard origin.accepts(model) else { return }
+        guard let draft = tokenDraft, draft.provider == p.provider, draft.origin.accepts(model) else { return }
+        let token = draft.value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { return }
-        tokenFor = nil
-        tokenDraft = ""
+        tokenDraft = nil
         model.connectConnector(provider: p.provider, token: token)
     }
 
@@ -1179,27 +1319,28 @@ struct ConnectorsPage: View {
 struct DevicesPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @State private var pending: AuthDevice?
+    @State private var pending: SettingsDeviceSelection?
     @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
-        AuthDevice.visible(model.devices)
+        AuthDevice.signedIn(model.devices)
     }
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         SettingsPage(title: "Devices") {
             if let why = model.devicesError, model.devices.isEmpty {
                 // The page's note: under the page header, before the first card.
                 ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
-                          onTryAgain: { Task { await model.refreshDevices() } })
-            } else if !model.devicesLoaded && model.devices.isEmpty {
+                          onTryAgain: { Task { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshDevices(expectedOwner: owner) } })
+            } else if !model.devicesLoaded && rows.isEmpty {
                 Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
-            } else if model.devices.isEmpty {
+            } else if rows.isEmpty {
                 Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
             } else {
-                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab. Agent tokens live in Agent access link.") {
                     ForEach(rows) { d in
                         PaneRow(
                             leading: .tile(d.glyph),
@@ -1213,15 +1354,17 @@ struct DevicesPage: View {
                 }
             }
         }
-        .task { await model.refreshDevices() }
+        .task(id: origin.expectedOwner) { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshDevices(expectedOwner: owner) }
         .confirm(item: $pending, spec: { d in
-            ConfirmSpec(title: AuthDevice.confirmQuestion(d.displayName), message: nil, action: "Sign out")
-        }) { d in
-            model.revokeDevice(d.id)
+            ConfirmSpec(title: AuthDevice.confirmQuestion(d.device.displayName), message: nil, action: "Sign out")
+        }, isCurrent: { origin.accepts(model) }) { d in
+            guard origin.accepts(model), d.origin.accepts(model) else { return }
+            model.revokeDevice(d.device.id)
         }
     }
 
     @ViewBuilder private func trailing(_ d: AuthDevice) -> some View {
+        let origin = SettingsOrigin(model)
         // Tag and control on one line, never wrapping (the gate build broke
         // "Sign out" over two lines next to the "read-only" tag).
         HStack(spacing: 8) {
@@ -1236,7 +1379,7 @@ struct DevicesPage: View {
             if d.current {
                 Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
             } else {
-                Button { pending = d } label: {
+                Button { guard origin.accepts(model) else { return }; pending = SettingsDeviceSelection(device: d, origin: origin) } label: {
                     // error-ui: exception destructive-action
                     Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
                 }
@@ -1287,6 +1430,7 @@ struct PrivacyPage: View {
     @State private var errorDetailsOpen = false
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         SettingsPage(title: "Privacy") {
             if let error {
                 ErrorNote(id: "privacy-error", error: error, detailsOpen: $errorDetailsOpen)
@@ -1301,8 +1445,16 @@ struct PrivacyPage: View {
                         selected: model.groupAddPolicy == policy.rawValue
                     ) {
                         Task {
-                            if let err = await model.updateGroupAddPolicy(policy) {
-                                error = UserError.refused("save the privacy setting", err)
+                            guard origin.accepts(model, allowUnpaired: true) else { return }
+                            // Fixture / unpaired privacy was already a local preference.
+                            guard let work = origin.work else {
+                                model.groupAddPolicy = policy.rawValue
+                                return
+                            }
+                            let message = await model.updateGroupAddPolicy(policy, expectedOwner: work.owner)
+                            guard origin.accepts(model, allowUnpaired: true) else { return }
+                            if let message {
+                                error = UserError.refused("save the privacy setting", message)
                             }
                         }
                     }
@@ -1478,6 +1630,7 @@ struct ProfileEditView: View {
 
     @State private var name: String = ""
     @State private var handle: String = ""
+    @State private var formWork: AccountWork?
     @State private var busy = false
     @State private var error: UserError?
     @State private var errorDetailsOpen = false
@@ -1486,6 +1639,7 @@ struct ProfileEditView: View {
     private enum Field { case name, handle }
 
     var body: some View {
+        let work = formWork
         VStack(spacing: 0) {
             if onboarding {
                 Capsule().fill(theme.separator).frame(width: 36, height: 5).padding(.top, 10)
@@ -1508,7 +1662,7 @@ struct ProfileEditView: View {
                     // The form's note: above the fields (the shared element).
                     if let error {
                         ErrorNote(id: "profile-error", error: error, detailsOpen: $errorDetailsOpen,
-                                  onTryAgain: { Task { await save() } })
+                                  onTryAgain: { Task { await save(work: work) } })
                     }
 
                     nameField
@@ -1535,7 +1689,7 @@ struct ProfileEditView: View {
             .padding(.bottom, 6)
 
             Button {
-                Task { await save() }
+                Task { await save(work: work) }
             } label: {
                 Text(busy ? "Saving…" : (onboarding ? "Continue" : "Save"))
                     .font(theme.font(Theme.body, weight: .semibold))
@@ -1563,6 +1717,7 @@ struct ProfileEditView: View {
         }
         .interactiveDismissDisabled(onboarding)
         .onAppear {
+            formWork = model.accountWork()
             name = model.user?.name ?? ""
             handle = model.user?.login ?? ""
             focus = .name
@@ -1590,7 +1745,8 @@ struct ProfileEditView: View {
     }
 
     private var handleField: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let work = formWork
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Handle").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             HStack(spacing: 2) {
                 Text("@").font(theme.font(Theme.body)).foregroundStyle(theme.muted)
@@ -1601,7 +1757,7 @@ struct ProfileEditView: View {
                     .autocorrectionDisabled()
                     .focused($focus, equals: .handle)
                     .submitLabel(.done)
-                    .onSubmit { Task { await save() } }
+                    .onSubmit { Task { await save(work: work) } }
                     .onChange(of: handle) { _, new in
                         let cleaned = Self.sanitizeHandle(new)
                         if cleaned != new { handle = cleaned }
@@ -1611,13 +1767,15 @@ struct ProfileEditView: View {
         }
     }
 
-    private func save() async {
-        guard canSave, !busy else { return }
+    private func save(work: AccountWork?) async {
+        guard model.acceptsAccountWork(work), canSave, !busy else { return }
         busy = true
         error = nil
-        defer { busy = false }
-        if let msg = await model.updateProfile(name: name, handle: handle) {
-            error = UserError.refused("save your profile", msg)
+        defer { if let work, model.accountLifetime.accepts(work.owner) { busy = false } }
+        let message = await model.updateProfile(name: name, handle: handle, expectedOwner: work?.owner)
+        guard model.acceptsAccountWork(work) else { return }
+        if let message {
+            error = UserError.refused("save your profile", message)
             return
         }
         dismiss()
@@ -1647,8 +1805,10 @@ struct RelayPage: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var relayUrl = ""
+    @State private var formOrigin: SettingsOrigin = .unavailable
 
     var body: some View {
+        let origin = formOrigin
         SettingsPage(title: "Relay") {
             SettingsGroup(footer: "Switching relays signs this device out of the current one; sessions stay in the Keychain.") {
                 HStack {
@@ -1658,12 +1818,12 @@ struct RelayPage: View {
                         .autocorrectionDisabled()
                         .font(theme.font(Theme.body))
                         .foregroundStyle(theme.text)
-                        .onSubmit(applyRelay)
+                        .onSubmit { applyRelay(origin: origin) }
                 }
                 .padding(.horizontal, 16)
                 .frame(minHeight: SettingsRow.height)
                 if RelayEndpoint(relayUrl).httpUrl != model.relayUrl {
-                    SettingsActionRow(title: "Switch relay", action: applyRelay)
+                    SettingsActionRow(title: "Switch relay", action: { applyRelay(origin: origin) })
                 }
             }
             SettingsGroup {
@@ -1673,7 +1833,7 @@ struct RelayPage: View {
                 SettingsValueRow("Link", value: linkLabel)
             }
         }
-        .onAppear { relayUrl = model.relayUrl }
+        .onAppear { formOrigin = SettingsOrigin(model); relayUrl = model.relayUrl }
     }
 
     private var linkLabel: String {
@@ -1684,7 +1844,8 @@ struct RelayPage: View {
         }
     }
 
-    private func applyRelay() {
+    private func applyRelay(origin: SettingsOrigin) {
+        guard origin.accepts(model, allowUnpaired: true) else { return }
         let trimmed = relayUrl.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         model.setRelayUrl(trimmed)
@@ -1704,6 +1865,7 @@ struct GoalsPage: View {
     private var closed: [GoalItem] { model.goals.filter { !$0.isOpen } }
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         SettingsPage(title: "Goals") {
             if model.goals.isEmpty {
                 Text("Long-running objectives the agent tracks across days. Say “make this a goal” in a chat, or start one here.")
@@ -1731,13 +1893,13 @@ struct GoalsPage: View {
                 }
             }
             SettingsGroup {
-                Button { showNew = true } label: {
+                Button { guard origin.accepts(model) else { return }; showNew = true } label: {
                     SettingsRow(icon: "plus", title: "New goal")
                 }
                 .buttonStyle(.plain)
             }
         }
-        .task { await model.refreshGoals() }
+        .task(id: origin.expectedOwner) { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshGoals(expectedOwner: owner) }
         .sheet(isPresented: $showNew) {
             NavigationStack {
                 NewGoalSheet().environmentObject(model).environment(\.theme, theme)
@@ -1808,6 +1970,7 @@ struct GoalDetailPage: View {
     private var goal: GoalItem? { model.goals.first { $0.id == goalId } }
 
     var body: some View {
+        let origin = SettingsOrigin(model)
         Group {
             if let goal {
                 SettingsPage(title: goal.title) {
@@ -1851,19 +2014,19 @@ struct GoalDetailPage: View {
                     }
                     SettingsGroup {
                         if goal.status != "paused" && goal.status != "done" {
-                            Button { model.setGoalStatus(goal, status: "paused") } label: {
+                            Button { guard origin.accepts(model) else { return }; model.setGoalStatus(goal, status: "paused") } label: {
                                 SettingsRow(icon: "pause.fill", title: "Pause")
                             }
                             .buttonStyle(.plain)
                         }
                         if goal.status == "paused" || goal.status == "done" {
-                            Button { model.setGoalStatus(goal, status: "active") } label: {
+                            Button { guard origin.accepts(model) else { return }; model.setGoalStatus(goal, status: "active") } label: {
                                 SettingsRow(icon: "play.fill", title: "Resume")
                             }
                             .buttonStyle(.plain)
                         }
                         if goal.status != "done" {
-                            Button { model.setGoalStatus(goal, status: "done") } label: {
+                            Button { guard origin.accepts(model) else { return }; model.setGoalStatus(goal, status: "done") } label: {
                                 SettingsRow(icon: "checkmark", title: "Mark done")
                             }
                             .buttonStyle(.plain)
@@ -1872,6 +2035,7 @@ struct GoalDetailPage: View {
                     SettingsGroup(header: "Check-in") {
                         ForEach(GoalCheckInPreset.all) { preset in
                             Button {
+                                guard origin.accepts(model) else { return }
                                 var body: [String: Any] = [
                                     "checkInCron": preset.cron ?? "",
                                 ]
@@ -1891,7 +2055,7 @@ struct GoalDetailPage: View {
                     }
                     SettingsGroup(header: "Autonomy", footer: "How much the agent may do on check-in without asking. Uses the same approval cards as the rest of Arbos.") {
                         ForEach(GoalAutonomyPreset.all) { preset in
-                            Button { model.patchGoal(goal, ["autonomy": preset.id]) } label: {
+                            Button { guard origin.accepts(model) else { return }; model.patchGoal(goal, ["autonomy": preset.id]) } label: {
                                 SettingsRow(
                                     icon: "hand.raised.fill",
                                     title: preset.label,
@@ -1902,7 +2066,7 @@ struct GoalDetailPage: View {
                         }
                     }
                     SettingsGroup {
-                        Button(role: .destructive) { model.deleteGoal(goal) } label: {
+                        Button(role: .destructive) { guard origin.accepts(model) else { return }; model.deleteGoal(goal) } label: {
                             Text("Delete goal")
                                 .font(theme.font(Theme.body))
                                 // error-ui: exception destructive-action
@@ -1921,7 +2085,7 @@ struct GoalDetailPage: View {
                 }
             }
         }
-        .task { await model.refreshGoals() }
+        .task(id: origin.expectedOwner) { guard origin.accepts(model), let owner = origin.expectedOwner else { return }; await model.refreshGoals(expectedOwner: owner) }
     }
 }
 
@@ -1951,6 +2115,7 @@ struct NewGoalSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @State private var formOrigin: SettingsOrigin = .unavailable
     @State private var title = ""
     @State private var outcome = ""
     @State private var nextStep = ""
@@ -1961,6 +2126,7 @@ struct NewGoalSheet: View {
     private var projects: [Project] { model.projects.filter { !$0.shared } }
 
     var body: some View {
+        let origin = formOrigin
         SettingsPage(title: "New goal", onBack: { dismiss() }) {
             SettingsGroup {
                 SecretField(label: "Title") {
@@ -1983,6 +2149,7 @@ struct NewGoalSheet: View {
                 SettingsGroup(header: "Agent") {
                     ForEach(projects) { p in
                         Button {
+                            guard origin.accepts(model) else { return }
                             projectId = p.id
                         } label: {
                             SettingsRow(
@@ -1997,7 +2164,7 @@ struct NewGoalSheet: View {
             }
             SettingsGroup(header: "Check-in") {
                 ForEach(GoalCheckInPreset.all) { preset in
-                    Button { checkIn = preset } label: {
+                    Button { guard origin.accepts(model) else { return }; checkIn = preset } label: {
                         SettingsRow(icon: "clock", title: preset.label, value: checkIn.id == preset.id ? "Selected" : nil)
                     }
                     .buttonStyle(.plain)
@@ -2005,7 +2172,7 @@ struct NewGoalSheet: View {
             }
             SettingsGroup(header: "Autonomy") {
                 ForEach(GoalAutonomyPreset.all) { preset in
-                    Button { autonomy = preset } label: {
+                    Button { guard origin.accepts(model) else { return }; autonomy = preset } label: {
                         SettingsRow(icon: "hand.raised.fill", title: preset.label, value: autonomy.id == preset.id ? "Selected" : nil)
                     }
                     .buttonStyle(.plain)
@@ -2013,6 +2180,7 @@ struct NewGoalSheet: View {
             }
             SettingsGroup {
                 Button {
+                    guard origin.accepts(model) else { return }
                     let pid = projectId.isEmpty ? (projects.first?.id ?? "") : projectId
                     guard !pid.isEmpty, !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     model.createGoal(
@@ -2038,6 +2206,7 @@ struct NewGoalSheet: View {
             }
         }
         .onAppear {
+            formOrigin = SettingsOrigin(model)
             if projectId.isEmpty { projectId = projects.first?.id ?? "" }
         }
     }

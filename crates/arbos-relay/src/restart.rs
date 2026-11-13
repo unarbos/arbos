@@ -27,6 +27,7 @@ use serde_json::json;
 use arbos_core::wire::{Frame, FrameType};
 
 use crate::auth::Principal;
+use crate::restart_lifetime::Phase;
 use crate::signin::api_error;
 use crate::state::{AppState, RoomBroadcast};
 
@@ -111,10 +112,6 @@ pub async fn freeze_box_work(state: &AppState) -> Vec<serde_json::Value> {
     box_work_in_flight(state).await
 }
 
-pub fn thaw_box_work(state: &AppState) {
-    state.restart.box_work_frozen.store(false, Ordering::SeqCst);
-}
-
 /// How long SIGTERM waits for in-flight box work before exiting; systemd kills at 90 s.
 const SIGTERM_BOX_WORK_WAIT: Duration = Duration::from_secs(60);
 
@@ -144,17 +141,12 @@ pub async fn admin_restart(
     let notice =
         Duration::from_secs(b.notice_s.unwrap_or(DEFAULT_NOTICE.as_secs())).min(MAX_NOTICE);
     let drain = Duration::from_secs(b.drain_s.unwrap_or(DEFAULT_DRAIN.as_secs())).min(MAX_DRAIN);
-    if state.restart.is_closing() {
-        return api_error(
-            StatusCode::CONFLICT,
-            "already_closing",
-            "a restart is already in progress",
-        );
-    }
+    let Some(owner) = state.restart.begin_planned() else {
+        return already_closing();
+    };
     let in_flight = freeze_box_work(&state).await;
     if !in_flight.is_empty() {
         if b.force != Some(true) {
-            thaw_box_work(&state);
             tracing::info!(in_flight = %serde_json::Value::from(in_flight.clone()), "planned restart: refused, box work in flight");
             return (
                 StatusCode::CONFLICT,
@@ -168,6 +160,9 @@ pub async fn admin_restart(
         }
         tracing::warn!(in_flight = %serde_json::Value::from(in_flight), "planned restart: forced with box work in flight");
     }
+    if !owner.advance(Phase::Notifying) {
+        return already_closing();
+    }
     let t0 = Instant::now();
     let mut rooms = 0;
     if !notice.is_zero() {
@@ -179,19 +174,22 @@ pub async fn admin_restart(
         );
         tokio::time::sleep(notice).await;
     }
+    if !owner.advance(Phase::Draining) {
+        return already_closing();
+    }
     let (before, left) = close_and_drain(&state, drain).await;
+    if !owner.advance(Phase::Ready) {
+        return already_closing();
+    }
     tracing::info!(
         sockets = before,
         still_open = left,
         took_ms = t0.elapsed().as_millis() as u64,
         "planned restart: room sockets closed with 1012; ready for systemctl restart"
     );
-    let st = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(CLOSING_RESET).await;
-        if st.restart.is_closing() {
-            st.restart.closing.send_replace(false);
-            thaw_box_work(&st);
+        if owner.release() {
             tracing::warn!(
                 "planned restart: no restart came within {CLOSING_RESET:?}; serving sockets again"
             );
@@ -205,6 +203,14 @@ pub async fn admin_restart(
         "took_ms": t0.elapsed().as_millis() as u64,
     }))
     .into_response()
+}
+
+fn already_closing() -> Response {
+    api_error(
+        StatusCode::CONFLICT,
+        "already_closing",
+        "a restart is already in progress",
+    )
 }
 
 /// On SIGTERM (what `systemctl restart`/`stop` sends): close every room socket with 1012, drain
@@ -221,6 +227,7 @@ pub fn install_sigterm_handler(state: AppState) {
                 }
             };
         term.recv().await;
+        state.restart.begin_shutdown();
         wait_for_box_work(&state, SIGTERM_BOX_WORK_WAIT).await;
         let (before, left) = close_and_drain(&state, DEFAULT_DRAIN).await;
         tracing::info!(
@@ -246,5 +253,187 @@ async fn wait_for_box_work(state: &AppState, max: Duration) {
     }
     for w in &in_flight {
         tracing::error!(user = %w["user_id"].as_str().unwrap_or(""), kind = %w["kind"].as_str().unwrap_or(""), phase = %w["phase"].as_str().unwrap_or(""), "SIGTERM: exiting with box work in flight; this box needs a look (#2262)");
+    }
+}
+
+#[cfg(test)]
+mod ownership_regressions {
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn body(notice: u64, drain: u64) -> Option<Json<RestartBody>> {
+        Some(Json(RestartBody {
+            notice_s: Some(notice),
+            drain_s: Some(drain),
+            force: None,
+        }))
+    }
+
+    async fn reached(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual handler reached the owned phase");
+    }
+
+    #[tokio::test]
+    async fn abort_during_notice_releases_its_box_freeze() {
+        let state = test_state(AuthMode::Github);
+        // The real announce call waits here after freeze; no timer or socket is faked.
+        let rooms = state.rooms.write().await;
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            admin_restart(State(task_state), Principal::Admin, body(10, 0)).await
+        });
+        reached(|| state.restart.box_work_frozen()).await;
+        assert!(!state.restart.is_closing());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(rooms);
+        assert!(
+            !state.restart.box_work_frozen(),
+            "an aborted handler must not strand the freeze"
+        );
+        assert!(!state.restart.is_closing());
+    }
+
+    #[tokio::test]
+    async fn abort_during_drain_releases_its_socket_close_and_freeze() {
+        let state = test_state(AuthMode::Github);
+        state.restart.open_sockets.store(1, Ordering::Relaxed);
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            admin_restart(State(task_state), Principal::Admin, body(0, 30)).await
+        });
+        reached(|| state.restart.is_closing()).await;
+        assert!(state.restart.box_work_frozen());
+        assert!(!task.is_finished());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            !state.restart.is_closing(),
+            "an aborted drain must not bounce every future socket"
+        );
+        assert!(!state.restart.box_work_frozen());
+    }
+
+    #[tokio::test]
+    async fn abort_before_freeze_changes_no_restart_signals() {
+        let state = test_state(AuthMode::Github);
+        let running = state.upgrading.lock().await;
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            admin_restart(State(task_state), Principal::Admin, body(0, 0)).await
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(running);
+        assert!(!state.restart.is_closing());
+        assert!(!state.restart.box_work_frozen());
+    }
+
+    #[tokio::test]
+    async fn a_completed_restart_stays_closed_for_the_existing_reset_owner() {
+        let state = test_state(AuthMode::Github);
+        let response = admin_restart(State(state.clone()), Principal::Admin, body(0, 0)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state.restart.is_closing());
+        assert!(state.restart.box_work_frozen());
+    }
+
+    #[tokio::test]
+    async fn a_notice_phase_owner_rejects_an_overlapping_planned_restart() {
+        let state = test_state(AuthMode::Github);
+        let rooms = state.rooms.write().await;
+        let task_state = state.clone();
+        let first = tokio::spawn(async move {
+            admin_restart(State(task_state), Principal::Admin, body(10, 0)).await
+        });
+        reached(|| state.restart.box_work_frozen()).await;
+        let second = admin_restart(State(state.clone()), Principal::Admin, body(0, 0)).await;
+        let stayed_open = !state.restart.is_closing();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        drop(rooms);
+        assert_eq!(
+            second.status(),
+            StatusCode::CONFLICT,
+            "only one planned restart may own the notice phase"
+        );
+        assert!(
+            stayed_open,
+            "the refused attempt must not close sockets owned by the first notice"
+        );
+        assert!(!state.restart.box_work_frozen());
+    }
+
+    #[test]
+    fn stale_reset_or_drop_cannot_thaw_a_replacement_owner() {
+        let signal = std::sync::Arc::new(crate::state::RestartSignal::default());
+        let old = signal.begin_planned().unwrap();
+        assert!(old.advance(Phase::Notifying));
+        assert!(old.advance(Phase::Draining));
+        assert!(old.advance(Phase::Ready));
+        assert!(old.release());
+        let current = signal.begin_planned().unwrap();
+        signal.box_work_frozen.store(true, Ordering::SeqCst);
+        signal.closing.send_replace(true);
+        assert!(!old.release());
+        drop(old);
+        assert!(signal.is_closing());
+        assert!(signal.box_work_frozen());
+        drop(current);
+        assert!(!signal.is_closing());
+        assert!(!signal.box_work_frozen());
+    }
+
+    #[test]
+    fn shutdown_owns_the_signals_after_a_planned_guard_is_dropped() {
+        let signal = std::sync::Arc::new(crate::state::RestartSignal::default());
+        let old = signal.begin_planned().unwrap();
+        signal.box_work_frozen.store(true, Ordering::SeqCst);
+        signal.closing.send_replace(true);
+        signal.begin_shutdown();
+        assert!(!old.release());
+        drop(old);
+        assert!(signal.is_closing());
+        assert!(signal.box_work_frozen());
+        assert!(signal.begin_planned().is_none());
+    }
+
+    #[test]
+    fn a_planned_owner_advances_only_in_the_existing_effect_order() {
+        let signal = std::sync::Arc::new(crate::state::RestartSignal::default());
+        let owner = signal.begin_planned().unwrap();
+        assert!(!owner.advance(Phase::Draining));
+        assert!(!owner.advance(Phase::Ready));
+        assert!(owner.advance(Phase::Notifying));
+        assert!(!owner.advance(Phase::Ready));
+        assert!(!owner.advance(Phase::Notifying));
+        assert!(owner.advance(Phase::Draining));
+        assert!(owner.advance(Phase::Ready));
+        assert!(!owner.advance(Phase::Draining));
+        assert!(owner.release());
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_cannot_start_or_freeze_a_restart() {
+        let state = test_state(AuthMode::Github);
+        let response = admin_restart(
+            State(state.clone()),
+            Principal::Box {
+                user_id: "fixture".into(),
+            },
+            body(0, 0),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!state.restart.is_closing());
+        assert!(!state.restart.box_work_frozen());
     }
 }

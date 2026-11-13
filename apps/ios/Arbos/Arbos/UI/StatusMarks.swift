@@ -46,11 +46,12 @@ struct FaultGlyph: View {
 struct StatusMarkView: View {
     let mark: StatusMark
     var size: CGFloat = WorkingSpinnerFrames.cell
+    var whileScrolling = false
 
     var body: some View {
         switch mark {
         case .working:
-            WorkingSpinner(size: size, glyphSize: min(size * 1.3, WorkingSpinnerFrames.glyphSize))
+            WorkingSpinner(size: size, glyphSize: min(size * 1.3, WorkingSpinnerFrames.glyphSize), whileScrolling: whileScrolling)
         case .fault:
             FaultGlyph(size: size)
         }
@@ -92,7 +93,7 @@ enum CornerMark {
                 content
                     .mask {
                         ZStack(alignment: .bottomTrailing) {
-                            // Wider than the picture: a leaf's sway or a shadow must not be clipped.
+                            // Wider than the picture: a shadow must not be clipped.
                             Rectangle().padding(-size)
                             Circle()
                                 .frame(width: m.ring, height: m.ring)

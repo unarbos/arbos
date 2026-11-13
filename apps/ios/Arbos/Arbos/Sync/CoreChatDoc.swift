@@ -156,6 +156,25 @@ final class CoreChatDoc {
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }
 
+    /// A poll message (`docs/polls.md`); its text part is the poll in plain words. Does not
+    /// commit. Throws when the fields are not a poll within bounds.
+    func insertPollMessage(
+        id: Id, question: String, options: [String], multiple: Bool, deviceId: String,
+        author: Author?, mentions: [String] = []
+    ) throws {
+        let opts = UserMessageOptsRecord(
+            attachments: [], mentions: mentions, replyTo: nil,
+            sender: author?.sender, senderHandle: author?.handle, senderName: author?.name, senderAvatar: author?.avatar,
+            forwardedFrom: nil, replyRef: nil)
+        try doc.insertPollMessage(id: id, question: question, options: options, multiple: multiple,
+                                  deviceId: deviceId, opts: opts)
+    }
+
+    /// `sender`'s vote on a poll, replacing any earlier one; empty retracts. Does not commit.
+    func setPollVote(messageId: Id, sender: String, selections: [String]) throws {
+        try doc.setPollVote(messageId: messageId, sender: sender, selections: selections)
+    }
+
     /// Optional `callId` is passed to the FFI as `linkId` (core's `callId`).
     func insertSystemLine(id: Id, text: String, deviceId: String, callId: String? = nil) throws {
         try doc.insertSystemLine(id: id, text: text, deviceId: deviceId, linkId: callId)

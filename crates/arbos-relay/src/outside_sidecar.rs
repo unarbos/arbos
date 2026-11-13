@@ -26,6 +26,11 @@ use crate::state::AppState;
 const LLMS_TXT: &str = include_str!("../assets/llms.txt");
 /// The one-line installer, served at `/sidecar/install.sh`.
 const INSTALL_SH: &str = include_str!("../assets/sidecar-install.sh");
+/// The one-command ACP connect, served at `/acp/install.sh`: it finds or builds `arbos-acp`,
+/// asks for the key with the terminal echo off and starts the bridge. It lives beside the
+/// sidecar installer because this module already holds the texts an outside agent is handed or
+/// runs, and it needs the same canonical-relay rewrite.
+const ACP_INSTALL_SH: &str = include_str!("../assets/acp-install.sh");
 const CANONICAL_RELAY: &str = "https://relay.arbos.life";
 /// Most rows a wake event may carry as context.
 pub const CONTEXT_MAX: usize = 20;
@@ -244,6 +249,17 @@ pub async fn llms_txt(State(state): State<AppState>) -> Response {
 /// `GET /sidecar/install.sh` — `curl -fsSL …/sidecar/install.sh | sh -s -- …`.
 pub async fn install_sh(State(state): State<AppState>) -> Response {
     let body = INSTALL_SH.replace(CANONICAL_RELAY, &relay_of(&state));
+    shell_script(body)
+}
+
+/// `GET /acp/install.sh` — the whole connect:
+/// `curl -fsSL …/acp/install.sh | sh -s -- --cwd ~/your-project`.
+pub async fn acp_install_sh(State(state): State<AppState>) -> Response {
+    let body = ACP_INSTALL_SH.replace(CANONICAL_RELAY, &relay_of(&state));
+    shell_script(body)
+}
+
+fn shell_script(body: String) -> Response {
     (
         StatusCode::OK,
         [
@@ -259,18 +275,154 @@ pub async fn install_sh(State(state): State<AppState>) -> Response {
 mod tests {
     use super::*;
 
+    /// Does this text carry something shaped like a live credential: one of the relay's key
+    /// prefixes followed by the forty hex characters a mint produces?
+    ///
+    /// The prefix alone is not the shape. Every one of these texts names its prefix on purpose,
+    /// to tell the reader what a key looks like, so a guard may only fire on the whole shape.
+    fn carries_a_key(text: &str) -> bool {
+        [crate::outside::KEY_PREFIX, crate::agent_link::TOKEN_PREFIX]
+            .iter()
+            .flat_map(|prefix| text.match_indices(prefix).map(|(i, p)| i + p.len()))
+            .any(|at| {
+                text[at..]
+                    .chars()
+                    .take(40)
+                    .filter(char::is_ascii_hexdigit)
+                    .count()
+                    == 40
+            })
+    }
+
+    /// No served text carries a live key, asserted on the key's shape rather than on a guess at
+    /// its first character. These three name their prefixes in prose on purpose, so they cannot
+    /// use the strict form `agent_link` uses for its own sheet (`!SHEET.contains(TOKEN_PREFIX)`),
+    /// which is why the shape is the right predicate here.
+    ///
+    /// The guard this replaces was `!contains("arbk_7") && !contains("arbk_0")`. A minted key is
+    /// forty lowercase hex characters, so its first is uniformly one of sixteen: that guard
+    /// caught one pasted key in eight and waved seven through. The predicate, not the subject,
+    /// was the weak part — `LLMS_TXT` is a global constant that the assertions above already pin
+    /// positively — which is why this is one predicate rather than a restructured test.
     #[test]
-    fn texts_name_the_relay_and_no_secret() {
+    fn no_served_text_carries_a_key() {
+        for (name, text) in [
+            ("llms.txt", LLMS_TXT),
+            ("sidecar-install.sh", INSTALL_SH),
+            ("acp-install.sh", ACP_INSTALL_SH),
+        ] {
+            assert!(!carries_a_key(text), "{name} carries a live key");
+        }
+
+        // The control an absence assertion cannot have on its own: the predicate catches a real
+        // key, so the three passes above mean the texts are clean rather than the check is blind.
+        let minted = crate::outside::mint_key();
+        assert!(carries_a_key(&minted), "{minted} is a minted key");
+        assert!(
+            carries_a_key(&format!("paste it here: {minted} and keep reading")),
+            "a key embedded in prose is still a key"
+        );
+        // And it does not fire on the prefixes the texts legitimately name.
+        assert!(!carries_a_key("the key looks like arbk_ plus 40 hex"));
+        assert!(!carries_a_key("your bearer is arbl_<secret>"));
+    }
+
+    #[test]
+    fn texts_name_the_relay_and_the_installer_never_handles_the_key() {
         assert!(LLMS_TXT.contains("/sidecar/install.sh"));
         assert!(LLMS_TXT.contains("ask your user"));
-        // The instructions describe the key's shape and never carry a real one.
-        assert!(!LLMS_TXT.contains("arbk_7") && !LLMS_TXT.contains("arbk_0"));
         assert!(INSTALL_SH.starts_with("#!/bin/sh"));
         assert!(INSTALL_SH.contains("\" init --relay"));
         assert!(INSTALL_SH.contains("install-service"));
-        // The installer never echoes the key.
-        assert!(!INSTALL_SH.contains("echo \"$KEY\""));
-        assert!(!INSTALL_SH.contains("echo $KEY"));
+        // The key never passes through the shell at all: the binary reads it from /dev/tty, or
+        // the caller pipes it to `--key-stdin`. So the invariant is not "the installer does not
+        // echo $KEY" in some particular spelling - the two spellings the old guard enumerated
+        // missed `printf '%s' "$KEY"` and `echo ${KEY}` - but that no key variable exists for a
+        // later edit to print.
+        let holds_the_key = INSTALL_SH.contains("${KEY}")
+            || INSTALL_SH.match_indices("$KEY").any(|(at, m)| {
+                // `$KEY_STDIN` is the flag, not the key.
+                !INSTALL_SH[at + m.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            });
+        assert!(
+            !holds_the_key,
+            "the installer must not hold the key in a variable"
+        );
+        assert!(INSTALL_SH.contains("--key-stdin"));
+    }
+
+    /// The ACP connect is one command, and the script is the thing a sceptical agent reads
+    /// before running it — so the properties the connect instructions claim are asserted here
+    /// rather than described in a comment. The whole point of the script is that it both
+    /// obtains the bridge and starts it; a script that only installed would put us back at two
+    /// commands, which is what `exec` below is checking.
+    #[test]
+    fn the_acp_installer_is_one_command_and_relaxes_nothing() {
+        assert!(ACP_INSTALL_SH.starts_with("#!/bin/sh"));
+
+        // The one line that decides what the bridge is actually started with, asserted whole
+        // rather than searched for needles. Equality is the instrument here on purpose: a list
+        // of forbidden flags only catches the ones somebody thought of, and the flag that
+        // undoes this fix next year is the one not on the list. Anything added to the bridge's
+        // command line fails this, including a flag that does not exist yet.
+        let exec_line: Vec<&str> = ACP_INSTALL_SH
+            .lines()
+            .filter(|l| l.starts_with("exec "))
+            .collect();
+        assert_eq!(
+            exec_line,
+            vec![r#"exec "$bin" --relay "$RELAY" --cwd "$CWD" "$@""#],
+            "the installer must start the bridge — that is what makes it one command and not \
+             two — and must pass it nothing of its own beyond the relay and the project"
+        );
+
+        // The key is asked for with echo off and handed over in the environment, never in argv.
+        assert!(ACP_INSTALL_SH.contains("stty -echo"));
+        assert!(ACP_INSTALL_SH.contains("export ARBOS_AGENT_KEY"));
+        // A key on the installer's own command line is refused rather than accepted quietly.
+        assert!(ACP_INSTALL_SH.contains("--key|--key=*)"));
+
+        // The bypass has no business appearing anywhere in a connect script, in a flag or in a
+        // settings key, so this one is searched over the whole text rather than one line.
+        for never in [
+            "--allow-bypass-permissions",
+            "bypassPermissions",
+            "disableBypassPermissionsMode",
+        ] {
+            assert!(
+                !ACP_INSTALL_SH.contains(never),
+                "the installer mentions `{never}`; the connect must not touch the bypass at all"
+            );
+        }
+        // Positive control for the loop above: the same search does find a string the script
+        // genuinely contains, so three clean answers mean the needles were looked for.
+        assert!(ACP_INSTALL_SH.contains("--dry-run"));
+
+        // `--ref` exists so a change can be tried before it merges, which is the only way a
+        // real Claude Code can review this branch's bridge rather than the default branch's.
+        // It has to force the build: a stale binary on the machine would otherwise answer for
+        // the branch under test and the run would prove nothing about it.
+        assert!(ACP_INSTALL_SH.contains("--branch \"$GIT_REF\""));
+        assert!(
+            ACP_INSTALL_SH.contains("--force --git \"$REPO\" --branch"),
+            "--ref must rebuild rather than accept whatever is already installed"
+        );
+        // A dry run that builds first is not a dry run.
+        assert!(ACP_INSTALL_SH.contains("Would build arbos-acp from"));
+
+        // The two things the old four-step setup made people do, and this does not.
+        assert!(!ACP_INSTALL_SH.contains("npm install -g"));
+        assert!(
+            !ACP_INSTALL_SH.contains(".claude/settings.json\"")
+                && !ACP_INSTALL_SH.contains("> ~/.claude"),
+            "the connect must not write a settings file"
+        );
+        // It never installs a toolchain unasked: rustup is named as a URL to read, not piped.
+        assert!(!ACP_INSTALL_SH.contains("sh.rustup.rs"));
+        assert!(ACP_INSTALL_SH.contains("https://rustup.rs"));
     }
 
     /// A group with two people and the agent: the members endpoint names everyone with

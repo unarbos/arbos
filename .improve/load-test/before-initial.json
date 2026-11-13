@@ -1,0 +1,54 @@
+{
+  "experiment": "history",
+  "scale": 1,
+  "rooms": 10,
+  "rows_per_room": 100,
+  "counts": {
+    "users": 7,
+    "devices": 7,
+    "projects": 10,
+    "chats": 10,
+    "people_chats": 10,
+    "people_members": 50,
+    "project_members": 10,
+    "people_reads": 10,
+    "room_seq": 10,
+    "checkpoints": 10,
+    "rows": 1000
+  },
+  "database_bytes": 708608,
+  "samples_ns": [
+    324750,
+    40333,
+    37209,
+    34625,
+    34083,
+    36833,
+    28000,
+    21541,
+    22000,
+    21334,
+    21750,
+    21500,
+    21167,
+    21917,
+    21333,
+    21250,
+    21208,
+    21625,
+    22125,
+    21542,
+    21417
+  ],
+  "result_position": [
+    100,
+    25
+  ],
+  "source_sha256": {
+    "crates/arbos-relay/src/db.rs": "3d08c6397f24bc570c4c57221b47dde01ca09eaf489111e99b60ac7e4527a350",
+    "crates/arbos-relay/src/db_people.rs": "215d752611f892c3e41554b2c9636a8e86fdcac26fec12cea58e1b6c3b76b007"
+  },
+  "python_sqlite": "3.53.4",
+  "pilot_only": true,
+  "limitations": "Initial pre-edit smoke profile, excluded from final statistics: fixture roster/compaction assumptions were corrected after independent review. Final profile uses retained exact before SQL on the corrected fixtures."
+}

@@ -1,0 +1,38 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "f4af59706045ced179c91e23759143c454b4d8da4ac75e4bb096f5279b2e0e99",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 5,
+    "results": [
+      {
+        "name": "late-people-list-cannot-paint-prune-or-save-B",
+        "pass": true
+      },
+      {
+        "name": "late-people-entry-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "cancelled-people-work-cannot-publish",
+        "pass": true
+      },
+      {
+        "name": "current-unread-recent-room-prune-control",
+        "pass": true
+      },
+      {
+        "name": "fixture-people-no-request-control",
+        "pass": true
+      }
+    ],
+    "total": 5
+  },
+  "seconds": 0.7196279589552432
+}

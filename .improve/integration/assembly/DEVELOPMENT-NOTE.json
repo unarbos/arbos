@@ -1,0 +1,7 @@
+{
+  "private_component_preparation_errors": [
+    "First wrapper used unsupported Git.text(data=...) before applying its component; fixed to run().decode().",
+    "Second wrapper incorrectly chose the P4 whole people.rs as preimage; exact preimage guard refused it. P3 current file survives because P4/P6 diffs do not touch that path."
+  ],
+  "disposition": "All semantic guards unchanged; final independent6components pass. No product test or full assembly failed/executed."
+}

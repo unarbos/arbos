@@ -13,6 +13,8 @@ struct VoicePickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents.
+    var pushed: Bool = false
     @StateObject private var player = SamplePlayer()
     @State private var failed = false
     @State private var errorDetailsOpen = false
@@ -22,49 +24,57 @@ struct VoicePickerView: View {
     private var defaultVoice: Voice? { catalog.flatMap { c in c.voices.first { $0.id == c.defaultId } } }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    if let catalog {
-                        voiceRow(id: nil, name: "Default (\(defaultVoice?.name ?? catalog.defaultId.capitalized))",
-                                 // The named voice's row carries its description; say what Default means instead of repeating it.
-                                 description: "What the relay uses when nothing is chosen", sample: defaultVoice?.sampleURL, selected: current.voice == nil)
-                        ForEach(catalog.voices) { v in
-                            voiceRow(id: v.id, name: v.name, description: v.description, sample: v.sampleURL, selected: current.voice == v.id)
+        Group {
+            if pushed {
+                list
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Voice")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                         }
-                    } else if failed {
-                        // The sheet's note (the shared element) where the list would be.
-                        ErrorNote(id: "voices-error",
-                                  error: UserError.of("load the voices", .offline(deviceOffline: false), "GET /voices failed"),
-                                  detailsOpen: $errorDetailsOpen)
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets())
-                    } else {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text("Loading voices…").foregroundStyle(theme.muted)
-                        }
-                        .listRowBackground(theme.card)
-                    }
-                } footer: {
-                    Text("How \(current.name) sounds on calls. Tap ▶ to hear a sample; tap a row to choose it.")
-                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
+                .presentationDetents([.large])
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Voice")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
-            }
-            .task {
-                await model.loadVoices()
-                failed = model.voiceCatalog == nil
-            }
-            .onDisappear { player.stop() }
         }
-        .presentationDetents([.large])
+        .task {
+            await model.loadVoices()
+            failed = model.voiceCatalog == nil
+        }
+        .onDisappear { player.stop() }
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                if let catalog {
+                    voiceRow(id: nil, name: "Default (\(defaultVoice?.name ?? catalog.defaultId.capitalized))",
+                             description: "What the relay uses when nothing is chosen", sample: defaultVoice?.sampleURL, selected: current.voice == nil)
+                    ForEach(catalog.voices) { v in
+                        voiceRow(id: v.id, name: v.name, description: v.description, sample: v.sampleURL, selected: current.voice == v.id)
+                    }
+                } else if failed {
+                    ErrorNote(id: "voices-error",
+                              error: UserError.of("load the voices", .offline(deviceOffline: false), "GET /voices failed"),
+                              detailsOpen: $errorDetailsOpen)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                } else {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading voices…").foregroundStyle(theme.muted)
+                    }
+                    .listRowBackground(theme.card)
+                }
+            } footer: {
+                Text("How \(current.name) sounds on calls. Tap ▶ to hear a sample; tap a row to choose it.")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 
     private func voiceRow(id: String?, name: String, description: String?, sample: URL?, selected: Bool) -> some View {

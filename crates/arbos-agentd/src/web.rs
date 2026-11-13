@@ -8,13 +8,57 @@
 //! endpoint's page reader when a site blocks bots or renders only with JavaScript. Credentials
 //! never travel through these tools: anything that needs a secret goes through `egress`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
-use crate::mcp::{err_result, text_result};
+use crate::mcp::{err_result, materialize_handle, text_result};
+
+static HTML_OMITTED: LazyLock<[regex_lite::Regex; 5]> = LazyLock::new(|| {
+    ["script", "style", "noscript", "svg", "template"]
+        .map(|tag| regex_lite::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap())
+});
+
+static HTML_COMMENTS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?s)<!--.*?-->").unwrap());
+
+static HTML_ANCHORS: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#).unwrap()
+});
+
+static HTML_LIST_ITEMS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)<li\b[^>]*>").unwrap());
+
+static HTML_HEADINGS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap());
+
+static HTML_BREAKS: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(
+        r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|/header|/footer|/pre|/blockquote|/ul|/ol|/dd|/dt|hr)\b[^>]*>",
+    )
+    .unwrap()
+});
+
+static HTML_CELLS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)</t[dh]>").unwrap());
+
+static HTML_TAGS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?s)<[^>]*>").unwrap());
+
+static HTML_NUMERIC_ENTITIES: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"&#(x?)([0-9a-fA-F]+);").unwrap());
+
+static SEARCH_LINKS: LazyLock<Result<regex_lite::Regex, String>> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+        .map_err(|e| e.to_string())
+});
+
+static SEARCH_SNIPPETS: LazyLock<Result<regex_lite::Regex, String>> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
+        .map_err(|e| e.to_string())
+});
 
 const DEFAULT_SEARCH_MCP_URL: &str = "https://mcp.exa.ai/mcp";
 const SEARCH_TOOL: &str = "web_search_exa";
@@ -28,10 +72,31 @@ const DEFAULT_RESULTS: u64 = 8;
 const MAX_RESULTS: u64 = 10;
 const DEFAULT_FETCH_CHARS: usize = 20_000;
 const MAX_FETCH_CHARS: usize = 60_000;
+/// Text longer than this becomes a `peek` handle holding the whole page, so the part past
+/// `max_chars` is readable without a second fetch. Matches `OFFLOAD_CHARS` in the pi extension
+/// (`harness/arbos-pi-ext/index.ts`) and the 4,000-character rule stated in `prompts/router.md`.
+const OFFLOAD_CHARS: usize = 4_000;
 /// Bytes read from one page before giving up on it.
 const MAX_BODY_BYTES: usize = 3_000_000;
 /// An HTML page that reduces to less text than this is probably a bot wall or a JS-only shell.
 const THIN_PAGE_CHARS: usize = 300;
+/// Retries of a rate-limited search before the HTML fallback. The keyless endpoint rejects a
+/// burst in 150–230 ms, so the old code reached the weaker fallback long before the quota could
+/// refill (Jacob, Test5, 2026-11-04, T5 13:51:04, twice).
+const RATE_LIMIT_RETRIES: u32 = 2;
+/// Wait before retrying a rate-limited search; doubles per retry (so 1 s, then 2 s).
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+/// How long after a rejection every search on this box queues behind one lane. Codemode fans
+/// searches out in parallel and they all spend the same quota, so a burst is what provokes the
+/// limit; during one, they go one at a time.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+/// The longest one `web_search` may spend waiting to be let through before it gives up and takes
+/// the HTML fallback. The lane needs a ceiling or it becomes the failure it replaced: one
+/// rejection serialises every search for a minute, and a codemode fan-out of ten would have its
+/// last search wait out nine turns of retries and sleeps — minutes — for an answer the first
+/// search already proved was not coming. Every search in a fan-out starts its own budget at the
+/// same moment, so the whole fan-out settles inside one of these rather than N of them.
+const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(8);
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
@@ -44,7 +109,7 @@ pub fn tool_specs() -> Vec<Value> {
         json!({ "name": "web_fetch", "description": "Read a public URL as text: documentation pages, OpenAPI/Swagger JSON or YAML, README files, llms.txt, raw source on GitHub, release notes. HTML is reduced to readable text with links kept; JSON, YAML and plain text come back verbatim. No credentials: a request that needs a key goes through egress instead.",
                 "inputSchema": { "type": "object", "properties": {
                     "url": { "type": "string" },
-                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the text here (default 20000); big pages become a peek handle anyway" } },
+                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the inline text here (default 20000). The whole page is kept in a peek handle, so read past the cut with peek(handle, {chars:[from,to]}) or peek(handle, {grep:\"...\"}) instead of fetching the URL again." } },
                   "required": ["url"] } }),
     ]
 }
@@ -54,6 +119,163 @@ fn search_mcp_url() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SEARCH_MCP_URL.to_owned())
+}
+
+/// `mcp_call`'s own wording for a rejected search. That `format!` is a few lines up and is the
+/// only thing that produces this string, so matching it here does not reach across a boundary.
+fn rate_limited(err: &str) -> bool {
+    err.starts_with("search endpoint answered 429")
+}
+
+/// Paces `web_search` against an endpoint that rate-limits.
+///
+/// Two separate jobs, which is why there are two locks. `lane` makes concurrent searches take
+/// turns while the endpoint is rejecting: codemode fans them out in parallel, they all draw on
+/// the same quota, and the burst is what provokes the limit in the first place. `state` holds
+/// how long to wait before the next attempt. Idle, neither costs anything — the lane is only
+/// taken once a rejection has been seen, so searches still fan out when nothing is limiting.
+#[derive(Default)]
+struct Pacer {
+    lane: tokio::sync::Mutex<()>,
+    state: std::sync::Mutex<PacerState>,
+}
+
+#[derive(Default)]
+struct PacerState {
+    /// No search goes out before this.
+    next_allowed: Option<Instant>,
+    /// Searches share the lane until this passes.
+    serialize_until: Option<Instant>,
+}
+
+impl Pacer {
+    /// Is a burst still queueing?
+    fn serializing(&self) -> bool {
+        let s = self.state.lock().expect("pacer");
+        s.serialize_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// How long this attempt must hold off, if at all.
+    fn wait(&self) -> Option<Duration> {
+        let s = self.state.lock().expect("pacer");
+        s.next_allowed
+            .and_then(|t| t.checked_duration_since(Instant::now()))
+            .filter(|d| !d.is_zero())
+    }
+
+    /// The endpoint rejected attempt `attempt` (0-based).
+    fn note_limited(&self, attempt: u32) {
+        let now = Instant::now();
+        let mut s = self.state.lock().expect("pacer");
+        s.next_allowed = Some(now + RATE_LIMIT_BACKOFF.saturating_mul(1 << attempt.min(4)));
+        s.serialize_until = Some(now + RATE_LIMIT_COOLDOWN);
+    }
+
+    /// A search got through. The hold-off goes, but the lane stays until the cooldown runs out:
+    /// one answer may be *because* the burst was queued, so it is not proof the quota is back.
+    fn note_ok(&self) {
+        self.state.lock().expect("pacer").next_allowed = None;
+    }
+}
+
+fn pacer() -> &'static Pacer {
+    static P: std::sync::OnceLock<Pacer> = std::sync::OnceLock::new();
+    P.get_or_init(Pacer::default)
+}
+
+/// Time left before `deadline`, or `None` once it has passed.
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+}
+
+/// Holds this search until the lane and the hold-off let it through. `false` when that would
+/// take longer than `deadline` leaves: the caller then stops retrying and the HTML fallback
+/// runs, so a queued search returns a weaker answer instead of holding the turn open.
+///
+/// Nothing is locked and nothing sleeps while the endpoint is answering, so searches still fan
+/// out in parallel until a rejection is seen. A search that cannot get the lane in time does
+/// not go out unpaced either — an unpaced burst is the thing the lane exists to prevent.
+async fn hold<'a>(
+    p: &'a Pacer,
+    lane: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
+    deadline: Instant,
+) -> bool {
+    if lane.is_none() && p.serializing() {
+        let Some(left) = remaining(deadline) else {
+            return false;
+        };
+        match tokio::time::timeout(left, p.lane.lock()).await {
+            Ok(g) => *lane = Some(g),
+            Err(_) => return false,
+        }
+    }
+    match p.wait() {
+        None => true,
+        Some(d) => match remaining(deadline) {
+            Some(left) if d <= left => {
+                tokio::time::sleep(d).await;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+/// The primary search, paced. A rate limit costs a short wait and a retry instead of dropping
+/// straight to the HTML fallback, which parses DuckDuckGo with regexes and is weaker than the
+/// answer the retry gets. Only a rejection is retried; any other error returns at once, and all
+/// the waiting a rejection buys fits inside `RATE_LIMIT_BUDGET`.
+async fn paced_search(
+    agent: &Arc<Agent>,
+    query: &str,
+    objective: &str,
+    limit: u64,
+) -> Result<String, String> {
+    let p = pacer();
+    let deadline = Instant::now() + RATE_LIMIT_BUDGET;
+    let mut lane = None;
+    let mut limited = String::new();
+    for attempt in 0..=RATE_LIMIT_RETRIES {
+        if !hold(p, &mut lane, deadline).await {
+            break;
+        }
+        match mcp_call(
+            agent,
+            SEARCH_TOOL,
+            json!({ "query": query, "objective": objective, "numResults": limit }),
+            SEARCH_TIMEOUT,
+        )
+        .await
+        {
+            Err(e) if rate_limited(&e) => {
+                tracing::info!(
+                    attempt,
+                    "web_search: the search endpoint is rate-limiting; backing off and queueing searches behind one lane"
+                );
+                limited = e;
+                p.note_limited(attempt);
+            }
+            Ok(text) if text.trim().is_empty() => {
+                p.note_ok();
+                return Err("no results".to_owned());
+            }
+            Ok(text) => {
+                p.note_ok();
+                return Ok(text);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Empty when the budget went on queueing and this search never reached the endpoint, which
+    // `web_search` would otherwise log as a blank reason.
+    Err(if limited.is_empty() {
+        "search endpoint is rate-limiting and the queue is longer than this search can wait"
+            .to_owned()
+    } else {
+        limited
+    })
 }
 
 /// The text content of one MCP `tools/call` answer, from a JSON body or an SSE stream.
@@ -145,19 +367,7 @@ pub async fn web_search(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Valu
         .unwrap_or(DEFAULT_RESULTS)
         .clamp(1, MAX_RESULTS);
     record(agent, chat_id, "web_search", &query);
-    let primary = mcp_call(
-        agent,
-        SEARCH_TOOL,
-        json!({ "query": query, "objective": objective, "numResults": limit }),
-        SEARCH_TIMEOUT,
-    )
-    .await;
-    let out = match primary {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Err("no results".to_owned()),
-        Err(e) => Err(e),
-    };
-    match out {
+    match paced_search(agent, &query, &objective, limit).await {
         Ok(text) => text_result(crate::store::redact(&text)),
         Err(primary_err) => {
             tracing::warn!(error = %primary_err, "web_search: primary endpoint failed; HTML fallback");
@@ -188,11 +398,8 @@ async fn html_search(agent: &Arc<Agent>, query: &str, limit: usize) -> Result<St
     if !status.is_success() {
         return Err(format!("search page answered {status}"));
     }
-    let link_re =
-        regex_lite::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .map_err(|e| e.to_string())?;
-    let snippet_re = regex_lite::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
-        .map_err(|e| e.to_string())?;
+    let link_re = SEARCH_LINKS.as_ref().map_err(Clone::clone)?;
+    let snippet_re = SEARCH_SNIPPETS.as_ref().map_err(Clone::clone)?;
     let snippets: Vec<String> = snippet_re
         .captures_iter(&html)
         .map(|c| html_to_text(&c[1], None))
@@ -256,7 +463,7 @@ pub async fn web_fetch(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value
         .unwrap_or(DEFAULT_FETCH_CHARS)
         .clamp(1_000, MAX_FETCH_CHARS);
     record(agent, chat_id, "web_fetch", &url);
-    let direct = direct_fetch(agent, &url, max_chars).await;
+    let direct = direct_fetch(agent, &url).await;
     let fallback_reason = match &direct {
         Ok(page) if page.thin => {
             Some("the page has almost no readable text (bot wall or JavaScript-only)".to_owned())
@@ -266,38 +473,80 @@ pub async fn web_fetch(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value
     };
     if let Some(reason) = fallback_reason {
         tracing::info!(url, reason, "web_fetch: trying the reader endpoint");
+        // Ask the endpoint for everything it will give, not for `max_chars`: the extra text goes
+        // into the handle so this branch can be paged like the direct one.
         if let Ok(text) = mcp_call(
             agent,
             FETCH_TOOL,
-            json!({ "urls": [url], "maxCharacters": max_chars }),
+            json!({ "urls": [url], "maxCharacters": MAX_FETCH_CHARS }),
             FETCH_TIMEOUT,
         )
         .await
         {
             if text.trim().len() > THIN_PAGE_CHARS {
+                let body = offload(agent, chat_id, &url, &text, max_chars);
                 return text_result(crate::store::redact(&format!(
-                    "URL: {url}\nSource: reader endpoint ({reason})\n\n{text}"
+                    "URL: {url}\nSource: reader endpoint ({reason})\n\n{body}"
                 )));
             }
         }
     }
     match direct {
-        Ok(page) => text_result(crate::store::redact(&format!(
-            "URL: {url}\nStatus: {}\nContent-Type: {}\n\n{}",
-            page.status, page.content_type, page.text
-        ))),
+        Ok(page) => {
+            let body = offload(agent, chat_id, &url, &page.text, max_chars);
+            text_result(crate::store::redact(&format!(
+                "URL: {url}\nStatus: {}\nContent-Type: {}\n\n{body}",
+                page.status, page.content_type
+            )))
+        }
         Err(e) => err_result(format!("web_fetch failed: {e}")),
     }
+}
+
+/// The inline body for one fetched page: the head, capped at `max_chars`, plus — for anything
+/// over `OFFLOAD_CHARS` — a handle holding the **whole** text.
+///
+/// Character offsets into the handle line up with the inline head, so
+/// `peek(handle, {chars:[max_chars, …]})` continues exactly where the head stops. Without this
+/// the remainder was dropped inside `direct_fetch` and re-fetching at a higher `max_chars` was
+/// the only way to reach it — impossible at all past `MAX_FETCH_CHARS`.
+fn offload(agent: &Arc<Agent>, chat_id: &str, url: &str, text: &str, max_chars: usize) -> String {
+    let chars = text.chars().count();
+    if chars <= OFFLOAD_CHARS {
+        return clip_chars(text, max_chars);
+    }
+    // Redact before the blob is written: `peek` reads the file back verbatim, so an unredacted
+    // handle would hand out what the inline text is careful not to show.
+    let text = crate::store::redact(text);
+    let chars = text.chars().count();
+    let handle = materialize_handle(agent, chat_id, &format!("web_fetch {url}"), &text);
+    let banner = format!(
+        "[handle {handle}: web_fetch {url}, {chars} chars, {} lines]",
+        text.lines().count()
+    );
+    if chars <= max_chars {
+        return format!("{banner}\n{text}");
+    }
+    let head: String = text.chars().take(max_chars).collect();
+    // `peek` clips its own answer at 16,000 bytes, so suggest a window it returns whole.
+    let to = chars.min(max_chars + 8_000);
+    format!(
+        "{banner}\n{head}\n…[cut at {max_chars} of {chars} chars. The rest is in the handle: \
+         peek(\"{handle}\", {{chars:[{max_chars},{to}]}}) reads on from here and \
+         peek(\"{handle}\", {{grep:\"pattern\"}}) searches the whole page. Do not fetch this URL again.]"
+    )
 }
 
 struct Page {
     status: u16,
     content_type: String,
+    /// The whole page, not the inline head: the caller offloads it to a handle and clips its own
+    /// copy. Bounded by `MAX_BODY_BYTES`, which is read off the wire.
     text: String,
     thin: bool,
 }
 
-async fn direct_fetch(agent: &Arc<Agent>, url: &str, max_chars: usize) -> Result<Page, String> {
+async fn direct_fetch(agent: &Arc<Agent>, url: &str) -> Result<Page, String> {
     let resp = agent
         .http_client()
         .get(url)
@@ -341,7 +590,7 @@ async fn direct_fetch(agent: &Arc<Agent>, url: &str, max_chars: usize) -> Result
         } else {
             content_type
         },
-        text: clip_chars(&text, max_chars),
+        text,
         thin,
     })
 }
@@ -418,16 +667,11 @@ fn clip_chars(s: &str, max: usize) -> String {
 /// simple, and anything else can go to the reader endpoint.
 pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
     let mut s = html.to_owned();
-    for tag in ["script", "style", "noscript", "svg", "template"] {
-        let re = regex_lite::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap();
+    for re in HTML_OMITTED.iter() {
         s = re.replace_all(&s, " ").into_owned();
     }
-    let comments = regex_lite::Regex::new(r"(?s)<!--.*?-->").unwrap();
-    s = comments.replace_all(&s, " ").into_owned();
-    let anchors =
-        regex_lite::Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#)
-            .unwrap();
-    s = anchors
+    s = HTML_COMMENTS.replace_all(&s, " ").into_owned();
+    s = HTML_ANCHORS
         .replace_all(&s, |c: &regex_lite::Captures| {
             let href = decode_entities(&c[1]);
             let label = strip_tags(&c[2]);
@@ -440,22 +684,15 @@ pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
             }
         })
         .into_owned();
-    let li = regex_lite::Regex::new(r"(?i)<li\b[^>]*>").unwrap();
-    s = li.replace_all(&s, "\n- ").into_owned();
-    let headings = regex_lite::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap();
-    s = headings
+    s = HTML_LIST_ITEMS.replace_all(&s, "\n- ").into_owned();
+    s = HTML_HEADINGS
         .replace_all(&s, |c: &regex_lite::Captures| {
             let n: usize = c[1].parse().unwrap_or(1);
             format!("\n\n{} ", "#".repeat(n))
         })
         .into_owned();
-    let breaks = regex_lite::Regex::new(
-        r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|/header|/footer|/pre|/blockquote|/ul|/ol|/dd|/dt|hr)\b[^>]*>",
-    )
-    .unwrap();
-    s = breaks.replace_all(&s, "\n").into_owned();
-    let cells = regex_lite::Regex::new(r"(?i)</t[dh]>").unwrap();
-    s = cells.replace_all(&s, " | ").into_owned();
+    s = HTML_BREAKS.replace_all(&s, "\n").into_owned();
+    s = HTML_CELLS.replace_all(&s, " | ").into_owned();
     let text = strip_tags(&s);
     let text = decode_entities(&text);
     let mut out = String::with_capacity(text.len());
@@ -477,8 +714,7 @@ pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
 }
 
 fn strip_tags(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"(?s)<[^>]*>").unwrap();
-    re.replace_all(s, " ").into_owned()
+    HTML_TAGS.replace_all(s, " ").into_owned()
 }
 
 fn absolute_url(href: &str, base: Option<&str>) -> Option<String> {
@@ -523,8 +759,7 @@ fn decode_entities(s: &str) -> String {
         .replace("&hellip;", "…")
         .replace("&mdash;", "—")
         .replace("&ndash;", "–");
-    let numeric = regex_lite::Regex::new(r"&#(x?)([0-9a-fA-F]+);").unwrap();
-    out = numeric
+    out = HTML_NUMERIC_ENTITIES
         .replace_all(&out, |c: &regex_lite::Captures| {
             let n = if c[1].is_empty() {
                 c[2].parse::<u32>().ok()
@@ -557,6 +792,150 @@ mod tests {
         assert!(text.contains("GET | /nodes"));
         assert!(!text.contains("x()"));
         assert!(!text.contains("hidden"));
+    }
+
+    /// Jacob, Test5, 2026-11-04, T5 13:51:04 (twice): `web_search: primary endpoint failed;
+    /// HTML fallback`, because the keyless endpoint answered `429 Too Many Requests … You've
+    /// hit Exa's free MCP rate limit`. A rejection took 150–230 ms, so the search was handed to
+    /// a DuckDuckGo regex parse almost instantly. A rejection now buys a wait and a retry.
+    #[test]
+    fn a_rejection_backs_off_and_queues_the_burst() {
+        let p = Pacer::default();
+        // Nothing has been refused, so nothing waits and searches still fan out in parallel.
+        assert!(!p.serializing());
+        assert!(p.wait().is_none());
+
+        p.note_limited(0);
+        assert!(
+            p.serializing(),
+            "a burst spends one quota, so it queues behind one lane while the limit holds"
+        );
+        let first = p.wait().expect("the next attempt holds off");
+        assert!(first <= RATE_LIMIT_BACKOFF && first > Duration::ZERO);
+
+        // The wait doubles while rejections continue.
+        p.note_limited(1);
+        let second = p.wait().expect("still holding off");
+        assert!(second > first, "{second:?} should exceed {first:?}");
+
+        // A search got through: the hold-off goes so the next one is not delayed for nothing.
+        p.note_ok();
+        assert!(p.wait().is_none());
+        // The lane stays, though — that answer may be *because* the burst was queued.
+        assert!(p.serializing());
+    }
+
+    /// A queued search gives up rather than holding the turn open. Without a ceiling the lane is
+    /// itself the failure: one rejection serialises every search for a minute, so the last search
+    /// of a codemode fan-out would wait out every search ahead of it — and all of them end in the
+    /// same fallback anyway. Past the budget, pacing stops and the weaker answer is taken.
+    #[tokio::test]
+    async fn a_queued_search_stops_waiting_at_its_budget() {
+        let p = Pacer::default();
+        p.note_limited(0);
+        assert!(p.serializing());
+        assert!(p.wait().is_some(), "there is a hold-off to wait out");
+
+        // Budget already spent: the hold-off is not waited out and the lane is not even taken.
+        let mut spent = None;
+        assert!(!hold(&p, &mut spent, Instant::now()).await);
+        assert!(spent.is_none());
+
+        // With budget, the same hold-off is waited out and the search goes on.
+        let mut first = None;
+        assert!(hold(&p, &mut first, Instant::now() + RATE_LIMIT_BUDGET).await);
+        assert!(
+            first.is_some(),
+            "a serialising burst queues behind the lane"
+        );
+        assert!(p.wait().is_none(), "the hold-off was waited out");
+
+        // A second search cannot have the lane while the first holds it, and it stops waiting at
+        // its own deadline instead of queueing behind the whole cooldown.
+        let mut second = None;
+        let t = Instant::now();
+        assert!(!hold(&p, &mut second, Instant::now() + Duration::from_millis(50)).await);
+        assert!(second.is_none());
+        assert!(
+            t.elapsed() < RATE_LIMIT_COOLDOWN,
+            "waited {:?}, which is the stall this budget exists to stop",
+            t.elapsed()
+        );
+    }
+
+    /// Only a rate limit is worth retrying; every other failure still goes straight on.
+    #[test]
+    fn only_a_rejection_counts_as_rate_limited() {
+        assert!(rate_limited(
+            "search endpoint answered 429 Too Many Requests: You've hit Exa's free MCP rate limit"
+        ));
+        assert!(!rate_limited(
+            "search endpoint answered 500 Internal Server Error: nope"
+        ));
+        assert!(!rate_limited(
+            "search endpoint unreachable: connection refused"
+        ));
+        assert!(!rate_limited("no results"));
+    }
+
+    /// End to end against an endpoint that behaves like Exa's free MCP: it rejects the first
+    /// call and serves the second. The answer must come from the retry, not from the HTML
+    /// fallback — which is the whole point, since the fallback is a regex parse of a results
+    /// page and is weaker than what the retry gets.
+    #[tokio::test]
+    async fn a_rate_limited_search_retries_instead_of_falling_back() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async {
+                use axum::response::IntoResponse;
+                if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        "You've hit Exa's free MCP rate limit. Please try again later.",
+                    )
+                        .into_response();
+                }
+                axum::Json(json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "content": [{ "type": "text",
+                        "text": "Python 3.15.2 — https://www.python.org/downloads/" }] }
+                }))
+                .into_response()
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        std::env::set_var(
+            "ARBOS_WEB_SEARCH_MCP_URL",
+            format!("http://127.0.0.1:{port}/mcp"),
+        );
+        let out = web_search(
+            &agent,
+            &json!({ "query": "latest python release" }),
+            "c-test",
+        )
+        .await;
+        std::env::remove_var("ARBOS_WEB_SEARCH_MCP_URL");
+
+        // The call count first: it is the assertion that does not depend on what any network
+        // the test happens to have would answer.
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "the rejection is retried once, not handed to DuckDuckGo"
+        );
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(
+            text.contains("Python 3.15.2"),
+            "the retry's answer is the result: {text}"
+        );
     }
 
     #[test]
@@ -605,5 +984,135 @@ mod tests {
             decode_entities("a &amp; b &lt;c&gt; &#65;&#x42; &quot;q&quot;"),
             "a & b <c> AB \"q\""
         );
+    }
+
+    /// `peek`'s `chars` slice (`mcp.rs`), so the test reads a handle the way the agent does.
+    fn peek_chars(agent: &Arc<Agent>, handle: &str, from: usize, to: usize) -> String {
+        let h = agent
+            .store
+            .handle(handle)
+            .expect("handle lookup")
+            .expect("handle is registered");
+        let full = std::fs::read_to_string(&h.path).expect("blob on disk");
+        full.chars().skip(from).take(to - from).collect()
+    }
+
+    /// The regression: text past `max_chars` used to be dropped inside `direct_fetch`, so no
+    /// sequence of calls could reach it. It now lives in the handle, at the offsets the inline
+    /// body advertises.
+    #[tokio::test]
+    async fn a_cut_page_can_be_read_on_past_the_cut() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
+        let max_chars = 4_500;
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/big",
+            &page,
+            max_chars,
+        );
+
+        let handle = body
+            .split_once("[handle ")
+            .and_then(|(_, r)| r.split_once(':'))
+            .map(|(id, _)| id.to_owned())
+            .expect("the body names a handle");
+        let past_the_cut: String = page.chars().skip(max_chars).take(200).collect();
+        assert!(
+            !body.contains(&past_the_cut),
+            "the inline body stops at the cut"
+        );
+        assert_eq!(
+            peek_chars(&agent, &handle, max_chars, max_chars + 200),
+            past_the_cut
+        );
+        assert_eq!(
+            peek_chars(&agent, &handle, 0, page.chars().count()),
+            page,
+            "the handle holds the whole page, not the head"
+        );
+    }
+
+    /// The inline half of the same call: capped at `max_chars` and pointing at the handle.
+    #[tokio::test]
+    async fn a_cut_page_says_how_to_read_on() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page = "Z".repeat(50_000);
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/big",
+            &page,
+            20_000,
+        );
+        assert_eq!(
+            body.matches('Z').count(),
+            20_000,
+            "inline text honours max_chars"
+        );
+        assert!(body.contains("[handle h_"));
+        assert!(body.contains("chars:[20000,28000]"));
+        assert!(body.contains("Do not fetch this URL again."));
+    }
+
+    /// Under the threshold nothing is offloaded and the body is exactly the page, as before.
+    #[tokio::test]
+    async fn a_small_page_is_unchanged_and_mints_no_handle() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page = "short page\nwith two lines";
+        assert_eq!(
+            offload(
+                &agent,
+                "c-test",
+                "https://docs.example.com/small",
+                page,
+                20_000
+            ),
+            page
+        );
+    }
+
+    /// Offloading happens at `OFFLOAD_CHARS`, which is what makes `prompts/router.md`'s
+    /// "outputs over 4,000 characters become handles" true for `web_fetch`.
+    #[tokio::test]
+    async fn a_page_over_four_thousand_chars_becomes_a_handle_even_when_nothing_is_cut() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        assert_eq!(OFFLOAD_CHARS, 4_000);
+        let page = "y".repeat(OFFLOAD_CHARS + 1);
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/mid",
+            &page,
+            20_000,
+        );
+        assert!(body.contains("[handle h_"));
+        assert!(
+            body.ends_with(&page),
+            "nothing was cut, so the whole page is inline"
+        );
+    }
+
+    /// A secret in the page must not survive into the blob: `peek` reads that file back verbatim.
+    #[tokio::test]
+    async fn an_offloaded_page_is_redacted_before_it_reaches_the_blob() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let secret = "sk-liveSecretValueForRedactionTest000000";
+        crate::store::redact_live_value(secret);
+        let page = format!("{}\n{secret}\n", "pad\n".repeat(2_000));
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/leak",
+            &page,
+            1_000,
+        );
+        let handle = body
+            .split_once("[handle ")
+            .and_then(|(_, r)| r.split_once(':'))
+            .map(|(id, _)| id.to_owned())
+            .expect("the body names a handle");
+        assert!(!peek_chars(&agent, &handle, 0, page.chars().count()).contains(secret));
     }
 }

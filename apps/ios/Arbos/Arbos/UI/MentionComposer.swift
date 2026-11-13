@@ -302,9 +302,29 @@ struct MentionTextView: UIViewRepresentable {
     /// Paste menu → image / GIF from the pasteboard (feedback
     /// app-01M5TGH18WV3QCK5KZT6XKG7FG). `mime` stays image/gif or image/webp.
     var onPasteImage: ((Data, String, String) -> Void)? = nil
+    /// How many lines the text wraps to at the width it was offered, reported when it changes.
+    /// Measured here because `sizeThatFits` is where the truth already is: the owner needs the
+    /// count to move its controls onto their own row (Grok's multi-line composer), and a second
+    /// measurement elsewhere would be a second answer to the same question.
+    var onLines: ((Int) -> Void)? = nil
+    /// Left pad inside the text view. Full-width rows (channel, or stacked above the controls)
+    /// keep Grok's 17 pt from the pill's edge; when the `+` sits on the same row the HStack
+    /// spacing is already the gap, so this is `Theme.composerTextInsetBesidePlus` — otherwise
+    /// "Ask …" reads centred ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    var leftInset: CGFloat = Theme.composerTextInset
 
-    /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
-    static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
+    /// Grok: one 22 pt line centred in 48; left is the full-width caret (17 pt from the edge).
+    /// Callers that put the `+` beside the text pass `leftInset: Theme.composerTextInsetBesidePlus`.
+    static let insets = textInsets(left: Theme.composerTextInset)
+
+    /// Text-container insets for a chosen left pad. Pure, so the beside-`+` vs full-width
+    /// choice is assertable without mounting the representable
+    /// ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    static func textInsets(left: CGFloat) -> UIEdgeInsets {
+        UIEdgeInsets(top: Theme.composerTextPadY, left: left, bottom: Theme.composerTextPadY, right: 0)
+    }
+
+    private var textInsets: UIEdgeInsets { Self.textInsets(left: leftInset) }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -313,7 +333,7 @@ struct MentionTextView: UIViewRepresentable {
         view.delegate = context.coordinator
         view.backgroundColor = .clear
         view.isScrollEnabled = false
-        view.textContainerInset = Self.insets
+        view.textContainerInset = textInsets
         view.textContainer.lineFragmentPadding = 0
         view.keyboardDismissMode = .interactive
         view.adjustsFontForContentSizeCategory = false
@@ -340,6 +360,10 @@ struct MentionTextView: UIViewRepresentable {
         c.apply(theme: theme, to: view)
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
+        if view.textContainerInset != textInsets {
+            view.textContainerInset = textInsets
+            view.setNeedsLayout()
+        }
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
         view.placeholderLabel.font = c.font
@@ -364,6 +388,14 @@ struct MentionTextView: UIViewRepresentable {
         c.syncFocus(view)
     }
 
+    /// Lines the text occupies, from the height it wants and the height of one line. Pure, so
+    /// the rounding that decides "has this wrapped" is testable without a text view.
+    static func lines(fit: CGFloat, line: CGFloat, insets: UIEdgeInsets) -> Int {
+        guard line > 0 else { return 1 }
+        let text = fit - insets.top - insets.bottom
+        return max(1, Int((text / line).rounded()))
+    }
+
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: MentionUITextView, context: Context) -> CGSize? {
         // Greedy in width like `TextField` (the mic and the round button beside
         // it are fixed); the height hugs the text, one to `maxLines` lines.
@@ -371,11 +403,18 @@ struct MentionTextView: UIViewRepresentable {
         let measured = width.isFinite ? width : max(uiView.bounds.width, 10)
         let fit = uiView.sizeThatFits(CGSize(width: measured, height: .greatestFiniteMagnitude))
         let line = context.coordinator.font.lineHeight
-        let minH = line + Self.insets.top + Self.insets.bottom
-        let maxH = line * CGFloat(maxLines) + Self.insets.top + Self.insets.bottom
+        let insets = textInsets
+        let minH = line + insets.top + insets.bottom
+        let maxH = line * CGFloat(maxLines) + insets.top + insets.bottom
         let h = min(max(fit.height, minH), maxH)
         let scroll = fit.height > maxH + 0.5
         if uiView.isScrollEnabled != scroll { uiView.isScrollEnabled = scroll }
+        // Deferred: this runs inside layout, and the owner turns the count into state.
+        let lines = MentionTextView.lines(fit: fit.height, line: line, insets: insets)
+        if context.coordinator.lastLines != lines {
+            context.coordinator.lastLines = lines
+            DispatchQueue.main.async { onLines?(lines) }
+        }
         return CGSize(width: width, height: h.rounded(.up))
     }
 
@@ -388,6 +427,8 @@ struct MentionTextView: UIViewRepresentable {
         /// Set while this side writes the view, so the delegate does not echo
         /// the change back into SwiftUI state mid-update.
         var rebuilding = false
+        /// Last line count handed to `onLines`, so layout only reports a change.
+        var lastLines = 0
         private(set) var font = UIFont.systemFont(ofSize: Theme.body)
         private var themeKey = ""
         private var chipCache: [String: UIImage] = [:]
@@ -532,7 +573,7 @@ struct MentionTextView: UIViewRepresentable {
             switch m.target {
             case .member(let member) where member.isAgent:
                 if let p = parent.agentProject(member) {
-                    picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
+                    picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture))
                 } else {
                     picture = AnyView(InitialsAvatar(name: member.name ?? member.handle, handle: member.handle, id: member.id, size: MentionTable.picture))
                 }

@@ -11,6 +11,66 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Authority captured once for a rendered chat and shared by its rows and callbacks.
+enum ChatAccountContext: Hashable {
+    case account(AccountWork)
+    case fixture(WorkLifetime.Ticket)
+    case unavailable
+
+    @MainActor
+    init(_ model: AppModel) {
+        guard !Task.isCancelled else { self = .unavailable; return }
+        if model.isFixture {
+            if let owner = model.accountLifetime.ticket { self = .fixture(owner) }
+            else { self = .unavailable }
+        } else if let work = model.accountWork() {
+            self = .account(work)
+        } else {
+            self = .unavailable
+        }
+    }
+
+    var work: AccountWork? {
+        if case .account(let work) = self { return work }
+        return nil
+    }
+
+    var owner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let work): return work.owner
+        case .fixture(let owner): return owner
+        case .unavailable: return nil
+        }
+    }
+
+    @MainActor
+    func accepts(_ model: AppModel) -> Bool {
+        guard !Task.isCancelled else { return false }
+        switch self {
+        case .account(let work): return model.acceptsAccountWork(work)
+        case .fixture(let owner): return model.isFixture && model.accountLifetime.accepts(owner)
+        case .unavailable: return false
+        }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.account(let a), .account(let b)): return a.owner == b.owner
+        case (.fixture(let a), .fixture(let b)): return a == b
+        case (.unavailable, .unavailable): return true
+        default: return false
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        switch self {
+        case .account(let work): hasher.combine(0); hasher.combine(work.owner)
+        case .fixture(let owner): hasher.combine(1); hasher.combine(owner)
+        case .unavailable: hasher.combine(2)
+        }
+    }
+}
+
 /// Long-press → Forward payload for the chat picker sheet: the message (its text, its
 /// pictures / files / videos and its charts all travel) and who wrote it
 /// ([feedback forward-attachments-ios-2026-10-27]).
@@ -87,10 +147,12 @@ private struct ChatSessionHost: View {
     @State private var shownCaughtUp = false
 
     var body: some View {
+        let account = ChatAccountContext(model)
         #if DEBUG
         let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
         #endif
-        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
+        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick, account: account)
+            .id(account)
             // This chat's list only: `messagesVersion[chatId]` moves on every replacement of
             // `messages[chatId]` or `channelRows[chatId]` (`AppModel.bumpVersions`), so a send
             // still re-runs the session at once (#1720) and another chat's stream does not.
@@ -142,6 +204,7 @@ struct ChatSession: View {
     /// publish changes this view's inputs and SwiftUI evaluates the body (and its
     /// `onChange` modifiers) again — see `ChatSessionHost`.
     let tick: Int
+    var account: ChatAccountContext = .unavailable
 
     /// The composer text lives in its own observable so a keystroke re-renders the
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
@@ -166,6 +229,7 @@ struct ChatSession: View {
     @State private var refreshIds: [Id] = []
     /// `messagesVersion` that `rows`, `messageById` and `refreshIds` were built from.
     @State private var refreshVersion: (chat: Id, version: Int?)?
+    @State private var refreshLinkPreviews: Bool?
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -253,7 +317,6 @@ struct ChatSession: View {
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
     @State private var rigViewerForward = false
-    @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
     @State private var sentOnce = false
@@ -267,6 +330,8 @@ struct ChatSession: View {
     @State private var showAttach = false
     /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
     @State private var showFun = false
+    @State private var showCheque = false
+    @State private var showPoll = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -274,8 +339,17 @@ struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// The reader has touched the transcript since the app last put it on its end. The resize
+    /// anchor is given up from that touch, not from the 120 pt "away" line: iOS 27 re-applies
+    /// the bottom anchor when that setting changes, and changing it mid-drag threw the list
+    /// back to its end under the finger. At the touch the list is still on its end, so the
+    /// same re-apply moves nothing.
+    @State private var readerHeld = false
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// The transcript has been put on its newest row once. A page pushed over the chat (a
+    /// sender's profile) re-runs `onAppear` on the way back, and that must keep the reader's place.
+    @State private var settledOnOpen = false
     /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
@@ -367,9 +441,73 @@ struct ChatSession: View {
         showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// The transcript's lazy stack is keyed by the keyword while one is set, so a filter that
-    /// replaces the whole row set gets a **new** stack rather than the one that was holding
-    /// the other 437 rows.
+    /// What the transcript draws above its rows. At most one of these is in the lazy stack at a
+    /// time, and which one it is changes while a chat is on screen — that is the whole point of
+    /// naming it: a child that comes and goes is what `transcriptStackIdentity` has to cover.
+    enum TranscriptLead: String {
+        /// Rows only.
+        case rowsOnly
+        /// The doc holds rows that are not on screen yet: a spinner.
+        case pending
+        /// The room is still catching up on a thread whose size we do not know: a spinner.
+        case catchUp
+        /// An agent chat or channel with nothing in it: the "Ask @handle anything…" hint.
+        case empty
+        /// Search-in-chat with a keyword no message matches.
+        case noMatches
+    }
+
+    /// The lead child for one transcript state. Pure, so the identity and the view can be read
+    /// off the same answer and cannot disagree about which child is in the stack.
+    static func transcriptLead(pending: Bool, caughtUp: Bool, fixture: Bool, messagesEmpty: Bool,
+                               knownEmpty: Bool, rowsEmpty: Bool, agentCopy: Bool,
+                               searchHits: Bool, visibleRowsEmpty: Bool) -> TranscriptLead {
+        if pending { return .pending }
+        if !caughtUp, messagesEmpty, !fixture {
+            // Known-empty (an optimistic new chat seeds `messages[id] = []`): the hint at once,
+            // no spinner flash on a thread we already know has no rows.
+            return knownEmpty ? (agentCopy ? .empty : .rowsOnly) : .catchUp
+        }
+        // People chats and channels stay blank when empty (iMessage-style); the agent copy
+        // would say "Ask @handle anything…", which is wrong there.
+        if rowsEmpty, agentCopy { return .empty }
+        if searchHits, visibleRowsEmpty { return .noMatches }
+        return .rowsOnly
+    }
+
+    private var transcriptLead: TranscriptLead {
+        Self.transcriptLead(pending: model.transcriptPending(chatId),
+                            caughtUp: model.caughtUp.contains(chatId),
+                            fixture: model.isFixture,
+                            messagesEmpty: messages.isEmpty,
+                            knownEmpty: model.hasKnownEmptyTranscript(chatId),
+                            rowsEmpty: rows.isEmpty,
+                            agentCopy: !isPeople && !isChannel,
+                            searchHits: searchHitsActive,
+                            visibleRowsEmpty: visibleRows.isEmpty)
+    }
+
+    /// Which lead child is in the stack and whether the waking banner is up — the two children
+    /// above the rows that come and go. A change here is a rebuild an **open** caused, as
+    /// against one a keyword caused, and the two want different things afterwards.
+    static func transcriptStackShape(lead: TranscriptLead, banner: Bool) -> String {
+        lead.rawValue + (banner ? "+banner" : "")
+    }
+
+    /// The stack's identity. Pure, so a test can hold every transition that re-keys it.
+    static func transcriptStackIdentity(lead: TranscriptLead, banner: Bool, query: String?) -> String {
+        let shape = transcriptStackShape(lead: lead, banner: banner)
+        guard let query else { return "all:\(shape)" }
+        return "filtered:\(shape):\(query)"
+    }
+
+    private var transcriptStackShape: String {
+        Self.transcriptStackShape(lead: transcriptLead, banner: machineBannerText != nil)
+    }
+
+    /// The transcript's lazy stack is keyed by the keyword while one is set, and by the shape of
+    /// whatever sits above the rows, so a change that replaces the row set gets a **new** stack
+    /// rather than the one that was holding the other 437 rows.
     ///
     /// Why it has to be the identity. A keyword swaps the row set for its hits in one step.
     /// iOS 27 does not re-measure the rows that stay: it keeps the space it had reserved for
@@ -386,11 +524,25 @@ struct ChatSession: View {
     /// 3. So the stale state is the stack's own per-child bookkeeping, not the scroll offset,
     /// and the only thing that clears it is a stack that has none.
     ///
-    /// The cost is bounded: unfiltered the key never changes, so the transcript's hot path
-    /// (streaming, window growth, scrolling) still never rebuilds, and a rebuilt filtered
-    /// stack is lazy, so it builds the few rows at the viewport and not the window.
+    /// Why the lead child has to be in it too. A keyword is not the only thing that replaces the
+    /// row set in one step. An agent chat whose rows have not arrived yet draws the empty hint as
+    /// its one lead child; when the rows land that child leaves and the window's rows arrive
+    /// together, and iOS 27 keeps the space it had reserved just the same — the transcript is a
+    /// header and a composer with nothing between them, no hint and no spinner, until a finger
+    /// scroll forces a build ([feedback iphone-blank-chat-on-open-2026-11-03], Jacob: "still").
+    /// Only the bottom inset was taken out of that path before (`2fe8f86f0`, the floating chat
+    /// bar), which is why the blank outlived it: the inset was one trigger, not the mechanism.
+    /// Rows arriving late is a slow link, which is why no simulator open reproduces it.
+    ///
+    /// The cost is bounded: with the rows up and no keyword the key never changes, so the
+    /// transcript's hot path (streaming, window growth, scrolling) still never rebuilds, and a
+    /// rebuilt stack is lazy, so it builds the few rows at the viewport and not the window. The
+    /// waking banner is in the key for the same reason the hint is, and it carries the one cost
+    /// here: a machine that starts waking while someone reads history rebuilds the stack, which
+    /// lands at the bottom anchor. That is a jump to the end instead of a blank transcript.
     private var transcriptStackIdentity: String {
-        searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
+        Self.transcriptStackIdentity(lead: transcriptLead, banner: machineBannerText != nil,
+                                     query: searchHitsActive ? searchText.trimmingCharacters(in: .whitespaces) : nil)
     }
 
     /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.
@@ -398,10 +550,10 @@ struct ChatSession: View {
     /// The identity has to carry the keyword — that is the whole point of it, a new stack per
     /// filter. A log line must not. What someone types into a chat search is their content:
     /// a name, a diagnosis, a fragment of a secret they are looking for. The trace only ever
-    /// needs to know **which of the two stacks** a reveal is scrolling, so the keyword never
-    /// reaches the line and there is nothing to redact later.
+    /// needs to know **which stack** a reveal is scrolling, so the keyword never reaches the
+    /// line and there is nothing to redact later.
     private var stackIdentityForTrace: String {
-        searchHitsActive ? "filtered" : "all"
+        searchHitsActive ? "filtered:\(transcriptStackShape)" : "all:\(transcriptStackShape)"
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -441,6 +593,7 @@ struct ChatSession: View {
     /// Never inside the caller's animation: an animated change to the row list makes
     /// SwiftUI diff the whole window per frame.
     private func growWindow() {
+        guard account.accepts(model) else { return }
         let all = visibleRows
         let available = all.count - windowSkipEnd
         guard windowCount < available else { return }
@@ -460,13 +613,14 @@ struct ChatSession: View {
         if windowCount + step > Self.windowMax, let firstShown, let proxy = scroller {
             // Rows left below the viewport and the bottom anchor would shift what is on
             // screen; put the row that was at the top back where it was.
-            DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
+            DispatchQueue.main.async { guard account.accepts(model) else { return }; proxy.scrollTo(firstShown, anchor: .top) }
         }
     }
 
     /// Back at the tail (a send, the new-messages pill, settle): the window is the
     /// newest rows again.
     private func resetWindowToTail() {
+        guard account.accepts(model) else { return }
         guard windowSkipEnd > 0 || windowCount > Self.windowMax else { return }
         var t = Transaction()
         t.disablesAnimations = true
@@ -551,6 +705,7 @@ struct ChatSession: View {
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
     /// server channel → the channel's page (#1317; the server's page is the channel list's header).
     private func openHeaderProfile() {
+        guard account.accepts(model) else { return }
         model.toggleProfile(headerTarget)
     }
 
@@ -586,18 +741,16 @@ struct ChatSession: View {
     /// Hardware ⌘F toggles the bar ([feedback iphone-chat-search-cmd-f-toggle-2026-10-27]):
     /// closed → open and focus the field; open → close it like ✕ / Esc.
     private func openSearchFromKeyboard() {
+        guard account.accepts(model) else { return }
         let effect = ChatSearchShortcut.apply(open: showSearch)
         if !effect.open {
             closeSearch()
             return
         }
-        if effect.animate {
-            withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
-        } else {
-            showSearch = effect.open
-        }
+        // Keyboard-initiated: the bar cuts in, as every close path already cuts out.
+        showSearch = effect.open
         if effect.focus {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; searchFocused = true }
         }
     }
 
@@ -606,21 +759,27 @@ struct ChatSession: View {
     /// back where a fresh open would show them (a window that slid while the filter was on
     /// was measured against the filtered list; [feedback iphone-search-close-2026-10-28]).
     private func closeSearch(scrollToTail: Bool = true) {
+        guard account.accepts(model) else { return }
         guard showSearch || !searchText.isEmpty || searchFocused else { return }
+        // A bar nothing was typed into filtered nothing: the list and the reader's place in it
+        // are as they were, so only the bar goes.
+        let filtered = !searchText.isEmpty
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
             showSearch = false
             searchText = ""
-            windowSkipEnd = 0
-            windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+            if filtered {
+                windowSkipEnd = 0
+                windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+            }
         }
         searchFocused = false
-        guard scrollToTail else { return }
+        guard scrollToTail, filtered else { return }
         pinnedToBottom = true
         // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
         // before the jump to the tail, or the view stays parked at the top of nothing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { guard account.accepts(model) else { return };
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         }
     }
@@ -629,6 +788,7 @@ struct ChatSession: View {
     /// the filter go, then the full transcript scrolls to that message and highlights it
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
+        guard account.accepts(model) else { return }
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
         // Where the result list was standing when the reader tapped. A reveal animates from
         // wherever the scroll view already is, so this is the one number that says which
@@ -641,7 +801,7 @@ struct ChatSession: View {
         traceOffsetsUntil = Date().addingTimeInterval(Self.revealTraceWindow)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; revealQuoted(messageId) }
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -663,14 +823,16 @@ struct ChatSession: View {
 
     /// Profile "search" tile: raise the in-chat search bar once for this chat.
     private func openPendingSearchIfNeeded() {
+        guard account.accepts(model) else { return }
         guard model.pendingSearchChat == chatId else { return }
         model.pendingSearchChat = nil
         showSearch = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { guard account.accepts(model) else { return }; searchFocused = true }
     }
 
     /// Reply in DM landed here: arm the composer with the cross-chat reply (#1836).
     private func takePendingDMReplyIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let p = model.pendingDMReply, p.chatId == chatId else { return }
         model.pendingDMReply = nil
         replyTo = nil
@@ -682,6 +844,7 @@ struct ChatSession: View {
     /// Forward landed here: put the text in the composer and remember who it was
     /// forwarded from for the next send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES).
     private func takePendingForwardDraftIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let p = model.pendingForwardDraft, p.chatId == chatId else { return }
         model.pendingForwardDraft = nil
         replyTo = nil
@@ -702,10 +865,11 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`). The appear settle scrolls to the end first;
     /// the jump follows a beat later.
     private func revealPendingIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let reveal = model.pendingReveal, reveal.chatId == chatId,
               rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
         model.pendingReveal = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { guard account.accepts(model) else { return };
             pinnedToBottom = false
             revealQuoted(reveal.messageId)
         }
@@ -732,15 +896,17 @@ struct ChatSession: View {
     private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
+        guard account.accepts(model) else { return }
         if AppModel.isDraftDM(chatId) {
             model.fail(UserError.refused("start the call", "Say hi first, then call."))
             return
         }
-        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
+        Task { guard account.accepts(model) else { return }; await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
     }
 
     /// Groups open the picker; DMs and agent chats start at once.
     private func requestCall(_ kind: CallKind) {
+        guard account.accepts(model) else { return }
         if people?.isGroup == true {
             showGroupCallPicker = true
         } else {
@@ -785,6 +951,10 @@ struct ChatSession: View {
     /// D88: a server channel rendered with this same view (`projectId == channelSlot`).
     private var channel: ServerChannel? { projectId == channelSlot ? model.channel(chatId) : nil }
     private var isChannel: Bool { projectId == channelSlot }
+    /// Cheques go to one person: a direct chat with exactly one other human and no agents.
+    private var chequeable: Bool { Wallet.chequesEnabled && (people.map { !$0.isGroup } ?? false) }
+    /// Polls live in people chats (`docs/polls.md`), DMs and groups alike.
+    private var pollable: Bool { people != nil }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     /// The DM's other person while they are on my block list ([feedback
@@ -839,7 +1009,7 @@ struct ChatSession: View {
                 guard seen.insert(p.id).inserted else { continue }
                 out.append(PresenceParticipant(
                     id: "working:\(p.id)", name: p.name, activity: .working,
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar)),
                     target: .agent(projectId: p.id)
                 ))
             }
@@ -847,7 +1017,7 @@ struct ChatSession: View {
             let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
                 id: "working:\(p.id)", name: p.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar)),
                 target: .agent(projectId: project.id)
             ))
         }
@@ -892,7 +1062,9 @@ struct ChatSession: View {
     /// With a picture or video staged, the field is the description bar for that
     /// send — one message, not a follow-up text bubble.
     private func composerPrompt(for draft: String) -> String {
-        if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
+        // A staged picture no longer renames the field. Grok previews the picture inside the
+        // composer and leaves the prompt alone, so the field still says who will answer
+        // ([feedback attachment-in-composer-2026-11-09]).
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if isJobTab { return "Steer this task" }
@@ -934,6 +1106,10 @@ struct ChatSession: View {
     /// Streaming deltas and single appends rebuild only the tail (feedback
     /// app-01M5NNJ001NHHYBHXTASM5NXBZ); everything else still does a full pass.
     private func refreshRows() {
+        guard account.accepts(model) else { return }
+        let linkPreviews = model.linkPreviews
+        let policyChanged = refreshLinkPreviews != linkPreviews
+        defer { refreshLinkPreviews = linkPreviews }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         var agentNames: [String: String] = [:]
@@ -969,7 +1145,10 @@ struct ChatSession: View {
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        let multiParty = isChannel || (people?.isGroup ?? false)
+        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+        // `names_senders`, and the solo-1:1 quote-header hide depends on it
+        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
@@ -980,7 +1159,7 @@ struct ChatSession: View {
         // A token that lands one version after these rows skips the history compare.
         let tailEdit = version != nil && version == model.tailEditVersion[chatId]
             && shown.map { $0 &+ 1 } == version && list.count == refreshIds.count
-        if list.count == refreshIds.count, list.count > 0,
+        if !policyChanged, list.count == refreshIds.count, list.count > 0,
            tailEdit || zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
             let last = list[list.count - 1]
             let prefixSame = tailEdit || list.dropLast().allSatisfy { messageById[$0.id] == $0 }
@@ -999,7 +1178,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -1018,7 +1197,7 @@ struct ChatSession: View {
         }
 
         // Incremental append: one new message at the end.
-        if list.count == refreshIds.count + 1, list.count > 0,
+        if !policyChanged, list.count == refreshIds.count + 1, list.count > 0,
            zip(list.dropLast(), refreshIds).allSatisfy({ $0.id == $1 }) {
             rowsPath = .append
             let last = list[list.count - 1]
@@ -1027,7 +1206,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -1052,7 +1231,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -1097,6 +1276,10 @@ struct ChatSession: View {
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
+                        guard account.accepts(model) else { return .handled }
+                        // The lift after a hold that opened the message menu is not a tap on
+                        // the link (or chip) under the finger.
+                        if ChatGestures.tapEndsHold() { return .handled }
                         // Inside a search result the row owns the tap: the reveal is what the
                         // reader asked for, so the chip and the spoiler stand down while a
                         // keyword filters the list (`ChatSearchClose.rowOwnsInnerTap`). A link
@@ -1176,7 +1359,7 @@ struct ChatSession: View {
                 }
                 if hasCallBar, let active = calls.activeByChat[chatId] {
                     CallBar(call: active) {
-                        Task { await calls.join(active, title: callTitle) }
+                        Task { guard account.accepts(model) else { return }; await calls.join(active, title: callTitle) }
                     }
                     .padding(.horizontal, 16)
                 }
@@ -1194,28 +1377,43 @@ struct ChatSession: View {
         // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01) — placed
         // from the composer's measured frame, since that inset is wrong on some hardware.
         .overlay(alignment: .bottom) { ChatBarFade(bar: chatBarHeight, composer: composerEdge, keyboard: composerFocused) }
+        // Both jump chips sit centred just above the chat bar. While Search-in-chat is open
+        // they overlay the lower result rows: a tap aimed at a hit there lands on the chip
+        // instead, `jumpToLatest` re-pins the filtered list to its end, and the bar stays
+        // open — the reveal never runs. Gate run 43133707619 is that miss on `long-265` at
+        // y457 (24 pt above the bar, dead centre of the chevron's 44 pt hit). Hide them for
+        // the life of the bar; they return the moment it closes.
         .overlay(alignment: .bottom) {
-            if newBelowCount > 0 {
-                ChatBarHeightReader(bar: chatBarHeight) { bar in
-                    newMessagesPill.padding(.bottom, bar + 10)
+            // The fade is scoped to the chip, not the whole canvas.
+            ZStack {
+                if newBelowCount > 0, !showSearch {
+                    ChatBarHeightReader(bar: chatBarHeight) { bar in
+                        newMessagesPill.padding(.bottom, bar + 10)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
+            .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         }
-        // Trailing-only overlay so the hit target is just the disc (not a full-width
-        // bar). UIKit tap inside the disc still works while the transcript decelerates.
-        .overlay(alignment: .bottomTrailing) {
-            if newBelowCount == 0, awayFromBottom {
-                ChatBarHeightReader(bar: chatBarHeight) { bar in
-                    scrollToBottomButton
-                        .padding(.trailing, composerSideInset)
-                        .padding(.bottom, bar + 10)
+        // Centred over the composer, like the reference build and like `newMessagesPill` above,
+        // which takes the same slot when there is something below to count. Pinned to the
+        // trailing edge it sat over the newest bubble instead of over the gap between them.
+        // The overlay is still sized to the disc — `ChatBarHeightReader` passes its content
+        // straight through — so the hit target is the disc and not a full-width bar, and a
+        // UIKit tap inside it still works while the transcript decelerates.
+        .overlay(alignment: .bottom) {
+            ZStack {
+                if newBelowCount == 0, awayFromBottom, !showSearch {
+                    ChatBarHeightReader(bar: chatBarHeight) { bar in
+                        scrollToBottomButton
+                            .padding(.bottom, bar + 10)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
+            .animation(.easeOut(duration: 0.2), value: awayFromBottom)
+            .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         }
-        .animation(.easeOut(duration: 0.2), value: awayFromBottom)
-        .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .environment(\.composerInset, composerSideInset)
         // The bar floats over the transcript instead of being a bottom safe-area inset: every
         // change of its height (the chat opening, the status row, a reply or edit banner,
@@ -1231,14 +1429,11 @@ struct ChatSession: View {
                 if let error = model.sendErrors[chatId] {
                     ErrorNote(id: "composer-error", error: error,
                               detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
-                                                   set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
-                              onTryAgain: { model.retrySendError(chatId) })
+                                                   set: { guard account.accepts(model) else { return }; if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
+                              onTryAgain: { guard account.accepts(model) else { return }; model.retrySendError(chatId) })
                         .padding(.horizontal, composerSideInset)
                         .padding(.bottom, 10)
                 }
-                presenceRow
-                    .environment(\.composerInset, composerSideInset)
-                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -1308,16 +1503,18 @@ struct ChatSession: View {
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
                                                 hasReplies: row.replyCount > 0,
-                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
+                                                hasPreview: model.linkPreviews && messageById[row.messageId]?.linkPreview != nil,
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
-                                                inPrivateChat: people?.isGroup != true),
+                                                inPrivateChat: people?.isGroup != true,
+                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
                             // again while the overlay fades) would undo the reaction.
                             guard actionsRow != nil else { return }
                             closeActions()
+                            guard account.accepts(model) else { return }
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },
                         onMenu: { item in
@@ -1329,7 +1526,7 @@ struct ChatSession: View {
                             // showReactionSenders: holding the message lists who
                             // used each emoji under the held bubble (chip hold
                             // does the same one-emoji list in the transcript).
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
                                     showReactionSenders: !row.reactions.isEmpty)
@@ -1364,13 +1561,14 @@ struct ChatSession: View {
         // composer bar, goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
         .fullScreenCover(item: $rigViewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { rigViewer = nil } },
+                        openForward: rigViewerForward, origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
-                ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
+                ModelPickerView(project: project, account: account).environmentObject(model).environment(\.theme, theme)
             }
         }
         .sheet(isPresented: $showAgentSecrets) {
@@ -1378,9 +1576,6 @@ struct ChatSession: View {
                 .environmentObject(model).environment(\.theme, theme)
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model).environment(\.theme, theme)
         }
         .sheet(isPresented: $showGroupCallPicker) {
             if let people {
@@ -1391,6 +1586,7 @@ struct ChatSession: View {
             }
         }
         .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
+            guard account.accepts(model) else { return }
             if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
         }
     }
@@ -1403,7 +1599,9 @@ struct ChatSession: View {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $pendingForward) { pending in
-            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
+            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true,
+                         origin: MediaOrigin(model, account: account)) { target in
+                guard account.accepts(model) else { return }
                 pendingForward = nil
                 // Text-only: opens the target chat with the text drafted; the user
                 // taps Send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES). Media /
@@ -1426,9 +1624,9 @@ struct ChatSession: View {
         .sheet(isPresented: $showTasks) {
             TasksSheet(jobs: model.openJobs(chatId),
                        onSteer: { job in steerJob(job) },
-                       onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
-                       onStopAll: { showTasks = false; stop() },
-                       onOpen: { job in showTasks = false; model.openJobTab(job.id) })
+                       onStop: { job in guard account.accepts(model) else { return }; model.stopJob(chatId: chatId, jobId: job.id) },
+                       onStopAll: { guard account.accepts(model) else { return }; showTasks = false; stop() },
+                       onOpen: { job in guard account.accepts(model) else { return }; showTasks = false; model.openJobTab(job.id) })
                 .environment(\.theme, theme)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -1449,11 +1647,11 @@ struct ChatSession: View {
         sessionRootDemoTasks
             .task(id: calls.activeByChat[chatId]?.callId) {
                 // While the Join bar is up, re-check the relay so an ended call does not stick.
-                guard !isChannel, calls.activeByChat[chatId] != nil else { return }
+                guard account.accepts(model), !isChannel, calls.activeByChat[chatId] != nil else { return }
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
-                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+                    guard account.accepts(model), !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId, expectedOwner: account.work?.owner)
                 }
             }
             // Timed group mute: sleep until `silencedUntil`, then clear local silenced state and
@@ -1461,14 +1659,14 @@ struct ChatSession: View {
             // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Lives here (not on the muted line) so
             // the sleep is not cancelled when `isSilencedNow` flips false a tick early.
             .task(id: people?.silencedUntil) {
-                guard isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
+                guard account.accepts(model), isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
                 let end = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
                 let delay = end.timeIntervalSinceNow
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
-                guard !Task.isCancelled else { return }
-                await MainActor.run { model.clearExpiredSilence(chatId: chatId) }
+                guard account.accepts(model), !Task.isCancelled else { return }
+                await MainActor.run { guard account.accepts(model) else { return }; model.clearExpiredSilence(chatId: chatId) }
             }
     }
 
@@ -1480,19 +1678,20 @@ struct ChatSession: View {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
             // closes itself.
+            guard account.accepts(model) else { return }
             if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
-                guard !Task.isCancelled else { break }
+                guard account.accepts(model), !Task.isCancelled else { break }
                 model.pollJobsIfNeeded(chatId: chatId)
                 if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
                 if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
             }
         }
         .task {
-            guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
+            guard account.accepts(model), DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
-            while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
+            while account.accepts(model) && !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             composerFocused = true
             try? await Task.sleep(nanoseconds: 800_000_000)
@@ -1516,7 +1715,12 @@ struct ChatSession: View {
             demoPresentNext()
         }
         .task {
-            guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
+            guard DebugHooks.timeReveal else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            timeReveal = RowView.timeRevealWidth(theme)
+        }
+        .task {
+            guard account.accepts(model), DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
             model.demoStarted = true
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             composerFocused = true
@@ -1573,7 +1777,9 @@ struct ChatSession: View {
             refreshRows()
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
+        .onChange(of: model.linkPreviews) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
+            guard account.accepts(model) else { return }
             model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)
         }
@@ -1581,6 +1787,7 @@ struct ChatSession: View {
 
     /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
     private func handleSessionAppear() {
+        guard account.accepts(model) else { return }
         appearedAt = Date()
         LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
         #if DEBUG
@@ -1593,12 +1800,15 @@ struct ChatSession: View {
         // Restore unsent text left when the user backed out of this thread.
         let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
         composerDraft.onChange = { [chatId] d in
+            guard account.accepts(model) else { return }
             // Keep the draft while the view is still up so a process kill mid-type
             // is not required — leaving the thread saves on disappear too.
             model.setComposerDraft(d, for: chatId)
-            // People chats (DM + group): tell the room we are typing so peers
-            // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
-            if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Tell the room we are typing. In a people chat (DM + group) peers see names
+            // on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]); in an
+            // agent's chat it wakes a sleeping machine a moment before the message
+            // (docs/box-scaling.md §4.2) and nobody is shown it.
+            if !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 model.typedIn(chatId: chatId)
             }
             let everyone = AppModel.addressesEveryone(d)
@@ -1613,7 +1823,7 @@ struct ChatSession: View {
             }
             updateMentionQuery()
         }
-        composerDraft.onCaretOrMentions = { updateMentionQuery() }
+        composerDraft.onCaretOrMentions = { guard account.accepts(model) else { return }; updateMentionQuery() }
         if composerDraft.text.isEmpty, !saved.isEmpty {
             composerDraft.text = saved
             composerDraft.caret = (saved as NSString).length
@@ -1621,11 +1831,13 @@ struct ChatSession: View {
             if DebugHooks.composerDraft != nil { composerFocused = true }
         }
         if isPeople { model.markPeopleRead(chatId, force: true) }
-        if isChannel {
-            // The newest page now, live rows through the listener from here on.
+        if isChannel || isPeople {
+            // The newest page now, live rows through the listener from here on. A people chat
+            // has a page to ask for only when it is read from the homeserver.
             model.openChannel(chatId)
-        } else {
-            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
+        }
+        if !isChannel {
+            Task { guard account.accepts(model) else { return }; await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId, expectedOwner: account.work?.owner) }
         }
         openPendingSearchIfNeeded()
         takePendingDMReplyIfNeeded()
@@ -1636,16 +1848,16 @@ struct ChatSession: View {
         if let link = DebugHooks.link {
             model.setRoomLink(chatId, link)
             if let ms = DebugHooks.linkClearsMs {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { guard account.accepts(model) else { return }; model.setRoomLink(chatId, .live) }
             }
         }
         #if DEBUG
         let drive = DebugHooks.perfDrive
-        if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+        if !drive.isEmpty { Task { @MainActor in guard account.accepts(model) else { return }; await runPerfDrive(drive) } }
         #endif
         if let show = DebugHooks.show, !model.showHookDone {
             model.showHookDone = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) { guard account.accepts(model) else { return };
                 self.handleDebugShowHook(show)
             }
         }
@@ -1653,6 +1865,10 @@ struct ChatSession: View {
 
     /// Chat disappear: keep draft, mark-read once more, clear visibleChatId.
     private func handleSessionDisappear() {
+        recorder.cancel()
+        composerDraft.onChange = nil
+        composerDraft.onCaretOrMentions = nil
+        guard account.accepts(model) else { return }
         // Keep the typed draft so coming back to this thread restores it.
         model.setComposerDraft(composerDraft.text, for: chatId)
         // The two callbacks capture this view, whose `@State` owns the draft: left set, the
@@ -1668,6 +1884,7 @@ struct ChatSession: View {
 
     /// Refresh rows when `messagesVersion` moves; mark-read on a new last row.
     private func handleMessagesVersionChange(_ new: Int) {
+        guard account.accepts(model) else { return }
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
         #endif
@@ -1689,6 +1906,7 @@ struct ChatSession: View {
 
     /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
     private func handleCaughtUpAutoSend(_ ready: Bool) {
+        guard account.accepts(model) else { return }
         guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
         // Several messages separated by " ||| " go out a few seconds apart
         // (multitasking checks: the composer never waits for a reply).
@@ -1696,7 +1914,7 @@ struct ChatSession: View {
         composerDraft.text = parts.first ?? text
         send()
         if parts.count > 1 {
-            Task {
+            Task { guard account.accepts(model) else { return };
                 for p in parts.dropFirst() {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     composerDraft.text = p
@@ -1709,9 +1927,10 @@ struct ChatSession: View {
     /// Rig / DebugHooks `ARBOS_SHOW=…` cases for chat appear (kept out of the
     /// view builder so the type-checker can finish).
     private func handleDebugShowHook(_ show: String) {
+        guard account.accepts(model) else { return }
         switch show {
                     case "keyboard": composerFocused = true
-                    case "settings": showSettings = true
+                    case "settings": model.showOwnProfile()
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
@@ -1733,7 +1952,7 @@ struct ChatSession: View {
                         // The group page, then its first other member pushed over it (rig).
                         openHeaderProfile()
                         if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard account.accepts(model) else { return }; model.showProfile(.user(ProfilePerson(other))) }
                         }
                     case "members", "addperson": openHeaderProfile()
                     case "foreignagent", "foreignagent-owner":
@@ -1743,7 +1962,7 @@ struct ChatSession: View {
                         if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
                             model.showProfile(.agent(projectId: foreign.id))
                             if show == "foreignagent-owner", let owner = agent.ownerHandle {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard account.accepts(model) else { return };
                                     model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
                                 }
                             }
@@ -1755,7 +1974,7 @@ struct ChatSession: View {
                     case "call":
                         #if DEBUG
                         if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
-                            Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
+                            Task { guard account.accepts(model) else { return }; await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
                                                          chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
                         } else {
                             startCall(DebugHooks.callKind == "video" ? .video : .voice)
@@ -1763,7 +1982,7 @@ struct ChatSession: View {
                         #else
                         startCall(.voice)
                         #endif
-                    case "recording": recorder.start()
+                    case "recording": recorder.start(isCurrent: { account.accepts(model) })
                     // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
                     // the n-th newest message row (0 = newest) through the menu's own path, the
                     // pasteboard printed to the console, then the composer's paste 2 s later.
@@ -1774,7 +1993,7 @@ struct ChatSession: View {
                         if n < candidates.count {
                             let row = candidates[candidates.count - 1 - n]
                             runMessageMenu(.copy, row: row)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { guard account.accepts(model) else { return };
                                 MessagePasteboard.debugDump()
                                 let media = MessagePasteboard.pendingAttachments()
                                 if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
@@ -1881,7 +2100,7 @@ struct ChatSession: View {
                         // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
                         // newest bubble is long-pressed — the overlay must clear the keyboard.
                         composerFocused = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) { guard account.accepts(model) else { return };
                             if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
                         }
                     case "reply-dm":
@@ -1906,6 +2125,7 @@ struct ChatSession: View {
     /// Demo tour: present the next sheet; each one auto-dismisses and its
     /// onDismiss schedules the next, so presentations never overlap.
     private func demoPresentNext() {
+        guard account.accepts(model) else { return }
         guard !demoQueue.isEmpty else { return }
         let step = demoQueue.removeFirst()
         let hold: Double = step == "voice" ? 3.5 : 3.0
@@ -1913,11 +2133,12 @@ struct ChatSession: View {
         case "model": showModelPicker = true
         case "attach": showAttach = true
         case "voice": startCall(.voice)
-        case "settings": showSettings = true
+        case "settings": model.showOwnProfile()
         default: break
         }
+        // Settings is a pushed page and the tour's last step: nothing takes it down again.
         guard step != "settings" else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) { guard account.accepts(model) else { return };
             switch step {
             case "model": showModelPicker = false
             case "attach": showAttach = false
@@ -1928,8 +2149,9 @@ struct ChatSession: View {
     }
 
     private func demoDismissed() {
-        guard DebugHooks.liveDemo, !demoQueue.isEmpty else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { demoPresentNext() }
+        guard account.accepts(model) else { return }
+        guard account.accepts(model), DebugHooks.liveDemo, !demoQueue.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { guard account.accepts(model) else { return }; demoPresentNext() }
     }
 
     // MARK: Header (floating glass)
@@ -1991,6 +2213,7 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint("Opens the channel details")
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
@@ -2003,15 +2226,10 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
-                            } else if people.isGroup, people.isNeutralAvatar {
-                                NeutralAvatar(name: people.title, size: Controls.avatar)
-                                Text(people.title)
-                                    .font(.system(size: Theme.body, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                                    .lineLimit(1)
-                            } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
-                                // D92 amendment: the leaf picked on the Create screen.
-                                LeafAvatar(pick: leaf, size: Controls.avatar)
+                            } else if people.isGroup, people.avatarDiscColor != nil {
+                                // D92 amendment: the colour picked on the Create screen, or the
+                                // id's own once the core resolves a stored sentinel.
+                                DiscAvatar(color: DiscArt.pick(seed: people.id, color: people.avatarDiscColor), size: Controls.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2038,11 +2256,12 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state))
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -2053,6 +2272,7 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint("Opens the agent profile")
                     }
                 }
@@ -2070,7 +2290,7 @@ struct ChatSession: View {
                     closeSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; searchFocused = true }
                 }
             } label: {
                 GlassCircle(material: headerMaterial) {
@@ -2147,6 +2367,7 @@ struct ChatSession: View {
     /// ↓ after a quote tap: return to the reply we came from. Otherwise jump to
     /// the latest row ([feedback app-01M5WDFMAZX82JNSEVZ94BM90D]).
     private func jumpBackOrLatest() {
+        guard account.accepts(model) else { return }
         if let back = jumpBackTo {
             jumpBackTo = nil
             revealQuoted(back)
@@ -2164,8 +2385,10 @@ struct ChatSession: View {
     /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
     /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
+        guard account.accepts(model) else { return }
         jumpBackTo = nil
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         let landing = Self.windowAfterJump(count: windowCount, skipEnd: windowSkipEnd)
@@ -2181,7 +2404,7 @@ struct ChatSession: View {
         }
         // The first scrollTo runs before layout knows the re-cut content's size.
         scroller?.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
     /// The window ↓ lands on. Unchanged while the window still ends at the tail
@@ -2194,9 +2417,11 @@ struct ChatSession: View {
 
     /// After a send: stick to the end now and again once the optimistic row has height.
     private func scrollAfterSend() {
+        guard account.accepts(model) else { return }
+        readerHeld = false
         scroller?.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; scroller?.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { guard account.accepts(model) else { return };
             withAnimation(.easeOut(duration: 0.2)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         }
     }
@@ -2219,6 +2444,11 @@ struct ChatSession: View {
         .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(jumpBackTo == nil ? "Scroll to bottom" : "Back to reply")
+        // `newMessagesPill` below has carried `chat-jump-to-latest` since it was written and
+        // this one carried nothing, so a test reaching for "the reader is away from the end"
+        // could only name the case where rows had also landed below them. The bare chevron is
+        // the other half of the same state and needs its own name.
+        .accessibilityIdentifier("chat-scroll-to-bottom")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpBackOrLatest() }
     }
@@ -2251,6 +2481,7 @@ struct ChatSession: View {
     /// decided on the first points so a vertical pan is the scroll view's alone. A nested
     /// table scrolling sideways undoes a peek in progress ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
+        guard account.accepts(model) else { return }
         var still = Transaction()
         still.disablesAnimations = true
         switch event {
@@ -2262,7 +2493,7 @@ struct ChatSession: View {
             // iMessage feel: 1:1 up to the reveal width, then rubber-band
             // (a fifth of the excess, at most 24 pt) instead of a hard stop.
             let raw = max(0, -dx)
-            let w = RowView.timeRevealWidth
+            let w = RowView.timeRevealWidth(theme)
             let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
@@ -2316,34 +2547,33 @@ struct ChatSession: View {
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
-                    if model.transcriptPending(chatId) {
+                    // One child at most, and `transcriptStackIdentity` is keyed on which one it
+                    // is: iOS 27 keeps a lazy stack's reserved space when its children change,
+                    // and this is the child that comes and goes while a chat is on screen.
+                    switch transcriptLead {
+                    case .pending:
                         // The doc has rows that are not on screen yet: a spinner, never a
                         // blank people chat ([feedback arbonites-blank-chat-ios-2026-10-28]).
                         HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
                             .accessibilityIdentifier("chat-transcript-loading")
-                    } else if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
-                        // Known-empty (optimistic new chat seeds `messages[id] = []`):
-                        // show the empty hint at once — no spinner flash while the
-                        // room catches up on a thread we already know has no rows.
-                        if model.hasKnownEmptyTranscript(chatId) {
-                            if !isPeople, !isChannel { emptyHint }
-                        } else {
-                            HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
-                        }
-                    } else if rows.isEmpty, !isPeople, !isChannel {
-                        // People chats and channels stay blank (iMessage-style); the agent
-                        // empty copy would say "Ask @handle anything…" which is wrong here.
+                    case .catchUp:
+                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                    case .empty:
                         emptyHint
-                    } else if searchHitsActive, visibleRows.isEmpty {
+                    case .noMatches:
                         // A keyword with no hit never leaves the transcript blank
                         // ([feedback iphone-search-close-2026-10-28]): say so, and that a
                         // tap or the ✕ brings the messages back.
                         Text("No messages match “\(searchText.trimmingCharacters(in: .whitespaces))”")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 60)
                             .accessibilityIdentifier("chat-search-no-matches")
+                    case .rowsOnly:
+                        EmptyView()
                     }
                     let shown = windowedRows
                     // One MentionTable for every bubble (Mac builds Mentions once per
@@ -2354,12 +2584,19 @@ struct ChatSession: View {
                     // Keystrokes do not reach this body (the composer is isolated); the other
                     // publishes re-diff the ids and let each realized `RowView` skip by `==`.
                     transcriptRows(shown: shown, mentions: mentions, width: width)
-                    // Who is working is the presence row over the composer
-                    // (`PresenceRow`), not a transcript row.
-                    // Clears the chat bar and the `Theme.composerFade` above it, so the
-                    // last row at rest is never under the fade; the status row rises into
-                    // that clearance (`Theme.presenceLift`) and is clear of the ramp too,
-                    // which now ends at the composer's top edge.
+                    // Who is working belongs to the end of the transcript, not to the bar
+                    // over it ([feedback typing-anchor-2026-11-08]). Pinned to the bar it
+                    // stayed on screen while the reader scrolled up, and since it draws no
+                    // background of its own it landed as a second line of text across
+                    // whichever old bubble happened to be under it. As the transcript's own
+                    // last child it scrolls away with the end it describes and comes back
+                    // when the reader does.
+                    presenceRow
+                        .environment(\.composerInset, composerSideInset)
+                        .animation(.easeOut(duration: 0.25), value: composerFocused)
+                    // Clears the chat bar and the `Theme.composerFade` above it, so the last
+                    // row at rest is never under the fade; the presence row settles back
+                    // into that clearance itself, so the tail is the same either way.
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -2391,11 +2628,18 @@ struct ChatSession: View {
                 .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
+            // A reader who has left the end keeps their offset through a resize; everyone
+            // else is still carried to it.
+            .modifier(TranscriptResizeAnchor(away: awayFromBottom || readerHeld))
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
+            // The finger that held a bubble into its menu may slide to a choice: the
+            // transcript does not scroll under it.
+            .scrollDisabled(actionsRow != nil)
+            .background(TouchWatch())
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
@@ -2412,13 +2656,13 @@ struct ChatSession: View {
             .simultaneousGesture(
                 TapGesture().onEnded {
                     guard ChatSearchClose.tapOutsideCloses(open: showSearch) else { return }
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { guard account.accepts(model) else { return };
                         if searchResultTapped == nil { closeSearch() }
                         searchResultTapped = nil
                     }
                 }
             )
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom, held: $readerHeld) {
                 // Streaming / new-row growth while pinned: re-stick without animation so
                 // each delta glides with layout instead of fighting a scroll animation.
                 proxy.scrollTo("bottom", anchor: .bottom)
@@ -2440,7 +2684,9 @@ struct ChatSession: View {
                 lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
-                } else if isChannel {
+                } else if isChannel || isPeople {
+                    // A people chat has older pages to ask for only when it is read from
+                    // the homeserver; `loadOlderChannel` does nothing for any other.
                     model.loadOlderChannel(chatId)
                 }
             }, onSample: { old, new in
@@ -2453,7 +2699,15 @@ struct ChatSession: View {
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
-            .onAppear { settleToBottom(proxy) }
+            .onAppear {
+                guard !settledOnOpen else { return }
+                settledOnOpen = true
+                settleToBottom(proxy)
+                let rigged = DebugHooks.fixtureComposerAttachments
+                if rigged > 0, pending.isEmpty {
+                    pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
+                }
+            }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
             .onChange(of: rows.last) { old, new in
@@ -2491,9 +2745,10 @@ struct ChatSession: View {
                 guard focused else { return }
                 jumpBackTo = nil
                 pinnedToBottom = true
+                readerHeld = false
                 awayFromBottom = false
                 newBelowCount = 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
@@ -2508,6 +2763,15 @@ struct ChatSession: View {
                 }
             }
             .onChange(of: transcriptStackIdentity) { _, _ in pinFilteredStackToEnd(proxy) }
+            // A rebuilt stack has no measured child heights either way, so the one a lead child
+            // or the banner rebuilds needs the same ladder the filtered one does — otherwise an
+            // open whose rows land late comes to rest on estimates, with the newest row short of
+            // the composer. Only while the reader is following the end: scrolled up, the rebuild
+            // already costs the bottom anchor and dragging them back would cost the place too.
+            .onChange(of: transcriptStackShape) { _, _ in
+                guard pinnedToBottom else { return }
+                settleToBottom(proxy)
+            }
         }
     }
 
@@ -2515,6 +2779,7 @@ struct ChatSession: View {
     /// `ARBOS_PERF_DRIVE` (perf rig): scripted scroll / typing / typing-row load so the
     /// frame log can be read per phase (`phase … begin/end` lines in the `perf` log).
     private func runPerfDrive(_ drive: Set<String>) async {
+        guard account.accepts(model) else { return }
         try? await Task.sleep(for: .seconds(4))
         if drive.contains("scroll") {
             PerfLog.mark("phase scroll begin", ms: 0)
@@ -2653,13 +2918,15 @@ struct ChatSession: View {
     /// `scrollTo` runs before layout knows the content size, so repeat after
     /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
+        guard account.accepts(model) else { return }
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
         proxy.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; proxy.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return }; proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     /// Put the rebuilt filtered stack back on its end after a keyword re-keys it.
@@ -2682,14 +2949,15 @@ struct ChatSession: View {
     /// closes search in order to land on its own message — hence the identity re-check before
     /// each deferred hop, so a tap taken mid-ladder is not dragged back to the tail.
     private func pinFilteredStackToEnd(_ proxy: ScrollViewProxy) {
+        guard account.accepts(model) else { return }
         guard searchHitsActive else { return }
         let key = transcriptStackIdentity
         proxy.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { guard account.accepts(model) else { return };
             guard transcriptStackIdentity == key else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
             guard transcriptStackIdentity == key else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
         }
@@ -2712,6 +2980,7 @@ struct ChatSession: View {
     /// (Reply in DM) opens the source chat on the original instead; the header is not
     /// tappable when the viewer is not in that chat.
     private func revealQuoted(_ quote: Quote, from replyId: Id) {
+        guard account.accepts(model) else { return }
         if let src = quote.source {
             if src.chatId == chatId {
                 jumpBackTo = replyId
@@ -2727,6 +2996,7 @@ struct ChatSession: View {
     }
 
     private func revealQuoted(_ messageId: Id) {
+        guard account.accepts(model) else { return }
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
         // `scrollTo` can only move to a row the stack has actually built, so whether the
         // target is in `windowedRows` decides whether the reveal can do anything at all.
@@ -2761,11 +3031,11 @@ struct ChatSession: View {
             // no animation worth keeping, and an animated scroll over a window that changed
             // in the same frame makes SwiftUI diff the whole stack per frame. Let the moved
             // window lay out first.
-            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId, animated: false) }
+            DispatchQueue.main.async { guard account.accepts(model) else { return }; settleOnRevealed(target.id, messageId: messageId, animated: false) }
         } else {
             settleOnRevealed(target.id, messageId: messageId, animated: true)
         }
-        Task { @MainActor in
+        Task { @MainActor in guard account.accepts(model) else { return };
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
         }
@@ -2816,6 +3086,7 @@ struct ChatSession: View {
     /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
     /// way and for the same reason.
     private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
+        guard account.accepts(model) else { return }
         if animated {
             withAnimation(.easeInOut(duration: Self.revealHop)) { scroller?.scrollTo(rowId, anchor: .center) }
         } else {
@@ -2830,7 +3101,7 @@ struct ChatSession: View {
         // cancel the animation the reader is watching.
         let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
         let giveUpAt = Date().addingTimeInterval(first + Self.revealCorrectFor)
-        DispatchQueue.main.asyncAfter(deadline: .now() + first) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + first) { guard account.accepts(model) else { return };
             correctReveal(rowId, messageId: messageId, pass: 0, unstuck: 0,
                           lastOffset: .infinity, giveUpAt: giveUpAt)
         }
@@ -2844,6 +3115,7 @@ struct ChatSession: View {
     /// than stored because it belongs to this reveal and nothing outside the loop reads it.
     private func correctReveal(_ rowId: String, messageId: Id, pass: Int, unstuck: Int,
                                lastOffset: CGFloat, giveUpAt: Date) {
+        guard account.accepts(model) else { return }
         // A second reveal has taken over, or the reader has been handed the scroll back.
         guard revealingRow == RevealTarget(rowId: rowId, messageId: messageId) else { return }
         let offset = scrollProbe.last
@@ -2876,7 +3148,7 @@ struct ChatSession: View {
         } else {
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealSettleGap) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealSettleGap) { guard account.accepts(model) else { return };
             correctReveal(rowId, messageId: messageId, pass: pass + 1,
                           unstuck: unstuck + (stuck ? 1 : 0),
                           lastOffset: offset, giveUpAt: giveUpAt)
@@ -2904,6 +3176,7 @@ struct ChatSession: View {
     /// a proof: the same row against `.top` and `.bottom`, which asks for a destination most
     /// of a viewport away without changing which row is being asked for.
     private func unstick(_ rowId: String, messageId: Id, pass: Int, tried: Int) {
+        guard account.accepts(model) else { return }
         if tried == 0, let tail = windowedRows.last?.id, tail != rowId {
             revealTrace("settle-unstick", "id=\(messageId) pass=\(pass) windowEnd=\(tail)")
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(tail, anchor: .bottom) }
@@ -2937,6 +3210,7 @@ struct ChatSession: View {
     /// Stop correcting: drop the row's frame reporting and, for the rig, publish what the
     /// loop did where a UI test can read it.
     private func finishReveal(messageId: Id, passes: Int, arrived: Bool, offset: CGFloat) {
+        guard account.accepts(model) else { return }
         revealingRow = nil
         let samplesAtStop = scrollProbe.samples
         if DebugHooks.traceReveal {
@@ -2944,7 +3218,7 @@ struct ChatSession: View {
             // `moved` cannot be read at the moment the loop stops — it is the count of scroll
             // samples *after* it. One short wait, well inside the three seconds the UI test
             // waits before reading the probe.
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealMovedAfter) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealMovedAfter) { guard account.accepts(model) else { return };
                 guard lastRevealedMessage == messageId else { return }
                 revealOutcome = "passes=\(passes) arrived=\(arrived) "
                     + "offset=\(Self.offsetText(scrollProbe.last)) "
@@ -2973,7 +3247,7 @@ struct ChatSession: View {
     /// It is a count and a scroll offset: no row content, no sender, nothing a reader typed.
     private func traceAtRest(messageId: Id, after samplesAtLastRung: Int) {
         guard DebugHooks.traceReveal else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) { guard account.accepts(model) else { return };
             // The highlight clears on its own well before this fires, so nil is the normal
             // case. A *different* id means a second reveal has taken over and this line
             // would be reporting its scroll position under the first one's name.
@@ -2994,7 +3268,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -3006,6 +3280,7 @@ struct ChatSession: View {
     /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
     /// only focus moves, and `closeActions` gives it back.
     private func openActions(_ row: Row) {
+        guard account.accepts(model) else { return }
         Haptics.pick()
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
@@ -3018,6 +3293,9 @@ struct ChatSession: View {
     /// reaction). The composer is focused again only if it was before the press and the
     /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
     private func closeActions(after item: MessageMenuItem? = nil) {
+        ChatGestures.heldIntoMenu = false
+        HeldFinger.shared.reset()
+        guard account.accepts(model) else { return }
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
@@ -3055,6 +3333,7 @@ struct ChatSession: View {
     /// Reply in DM (open a private chat with the human who wrote it), Edit
     /// (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
+        guard account.accepts(model) else { return }
         switch item {
         case .copy:
             // The whole message — words and pictures / files — through the one copy path
@@ -3062,7 +3341,10 @@ struct ChatSession: View {
             // and a picture message copied nothing).
             guard let m = messageById[row.messageId] else { return }
             let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
-            Task { await model.copyMessage(m, slot: slot) }
+            Task { guard account.accepts(model) else { return }; await model.copyMessage(m, slot: slot, isCurrent: { account.accepts(model) }) }
+        case .copyLink:
+            guard let link = ChatMedia.links(in: m_text(row)).first else { return }
+            UIPasteboard.general.url = link
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -3088,6 +3370,7 @@ struct ChatSession: View {
 
     /// Long-press → View thread: open the held message and every reply in its chain.
     private func openThread(for row: Row) {
+        guard account.accepts(model) else { return }
         guard let root = messageById[row.messageId] else { return }
         let replies = Transcript.threadReplies(rootId: root.id, in: messages)
         guard !replies.isEmpty else { return }
@@ -3114,6 +3397,7 @@ struct ChatSession: View {
     /// pictures, files, charts, any of them is enough
     /// ([feedback forward-attachments-ios-2026-10-27]: only the words used to travel).
     private func beginForward(_ row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         guard m.body != nil else {
             if m.hasUploadingAttachment {
@@ -3135,6 +3419,7 @@ struct ChatSession: View {
     /// Reply to this row: composer preview + focus (people chats also address the agent).
     /// Long-press → Reply on the bubble, and the actions menu.
     private func beginReply(to row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         editing = nil
         forwardedFrom = nil
@@ -3147,6 +3432,7 @@ struct ChatSession: View {
 
     /// Edit this own message: put its text in the composer with an Editing bar.
     private func beginEdit(_ row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, isOwnMessage(m) else { return }
@@ -3195,7 +3481,7 @@ struct ChatSession: View {
             ErrorNote(id: model.pushRefused.contains(chatId) ? "delivery-error" : "machine-error",
                       error: error,
                       detailsOpen: $chatNoteDetailsOpen,
-                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() })
+                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { guard account.accepts(model) else { return }; model.startMachine() })
         }
     }
 
@@ -3218,7 +3504,8 @@ struct ChatSession: View {
                 }
             }()
             HStack(spacing: 6) {
-                if let mark { StatusMarkView(mark: mark, size: 9) }
+                // Floats over the transcript, so it keeps turning while the reader scrolls.
+                if let mark { StatusMarkView(mark: mark, size: 9, whileScrolling: true) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -3229,7 +3516,7 @@ struct ChatSession: View {
             .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
-            .transition(.opacity.combined(with: .move(edge: .top)))
+            .transition(.fromTop)
         }
     }
 
@@ -3241,6 +3528,7 @@ struct ChatSession: View {
             Text(name)
                 .font(theme.font(20, weight: .semibold))
                 .foregroundStyle(theme.text)
+                .multilineTextAlignment(.center)
             Text("Ask \(name) anything. It plans, delegates, or answers.")
                 .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
@@ -3286,7 +3574,7 @@ struct ChatSession: View {
                     } label: {
                         HStack(spacing: 6) {
                             if m.isAgent {
-                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18, still: true)
+                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18)
                             } else {
                                 PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
@@ -3321,43 +3609,82 @@ struct ChatSession: View {
         .frame(height: 36)
     }
 
-    /// The presence row over the composer: ticks once a second so time-capped
+    /// The presence row at the transcript's end: ticks once a second so time-capped
     /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
-    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt,
+    /// which it inherits from the transcript's stack rather than padding itself.
+    ///
+    /// Its appearing and disappearing changes the transcript's height by the same
+    /// 26 pt it used to add to the bar, and at the end rather than in the reader's
+    /// view, so a turn starting while the reader is up in history moves nothing.
+    ///
+    /// When the awaiting cheat expires and no assistant row ever landed, the same
+    /// tick draws the stock "didn't answer" bubble here — Transcript only writes
+    /// that line under an empty finished assistant row, so a turn that never
+    /// opened one used to leave a dead transcript ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let participants = presenceParticipants
-            if !participants.isEmpty {
-                // The tasks chip rides on the row while the agent has background jobs
-                // open in this chat (duplex §2.4); a tap opens the sheet.
-                let jobs = model.openJobs(chatId)
-                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
-                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
-                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
-                PresenceRow(participants: participants,
-                            detail: model.currentActivity(chatId),
-                            queued: false,
-                            taskCount: jobs.count,
-                            onTasks: openTasks,
-                            onWords: openNewest,
-                            onPicture: { model.toggleProfile($0) },
-                            pictureShowing: { model.profileShows($0) })
-                    .padding(.horizontal, 16)
-                    // Grok: 68 px from the picture's bottom to the composer's top.
-                    .padding(.bottom, Theme.presenceBottomGap)
-                    // Grok: 42 px from the last bubble to the picture's top — the row
-                    // rises into the transcript's tail instead of stacking under it
-                    // ([feedback status-row-gap-ios-2026-10-26]).
-                    .padding(.top, -Theme.presenceLift)
+            VStack(alignment: .leading, spacing: 0) {
+                if model.missedReply(chatId) {
+                    missedReplyBubble
+                }
+                let participants = presenceParticipants
+                if !participants.isEmpty {
+                    // The tasks chip rides on the row while the agent has background jobs
+                    // open in this chat (duplex §2.4); a tap opens the sheet.
+                    let jobs = model.openJobs(chatId)
+                    let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                    // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                    let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { guard account.accepts(model) else { return }; model.openNewestJobTab(from: chatId) }
+                    PresenceRow(participants: participants,
+                                detail: model.currentActivity(chatId),
+                                queued: model.machineWaiting(for: chatId),
+                                taskCount: jobs.count,
+                                onTasks: openTasks,
+                                onWords: openNewest,
+                                onPicture: { guard account.accepts(model) else { return }; model.toggleProfile($0) },
+                                pictureShowing: { model.profileShows($0) })
+                        // Grok: 42 px from the last bubble to the picture's top ([feedback
+                        // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                        // carries the bubbles' 16 pt side inset.
+                        .padding(.top, Theme.presenceTopGap)
+                        // Grok: 68 px from the picture's bottom to the composer's top. The row
+                        // is the transcript's last child, so it settles down into the tail the
+                        // tail already reserves rather than stacking on top of it.
+                        .padding(.bottom, -Theme.presenceSettle)
+                }
             }
         }
+    }
+
+    /// Same words Transcript uses for an empty finished assistant row, drawn when
+    /// no such row exists so the chat never goes silent after a send.
+    private var missedReplyBubble: some View {
+        let who = name.trimmingCharacters(in: .whitespaces)
+        let line = "\(who.isEmpty ? "The agent" : who) didn't answer. Ask again."
+        return HStack {
+            Text(line)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .fill(theme.bubbleAssistant)
+                )
+                .frame(maxWidth: 560, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Theme.presenceTopGap)
+        .accessibilityIdentifier("missed-reply")
     }
 
     /// Steer a job (contract: no command of its own): the composer becomes a reply to
     /// the job's ask and the user types the correction; the agent binds a correction
     /// that quotes the ask to that job.
     private func steerJob(_ job: Job) {
+        guard account.accepts(model) else { return }
         guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
             model.failRefused("steer the task", "That task's request is not in this chat any more.")
             return
@@ -3381,7 +3708,7 @@ struct ChatSession: View {
             Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 .lineLimit(1).fixedSize()
             if let ref = quotedImageRef(r) {
-                ReplyThumb(projectId: projectId, blobRef: ref)
+                ReplyThumb(account: account, projectId: projectId, blobRef: ref)
             }
             Text(Quote.line(of: r, maxChars: Theme.replyPreviewChars))
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
@@ -3462,66 +3789,7 @@ struct ChatSession: View {
             } else if let r = replyTo {
                 replyPreview(r)
             }
-            if !pending.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(pending) { a in
-                            // Images show a real thumbnail (same 28 pt chip as Mac);
-                            // other files keep the SF Symbol + name pill.
-                            // Tap the chip (not ×) to open a picture/video while the
-                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
-                            let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
-                            let canPreview = Self.isCaptionablePending(a)
-                            HStack(spacing: 6) {
-                                Button {
-                                    openPendingPreview(a)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if let thumb {
-                                            Image(uiImage: thumb)
-                                                .resizable()
-                                                .scaledToFill()
-                                                .frame(width: 28, height: 28)
-                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        } else {
-                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
-                                                .font(theme.font(12))
-                                        }
-                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!canPreview)
-                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
-                                // The remove ✕: always drawn, a full-size hit target
-                                // (not the 10 pt glyph alone), named for VoiceOver
-                                // ([feedback composer-attachment-removal-ios-2026-10-27]).
-                                Button { removePending(a.id) } label: {
-                                    Image(systemName: "xmark").font(.system(size: Theme.pendingRemoveGlyph, weight: .bold))
-                                        .frame(width: Theme.pendingRemoveHit, height: Theme.pendingRemoveHit)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove attachment")
-                                .accessibilityIdentifier("composer-remove-attachment")
-                            }
-                            .foregroundStyle(theme.text)
-                            .padding(.leading, thumb != nil ? 4 : 10)
-                            .padding(.trailing, Theme.pendingChipTrailing)
-                            .padding(.vertical, thumb != nil ? 3 : 6)
-                            .background(Capsule().fill(theme.bubbleAssistant))
-                        }
-                    }
-                    .padding(.leading, Theme.plusButton + Theme.plusFieldGap)
-                }
-            }
-            // Bottom-align the "+" with a multi-line field so growth expands upward.
-            HStack(alignment: .bottom, spacing: Theme.plusFieldGap) {
-                if !isChannel {
-                    attachButton
-                }
-                textField
-            }
+            textField
         }
         // The mention list floats 8 pt above the composer, over the transcript. As a row of
         // the stack it grew the bar's safe-area inset by its height and every bubble slid up
@@ -3544,12 +3812,14 @@ struct ChatSession: View {
 
     /// The chip's ✕: that one goes, the others and the draft stay.
     private func removePending(_ id: UUID) {
+        guard account.accepts(model) else { return }
         pending = Self.removingPending(id, from: pending)
     }
 
     /// ⌫ on an empty draft (`MentionTextView.onDeleteBackwardEmpty`): the last
     /// pending attachment goes; with text in the draft the key edits text only.
     private func removeLastPending() {
+        guard account.accepts(model) else { return }
         pending = Self.removingLastPending(from: pending, draftEmpty: composerDraft.text.isEmpty)
     }
 
@@ -3562,41 +3832,66 @@ struct ChatSession: View {
         return Array(list.dropLast())
     }
 
-    /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    /// The "+" inside the field: photos and files. Channels send text only (C1), so none there.
     private var attachButton: some View {
-        Button { showAttach = true } label: {
+        Button { guard account.accepts(model) else { return }; showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                ComposerDisc()
                 Image(systemName: "plus")
-                    .font(theme.font(Theme.plusGlyph, weight: .regular)) // control-size: exception plusGlyph
+                    .font(theme.font(Theme.composerPlusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
             }
-            .frame(width: Theme.plusButton, height: Theme.plusButton)
+            .frame(width: Theme.composerDisc, height: Theme.composerDisc)
             .contentShape(Circle())
             .accessibilityIdentifier("composer-plus")
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
-            AttachSheet {
+            AttachSheet(onPhoto: {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
-            } onFile: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showPhotos = true }
+            }, onFile: {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
-            } onFun: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showFiles = true }
+            }, onFun: {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFun = true }
-            }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showFun = true }
+            }, onCheque: chequeable ? {
+                guard account.accepts(model) else { return }
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showCheque = true }
+            } : nil, onPoll: pollable ? {
+                guard account.accepts(model) else { return }
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showPoll = true }
+            } : nil)
             .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showPoll) {
+            SendPollSheet(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showCheque) {
+            SendChequeSheet(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium])
         }
         .sheet(isPresented: $showFun) {
             FunPickerSheet(chatId: chatId, onEmoji: { glyph in
+                guard account.accepts(model) else { return }
                 // Into the draft like typed text; the field keeps the caret at the end.
                 composerDraft.text += glyph
             }, onSend: { pick in
+                guard account.accepts(model) else { return }
                 Haptics.send()
                 jumpBackTo = nil
                 pinnedToBottom = true
+                readerHeld = false
                 awayFromBottom = false
                 newBelowCount = 0
                 model.sendMedia(chatId: chatId, pick: pick)
@@ -3608,6 +3903,7 @@ struct ChatSession: View {
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            guard account.accepts(model) else { return }
             if case .success(let urls) = result, let url = urls.first {
                 let ok = url.startAccessingSecurityScopedResource()
                 defer { if ok { url.stopAccessingSecurityScopedResource() } }
@@ -3621,9 +3917,11 @@ struct ChatSession: View {
             }
         }
         .onChange(of: photoItem) { _, item in
+            guard account.accepts(model) else { return }
             guard let item else { return }
-            Task {
+            Task { guard account.accepts(model) else { return };
                 if let data = try? await item.loadTransferable(type: Data.self) {
+                    guard account.accepts(model) else { return }
                     let type = item.supportedContentTypes.first
                     let picked = ChatView.imageForUpload(data, type: type)
                     // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
@@ -3631,12 +3929,33 @@ struct ChatSession: View {
                     pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
                     composerFocused = true
                 }
+                guard account.accepts(model) else { return }
                 photoItem = nil
             }
         }
     }
 
     /// Picture or video pending in the composer — the field is their description bar.
+    /// A drawn picture for `ARBOS_FIXTURE_COMPOSER_ATTACHMENT`. Drawn rather than bundled so
+    /// the rig carries no asset, and recognisable rather than flat so a capture shows the
+    /// thumbnail really is the picture and not a placeholder.
+    /// `seed` shifts the hue so a row of several is visibly several pictures rather than one
+    /// picture repeated, which is the whole point of the multiple-attachment shot.
+    private static func riggedAttachment(seed: Int) -> AppModel.PendingAttachment {
+        let side = CGSize(width: 640, height: 640)
+        let hue = CGFloat(seed % 5) / 5
+        let image = UIGraphicsImageRenderer(size: side).image { ctx in
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.42, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: side))
+            UIColor(hue: hue, saturation: 0.70, brightness: 0.95, alpha: 1).setFill()
+            ctx.cgContext.fillEllipse(in: CGRect(x: 150, y: 110, width: 340, height: 340))
+            UIColor(hue: hue, saturation: 0.45, brightness: 0.62, alpha: 1).setFill()
+            ctx.fill(CGRect(x: 0, y: 440, width: side.width, height: 200))
+        }
+        return AppModel.PendingAttachment(name: "photo-\(seed + 1).png", mime: "image/png",
+                                          data: image.pngData() ?? Data())
+    }
+
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
@@ -3644,11 +3963,12 @@ struct ChatSession: View {
 
     /// Open a staged picture/video in Quick Look so the description can still be written after.
     private func openPendingPreview(_ a: AppModel.PendingAttachment) {
+        guard account.accepts(model) else { return }
         guard Self.isCaptionablePending(a), let file = MediaFetch.tempFile(a.data, name: a.name) else { return }
         // `.quickLookPreview` only presents when the binding becomes non-nil.
         if pendingPreviewURL == file {
             pendingPreviewURL = nil
-            Task { @MainActor in pendingPreviewURL = file }
+            Task { @MainActor in guard account.accepts(model) else { return }; pendingPreviewURL = file }
             return
         }
         pendingPreviewURL = file
@@ -3667,6 +3987,10 @@ struct ChatSession: View {
             isChannel: isChannel,
             needsAnswer: needsAnswer,
             hasPending: !pending.isEmpty,
+            pending: pending,
+            canOpenPending: { Self.isCaptionablePending($0) },
+            onOpenPending: { openPendingPreview($0) },
+            onRemovePending: { removePending($0) },
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
             memoDragX: memoDragX,
@@ -3677,6 +4001,7 @@ struct ChatSession: View {
             // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
+                guard account.accepts(model) else { return }
                 if !memoHoldActive {
                     memoHoldActive = true
                     memoPressStartedAt = Date()
@@ -3689,7 +4014,7 @@ struct ChatSession: View {
                     } else {
                         memoIgnoreRelease = false
                         Haptics.recordStart()
-                        recorder.start()
+                        recorder.start(isCurrent: { account.accepts(model) })
                     }
                 }
                 // Slide left while holding to arm cancel (hold-to-talk).
@@ -3703,34 +4028,52 @@ struct ChatSession: View {
                 }
             },
             onMicEnd: { value in
+                // A pure tap can deliver onEnded with no onChanged
+                // (`DragGesture(minimumDistance: 0)` on current iOS). Decide
+                // here so a click is never a no-op ([feedback
+                // app-01M69J94RZRMZXKGMC6XDGWBFH]).
+                guard account.accepts(model) else { return }
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                let action = MemoMicRelease.decide(
+                    holdActive: memoHoldActive,
+                    recording: recorder.recording,
+                    ignoreRelease: memoIgnoreRelease,
+                    cancelArmed: memoCancelArmed,
+                    translationWidth: value.translation.width,
+                    heldSeconds: held,
+                    cancelDistance: Self.memoCancelDistance)
                 memoHoldActive = false
                 memoPressStartedAt = nil
                 memoDragX = 0
                 memoCancelArmed = false
-                if memoIgnoreRelease {
-                    memoIgnoreRelease = false
-                    return
-                }
-                // Slide-left discard: drop the memo instead of sending.
-                if cancel {
+                memoIgnoreRelease = false
+                switch action {
+                case .toggleTap:
                     memoFinishWhenPermission = false
-                    if recorder.recording { recorder.cancel() }
-                    return
-                }
-                // Hold-to-talk: release after the threshold sends.
-                if held >= 0.25 {
                     if recorder.recording {
                         finishMemoHold()
                     } else {
-                        // Permission still pending; finish when it starts.
-                        memoFinishWhenPermission = true
+                        Haptics.recordStart()
+                        recorder.start(isCurrent: { account.accepts(model) })
                     }
+                case .ignore:
+                    break
+                case .cancel:
+                    memoFinishWhenPermission = false
+                    // Also revokes a permission request that is still pending.
+                    recorder.cancel()
+                case .finishHold:
+                    finishMemoHold()
+                case .waitForPermission:
+                    // Permission still pending; finish when it starts.
+                    memoFinishWhenPermission = true
+                case .keepRecording:
+                    // Short tap after hold tracked: leave recording on (click-to-toggle).
+                    break
                 }
-                // Short tap: leave recording on (click-to-toggle).
             },
             onPrimary: {
+                guard account.accepts(model) else { return }
                 if recorder.recording {
                     memoHoldActive = false
                     memoIgnoreRelease = false
@@ -3746,16 +4089,27 @@ struct ChatSession: View {
                 }
             },
             onPasteMedia: { media in
+                guard account.accepts(model) else { return }
                 // A copied picture / file pastes back as an attachment chip
                 // ([feedback copy-image-messages-ios-2026-10-27]).
                 pending.append(contentsOf: media)
                 composerFocused = true
+            },
+            // Channels send text only (C1), so they pass nothing and the field's leading
+            // edge closes up. The inset and the height frame live here rather than in the
+            // slot so that "nothing" really does occupy no width.
+            leading: {
+                if !isChannel {
+                    attachButton
+                        .frame(height: Theme.composerHeight)
+                        .padding(.leading, Theme.composerPlusLeading)
+                }
             }
         )
         // Hold released before permission returned: finish once recording starts.
         // A short tap leaves recording on (click-to-toggle), so do not auto-finish then.
         .onChange(of: recorder.recording) { _, isOn in
-            guard isOn, memoFinishWhenPermission else { return }
+            guard account.accepts(model), isOn, memoFinishWhenPermission else { return }
             memoFinishWhenPermission = false
             finishMemoHold()
         }
@@ -3763,6 +4117,7 @@ struct ChatSession: View {
 
     /// Stop the hold-to-talk memo and send its transcript (no-op if too short).
     private func finishMemoHold() {
+        guard account.accepts(model) else { return }
         guard recorder.recording else { return }
         Haptics.send()
         if let memo = recorder.stop() {
@@ -3783,6 +4138,7 @@ struct ChatSession: View {
 
     /// Empty the field after a send (text, chips, caret, the saved draft).
     private func clearDraft() {
+        guard account.accepts(model) else { return }
         composerDraft.text = ""
         composerDraft.mentions = []
         composerDraft.caret = 0
@@ -3797,6 +4153,7 @@ struct ChatSession: View {
 
     /// `@` completion: the `@token` the caret sits at the end of (nil closes the picker).
     private func updateMentionQuery() {
+        guard account.accepts(model) else { return }
         // Set only on change: this runs per keystroke from the draft hook, and the
         // screen must not re-render for a value that did not move.
         let next: String? = isPeople ? MentionDraft.openToken(text: composerDraft.text, caret: composerDraft.caret, mentions: composerDraft.mentions)?.query : nil
@@ -3843,17 +4200,17 @@ struct ChatSession: View {
                         Button { completeMention(m) } label: {
                             HStack(spacing: 12) {
                                 if m.isAgent {
-                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28, still: true)
+                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28)
                                 } else {
                                     PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 28, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                                 }
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     Text(m.isAgent ? (m.project?.name ?? m.handle) : (m.name?.isEmpty == false ? m.name! : m.handle))
-                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1).layoutPriority(1)
                                     Text("@" + ComposerMention.handle(of: m))
                                         .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
                                     if let tag = MentionDraft.tag(for: m, among: rows, me: model.user?.login) {
-                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder)
+                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder).lineLimit(1).fixedSize()
                                     }
                                 }
                                 Spacer(minLength: 0)
@@ -3883,11 +4240,13 @@ struct ChatSession: View {
 
     /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
+        guard account.accepts(model) else { return }
         completeMention(.member(m))
     }
 
     /// A collective chip addresses everyone: no sticky conversation chip.
     private func completeMention(_ target: ComposerMentionTarget) {
+        guard account.accepts(model) else { return }
         ensureMention(target)
         switch target {
         case .member(let m): talkTo = [m.member]
@@ -3897,12 +4256,14 @@ struct ChatSession: View {
     }
 
     private func ensureMention(_ m: ChatMember) {
+        guard account.accepts(model) else { return }
         ensureMention(.member(m))
     }
 
     /// Put the chip in the draft: over the open `@token` when there is one,
     /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ target: ComposerMentionTarget) {
+        guard account.accepts(model) else { return }
         let probe = ComposerMention(range: 0..<0, target: target)
         let handle = probe.handle.lowercased()
         if composerDraft.mentions.contains(where: { $0.memberId == probe.memberId }) { return }
@@ -3967,6 +4328,7 @@ struct ChatSession: View {
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
     /// The audio is only used for STT — it is not attached to the chat.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
+        guard let work = model.accountWork() else { return }
         let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
@@ -3984,9 +4346,11 @@ struct ChatSession: View {
         pinTalkTo(afterSending: address, chipMentions: chips)
         sentOnce = true
         transcribing = true
+        let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
         Task {
-            let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
-            let transcript = await model.transcribe(projectId: sttProject, memo: memo)
+            guard model.accountLifetime.accepts(work.owner) else { return }
+            let transcript = await model.transcribe(projectId: sttProject, memo: memo, work: work)
+            guard model.accountLifetime.accepts(work.owner) else { return }
             transcribing = false
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             guard !text.isEmpty || !extras.isEmpty else { return }
@@ -4012,6 +4376,7 @@ struct ChatSession: View {
     /// who replies (an explicit chip tap still addresses that send). Always clear everyone /
     /// multi-agent combinations.
     private func pinTalkTo(afterSending address: String?, chipMentions: [String]) {
+        guard account.accepts(model) else { return }
         if address == "everyone" || people?.kind == "group" || chipMentions.count > 1 {
             talkTo = []
         } else if let address, address.hasPrefix("agent:") {
@@ -4025,6 +4390,7 @@ struct ChatSession: View {
     }
 
     private func send() {
+        guard account.accepts(model) else { return }
         let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         #if DEBUG
@@ -4035,6 +4401,7 @@ struct ChatSession: View {
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         jumpBackTo = nil
         pinnedToBottom = true
+        readerHeld = false
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
@@ -4094,6 +4461,7 @@ struct ChatSession: View {
     }
 
     private func stop() {
+        guard account.accepts(model) else { return }
         model.stop(chatId: chatId)
     }
 }
@@ -4197,6 +4565,8 @@ struct AttachSheet: View {
     let onPhoto: () -> Void
     let onFile: () -> Void
     var onFun: (() -> Void)? = nil
+    var onCheque: (() -> Void)? = nil
+    var onPoll: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -4207,11 +4577,19 @@ struct AttachSheet: View {
                 row(icon: "face.smiling", title: "Emoji, stickers & GIFs", subtitle: "Add some fun to the chat", action: onFun)
                     .accessibilityIdentifier("attach-fun")
             }
+            if let onCheque {
+                row(icon: "signature", title: "Send TAO", subtitle: "A cheque they can cash for about 7 hours", action: onCheque)
+                    .accessibilityIdentifier("attach-cheque")
+            }
+            if let onPoll {
+                row(icon: "chart.bar", title: "Poll", subtitle: "Ask the chat a question", action: onPoll)
+                    .accessibilityIdentifier("attach-poll")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(onFun == nil ? 190 : 258)])
+        .presentationDetents([.height(190 + (onFun == nil ? 0 : 68) + (onCheque == nil ? 0 : 68) + (onPoll == nil ? 0 : 68))])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
@@ -4241,6 +4619,10 @@ struct ModelPickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    var account: ChatAccountContext? = nil
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents —
+    /// the parent page owns the chrome ([feedback iphone-entity-nav-push-2026-11-10]).
+    var pushed: Bool = false
     @State private var query = ""
     @State private var effort: Effort = .low
 
@@ -4255,79 +4637,93 @@ struct ModelPickerView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(15, weight: .medium))
-                            .foregroundStyle(theme.muted)
-                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                        if !query.isEmpty {
-                            Button { query = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
+        let account = self.account ?? ChatAccountContext(model)
+        Group {
+            if pushed {
+                list.onAppear { guard account.accepts(model) else { return }; effort = current.effort }
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Model")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { guard account.accepts(model) else { return }; dismiss() } }
                         }
-                    }
-                    .listRowBackground(theme.card)
+                        .onAppear { guard account.accepts(model) else { return }; effort = current.effort }
                 }
-                Section("Reasoning") {
-                    Picker("Effort", selection: $effort) {
-                        ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: effort) { _, new in
-                        model.setModel(projectId: project.id, model: current.model, effort: new)
-                    }
-                }
-                Section("Model") {
-                    if model.models.isEmpty {
-                        Text("Loading models from the relay…").foregroundStyle(theme.muted)
-                    }
-                    ForEach(ids, id: \.self) { id in
-                        Button {
-                            model.setModel(projectId: project.id, model: id, effort: effort)
-                            dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(Project.shortModel(id)).foregroundStyle(theme.text)
-                                    Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if id == current.model {
-                                    Image(systemName: "checkmark").foregroundStyle(theme.text)
-                                }
-                            }
-                            .contentShape(Rectangle())
+                .presentationDetents([.medium, .large])
+            }
+        }
+    }
+
+    private var list: some View {
+        let account = self.account ?? ChatAccountContext(model)
+        return List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(15, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                    TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(theme.card)
-                        .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
-                        .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
                     }
                 }
-                if !current.modelNote.isEmpty {
-                    Section {
-                        Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
-                    }
+                .listRowBackground(theme.card)
+            }
+            Section("Reasoning") {
+                Picker("Effort", selection: $effort) {
+                    ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: effort) { _, new in
+                    guard account.accepts(model) else { return }
+                    model.setModel(projectId: project.id, model: current.model, effort: new)
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Model")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            Section("Model") {
+                if model.models.isEmpty {
+                    Text("Loading models from the relay…").foregroundStyle(theme.muted)
+                }
+                ForEach(ids, id: \.self) { id in
+                    Button {
+                        guard account.accepts(model) else { return }
+                        model.setModel(projectId: project.id, model: id, effort: effort)
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Project.shortModel(id)).foregroundStyle(theme.text)
+                                Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            }
+                            Spacer()
+                            if id == current.model {
+                                Image(systemName: "checkmark").foregroundStyle(theme.text)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.card)
+                    .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
+                    .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
+                }
             }
-            .onAppear { effort = current.effort }
+            if !current.modelNote.isEmpty {
+                Section {
+                    Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
+                }
+            }
         }
-        .presentationDetents([.medium, .large])
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }
 
@@ -4349,9 +4745,10 @@ extension ChatSession {
         let lastId = shown.last?.id
         ForEach(shown) { row in
             let reply = isMessageRow(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+            RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
                     isMessage: reply,
@@ -4393,6 +4790,7 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
+                                        guard account.accepts(model) else { return }
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
@@ -4402,7 +4800,7 @@ extension ChatSession {
     /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
     private static func isMessageBubble(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -4525,6 +4923,30 @@ private struct NoBottomScrollEdgeEffect: ViewModifier {
     }
 }
 
+/// Who the bottom anchor is for, once the reader has left the end.
+///
+/// `.defaultScrollAnchor(.bottom)` does three jobs at once: a chat opens on its newest row,
+/// a reader at the end is carried there when the keyboard moves, and the end is kept against
+/// the container's bottom edge through any resize. The third one has no idea who caused the
+/// resize, so it also drags a reader who has gone up into history back down — the keyboard
+/// finishing its retraction after their own drag is a container resize like any other, and
+/// the reader loses the place they just took ([feedback typing-anchor-2026-11-08]).
+///
+/// iOS 18 splits the roles apart, so the size-change anchor can be dropped for a reader who
+/// is away while alignment keeps the bottom for everyone else. Below 18 the transcript keeps
+/// the old single anchor: the reader's place is worth less than opening on the newest row.
+private struct TranscriptResizeAnchor: ViewModifier {
+    var away: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.defaultScrollAnchor(away ? nil : .bottom, for: .sizeChanges)
+        } else {
+            content
+        }
+    }
+}
+
 /// The chat bar's measured height (`sessionCanvas`). Held by the screen as plain state and
 /// observed only by the views below, so a change re-renders them and not the transcript.
 @MainActor
@@ -4594,68 +5016,202 @@ private struct ChatBarIndicatorMargin: ViewModifier {
     }
 }
 
+/// Where one scroll-geometry sample leaves the reader, in the face of a container that can
+/// resize mid-gesture.
+///
+/// The transcript measures "how far from the end" from the container's bottom edge, so
+/// anything that resizes the container moves that number without a row having moved. The
+/// keyboard is the case that bites: `.scrollDismissesKeyboard(.interactively)` retracts it
+/// under the finger, and the only drag that retracts it is a drag away from the end. So at
+/// the exact moment the reader leaves the live bottom, the container grows by the keyboard's
+/// height and the raw sample says they are a keyboard's worth *nearer* the end than they are.
+///
+/// Latching on that is what loses the reader's place: `pinned` goes true, and the next growth
+/// re-sticks the transcript to the end under them. Holding the gesture's own container makes
+/// the reading about the content again — a gesture with no keyboard in it corrects by zero and
+/// reads exactly as it did before.
+enum TranscriptScrollLatch {
+    /// Past this the reader is reading history rather than following the end.
+    static let awayThreshold: CGFloat = 120
+
+    /// `sampled` re-measured against the container the gesture started with.
+    static func distance(sampled: CGFloat, container: CGFloat, gestureStart: CGFloat) -> CGFloat {
+        sampled + (container - gestureStart)
+    }
+
+    static func away(distance: CGFloat) -> Bool { distance > awayThreshold }
+
+    /// What a sample the reader did not cause means for the latch.
+    enum Settled: Equatable {
+        /// Content grew under a reader held at the end: follow it down.
+        case stick
+        /// Something moved the end relative to the reader: read where they are again.
+        case reread(away: Bool)
+        /// Nothing moved that changes the answer.
+        case hold
+    }
+
+    /// Outside the reader's own gesture, two different things can move the end.
+    ///
+    /// Content growth is the one this has always handled: a new or streaming row, which
+    /// re-sticks for a reader at the end and leaves a reader in history alone. The container
+    /// is the one it did not. The keyboard finishing its retraction after the finger lifts
+    /// resizes the container by its whole height without a row changing, which moves the end
+    /// past the reader while `away` keeps whatever the gesture last set — so the chevron
+    /// outlives the state it describes, and anything that reads `away` after a resize reads a
+    /// value from before it.
+    /// The container moved while the reader's own finger was on the scroll view.
+    ///
+    /// The one case that needs the offset put back, and the line between it and every other
+    /// resize. The keyboard rising or falling at the live bottom is not this — nothing is
+    /// being dragged, so the bottom anchor is free to do its job and a chat still opens and
+    /// stays on its newest row. A drag that retracts the keyboard is, and there the anchor
+    /// moves content the reader is holding.
+    ///
+    /// Not a question about `away`: at the instant the retraction starts the reader is a few
+    /// points into the drag and under the 120 pt threshold, so asking how far they have got
+    /// answers `false` and the resize goes unhandled. Asking who is dragging answers now.
+    static func resizedUnderTheFinger(userDriven: Bool,
+                                      oldContainer: CGFloat, newContainer: CGFloat) -> Bool {
+        userDriven && abs(newContainer - oldContainer) > 0.5
+    }
+
+    static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
+                        distance: CGFloat, pinned: Bool) -> Settled {
+        if grew { return pinned ? .stick : .reread(away: true) }
+        if abs(newContainer - oldContainer) > 0.5 { return .reread(away: away(distance: distance)) }
+        return .hold
+    }
+}
+
+/// Below iOS 18 the transcript keeps the behaviour it always had: `onScrollGeometryChange`,
+/// `onScrollPhaseChange` and `ScrollPosition` all arrive together in 18, and the whole reporter
+/// depends on them. The split is for the availability of the *stored properties* — an
+/// `if #available` inside `body` covers the view it returns and not a `@State` beside it.
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
+    @Binding var held: Bool
+    var onStick: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, held: $held, onStick: onStick))
+        } else {
+            content
+        }
+    }
+}
+
+@available(iOS 18, *)
+private struct AwayFromBottomReporterModern: ViewModifier {
+    @Binding var away: Bool
+    @Binding var pinned: Bool
+    @Binding var held: Bool
     var onStick: () -> Void
     /// The finger (or its deceleration) is moving the scroll view right now.
     @State private var userDriven = false
+    /// The container the gesture in flight began with, held for as long as it runs.
+    /// `distance` is measured from the container's bottom edge, and
+    /// `.scrollDismissesKeyboard(.interactively)` retracts the keyboard under the finger —
+    /// so the container grows mid-drag by the keyboard's whole height, and the drag that
+    /// grows it is a drag *into history*. Measured against the live container, a reader
+    /// leaving the end reads as a reader arriving at it, which latches `pinned` and lets
+    /// the next growth stick the transcript back to the bottom underneath them.
+    @State private var gestureContainer: CGFloat?
+    /// Set so the offset can be put back when the container moves under the reader's finger.
+    @State private var position = ScrollPosition()
 
     private struct Sample: Equatable {
         var height: CGFloat
+        var container: CGFloat
+        var offset: CGFloat
         var distance: CGFloat
     }
 
     func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content
-                // Only the reader's own scrolling decides whether they are at the bottom. Lazy
-                // rows (#2149) change the content height as rows are measured — up and down,
-                // during a flick and after it as pictures arrive — and a geometry sample alone
-                // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
-                // was pulled back down by the next growth, every time).
-                .onScrollPhaseChange { _, phase in
-                    switch phase {
-                    case .tracking, .interacting, .decelerating: userDriven = true
-                    case .idle, .animating: userDriven = false
-                    @unknown default: userDriven = false
-                    }
+        content
+            // Only the reader's own scrolling decides whether they are at the bottom. Lazy
+            // rows (#2149) change the content height as rows are measured — up and down,
+            // during a flick and after it as pictures arrive — and a geometry sample alone
+            // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
+            // was pulled back down by the next growth, every time).
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating: userDriven = true
+                case .idle, .animating: userDriven = false
+                @unknown default: userDriven = false
                 }
-                .onScrollGeometryChange(for: Sample.self) { g in
-                    Sample(
-                        height: g.contentSize.height,
-                        distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
-                    )
-                } action: { old, new in
-                    let grew = new.height > old.height + 0.5
-                    #if DEBUG
-                    PerfDriveProbe.lastScrollGeometry = Date()
-                    if SendTrace.recent {
-                        SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
-                        // The "bottom" spacer and padding sit ~60 pt under the last bubble.
-                        if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
-                    }
-                    #endif
-                    if userDriven {
-                        let isAway = new.distance > 120
-                        away = isAway
-                        pinned = !isAway
-                        return
-                    }
-                    // Content or layout moved, not the reader: a growth while pinned (a new or
-                    // streaming row) re-sticks to the end; while away it stays put.
-                    if grew {
-                        if pinned {
-                            away = false
-                            onStick()
-                        } else {
-                            away = true
-                        }
-                    }
+                // The reader has taken hold: see `TranscriptResizeAnchor`.
+                if userDriven { held = true }
+            }
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    container: g.containerSize.height,
+                    offset: g.contentOffset.y,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                #if DEBUG
+                PerfDriveProbe.lastScrollGeometry = Date()
+                if SendTrace.recent {
+                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
+                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
                 }
-        } else {
-            content
-        }
+                #endif
+                if userDriven {
+                    // The finger owns the offset while it is down. A container resize
+                    // under it is the keyboard retracting out of the reader's own drag,
+                    // and `.defaultScrollAnchor(.bottom)` answers that by holding the
+                    // *end* against the container — which moves the content the reader is
+                    // holding. Put the offset back.
+                    //
+                    // Deliberately not conditioned on `away`: the reader has travelled only
+                    // a few points when the retraction starts, so the 120 pt threshold has
+                    // not been crossed yet and anything reading it here reads `false` (leg
+                    // 42604426988, where the conditional size-change anchor was chosen as
+                    // `.bottom` for exactly that reason). Who is dragging is knowable at
+                    // that instant; how far they have got is not yet meaningful.
+                    //
+                    // Outside a gesture this does not run at all, which is what keeps the
+                    // keyboard rising and falling at the live bottom anchored as before.
+                    if TranscriptScrollLatch.resizedUnderTheFinger(
+                        userDriven: true, oldContainer: old.container,
+                        newContainer: new.container) {
+                        position.scrollTo(y: old.offset)
+                    }
+                    let start = gestureContainer ?? old.container
+                    gestureContainer = start
+                    let isAway = TranscriptScrollLatch.away(
+                        distance: TranscriptScrollLatch.distance(sampled: new.distance,
+                                                                 container: new.container,
+                                                                 gestureStart: start))
+                    away = isAway
+                    pinned = !isAway
+                    return
+                }
+                gestureContainer = nil
+                // Content or layout moved, not the reader: a growth while pinned (a new or
+                // streaming row) re-sticks to the end; while away it stays put. A container
+                // resize moves the end too, and has to be read again rather than ignored.
+                switch TranscriptScrollLatch.settled(grew: grew, oldContainer: old.container,
+                                                     newContainer: new.container,
+                                                     distance: new.distance, pinned: pinned) {
+                case .stick:
+                    away = false
+                    held = false
+                    onStick()
+                case .reread(let isAway):
+                    away = isAway
+                    pinned = !isAway
+                case .hold:
+                    break
+                }
+            }
     }
 }
 
@@ -4681,11 +5237,51 @@ final class ComposerDraft: ObservableObject {
     var onCaretOrMentions: (() -> Void)?
 
     #if DEBUG
-    /// Drafts alive right now, so a test can see a closed chat's draft free.
-    nonisolated(unsafe) static var live = 0
-    init() { Self.live += 1 }
-    deinit { Self.live -= 1 }
+    /// Weak debug inventory for observing the exact hosted composer instances.
+    private static let liveObjects = NSHashTable<ComposerDraft>.weakObjects()
+    /// A temporary strong snapshot. Lifetime tests keep only weak references to
+    /// their newly hosted drafts, while explicitly retaining pre-existing ones.
+    static var liveInstances: [ComposerDraft] { liveObjects.allObjects }
+    init() { Self.liveObjects.add(self) }
     #endif
+}
+
+/// What a mic press/release should do. Pure so a tap that never sees
+/// `onChanged` still starts recording ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+enum MemoMicRelease: Equatable {
+    /// `onEnded` arrived with no `onChanged` — toggle start/finish.
+    case toggleTap
+    /// Second press already finished the memo; ignore this release.
+    case ignore
+    /// Slide-left discard (or cancel armed).
+    case cancel
+    /// Hold past the send threshold; recording is live — finish and send.
+    case finishHold
+    /// Hold past the send threshold; permission still pending — finish once it starts.
+    case waitForPermission
+    /// Short tap after hold was tracked: leave recording on (click-to-toggle).
+    case keepRecording
+
+    static func decide(
+        holdActive: Bool,
+        recording: Bool,
+        ignoreRelease: Bool,
+        cancelArmed: Bool,
+        translationWidth: CGFloat,
+        heldSeconds: TimeInterval,
+        cancelDistance: CGFloat,
+        holdSendThreshold: TimeInterval = 0.25
+    ) -> MemoMicRelease {
+        // Ended-only tap: `DragGesture(minimumDistance: 0)` can skip onChanged.
+        if !holdActive { return .toggleTap }
+        if ignoreRelease { return .ignore }
+        let cancel = cancelArmed || translationWidth < -cancelDistance
+        if cancel { return .cancel }
+        if heldSeconds >= holdSendThreshold {
+            return recording ? .finishHold : .waitForPermission
+        }
+        return .keepRecording
+    }
 }
 
 /// Which of the composer's trailing controls the field's state calls for. The
@@ -4694,11 +5290,13 @@ final class ComposerDraft: ObservableObject {
 /// finish the memo. Pure, so `ComposerMetricsTests` can pin the pair that
 /// cross-fades ([feedback composer-send-crossfade-2026-10-30]).
 enum ComposerTrailing {
-    /// The mic is in its slot and takes touches: an empty field, or any
-    /// recording. The moment the field has text the mic is leaving, and a
-    /// leaving mic answers nothing.
-    static func micShown(draftEmpty: Bool, recording: Bool) -> Bool {
-        draftEmpty || recording
+    /// The mic is in its slot and takes touches, always. Grok keeps it beside the send arrow
+    /// while you type (Jacob, 2026-11-09, shots 2 and 3); ours used to drop it on the first
+    /// character, which took the voice memo away from anyone who had started typing and
+    /// changed their mind. There is no state that hides it now — it is a function rather than
+    /// a literal so the rule has one home and one test.
+    static func micShown() -> Bool {
+        true
     }
 
     /// The round pill sends rather than calls: something to send, a recording
@@ -4708,9 +5306,32 @@ enum ComposerTrailing {
     }
 }
 
+/// How the composer arranges itself. Grok puts the `+`, mic and send arrow on the text's own
+/// line while it is one line, and drops them onto a row of their own underneath once the text
+/// wraps, with the text then running the full width (Jacob, 2026-11-09, shots 2 and 3). Ours
+/// kept one row at every height and centred the controls against the growing text, which is
+/// shot 4.
+enum ComposerLayout {
+    /// The controls take their own row, and stay there until the field is empty.
+    ///
+    /// The latch is not timidity, it is the only stable answer. The two arrangements offer the
+    /// text different widths — stacking hands it back the ~135 pt the controls were using — so
+    /// a line that wraps inline may well fit unstacked, which would unstack it, which would
+    /// wrap it again. Deciding afresh on every measurement trades the layout back and forth for
+    /// any text near that boundary. Holding the row until the draft is empty costs nothing a
+    /// reader would notice and cannot oscillate.
+    static func stacked(wasStacked: Bool, lines: Int, empty: Bool, attachments: Int) -> Bool {
+        // A staged picture always makes the tall card: the thumbnail needs the width, and the
+        // controls belong under it ([feedback attachment-in-composer-2026-11-09]).
+        if attachments > 0 { return true }
+        if empty { return false }
+        return wasStacked || lines >= 2
+    }
+}
+
 /// The field, mic and send / call button. Owns nothing: every action calls back
 /// into the chat screen, whose memo and send logic is unchanged.
-private struct ComposerField: View {
+private struct ComposerField<Leading: View>: View {
     @Environment(\.theme) private var theme
     /// Settings → Accessibility → Motion → Reduce Motion. The swap below then
     /// lands on the frame the character does, with no scale and no fade.
@@ -4723,6 +5344,12 @@ private struct ComposerField: View {
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
+    /// Staged pictures and files, previewed inside the box
+    /// ([feedback attachment-in-composer-2026-11-09]).
+    let pending: [AppModel.PendingAttachment]
+    let canOpenPending: (AppModel.PendingAttachment) -> Bool
+    let onOpenPending: (AppModel.PendingAttachment) -> Void
+    let onRemovePending: (UUID) -> Void
     /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
@@ -4739,6 +5366,10 @@ private struct ComposerField: View {
     let onPrimary: () -> Void
     /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
     var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
+    /// The `+`, drawn inside the pill at the leading end rather than as a separate disc
+    /// beside it. A slot rather than a fixed view because the button owns the attachment
+    /// sheets, which belong to the chat screen; channels send text only (C1) and pass none.
+    @ViewBuilder var leading: () -> Leading
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -4750,7 +5381,19 @@ private struct ComposerField: View {
 
     /// The mic is in its slot and takes touches.
     private var micShown: Bool {
-        ComposerTrailing.micShown(draftEmpty: draft.text.isEmpty, recording: recorder.recording)
+        ComposerTrailing.micShown()
+    }
+
+    /// Lines the field is wrapping to, reported by the field's own measurement.
+    @State private var lines = 1
+    /// Latched by `ComposerLayout.stacked`; see its note on why this does not re-decide.
+    @State private var stackedLatch = false
+
+    /// The controls are on their own row. Never while recording: that row is the recorder's.
+    private var stacked: Bool {
+        !recorder.recording
+            && ComposerLayout.stacked(wasStacked: stackedLatch, lines: lines,
+                                      empty: draft.text.isEmpty, attachments: pending.count)
     }
 
     /// The round pill sends rather than calls.
@@ -4803,8 +5446,15 @@ private struct ComposerField: View {
     /// slot its caller always keeps, so the field beside it cannot move.
     @ViewBuilder
     private var micButton: some View {
-        micGlyph
-            .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        ZStack {
+            // The same disc the `+` sits on at the other end of the field. Grok shades behind
+            // both; ours had the mic as a bare glyph, which read as unfinished next to a `+`
+            // that already had one (Jacob, 2026-11-09).
+            ComposerDisc()
+                .frame(width: Theme.composerDisc, height: Theme.composerDisc)
+            micGlyph
+                .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        }
             .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
             .contentShape(Rectangle())
             .id("memo-mic")
@@ -4826,7 +5476,15 @@ private struct ComposerField: View {
     /// eight lines and covering the transcript. Hug content with `fixedSize`,
     /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
-        Theme.composerHeight + 7 * 22
+        let text = Theme.composerHeight + 7 * 22
+        guard stacked else { return text }
+        // The stacked card carries the control row under the text, and a staged picture over
+        // it; without the extra room the cap clips whichever arrived last.
+        var tall = text + Theme.composerStackGap + Theme.composerHeight
+        if !pending.isEmpty {
+            tall += ComposerAttachment.side + ComposerAttachment.overhang + Theme.composerStackGap
+        }
+        return tall
     }
 
     /// The field's rim: Grok's edge highlight, or the recording / needs-answer tint.
@@ -4836,103 +5494,159 @@ private struct ComposerField: View {
         return nil
     }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            if recorder.recording {
-                // Visible discard control (tap) — also used after a short tap that
-                // left recording on; hold-to-talk can slide left instead.
-                Button(action: onCancelRecording) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.composerHeight)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel")
-                if memoCancelArmed {
-                    Text("Release to cancel")
-                        .font(theme.font(Theme.small))
-                        // error-ui: exception status-mark
-                        .foregroundStyle(theme.danger)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                } else if memoHoldActive && memoDragX < -12 {
-                    Text("Slide to cancel")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .opacity(min(1, -memoDragX / cancelDistance))
-                } else {
-                    HStack(spacing: 8) {
-                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
-                        WorkingSpinner(size: 8, glyphSize: 11)
-                        // Level bars drawn into whatever width is left (newest on the right),
-                        // so the recorder row never pushes the composer past the screen edge.
-                        Canvas { ctx, size in
-                            let pitch: CGFloat = 5, w: CGFloat = 3
-                            let levels = recorder.levels
-                            let n = min(levels.count, max(0, Int(size.width / pitch)))
-                            for i in 0..<n {
-                                let l = CGFloat(levels[levels.count - n + i])
-                                let h = min(size.height, 4 + l * 20)
-                                let x = size.width - CGFloat(n - i) * pitch
-                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
-                            }
+    /// The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
+    /// channel passes no button, and an `EmptyView` carrying this slot's inset and
+    /// frame would still hold its place in the stack. The caller styles it instead.
+    @ViewBuilder private var leadingSlot: some View {
+        leading()
+    }
+
+    /// The recorder's own row while recording, otherwise the text field.
+    @ViewBuilder private var middle: some View {
+        if recorder.recording {
+            // Visible discard control (tap) — also used after a short tap that
+            // left recording on; hold-to-talk can slide left instead.
+            Button(action: onCancelRecording) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.danger)
+                    .frame(width: 44, height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel")
+            if memoCancelArmed {
+                Text("Release to cancel")
+                    .font(theme.font(Theme.small))
+                    // error-ui: exception status-mark
+                    .foregroundStyle(theme.danger)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else if memoHoldActive && memoDragX < -12 {
+                Text("Slide to cancel")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .opacity(min(1, -memoDragX / cancelDistance))
+            } else {
+                HStack(spacing: 8) {
+                    // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                    WorkingSpinner(size: 8, glyphSize: 11)
+                    // Level bars drawn into whatever width is left (newest on the right),
+                    // so the recorder row never pushes the composer past the screen edge.
+                    Canvas { ctx, size in
+                        let pitch: CGFloat = 5, w: CGFloat = 3
+                        let levels = recorder.levels
+                        let n = min(levels.count, max(0, Int(size.width / pitch)))
+                        for i in 0..<n {
+                            let l = CGFloat(levels[levels.count - n + i])
+                            let h = min(size.height, 4 + l * 20)
+                            let x = size.width - CGFloat(n - i) * pitch
+                            let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                            ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
                         }
-                        .frame(maxWidth: .infinity, maxHeight: 24)
-                        Text(recorder.timeLabel)
-                            .font(theme.font(Theme.small, design: .monospaced))
-                            .foregroundStyle(theme.text)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: 24)
+                    Text(recorder.timeLabel)
+                        .font(theme.font(Theme.small, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                }
+            }
+        } else {
+            // The field with mention chips (#1596): one to eight lines, the
+            // chips as attachments; `draft.text` stays the plain `@handle` text.
+            // Beside the `+` the HStack's 8 pt is the only gap; the full-width
+            // 17 pt inset is for channels and the stacked text row above the
+            // controls ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+            MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
+                            placeholder: prompt(draft.text), theme: theme,
+                            agentProject: { model.agent(member: $0, chatId: chatId) },
+                            onPasteMedia: onPasteMedia,
+                            onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                            onPasteImage: onPasteImage,
+                            onLines: { lines = $0 },
+                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : Theme.composerTextInsetBesidePlus)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private var trailingCluster: some View {
+        // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
+        // 8⅔ pt from the field's edge, both centred on the field's bottom line.
+        HStack(spacing: Theme.micPillGap) {
+            // The mic's frame is here whether the mic is or not: the text
+            // field must not change width when the arrow replaces the pair
+            // ([feedback composer-send-crossfade-2026-10-30]). The mic
+            // stays mounted while recording too, so a hold-to-talk release
+            // can finish without a second tap.
+            micButton
+                .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
+                .opacity(micShown ? 1 : 0)
+                // A mic on its way out answers nothing: a swap that
+                // swallows the touch that started it is worse than a cut.
+                .allowsHitTesting(micShown)
+                .accessibilityHidden(!micShown)
+                .animation(swap, value: micShown)
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts a voice call with the agent (Grok's voice-wave pill).
+            Button(action: onPrimary) {
+                Capsule()
+                    .fill(theme.primary)
+                    .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                    .overlay(actionGlyph)
+                    .frame(height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .animation(swap, value: canSend)
+            // The label follows the action, not the fade: the button sends
+            // from the first frame of the swap, so it says so at once.
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+            .accessibilityIdentifier("composer-action")
+        }
+        .padding(.trailing, Theme.actionPillTrailing)
+    }
+
+    var body: some View {
+        Group {
+            if stacked {
+                // Grok's wrapped composer: the text runs the full width, and the
+                // controls sit on their own row beneath it, bottom-aligned.
+                VStack(alignment: .leading, spacing: Theme.composerStackGap) {
+                    if !pending.isEmpty {
+                        ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
+                                              onOpen: onOpenPending, onRemove: onRemovePending)
+                    }
+                    // Full width in both rows: the text is no longer sharing the line with
+                    // the controls, and the trailing cluster needs the whole width to be
+                    // pushed to the right edge.
+                    middle
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 8) {
+                        leadingSlot
+                        Spacer(minLength: 0)
+                        trailingCluster
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             } else {
-                // The field with mention chips (#1596): one to eight lines, the
-                // chips as attachments; `draft.text` stays the plain `@handle` text.
-                MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
-                                placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) },
-                                onPasteMedia: onPasteMedia,
-                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
-                                onPasteImage: onPasteImage)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
-            // 8⅔ pt from the field's edge, both centred on the field's bottom line.
-            HStack(spacing: Theme.micPillGap) {
-                // The mic's frame is here whether the mic is or not: the text
-                // field must not change width when the arrow replaces the pair
-                // ([feedback composer-send-crossfade-2026-10-30]). The mic
-                // stays mounted while recording too, so a hold-to-talk release
-                // can finish without a second tap.
-                micButton
-                    .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
-                    .opacity(micShown ? 1 : 0)
-                    // A mic on its way out answers nothing: a swap that
-                    // swallows the touch that started it is worse than a cut.
-                    .allowsHitTesting(micShown)
-                    .accessibilityHidden(!micShown)
-                    .animation(swap, value: micShown)
-                // While recording: tap send also finishes (same as release). Otherwise
-                // Grok keeps the composer usable while the bot works: text sends, an
-                // empty field starts a voice call with the agent (Grok's voice-wave pill).
-                Button(action: onPrimary) {
-                    Capsule()
-                        .fill(theme.primary)
-                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
-                        .overlay(actionGlyph)
-                        .frame(height: Theme.composerHeight)
-                        .contentShape(Rectangle())
+                HStack(spacing: 8) {
+                    leadingSlot
+                    middle
+                    trailingCluster
                 }
-                .buttonStyle(.plain)
-                .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-                .animation(swap, value: canSend)
-                // The label follows the action, not the fade: the button sends
-                // from the first frame of the swap, so it says so at once.
-                .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-                .accessibilityIdentifier("composer-action")
             }
-            .padding(.trailing, Theme.actionPillTrailing)
+        }
+        // Latched here rather than recomputed in `stacked`, so the arrangement is remembered
+        // across the measurement it causes; see `ComposerLayout.stacked`.
+        .onChange(of: lines) { _, n in
+            stackedLatch = ComposerLayout.stacked(wasStacked: stackedLatch, lines: n,
+                                                  empty: draft.text.isEmpty,
+                                                  attachments: pending.count)
+        }
+        .onChange(of: draft.text.isEmpty) { _, isEmpty in
+            if isEmpty { stackedLatch = false }
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
         .frame(minHeight: Theme.composerHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
@@ -4943,7 +5657,11 @@ private struct ComposerField: View {
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
-        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Rim is paint only: a hit-testing stroke over the trailing edge would
+        // swallow taps on the mic ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint).allowsHitTesting(false))
+        // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
+        .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {

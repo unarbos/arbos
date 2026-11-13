@@ -1,0 +1,8 @@
+{
+  "command": "python3 -I -B test_assemble.py",
+  "exit": 0,
+  "tests": 12,
+  "seconds_reported_by_unittest": 0.167,
+  "test_source_sha256": "75d28c64d9cd9680b6467add5fb0493e208809df049d5c196c78ab6ceef1e027",
+  "scope": "Existing unchanged standard-library contracts; no full assembly."
+}

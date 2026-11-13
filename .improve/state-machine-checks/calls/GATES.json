@@ -1,0 +1,77 @@
+{
+  "source_unchanged": true,
+  "tests": 41,
+  "gates": {
+    "final-relay.json": {
+      "tests": 17,
+      "seconds": 6.154119500075467,
+      "source_sha256": "b190a0b42450828972360a74a2ac02d5fd115a64b75b8d8510bfd551724beb52"
+    },
+    "final-owned-http.json": {
+      "tests": 4,
+      "seconds": 4.681294083013199,
+      "source_sha256": "b190a0b42450828972360a74a2ac02d5fd115a64b75b8d8510bfd551724beb52"
+    },
+    "final-engine.json": {
+      "tests": 6,
+      "seconds": 5.255191708914936,
+      "source_sha256": "13bc976a1cec45213596ca4324ee6a45d28530bf38026f732de287fc36af5430"
+    },
+    "request-order.json": {
+      "tests": 3,
+      "seconds": 3.927254833979532,
+      "source_sha256": "801b3e87a9070f7f37711d448296635c3324205578898cf2af9097ea19d66058"
+    },
+    "store-owner.json": {
+      "tests": 11,
+      "seconds": 0.5283669589553028,
+      "source_sha256": {
+        "crates/arbos-mac/src/sync/store_owner.rs": "b162091688e62a0b979af140c678ee8d6e797633129e835e96d4407ad4f39875",
+        "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+        "crates/arbos-mac/src/sync/store.rs": "28d48ea31b86768eafa2233c51e2ff312fc424a03d51ca8ebb2815f5e07dbef0"
+      },
+      "case_insensitive_filesystem": true
+    }
+  },
+  "scope": "Actual selected production methods/pure modules with synthetic collaborators; actual SDK native composition is separate",
+  "additional_current_ui_checks": {
+    "swift": {
+      "exit_code": 0,
+      "compile_exit": 0,
+      "wall_seconds": 1.539075749926269,
+      "source_sha256": "5367d7a1bbc0284672b68477419e046f44f182e5b57212fdd8e2615d2ce34454",
+      "fixture_sha256": "f83eca1d2c3c84486f1f8a487729d930ff5f41b3621d43c73d327f829dcb59be",
+      "methods": [
+        "start",
+        "join",
+        "connect",
+        "teardown",
+        "hangUp",
+        "syncActiveBar",
+        "beginAttempt",
+        "ownsAttempt",
+        "releaseStaleCall",
+        "invalidateForSignOut"
+      ],
+      "output": "PASS late REST cannot resurrect\nPASS late error cannot clear replacement\nPASS permission completion after hangup\nPASS late media cannot activate\nPASS ordinary start control\nPASS late join cleanup\nPASS permission reservation prevents duplicate starts\nPASS same-call replacement is never left\nPASS cleanup retains original API authority\nPASS late media cannot affect replacement room\nPASS old leave cannot mutate replacement account\nPASS queued old-room delegate rejected/current control\nPASS different remote user membership gets old cleanup\nPASS different relay scope gets old cleanup\nRESULT tests=14 failed=0\n"
+    },
+    "api": {
+      "exit_code": 0,
+      "compile_exit": 0,
+      "wall_seconds": 0.5959790000924841,
+      "source_sha256": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+      "fixture_sha256": "f84e9215f79d5c2ac70adb5415d15e73a9d650be676b3cea02b01a8b95ec2ccb",
+      "output": "PASS same-account refresh control\nPASS old refresh cannot retry as replacement\nPASS captured cleanup freezes original bearer\nPASS invalid account cannot begin request\nPASS refreshed original bearer survives retired-account cleanup\nRESULT tests=5 failed=0\n"
+    },
+    "mac": {
+      "exit_code": 0,
+      "compile_exit": 0,
+      "wall_seconds": 1.152096000034362,
+      "source_sha256": "6adb872142aad6c8db71aec2c4a9027bfbbf02a9323c0fad37cf9ae677538b84",
+      "fixture_sha256": "1459d8b295e0a8fbdaf1e7feb441c38f4facc82f76a502abbe68d4b324e741ff",
+      "output": "PASS canceled REST cannot resurrect\nPASS old REST cannot replace current call\nPASS ordinary completion control\nPASS queued receipt rejected after same-device readoption\nPASS same-account token rotation preserves receipt control\nPASS repeated backend ticket preserves ongoing call\nRESULT tests=6 failed=0\n"
+    }
+  },
+  "entrypoint_cases": 66,
+  "note": "41 backend/native checks + retained25 Swift/API/UI checks, each run against frozen current inputs; no whole-SDK runtime claim"
+}

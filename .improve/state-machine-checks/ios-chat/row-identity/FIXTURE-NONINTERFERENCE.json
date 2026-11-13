@@ -1,0 +1,44 @@
+{
+  "scope": "Source-only closure proof for existing AvatarBackSwipe UI fixture, not runtime attribution",
+  "canonical_commit": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "files": {
+    "apps/ios/Arbos/Arbos/Store/Fixture.swift": "75c3601d74558cffb14b6ab6fc20a8c18e5958071834e7c200d19bfcb310d2a1",
+    "apps/ios/Arbos/Arbos/App/DebugHooks.swift": "dc77907bf32c23e5646acf1d41706045e961118a863eb31a14fed4c4f4406392",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "2fb19532c675bdda31e60e658a032543f5c9178fce185fcd327bcd628aad81ca",
+    "apps/ios/Arbos/ArbosUITests/AvatarBackSwipeUITests.swift": "f7a1613cefb85feff22f707ea0c2c68601790b24d85d126ad10c406b1c4f857b"
+  },
+  "test_launch_environment": {
+    "ARBOS_FIXTURE": "1",
+    "ARBOS_OPEN_PEOPLE": "fx-group-launch",
+    "ARBOS_FIXTURE_LONG_ROWS": "120"
+  },
+  "evidence": [
+    {
+      "file": "apps/ios/Arbos/ArbosUITests/AvatarBackSwipeUITests.swift",
+      "lines": "36-39",
+      "behavior": "launchEnvironment supplies only fixture/group/120 generated long rows; no fixture document or replay path"
+    },
+    {
+      "file": "apps/ios/Arbos/Arbos/Store/Fixture.swift",
+      "lines": "9-38,308-310,1189+",
+      "behavior": "fixture group and long rows are Swift-generated constants and Message values"
+    },
+    {
+      "file": "apps/ios/Arbos/Arbos/Store/Fixture.swift",
+      "lines": "349-383",
+      "behavior": "external snapshot/replay reads require separately supplied fixtureDoc/perfReplay paths"
+    },
+    {
+      "file": "apps/ios/Arbos/Arbos/App/DebugHooks.swift",
+      "lines": "226-235,285+",
+      "behavior": "fixtureDoc/perfReplay are optional explicit launch environment values; absent in these test launches"
+    },
+    {
+      "file": "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+      "lines": "1061-1066",
+      "behavior": "ARBOS_FIXTURE initialization installs synthetic credentials/API and calls loadFixture before ordinary live bootstrap"
+    }
+  ],
+  "missing_repository_goldens_cannot_affect_this_test_fixture": true,
+  "limits": "This source proof supports using the existing same-runtime three sender-avatar failures as before evidence when only the extra repository goldens are added. It does not yet prove the one-line identity change restores UI."
+}

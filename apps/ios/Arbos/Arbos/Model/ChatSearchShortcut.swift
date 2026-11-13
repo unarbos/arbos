@@ -19,12 +19,10 @@ enum ChatSearchShortcut {
         let open: Bool
         /// The field takes the cursor (only when opening).
         let focus: Bool
-        /// Slide the bar in / out.
-        let animate: Bool
     }
 
     static func apply(open: Bool) -> Effect {
-        Effect(open: !open, focus: !open, animate: true)
+        Effect(open: !open, focus: !open)
     }
 }
 

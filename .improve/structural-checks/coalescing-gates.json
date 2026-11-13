@@ -1,0 +1,54 @@
+{
+  "source_sha256": "456a1e2908547917caf5f04eda2595d518be30000152486641722e1ab9ee5154",
+  "old_models": [
+    {
+      "command": [
+        "rustc",
+        "--edition=2021",
+        "--test",
+        ".improve/evidence/coalescing/original-models.rs",
+        "-o",
+        ".improve/evidence/coalescing/original-tests"
+      ],
+      "seconds": 0.1129383749794215,
+      "exit_code": 0
+    },
+    {
+      "command": [
+        ".improve/evidence/coalescing/original-tests"
+      ],
+      "seconds": 0.18023570801597089,
+      "exit_code": 0
+    }
+  ],
+  "actual_and_mutants": [
+    {
+      "gate": "actual",
+      "compile_seconds": 0.11413091700524092,
+      "test_seconds": 0.18356854107696563,
+      "exit_code": 0,
+      "expected_exit_code": 0
+    },
+    {
+      "gate": "always-paint",
+      "compile_seconds": 0.08807858393993229,
+      "test_seconds": 0.18162166594993323,
+      "exit_code": 101,
+      "expected_exit_code": 101
+    },
+    {
+      "gate": "postpone-burst",
+      "compile_seconds": 0.08621445891913027,
+      "test_seconds": 0.17788799991831183,
+      "exit_code": 101,
+      "expected_exit_code": 101
+    },
+    {
+      "gate": "never-timer",
+      "compile_seconds": 0.08404870796948671,
+      "test_seconds": 0.18236083292867988,
+      "exit_code": 101,
+      "expected_exit_code": 101
+    }
+  ]
+}

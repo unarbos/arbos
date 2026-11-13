@@ -63,6 +63,7 @@ python3 -c 'import cryptography' 2>/dev/null || { apt-get update -q && apt-get i
 
 say "files"
 install -d -m 0755 "$INSTALL_DIR"
+install -m 0644 "$HERE/feedback_state.py" "$INSTALL_DIR/feedback_state.py"
 install -m 0755 "$HERE/feedback_poller.py" "$INSTALL_DIR/feedback_poller.py"
 install -m 0644 "$HERE/agent-prompt.md" "$INSTALL_DIR/agent-prompt.md"
 install -m 0644 "$HERE/arbos-feedback-poller.service" /etc/systemd/system/arbos-feedback-poller.service

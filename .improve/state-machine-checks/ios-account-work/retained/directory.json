@@ -1,0 +1,38 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "1d08f6c59ef0d020284deb105fc1126e971592c8e6e32e60fae6f424eea4dab8",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 5,
+    "results": [
+      {
+        "name": "late-users-response-cannot-publish-into-B",
+        "pass": true
+      },
+      {
+        "name": "late-users-error-cannot-start-B-fallback",
+        "pass": true
+      },
+      {
+        "name": "current-users-control",
+        "pass": true
+      },
+      {
+        "name": "current-fallback-filter-dedup-sort-control",
+        "pass": true
+      },
+      {
+        "name": "late-poll-entry-refuses-new-account-work",
+        "pass": true
+      }
+    ],
+    "total": 5
+  },
+  "seconds": 1.48359308403451
+}

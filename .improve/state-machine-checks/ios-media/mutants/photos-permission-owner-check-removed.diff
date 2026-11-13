@@ -1,0 +1,10 @@
+--- a/apps/ios/Arbos/Arbos/UI/MediaViewer.swift
++++ b/apps/ios/Arbos/Arbos/UI/MediaViewer.swift
+@@ -496,7 +496,6 @@
+         switch item.kind {
+         case .image, .video:
+             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+-            guard origin.allowsPrivate(model) else { return }
+             guard status == .authorized || status == .limited else {
+                 // No Photos access: fall back to the share sheet (Save to Files is in it).
+                 shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)

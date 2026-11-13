@@ -13,6 +13,7 @@
 //! `POST /servers/{id}/leave` · `GET /me/matrix` (token for the SDK) ·
 //! `/_matrix/client/{*rest}` (proxy to Synapse; the Matrix token authenticates there).
 
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -21,6 +22,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use arbos_core::api::{
     PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
@@ -201,8 +203,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "channels": channels.iter().map(|c| channel_json_for(state, c, &me.user_id)).collect::<Vec<_>>(),
         "general_channel_id": channels.iter().find(|c| c.name == "general").or(channels.first()).map(|c| c.id.clone()),
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
-        "avatar_leaf": s.avatar_leaf,
-        "avatar_leaf_color": s.avatar_leaf_color,
+        "avatar_disc_color": s.avatar_leaf_color,
         "archived_at": state.db.space_archived_at(&me.user_id, &s.id).ok().flatten(),
     });
     // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
@@ -225,6 +226,19 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
             .iter()
             .map(|m| member_json(state, m))
             .collect::<Vec<_>>());
+        // What a removal before this was fixed left behind: people who are not in the server
+        // but whose row still says `admin`, so they would come back as one. The owner is the
+        // only one who can clear it (`PUT /servers/{id}/members/{uid} {role: "member"}`), so
+        // the owner is the only one shown it.
+        if s.owner_user_id == me.user_id {
+            v["residual_roles"] = json!(state
+                .db
+                .departed_members_with_role(&s.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|m| member_json(state, m))
+                .collect::<Vec<_>>());
+        }
     }
     v
 }
@@ -364,11 +378,9 @@ pub struct CreateBody {
     /// `true` (default) also makes `#announcements` (admins post).
     #[serde(default = "yes")]
     pub announcements: bool,
-    /// Create screen (D93): the server's leaf picture (0–8) and disc colour (0–9), both or neither.
-    #[serde(default)]
-    pub avatar_leaf: Option<i64>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<i64>,
+    /// Create screen (D93): the server's disc colour (0–9), or 255 for "no picture".
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<i64>,
 }
 
 fn yes() -> bool {
@@ -408,10 +420,9 @@ pub async fn create(
             "too many servers today",
         );
     }
-    if let Err((st, msg)) = crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color) {
-        return api_error(st, "bad_leaf", msg);
+    if let Err((st, msg)) = crate::avatar::check_disc_color(b.avatar_disc_color) {
+        return api_error(st, "bad_disc_color", msg);
     }
-    let leaf = b.avatar_leaf.zip(b.avatar_leaf_color);
     let now = now_ms();
     let server = Server {
         id: ulid(),
@@ -422,8 +433,8 @@ pub async fn create(
         space_room_id: None,
         created_at: now,
         is_open: false,
-        avatar_leaf: leaf.map(|l| l.0),
-        avatar_leaf_color: leaf.map(|l| l.1),
+        avatar_leaf: None,
+        avatar_leaf_color: b.avatar_disc_color,
     };
     if let Err(e) = state.db.insert_server(&server) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -520,17 +531,13 @@ pub struct PatchBody {
     /// `true` = anyone on Arbos can search and join without an invite link.
     #[serde(default)]
     pub open: Option<bool>,
-    /// D92 amendment: the server's leaf picture (`null` = none); set together.
+    /// D92 amendment: the server's disc colour (`null` = automatic from the id).
     #[serde(
         default,
+        alias = "avatar_leaf_color",
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
-    pub avatar_leaf: Option<Option<i64>>,
-    #[serde(
-        default,
-        deserialize_with = "crate::api::deserialize_double_option_i64"
-    )]
-    pub avatar_leaf_color: Option<Option<i64>>,
+    pub avatar_disc_color: Option<Option<i64>>,
 }
 
 /// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
@@ -550,8 +557,8 @@ pub async fn patch(
     if b.open.is_some() {
         fields.push("open");
     }
-    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
-        fields.push("avatar_leaf");
+    if b.avatar_disc_color.is_some() {
+        fields.push("avatar_disc_color");
     }
     let (me, _, _) = match settings_server(&state, &principal, &id, "server", &fields) {
         Ok(v) => v,
@@ -604,24 +611,11 @@ pub async fn patch(
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
-    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
-        let leaf = match (b.avatar_leaf, b.avatar_leaf_color) {
-            (Some(Some(l)), Some(Some(c))) => {
-                if let Err((st, msg)) = crate::avatar::check_leaf_pick(Some(l), Some(c)) {
-                    return api_error(st, "bad_leaf", msg);
-                }
-                Some((l, c))
-            }
-            (Some(Some(_)), _) | (_, Some(Some(_))) => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "bad_leaf",
-                    "avatar_leaf and avatar_leaf_color go together",
-                )
-            }
-            _ => None,
-        };
-        if let Err(e) = state.db.update_server_leaf(&id, leaf) {
+    if let Some(color) = b.avatar_disc_color {
+        if let Err((st, msg)) = crate::avatar::check_disc_color(color) {
+            return api_error(st, "bad_disc_color", msg);
+        }
+        if let Err(e) = state.db.update_server_disc_color(&id, color) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
     }
@@ -1298,8 +1292,7 @@ fn open_hit_json(s: &Server, member_count: i64) -> Value {
         "open": true,
         "member_count": member_count,
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
-        "avatar_leaf": s.avatar_leaf,
-        "avatar_leaf_color": s.avatar_leaf_color,
+        "avatar_disc_color": s.avatar_leaf_color,
         "my_role": "",
         "channels": [],
     })
@@ -1600,9 +1593,39 @@ pub async fn leave(
 
 // ---- the device's Matrix identity and the proxy ---------------------------------------------------
 
-/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id}` for this device. The
-/// token is minted once through the appservice login (`m.login.application_service`), stored
-/// encrypted, and handed back on every call; sign-out revokes it with the device.
+/// `GET /me/matrix/people` → `{rooms: {<chat_id>: <room_id>}}`: the caller's people chats that
+/// are read and written on the homeserver ([`super::people_native_room`]), each with the room
+/// the relay made for it. The apps show a people chat from the homeserver only when this
+/// names the room; everything else stays in its Loro room. Empty for someone not flagged.
+pub async fn me_matrix_people(State(state): State<AppState>, principal: Principal) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = matrix_required(&state) {
+        return *r;
+    }
+    let mut rooms = serde_json::Map::new();
+    if state.db.matrix_people_native(&me).unwrap_or(false) {
+        let chats = match state.db.chats_of_member(&format!("user:{me}")) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        };
+        for cm in &chats {
+            if let Some(room) = super::people_native_room(&state, cm) {
+                rooms.insert(cm.chat.id.clone(), json!(room));
+            }
+        }
+    }
+    Json(json!({ "rooms": rooms })).into_response()
+}
+
+/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id, people_native,
+/// history_key}` for this device. `history_key` is the key the relay signs carried history
+/// with (`history.rs`); an app pins the first one it is told. The token is minted once through the appservice login
+/// (`m.login.application_service`), stored encrypted, and handed back on every call; sign-out
+/// revokes it with the device. `people_native` is the user's `users.matrix_people_native`
+/// (`PUT /admin/matrix/people/{user}`); a failed lookup reads as off.
 pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> Response {
     let me = match user_of(&principal) {
         Ok(u) => u,
@@ -1616,9 +1639,14 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     }
     let homeserver = state.cfg.public_url.trim_end_matches('/').to_owned();
     let mxid = state.matrix.cfg.user_mxid(&me);
+    let people_native = state
+        .db
+        .matrix_people_native_users()
+        .is_ok_and(|u| u.contains(&me));
+    let history_key = super::history::public_key(&state);
     if let Ok(Some((mx_device, enc))) = state.db.matrix_device(&device_id) {
         if let Ok(token) = state.relay_key.decrypt(&enc) {
-            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
+            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native, "history_key": history_key }))
                 .into_response();
         }
     }
@@ -1643,27 +1671,60 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     // A device that can read channels can be told about them: the relay becomes this user's
     // push gateway (every live device; reads.rs `on_notify` fans channel messages out).
     state.matrix.pushers(&state, &me, true);
-    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
+    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native, "history_key": history_key }))
         .into_response()
 }
 
+/// How long one device's Matrix logout may take. The shared `reqwest::Client` carries no
+/// request timeout, so without this a hung homeserver hangs the caller for as long as it likes
+/// — and a sign-out-everywhere makes that call once per device.
+const LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A signed-out Arbos device takes its Matrix device with it (`/logout` with its own token).
-pub async fn revoke_device(state: &AppState, device_id: &str) {
-    let Ok(Some((_, _, enc))) = state.db.matrix_delete_device(device_id) else {
-        return;
+///
+/// Returns an error when the Matrix session is still live at the homeserver, so a caller that
+/// promises "signed out everywhere" can tell the truth. `/_matrix` forwards any valid Matrix
+/// token straight to Synapse and never consults the `devices` table, so a token left behind
+/// here is a working session for a device the user believes is gone (#2433).
+///
+/// The `matrix_devices` row is deleted only once the logout has landed. It holds the encrypted
+/// access token, which is the relay's one handle on that session: deleting it first — as this
+/// did until the #2460 review — makes a failed logout permanent, because no retry can find the
+/// token again.
+pub async fn revoke_device(state: &AppState, device_id: &str) -> anyhow::Result<()> {
+    let row = state
+        .db
+        .matrix_device_to_revoke(device_id)
+        .context("read the device's Matrix identity")?;
+    let Some((_, _, enc)) = row else {
+        return Ok(());
     };
-    let token = match state.relay_key.decrypt(&enc) {
-        Ok(t) => t,
+    let token = state.relay_key.decrypt(&enc).map_err(|e| {
         // Silence here is how a signed-out device kept a live Matrix token (#2433): the row
         // went, the token did not.
-        Err(e) => {
-            tracing::warn!(device = %device_id, error = %e, "matrix: device token unreadable; it stays live at the homeserver");
-            return;
-        }
-    };
+        anyhow::anyhow!("the device's Matrix token cannot be read, so it stays live: {e}")
+    })?;
     let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
-    if let Err(e) = client.logout_token(&token).await {
-        tracing::warn!(device = %device_id, error = %e, "matrix: device logout failed");
+    match tokio::time::timeout(LOGOUT_TIMEOUT, client.logout_token(&token)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::new(e).context("log the device out at the homeserver"))
+        }
+        Err(_) => {
+            anyhow::bail!("the homeserver did not answer the logout within {LOGOUT_TIMEOUT:?}")
+        }
+    }
+    state
+        .db
+        .matrix_forget_device(device_id)
+        .context("forget the device's Matrix identity")?;
+    Ok(())
+}
+
+/// [`revoke_device`] for callers that have nothing to do with a failure beyond logging it.
+pub async fn revoke_device_logging(state: &AppState, device_id: &str) {
+    if let Err(e) = revoke_device(state, device_id).await {
+        tracing::warn!(device = %device_id, error = %e, "matrix: device not logged out; its session stays live");
     }
 }
 
@@ -1684,14 +1745,14 @@ pub async fn forget_user(state: &AppState, user_id: &str) {
         }
     }
     for device_id in state.db.matrix_devices_of_user(user_id).unwrap_or_default() {
-        revoke_device(state, &device_id).await;
+        revoke_device_logging(state, &device_id).await;
     }
     if let Err(e) = state.db.matrix_forget_user(user_id) {
         tracing::warn!(user = %user_id, error = %e, "matrix: rows of a deleted user not cleared");
     }
 }
 
-/// `/_matrix/client/{*rest}` → Synapse, body and headers streamed both ways. The Matrix access
+/// `/_matrix/client/{*rest}` and `POST /_matrix/media/v3/upload` → Synapse, body and headers streamed both ways. The Matrix access
 /// token in the request authenticates at the homeserver; the relay adds nothing.
 pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     if !state.matrix.cfg.mode.writes() {
@@ -1954,8 +2015,7 @@ mod settings_permission_tests {
             name: None,
             image_key: None,
             open: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
         }
     }
 
@@ -2040,10 +2100,9 @@ mod settings_permission_tests {
                     },
                 ),
                 (
-                    "avatar_leaf",
+                    "avatar_disc_color",
                     PatchBody {
-                        avatar_leaf: Some(Some(1)),
-                        avatar_leaf_color: Some(Some(2)),
+                        avatar_disc_color: Some(Some(2)),
                         ..patch_body()
                     },
                 ),
@@ -2213,8 +2272,7 @@ mod picture_tests {
                 name: None,
                 image_key: Some(key),
                 open: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
             }),
         )
         .await
@@ -2290,5 +2348,408 @@ mod picture_tests {
             StatusCode::OK
         );
         assert_eq!(picture(&state), None);
+    }
+}
+
+#[cfg(test)]
+mod role_residue_tests {
+    //! Removal has to take the role with it. A `left_at` written over a row that still says
+    //! `admin` is a standing promise of admin rights on the next join, kept in a row nobody
+    //! could see: the roster lists live members only, and `set_server_role` reached live rows
+    //! only, so the one person who would want to clear it could neither see it nor reach it.
+
+    use std::collections::HashMap;
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+
+    use arbos_core::ids::{now_ms, ulid};
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    struct Crew {
+        server: String,
+        owner: String,
+        owner_dev: Principal,
+        admin: String,
+        admin_dev: Principal,
+    }
+
+    /// A server whose owner has made one other person an admin.
+    fn crew(state: &AppState, seed: i64) -> Crew {
+        crew_open(state, seed, false)
+    }
+
+    fn crew_open(state: &AppState, seed: i64, is_open: bool) -> Crew {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, admin_dev) = person(state, seed + 1);
+        let server = Server {
+            id: ulid(),
+            name: "Launch Crew".into(),
+            owner_user_id: owner.clone(),
+            image_key: None,
+            invite_code: format!("crew{seed}"),
+            space_room_id: None,
+            created_at: now_ms(),
+            is_open,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_server(&server).expect("server");
+        state
+            .db
+            .add_server_member(&server.id, &admin, &owner)
+            .expect("joined");
+        state
+            .db
+            .set_server_role(&server.id, &admin, "admin")
+            .expect("promoted");
+        Crew {
+            server: server.id,
+            owner,
+            owner_dev,
+            admin,
+            admin_dev,
+        }
+    }
+
+    async fn detail(state: &AppState, who: &Principal, server: &str) -> Value {
+        let r = get(State(state.clone()), who.clone(), Path(server.to_owned())).await;
+        let body = to_bytes(r.into_body(), usize::MAX).await.expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
+    async fn remove(state: &AppState, by: &Principal, server: &str, uid: &str) -> StatusCode {
+        member_remove(
+            State(state.clone()),
+            by.clone(),
+            Path((server.to_owned(), uid.to_owned())),
+            Query(HashMap::new()),
+        )
+        .await
+        .status()
+    }
+
+    async fn re_add(state: &AppState, by: &Principal, server: &str, uid: &str) -> StatusCode {
+        member_add(
+            State(state.clone()),
+            by.clone(),
+            Path(server.to_owned()),
+            Json(AddMemberBody {
+                user_id: uid.to_owned(),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    fn residual_user_ids(detail: &Value) -> Vec<String> {
+        detail["residual_roles"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m["user_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The attack: remove an admin, let them back in, and they are an admin again — the
+    /// removal never rewrote `role`, and the re-join never reset it either.
+    #[tokio::test]
+    async fn a_removed_admin_comes_back_a_member() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5101);
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin"
+        );
+
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(state
+            .db
+            .server_member(&c.server, &c.admin)
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        let back = state
+            .db
+            .server_member(&c.server, &c.admin)
+            .unwrap()
+            .expect("rejoined");
+        assert_eq!(
+            back.role, "member",
+            "a removed admin rejoins as a member: the role left with the membership"
+        );
+    }
+
+    /// The owner's half: a role a removal left behind before this was fixed has to be visible
+    /// to the owner and clearable by them. Neither was true — the roster hides departed rows,
+    /// and the only route that writes a role refused to touch one.
+    #[tokio::test]
+    async fn an_owner_sees_and_clears_a_role_left_behind() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5201);
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        // Put the role back on the departed row: the exact state an old removal left, which no
+        // backfill is going to clean up for us.
+        assert!(
+            state
+                .db
+                .set_server_role(&c.server, &c.admin, "admin")
+                .unwrap(),
+            "a departed row has to be reachable, or the residue cannot be written or cleared"
+        );
+
+        let v = detail(&state, &c.owner_dev, &c.server).await;
+        assert_eq!(
+            residual_user_ids(&v),
+            vec![c.admin.clone()],
+            "the owner sees who would come back an admin: {v:#}"
+        );
+        assert!(
+            !v["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["user_id"] == json!(c.admin)),
+            "and they are still not in the roster"
+        );
+
+        let r = member_role(
+            State(state.clone()),
+            c.owner_dev.clone(),
+            Path((c.server.clone(), c.admin.clone())),
+            Json(RoleBody {
+                role: "member".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::NO_CONTENT,
+            "the owner can demote a row that is not a live membership"
+        );
+        let v = detail(&state, &c.owner_dev, &c.server).await;
+        assert!(residual_user_ids(&v).is_empty(), "cleared: {v:#}");
+
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "member"
+        );
+    }
+
+    /// The reset belongs to a re-join, not to every call that reaches the join statement. An
+    /// admin who never left — re-added by the owner, or tapping Join on an open server they
+    /// are already in — keeps their role. Both routes return early on a live membership; this
+    /// pins that, because the reset would demote them if either stopped doing so.
+    #[tokio::test]
+    async fn a_live_admin_who_joins_again_stays_an_admin() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5401);
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin",
+            "being added again is not a demotion"
+        );
+
+        let open = crew_open(&state, 5411, true);
+        let r = join(
+            State(state.clone()),
+            open.admin_dev.clone(),
+            Json(JoinBody {
+                code: None,
+                server_id: Some(open.server.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .db
+                .server_member(&open.server, &open.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin",
+            "tapping Join on a server you are already an admin of is not a demotion"
+        );
+    }
+
+    /// Residue is the owner's to clear, so it is the owner's to see. An admin is not shown it,
+    /// and no role write may take the server's owner off their own server.
+    #[tokio::test]
+    async fn only_the_owner_is_shown_residue_and_the_owner_role_is_not_writable() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5301);
+        let (live_admin, live_admin_dev) = person(&state, 5399);
+        state
+            .db
+            .add_server_member(&c.server, &live_admin, &c.owner)
+            .unwrap();
+        state
+            .db
+            .set_server_role(&c.server, &live_admin, "admin")
+            .unwrap();
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        state
+            .db
+            .set_server_role(&c.server, &c.admin, "admin")
+            .unwrap();
+
+        let as_admin = detail(&state, &live_admin_dev, &c.server).await;
+        assert!(
+            as_admin.get("residual_roles").is_none(),
+            "an admin is not shown the owner's cleanup list: {as_admin:#}"
+        );
+        let as_owner = detail(&state, &c.owner_dev, &c.server).await;
+        assert_eq!(residual_user_ids(&as_owner), vec![c.admin.clone()]);
+
+        assert!(
+            !state
+                .db
+                .set_server_role(&c.server, &c.owner, "member")
+                .unwrap(),
+            "nothing demotes the owner of the server"
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.owner)
+                .unwrap()
+                .unwrap()
+                .role,
+            "owner"
+        );
+    }
+}
+
+#[cfg(test)]
+mod people_native_tests {
+    use axum::body::to_bytes;
+    use axum::extract::State;
+
+    use super::*;
+    use crate::matrix::{Config, Matrix, Mode};
+    use crate::people::tests_support::{dm, group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn rooms(state: &AppState, who: &Principal) -> Value {
+        let r = me_matrix_people(State(state.clone()), who.clone()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = to_bytes(r.into_body(), usize::MAX).await.expect("body");
+        serde_json::from_slice::<Value>(&body).expect("json")["rooms"].clone()
+    }
+
+    /// A people chat is on the homeserver for a person only when nobody in it would miss a
+    /// message sent there: every member a flagged person, and a room the relay holds open.
+    #[tokio::test]
+    async fn a_chat_is_native_only_when_every_member_is() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            mode: Mode::Dual,
+            ..Config::off()
+        });
+        let (alice, alice_dev) = person(&state, 1301);
+        let (bob, bob_dev) = person(&state, 1302);
+        let (carol, _) = person(&state, 1303);
+        let flag = |u: &str, on: bool| assert!(state.db.set_matrix_people_native(u, on).unwrap());
+        let room = |chat: &str, id: &str| {
+            state
+                .db
+                .matrix_insert_room(
+                    chat,
+                    id,
+                    None,
+                    if id.contains("dm") { "dm" } else { "group" },
+                    false,
+                )
+                .expect("room")
+        };
+        let both = dm(&state, &alice, &bob);
+        room(&both, "!dm:arbos.life");
+        let with_carol = group(&state, &[&alice, &bob, &carol]);
+        room(&with_carol, "!carol:arbos.life");
+        let with_agent = group(&state, &[&alice, &bob]);
+        room(&with_agent, "!agent:arbos.life");
+        let agent = project_of(&state, &alice, "Scout");
+        state
+            .db
+            .add_member(
+                &with_agent,
+                &format!("agent:{agent}"),
+                "agent",
+                &alice,
+                &json!({}),
+            )
+            .expect("agent");
+        group(&state, &[&alice, &bob]); // no room yet
+        let closed = group(&state, &[&alice, &bob]);
+        room(&closed, "!closed:arbos.life");
+        state.db.matrix_close_room(&closed).expect("closed");
+
+        // Nobody flagged: nothing, for anyone.
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        // Only Alice: Bob reads the Loro room, so Alice's device must write there too.
+        flag(&alice, true);
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        // Both: their DM, and none of the chats with an unflagged person, an agent, no room
+        // or a closed one.
+        flag(&bob, true);
+        let expected = json!({ both.clone(): "!dm:arbos.life" });
+        assert_eq!(rooms(&state, &alice_dev).await, expected);
+        assert_eq!(rooms(&state, &bob_dev).await, expected);
+        // Rollback is the flag: the chat is back in its Loro room for both.
+        flag(&bob, false);
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        assert_eq!(rooms(&state, &bob_dev).await, json!({}));
+
+        // Not a device: refused. Matrix off: no such thing on this relay.
+        let r = me_matrix_people(State(state.clone()), Principal::Admin).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        state.matrix = Matrix::new(Config::off());
+        let r = me_matrix_people(State(state.clone()), alice_dev).await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

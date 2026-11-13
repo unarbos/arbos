@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "4571bcc26be7bb8fd7ccd39c85939b5ff5d042021b5a597497290fdb1c84273b"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "db8461a3e592f47f24044d7e7d8872be534c199298d9718b1f98f22dd402a81f",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-people-memo-control": true,
+      "current-project-memo-control": true,
+      "late-memo-failure-no-typed-A-send": true,
+      "late-memo-success-no-typed-A-send": true,
+      "queued-A-memo-no-B-authority-or-send": true
+    },
+    "failed": 0,
+    "passed": 5,
+    "total": 5
+  },
+  "seconds": 0.6733396250056103
+}

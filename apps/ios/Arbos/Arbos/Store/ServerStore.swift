@@ -13,24 +13,35 @@ private let matrixLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "ma
 /// UniFFI callbacks arrive on the Rust sync task; hop to the main actor before touching AppModel.
 final class MatrixBridgeListener: ArbosFFI.MatrixListener, @unchecked Sendable {
     private weak var model: AppModel?
+    private let owner: MatrixLifetime.Ticket
 
-    init(model: AppModel) {
+    init(model: AppModel, owner: MatrixLifetime.Ticket) {
         self.model = model
+        self.owner = owner
     }
 
     func onRooms(snapshot: ArbosFFI.MatrixSnapshot) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixSnapshot(snapshot) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixSnapshot(snapshot)
+        }
     }
 
     func onTimeline(roomId: String, rows: [ArbosFFI.MatrixMessageRow]) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixTimeline(roomId: roomId, rows: rows) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixTimeline(roomId: roomId, rows: rows)
+        }
     }
 
     func onConnection(connected: Bool, error: String?) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixConnection(connected: connected, error: error) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixConnection(connected: connected, error: error)
+        }
     }
 }
 
@@ -209,10 +220,11 @@ extension AppModel {
     /// Members come only with `GET /servers/{id}`: ask once per server per session for any
     /// server the list brought without them, so channel bubbles and the previews can name
     /// people from the first paint.
-    func wantServerRosters() {
+    func wantServerRosters(expectedOwner: WorkLifetime.Ticket? = nil) {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         for s in servers where s.members.isEmpty && !serverRostersRequested.contains(s.id) {
             serverRostersRequested.insert(s.id)
-            Task { await refreshServer(s.id) }
+            Task { await refreshServer(s.id, expectedOwner: work.owner) }
         }
     }
 
@@ -265,10 +277,12 @@ extension AppModel {
     // MARK: Relay (control plane)
 
     /// `GET /servers`; refetched on the 15 s loop and on every `server_*` push.
-    func refreshServers() async {
-        guard credentials != nil, !isFixture else { return }
+    func refreshServers(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+              let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            var list = try await relay.servers()
+            var list = try await work.api.servers()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             // The list has no members; keep the ones a profile page already fetched.
             for i in list.indices where list[i].members.isEmpty {
                 if let prev = server(list[i].id) { list[i].members = prev.members }
@@ -282,10 +296,11 @@ extension AppModel {
             reconcileArchivedServers(list)
             if !serversAvailable { serversAvailable = true }
             rememberServersAvailable(true)
-            wantServerRosters()
+            wantServerRosters(expectedOwner: work.owner)
             refreshChannelSenders()
             applyOpenServerHook()
         } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             // Relays without servers: nothing server-related.
             if !servers.isEmpty { servers = [] }
             if serversAvailable { serversAvailable = false }
@@ -297,9 +312,13 @@ extension AppModel {
 
     /// `GET /servers/{id}` — members for the profile page.
     @discardableResult
-    func refreshServer(_ id: Id) async -> Server? {
+    func refreshServer(_ id: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> Server? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
         guard credentials != nil, !isFixture else { return server(id) }
-        guard let s = try? await relay.server(id) else { return server(id) }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let fresh = try? await work.api.server(id)
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
+        guard let s = fresh else { return server(id) }
         upsert(server: s)
         return s
     }
@@ -316,36 +335,46 @@ extension AppModel {
     }
 
     /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
-    func createServer(name: String, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
+    func createServer(name: String, discColor: UInt8? = nil, picture: DraftPicture? = nil, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            var s = try await relay.createServer(name: name, leaf: leaf)
+            var s = try await work.api.createServer(name: name, discColor: discColor)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             if let picture, let jpeg = await draftJpeg(picture) {
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
                 let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
-                if (try? await relay.putBlob(projectId: "servers:\(s.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
-                   (try? await relay.patchServer(s.id, imageKey: key)) != nil,
-                   let fresh = try? await relay.server(s.id) {
+                if (try? await work.api.putBlob(projectId: "servers:\(s.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
+                   (try? await work.api.patchServer(s.id, imageKey: key)) != nil,
+                   let fresh = try? await work.api.server(s.id) {
                     s = fresh
                 }
             }
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             upsert(server: s)
             open(server: s)
-            await startMatrixIfNeeded()
+            await startMatrixIfNeeded(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("create the server", error)
             return false
         }
     }
 
     /// Rule 8: "Join a server" → `POST /servers/join {code}` (the code or the whole link).
-    func joinServer(code: String) async -> Bool {
+    func joinServer(code: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            let s = try await relay.joinServer(code: code)
+            let s = try await work.api.joinServer(code: code)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             upsert(server: s)
             open(server: s)
-            await startMatrixIfNeeded()
+            await startMatrixIfNeeded(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             let type = (error as? RelayError)?.type
             let said: String? = type == "banned" ? "You can't join this server."
                 : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
@@ -356,14 +385,18 @@ extension AppModel {
     }
 
     /// Join an open server by id (no invite link).
-    func joinOpenServer(_ id: Id) async -> Bool {
+    func joinOpenServer(_ id: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            let s = try await relay.joinOpenServer(id: id)
+            let s = try await work.api.joinOpenServer(id: id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             upsert(server: s)
             open(server: s)
-            await startMatrixIfNeeded()
+            await startMatrixIfNeeded(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             let type = (error as? RelayError)?.type
             let said: String? = type == "banned" ? "You can't join this server."
                 : type == "invite_required" ? "This server needs an invite link."
@@ -375,178 +408,258 @@ extension AppModel {
     }
 
     /// `GET /servers/search?q=` — open servers matching the name (ones you are not in).
-    func searchOpenServers(_ q: String) async -> [Server] {
+    func searchOpenServers(_ q: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> [Server] {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
         guard credentials != nil, !isFixture, serversAvailable else { return [] }
-        return (try? await relay.searchOpenServers(q)) ?? []
+        let result = (try? await work.api.searchOpenServers(q)) ?? []
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return [] }
+        return result
     }
 
-    /// D92 amendment: a server's leaf picture (nil = initials); drops the uploaded picture.
-    func setServerLeaf(_ id: Id, pick: LeafPick?) async -> Bool {
+    /// D92 amendment: a server's disc colour (nil = initials); drops the uploaded picture.
+    func setServerDisc(_ id: Id, color: UInt8?, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        let work = accountWork(expectedOwner: expectedOwner)
+        guard isFixture || work != nil else { return false }
         if let i = servers.firstIndex(where: { $0.id == id }) {
-            servers[i].avatarLeaf = pick.map { Int($0.leaf) }
-            servers[i].avatarLeafColor = pick.map { Int($0.color) }
+            servers[i].avatarDiscColor = color.map { Int($0) }
             servers[i].imageKey = nil
         }
         guard !isFixture else { return true }
+        guard let work else { return false }
         do {
-            try await relay.setServerLeaf(id, pick: pick)
-            await refreshServers()
+            try await work.api.setServerDisc(id, color: color)
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("save the server picture", error)
-            await refreshServers()
+            await refreshServers(expectedOwner: work.owner)
             return false
         }
     }
 
     /// D92 amendment: a server picture — upload the master (PNG / JPEG) into `servers:{id}` and set it.
-    func setServerImage(_ id: Id, jpeg: Data) async -> Bool {
+    func setServerImage(_ id: Id, jpeg: Data, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        let work = accountWork(expectedOwner: expectedOwner)
+        guard isFixture || work != nil else { return false }
         let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
             if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].imageKey = key }
             return true
         }
+        guard let work else { return false }
         do {
-            _ = try await relay.putBlob(projectId: "servers:\(id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
-            return await setServerImageKey(id, key: key)
+            _ = try await work.api.putBlob(projectId: "servers:\(id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
+            return await setServerImageKey(id, key: key, expectedOwner: work.owner)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("upload the picture", error)
             return false
         }
     }
 
     /// A server picture from a key the relay already holds (the Generate tab's answer).
-    func setServerImageKey(_ id: Id, key: String) async -> Bool {
+    func setServerImageKey(_ id: Id, key: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        let work = accountWork(expectedOwner: expectedOwner)
+        guard isFixture || work != nil else { return false }
         if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].imageKey = key }
         guard !isFixture else { return true }
+        guard let work else { return false }
         do {
-            try await relay.patchServer(id, imageKey: key)
-            await refreshServers()
+            try await work.api.patchServer(id, imageKey: key)
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("save the server picture", error)
-            await refreshServers()
+            await refreshServers(expectedOwner: work.owner)
             return false
         }
     }
 
     /// The Generate tab for a server (owner / admins): the relay paints one picture.
-    func generateServerAvatar(_ id: Id, prompt: String) async throws -> String {
+    func generateServerAvatar(_ id: Id, prompt: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
+        let work = accountWork(expectedOwner: expectedOwner)
+        guard isFixture || work != nil else { throw CancellationError() }
         if isFixture {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
         }
-        return try await relay.generateServerAvatar(id, prompt: prompt)
+        guard let work else { throw CancellationError() }
+        let key = try await work.api.generateServerAvatar(id, prompt: prompt)
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
+        return key
     }
 
-    func renameServer(_ id: Id, name: String) async -> Bool {
+    func renameServer(_ id: Id, name: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].name = trimmed }
         do {
-            try await relay.patchServer(id, name: trimmed)
-            await refreshServers()
+            try await work.api.patchServer(id, name: trimmed)
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("rename the server", error)
-            await refreshServers()
+            await refreshServers(expectedOwner: work.owner)
             return false
         }
     }
 
     /// Owner/admin: open = anyone can search and join without an invite link.
-    func setServerOpen(_ id: Id, open: Bool) async -> Bool {
+    func setServerOpen(_ id: Id, open: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].isOpen = open }
         do {
-            try await relay.patchServer(id, open: open)
-            await refreshServer(id)
+            try await work.api.patchServer(id, open: open)
+            await refreshServer(id, expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("update the server", error)
-            await refreshServers()
+            await refreshServers(expectedOwner: work.owner)
             return false
         }
     }
 
     /// Owner only: the server goes for everyone.
-    func deleteServer(_ id: Id) async -> Bool {
+    func deleteServer(_ id: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            try await relay.deleteServer(id)
+            try await work.api.deleteServer(id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             forgetServer(id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("delete the server", error)
             return false
         }
     }
 
-    func leaveServer(_ id: Id) async -> Bool {
+    func leaveServer(_ id: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            try await relay.leaveServer(id)
+            try await work.api.leaveServer(id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             forgetServer(id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("leave the server", error)
             return false
         }
     }
 
     private func forgetServer(_ id: Id) {
-        if let s = server(id) {
-            for c in s.channels {
-                channelRows[c.id] = nil
-                caughtUp.remove(c.id)
-                channelAtStart.remove(c.id)
-            }
+        let channelIds = Set(server(id)?.channels.map(\.id) ?? [])
+        for c in channelIds {
+            channelRows[c] = nil
+            caughtUp.remove(c)
+            channelAtStart.remove(c)
         }
         servers.removeAll { $0.id == id }
-        if path.contains(where: { if case .server(let sid) = $0 { return sid == id } else { return false } }) {
-            path = []
+        // Every screen about this server goes, and the first one takes the rest with it:
+        // its channel list, one of its channels, and — since 2026-11-01 — the server's or
+        // a channel's own profile page, which is a pushed route rather than a sheet.
+        if let i = path.firstIndex(where: { route in
+            if case .server(let sid) = route, sid == id { return true }
+            if case .profile(.server(let sid)) = route, sid == id { return true }
+            return shows(channelIds: channelIds, route: route)
+        }) {
+            path.removeSubrange(i...)
+        }
+    }
+
+    /// A channel that is archived or deleted gives way to its server's channel list, from
+    /// whichever of its screens the user is on — the channel itself, or the channel's own
+    /// profile page, which is a pushed route since 2026-11-01 and can sit either over the
+    /// channel or straight on top of the channel list. The model owns this rather than the
+    /// page calling `dismiss()` afterwards: two navigations for one action pop twice.
+    private func leaveScreensAbout(_ channel: ServerChannel) {
+        guard let i = path.firstIndex(where: { shows(channelIds: [channel.id], route: $0) }) else { return }
+        path.removeSubrange(i...)
+        if !path.contains(.server(serverId: channel.serverId)) {
+            path.append(.server(serverId: channel.serverId))
+        }
+    }
+
+    /// Does this route show one of these channels — the channel itself, or its own page?
+    private func shows(channelIds: Set<Id>, route: Route) -> Bool {
+        switch route {
+        case .server, .ownProfile, .newMessage: return false
+        case .chat(let chatId, _): return channelIds.contains(chatId)
+        case .profile(let target):
+            switch target {
+            case .channel(let channelId): return channelIds.contains(channelId)
+            case .user, .group, .agent, .server: return false
+            }
         }
     }
 
     /// Rule 7: a new channel (owner/admin): name (letters, digits, dashes), admins-only toggle.
-    func createChannel(serverId: Id, name: String, restricted: Bool) async -> ServerChannel? {
+    func createChannel(serverId: Id, name: String, restricted: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async -> ServerChannel? {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
         do {
-            let c = try await relay.createChannel(serverId: serverId, name: Self.channelSlug(name), restricted: restricted)
+            let c = try await work.api.createChannel(serverId: serverId, name: Self.channelSlug(name), restricted: restricted)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
             if let i = servers.firstIndex(where: { $0.id == serverId }),
                !servers[i].channels.contains(where: { $0.id == c.id }) {
                 servers[i].channels.append(c)
             }
-            await refreshServers()
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
             return channel(c.id) ?? c
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
             fail("create the channel", error)
             return nil
         }
     }
 
-    func renameChannel(_ channel: ServerChannel, name: String) async -> Bool {
+    func renameChannel(_ channel: ServerChannel, name: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         let slug = Self.channelSlug(name)
         guard !slug.isEmpty else { return false }
         do {
-            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, name: slug)
-            await refreshServers()
+            try await work.api.patchChannel(serverId: channel.serverId, channelId: channel.id, name: slug)
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail("rename the channel", error)
             return false
         }
     }
 
     /// Channel page › Settings: the topic (owner/admin; ≤ 200 chars, empty clears it).
-    func setChannelTopic(_ channel: ServerChannel, topic: String) async {
+    func setChannelTopic(_ channel: ServerChannel, topic: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         let topic = String(topic.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
         if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
            let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
             servers[si].channels[ci].topic = topic.isEmpty ? nil : topic
         }
         do {
-            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, topic: topic)
+            try await work.api.patchChannel(serverId: channel.serverId, channelId: channel.id, topic: topic)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("change the topic", error)
         }
-        await refreshServers()
+        await refreshServers(expectedOwner: work.owner)
     }
 
     func isChannelMuted(_ channel: ServerChannel) -> Bool { mutedChannelIds.contains(channel.id) }
@@ -555,48 +668,52 @@ extension AppModel {
         if mutedChannelIds.contains(channel.id) { mutedChannelIds.remove(channel.id) } else { mutedChannelIds.insert(channel.id) }
     }
 
-    func setChannelRestricted(_ channel: ServerChannel, _ restricted: Bool) async {
+    func setChannelRestricted(_ channel: ServerChannel, _ restricted: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
            let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
             servers[si].channels[ci].restricted = restricted
         }
         do {
-            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, restricted: restricted)
+            try await work.api.patchChannel(serverId: channel.serverId, channelId: channel.id, restricted: restricted)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("change who posts", error)
         }
-        await refreshServers()
+        await refreshServers(expectedOwner: work.owner)
     }
 
     /// Row menu → Archive / Unarchive: hide a channel from my list or bring it back. An archived
     /// channel that is open gives way to the channel list.
-    func archiveChannel(_ channel: ServerChannel, _ archived: Bool) async {
+    func archiveChannel(_ channel: ServerChannel, _ archived: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
            let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
             servers[si].channels[ci].archived = archived
         }
-        if archived, case .chat(let id, _)? = path.last, id == channel.id {
-            path = [.server(serverId: channel.serverId)]
-        }
+        if archived { leaveScreensAbout(channel) }
         do {
-            try await relay.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
+            try await work.api.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail(archived ? "archive the channel" : "unarchive the channel", error)
         }
-        await refreshServers()
+        await refreshServers(expectedOwner: work.owner)
     }
 
-    func deleteChannel(_ channel: ServerChannel) async -> Bool {
+    func deleteChannel(_ channel: ServerChannel, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         do {
-            try await relay.deleteChannel(serverId: channel.serverId, channelId: channel.id)
+            try await work.api.deleteChannel(serverId: channel.serverId, channelId: channel.id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             channelRows[channel.id] = nil
             caughtUp.remove(channel.id)
-            if case .chat(let id, _)? = path.last, id == channel.id {
-                path = [.server(serverId: channel.serverId)]
-            }
-            await refreshServers()
+            leaveScreensAbout(channel)
+            await refreshServers(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
             fail((error as? RelayError)?.status == 409
                  ? UserError.refused("delete the channel", "#general stays.")
                  : UserError.classify("delete the channel", error))
@@ -606,73 +723,89 @@ extension AppModel {
 
     /// Rule 6: owner resets the invite link (the old one stops working).
     /// Members tab → Add members (the main way in since 2026-10-22): one call per new person.
-    func addServerMembers(serverId: Id, userIds: [String]) async -> Bool {
+    func addServerMembers(serverId: Id, userIds: [String], expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         var ok = true
         for uid in userIds {
-            do { try await relay.addServerMember(serverId: serverId, userId: uid) } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
+            do { try await work.api.addServerMember(serverId: serverId, userId: uid) } catch {
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
                 ok = false
                 fail("add them", error)
             }
         }
-        await refreshServer(serverId)
+        await refreshServer(serverId, expectedOwner: work.owner)
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
         return ok
     }
 
     /// Settings › Invite links › New link (owner).
-    func createServerInvite(_ id: Id, expires: Bool, singleUse: Bool) async {
+    func createServerInvite(_ id: Id, expires: Bool, singleUse: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            _ = try await relay.createServerInvite(id, expires: expires, maxUses: singleUse ? 1 : nil)
-            await refreshServer(id)
+            _ = try await work.api.createServerInvite(id, expires: expires, maxUses: singleUse ? 1 : nil)
+            await refreshServer(id, expectedOwner: work.owner)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("make an invite link", error)
         }
     }
 
     /// Settings › Invite links › revoke (owner): gone from the list at once.
-    func revokeServerInvite(_ id: Id, inviteId: String) async {
+    func revokeServerInvite(_ id: Id, inviteId: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         if let si = servers.firstIndex(where: { $0.id == id }) {
             servers[si].invites.removeAll { $0.id == inviteId }
         }
-        do { try await relay.revokeServerInvite(id, inviteId: inviteId) } catch {
+        do { try await work.api.revokeServerInvite(id, inviteId: inviteId) } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("revoke the link", error)
         }
-        await refreshServer(id)
+        await refreshServer(id, expectedOwner: work.owner)
     }
 
     /// `arbos://join/<code>` (the site's invite page): join right away and land in the server.
-    func joinFromLink(code: String) async {
+    func joinFromLink(code: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard !code.isEmpty else { return }
-        _ = await joinServer(code: code)
+        _ = await joinServer(code: code, expectedOwner: work.owner)
     }
 
-    func resetServerInvite(_ id: Id) async -> ServerInvite? {
+    func resetServerInvite(_ id: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> ServerInvite? {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
         do {
-            let inv = try await relay.resetServerInvite(id)
+            let inv = try await work.api.resetServerInvite(id)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
             if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].invite = inv }
             return inv
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return nil }
             fail("reset the invite link", error)
             return nil
         }
     }
 
-    func setServerRole(serverId: Id, userId: String, role: String) async {
+    func setServerRole(serverId: Id, userId: String, role: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            try await relay.setServerMemberRole(serverId: serverId, userId: userId, role: role)
+            try await work.api.setServerMemberRole(serverId: serverId, userId: userId, role: role)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("change the role", error)
         }
-        await refreshServer(serverId)
+        await refreshServer(serverId, expectedOwner: work.owner)
     }
 
-    func removeServerMember(serverId: Id, userId: String, ban: Bool) async {
+    func removeServerMember(serverId: Id, userId: String, ban: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            try await relay.removeServerMember(serverId: serverId, userId: userId, ban: ban)
+            try await work.api.removeServerMember(serverId: serverId, userId: userId, ban: ban)
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             fail("remove the member", error)
         }
-        await refreshServer(serverId)
+        await refreshServer(serverId, expectedOwner: work.owner)
     }
 
     /// Channel names: lower-case letters, digits and dashes (rule 7).
@@ -688,41 +821,92 @@ extension AppModel {
 
     /// Start the shared client once `GET /me/matrix` answers; a relay without servers (503
     /// `servers_off`) leaves `matrixClient` nil and nothing server-related shows.
-    func startMatrixIfNeeded() async {
-        guard credentials != nil, !isFixture, matrixClient == nil, !matrixStarting else { return }
-        matrixStarting = true
-        defer { matrixStarting = false }
+    func startMatrixIfNeeded(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture, matrixClient == nil,
+              let work = accountWork(expectedOwner: expectedOwner),
+              let owner = matrixLifetime.start(account: work.owner) else { return }
+        defer { matrixLifetime.failed(owner) }
+        let requestAPI = work.api
         do {
-            guard let creds = try await relay.matrixSession() else { return }
-            let listener = MatrixBridgeListener(model: self)
+            let answer = try await requestAPI.matrixSession()
+            guard acceptsMatrix(owner) else { return }
+            guard let creds = answer else {
+                // No homeserver on this relay (any more): no chat is read from one.
+                applyNativeRooms([:])
+                return
+            }
+            let listener = MatrixBridgeListener(model: self, owner: owner)
             let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
-                                                 accessToken: creds.accessToken, deviceId: creds.deviceId)
-            let client = try await matrixStart(session: session, listener: listener)
+                                                 accessToken: creds.accessToken, deviceId: creds.deviceId,
+                                                 peopleNative: creds.peopleNative, historyKey: creds.historyKey)
+            // No key, no client: without it the store holding the room keys would be written
+            // unencrypted. The next call tries again (the Keychain may only have been locked).
+            guard let storeKey = WalletVault.storeKey(device: creds.deviceId) else {
+                matrixLog.notice("matrix start skipped: the store key is not available")
+                return
+            }
+            let crypto = ArbosFFI.MatrixCrypto(storeDir: WalletVault.storeDir(device: creds.deviceId),
+                                               storeKey: storeKey)
+            // For the notification extension, which reads an encrypted message's words.
+            PreviewVault.save(.init(userId: creds.userId, deviceId: creds.deviceId, storeKey: storeKey))
+            let client = try await matrixStart(session: session, crypto: crypto, listener: listener)
             // Signed out (or started twice) while the handshake ran.
-            guard credentials != nil, matrixClient == nil else {
+            guard acceptsMatrix(owner), matrixClient == nil else {
                 client.stop()
                 return
             }
             matrixListener = listener
             matrixClient = client
+            matrixLifetime.ready(owner)
+            MatrixMediaProtocol.serve { [weak self] chat, reference in
+                guard let (client, room) = await self?.nativeTarget(chat) else { throw URLError(.resourceUnavailable) }
+                let media = try await client.media(roomId: room, reference: reference)
+                return (media.mime, media.bytes)
+            }
             matrixConnected = true
-            applyMatrixSnapshot(await client.snapshot())
+            peopleNative = creds.peopleNative
+            // Switched off (the rollback): every people chat is its Loro room again, dialled
+            // here. The launch loop's `refreshPeople` ran before this, while the chats still
+            // counted as native, and dialled none; its next turn is 15 s away.
+            if !peopleNative, !nativeRooms.isEmpty {
+                applyNativeRooms([:])
+                await refreshPeople()
+                guard acceptsMatrix(owner) else { return }
+            }
+            let snapshot = await client.snapshot()
+            guard acceptsMatrix(owner) else { return }
+            applyMatrixSnapshot(snapshot)
+            await refreshNativeRooms(expectedOwner: owner.account)
+            guard acceptsMatrix(owner) else { return }
+            // Waits for the first sync's word on the key backup; never holds up the start.
+            // Only with encrypted people chats on for this account: without them nothing is
+            // encrypted, and no one is handed a recovery phrase for chats they do not have.
+            if peopleNative { Task { await ensureKeys(client) } }
         } catch {
             matrixLog.notice("matrix start failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    func acceptsMatrix(_ owner: MatrixLifetime.Ticket) -> Bool {
+        credentials != nil && accountLifetime.accepts(owner.account) && matrixLifetime.accepts(owner)
+    }
+
     func stopMatrix() {
+        matrixLifetime.stop()
         matrixClient?.stop()
         matrixClient = nil
+        PreviewVault.save(nil)
         matrixListener = nil
         matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
         matrixConnected = true
         matrixDisconnectedSince = nil
+        peopleNative = false
+        applyNativeRooms([:])
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
         channelAtStart = []
         channelLoading = []
+        historyAsked = []
     }
 
     func applyMatrixSnapshot(_ snapshot: ArbosFFI.MatrixSnapshot) {
@@ -732,6 +916,8 @@ extension AppModel {
         if let id = visibleChatId, channel(id) != nil, !caughtUp.contains(id) {
             openChannel(id)
         }
+        // A native people chat is shown once the homeserver lists its room.
+        openNativeRooms()
     }
 
     func applyMatrixConnection(connected: Bool, error: String?) {
@@ -755,6 +941,10 @@ extension AppModel {
     }
 
     private func channelId(forRoom roomId: String) -> Id? {
+        if let chat = nativeRooms.first(where: { $0.value == roomId })?.key {
+            // A people chat only one of the relay and the homeserver vouches for is not shown.
+            return nativeRoom(chat) == nil ? nil : chat
+        }
         if let row = matrixSnapshot.channels.first(where: { $0.roomId == roomId }), !row.channelId.isEmpty {
             return row.channelId
         }
@@ -767,11 +957,15 @@ extension AppModel {
     /// Decode the chat-doc rows and keep optimistic sends whose echo has not landed yet
     /// (the echo carries the same id, so it simply replaces the pending row).
     private func setChannelRows(_ channelId: Id, _ rows: [ArbosFFI.MatrixMessageRow]) {
-        var decoded = rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
+        // A native people chat's pending rows are the client's own: it takes a failed one back.
+        let native = nativeRooms[channelId] != nil
+        var decoded = native
+            ? Self.nativeMessages(rows, chatId: channelId, members: nativeMembers(channelId))
+            : rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
         for i in decoded.indices { _ = fillChannelSender(&decoded[i]) }
         let ids = Set(decoded.map(\.id))
         let cutoff = nowMs() - 60_000
-        for m in channelRows[channelId] ?? [] where m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
+        for m in channelRows[channelId] ?? [] where !native && m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
             decoded.append(m)
         }
         decoded.sort { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
@@ -796,45 +990,95 @@ extension AppModel {
 
     // MARK: Channel timelines
 
+    /// The homeserver room a chat's rows are read from: a channel's, or a native people chat's.
+    private func timelineRoomId(_ chatId: Id) -> String? {
+        if let c = channel(chatId) { return channelRoomId(c) }
+        return nativeRoom(chatId)
+    }
+
     /// `openRoom`: the newest page, then live rows through the listener. Safe to call again.
     func openChannel(_ channelId: Id) {
-        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+        guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
+              let client = matrixClient, let roomId = timelineRoomId(channelId),
               !channelLoading.contains(channelId) else { return }
         channelLoading.insert(channelId)
         Task {
-            defer { channelLoading.remove(channelId) }
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
+            defer { if acceptsMatrix(owner) { channelLoading.remove(channelId) } }
             do {
                 let rows = try await client.openRoom(roomId: roomId)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 setChannelRows(channelId, rows)
-                try? await client.markRead(roomId: roomId)
+                // A native people chat is also read off screen (`openNativeRooms`): that is
+                // not the person reading it.
+                if nativeRooms[channelId] == nil || visibleChatId == channelId {
+                    try? await client.markRead(roomId: roomId)
+                }
+                if nativeRooms[channelId] != nil { await carryHistory(channelId, client: client, roomId: roomId, owner: owner) }
             } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 matrixLog.notice("open room failed: \(error.localizedDescription, privacy: .public)")
-                // Paint the empty transcript rather than a spinner that never ends.
-                caughtUp.insert(channelId)
+                // Paint the empty transcript rather than a spinner that never ends. A native
+                // people chat is asked for again instead (`openNativeRooms`).
+                if nativeRooms[channelId] == nil { caughtUp.insert(channelId) }
             }
         }
     }
 
+    /// Carry a native chat's earlier history from its Loro room into its homeserver room,
+    /// once per launch: the relay hands out signed rows a batch at a time, the Matrix client
+    /// sends them, and the relay is told which events they became. Stops at the first thing
+    /// that fails (the next launch, or another member's device, takes it up there) and when
+    /// another device is at it.
+    private func carryHistory(_ chatId: Id, client: ArbosFFI.MatrixClient, roomId: String,
+                              owner: MatrixLifetime.Ticket) async {
+        guard acceptsMatrix(owner), !Task.isCancelled, let work = accountWork(expectedOwner: owner.account),
+              historyAsked.insert(chatId).inserted else { return }
+        while true {
+            guard let page = try? await work.api.matrixHistoryPage(chatId), acceptsMatrix(owner), !Task.isCancelled,
+                  let said = (try? JSONSerialization.jsonObject(with: Data(page.utf8))) as? [String: Any],
+                  let rows = said["rows"] as? [Any], !rows.isEmpty else { return }
+            do {
+                let report = try await client.carryHistory(roomId: roomId, pageJson: page)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                try await work.api.matrixHistoryCarried(chatId, report: JSONSerialization.jsonObject(with: Data(report.utf8)))
+            } catch {
+                matrixLog.notice("history not carried: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard acceptsMatrix(owner), !Task.isCancelled, said["more"] as? NSNumber === kCFBooleanTrue else { return }
+        }
+    }
+
     func markChannelRead(_ channelId: Id) {
-        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c) else { return }
-        Task { try? await client.markRead(roomId: roomId) }
+        guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
+              let client = matrixClient, let roomId = timelineRoomId(channelId) else { return }
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
+            try? await client.markRead(roomId: roomId)
+        }
     }
 
     /// One older page when the transcript is scrolled near its top; stops at the room's start.
     func loadOlderChannel(_ channelId: Id) {
-        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+        guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
+              let client = matrixClient, let roomId = timelineRoomId(channelId),
               caughtUp.contains(channelId), !channelAtStart.contains(channelId),
               !channelLoading.contains(channelId) else { return }
         channelLoading.insert(channelId)
         Task {
-            defer { channelLoading.remove(channelId) }
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
+            defer { if acceptsMatrix(owner) { channelLoading.remove(channelId) } }
             do {
                 if let rows = try await client.loadOlder(roomId: roomId) {
+                    guard acceptsMatrix(owner), !Task.isCancelled else { return }
                     setChannelRows(channelId, rows)
                 } else {
+                    guard acceptsMatrix(owner), !Task.isCancelled else { return }
                     channelAtStart.insert(channelId)
                 }
             } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 matrixLog.notice("load older failed: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -844,7 +1088,8 @@ extension AppModel {
     /// arrives in the timeline with the same id (`life.arbos.id`).
     func sendChannel(chatId channelId: Id, text: String) {
         guard let c = channel(channelId), let me = user else { return }
-        guard let client = matrixClient, let roomId = channelRoomId(c) else {
+        guard let client = matrixClient, let roomId = channelRoomId(c),
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else {
             setSendError(channelId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
             return
         }
@@ -858,12 +1103,298 @@ extension AppModel {
         m.senderAvatar = me.avatarUrl
         channelRows[channelId, default: []].append(m)
         Task {
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
             do {
                 _ = try await client.sendText(roomId: roomId, text: text, localId: messageId)
             } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 channelRows[channelId]?.removeAll { $0.id == messageId }
                 fail("send your message", error)
             }
         }
     }
+
+    // MARK: Native people chats (phase 3)
+    //
+    // The Mac's rule (crates/arbos-mac/src/sync/relay.rs), kept the same here: the relay names
+    // a people chat's room only when every member is a flagged person (no agent, nobody
+    // unflagged); this phone takes that answer only as written (`parsePeopleRooms`) and reads
+    // and writes the room only once the homeserver lists that very room as that very chat
+    // (`confirmedRoom`). Everything else stays in its Loro room.
+
+    /// What a native chat answers to a verb the homeserver path does not carry yet (the Mac's
+    /// words).
+    static let nativeTextOnly = "This chat can only send text and files for now"
+
+    /// `GET /me/matrix/people` as the relay writes it, `{rooms: {<chat_id>: <room_id>}}` and
+    /// nothing else, or nil when the answer is not that (what was known is kept). Kept: the
+    /// people chats this phone lists, each with a room id no other chat is given.
+    static func parsePeopleRooms(_ raw: Any, people: Set<Id>) -> [Id: String]? {
+        guard let d = raw as? [String: Any], d.count == 1, let rooms = d["rooms"] as? [String: String] else { return nil }
+        let uses = Dictionary(rooms.values.map { ($0, 1) }, uniquingKeysWith: +)
+        return rooms.filter { chat, room in
+            people.contains(chat) && room.hasPrefix("!") && room.utf8.count <= 255 && uses[room] == 1
+        }
+    }
+
+    /// The room a native chat is shown from: the one the relay names for it (`relay`), and
+    /// only once the homeserver lists that very room as that very chat (`homeserver`, already
+    /// checked against the room's create event). A room only one of them vouches for is not shown.
+    static func confirmedRoom(relay: [Id: String], homeserver: [ArbosFFI.MatrixPeopleRow], chatId: Id) -> String? {
+        guard let room = relay[chatId],
+              homeserver.contains(where: { $0.roomId == room && $0.chatId == chatId }) else { return nil }
+        return room
+    }
+
+    /// The homeserver room of a native chat (`confirmedRoom`).
+    func nativeRoom(_ chatId: Id) -> String? {
+        Self.confirmedRoom(relay: nativeRooms, homeserver: matrixSnapshot.people, chatId: chatId)
+    }
+
+    /// The client and room a native chat is read through, once both exist.
+    func nativeTarget(_ chatId: Id) -> (ArbosFFI.MatrixClient, String)? {
+        guard let client = matrixClient, let room = nativeRoom(chatId) else { return nil }
+        return (client, room)
+    }
+
+    /// The homeserver's row for a native chat: its unread count and whether it is encrypted.
+    func nativePeopleRow(_ chatId: Id) -> ArbosFFI.MatrixPeopleRow? {
+        guard let room = nativeRoom(chatId) else { return nil }
+        return matrixSnapshot.people.first { $0.roomId == room }
+    }
+
+    /// Ask the relay which people chats are on the homeserver. Only a session told
+    /// `people_native` asks; a failed or malformed answer keeps what was known.
+    func refreshNativeRooms(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard peopleNative, !isFixture, let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let raw = try? await work.api.matrixPeopleRooms()
+        // Another account's answer is not this one's rooms.
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        guard let raw,
+              let rooms = Self.parsePeopleRooms(raw, people: Set(peopleChats.map(\.id))) else {
+            matrixLog.notice("bad or no /me/matrix/people")
+            return
+        }
+        // Signed out, or switched off, while the relay answered.
+        guard peopleNative else { return }
+        applyNativeRooms(rooms)
+        openNativeRooms()
+        // `link` goes live with a Loro room; an account whose every chat is native may have
+        // none left to say the relay is reachable. It just answered.
+        if link == .connecting, !nativeRooms.isEmpty { link = .live }
+    }
+
+    /// Read every native chat's room once: the newest page, then live rows through the
+    /// listener, so an unopened chat still previews the way a synced Loro doc does.
+    // Read from the device's event store; the homeserver is asked only for a chat the store
+    // holds less than a page of.
+    private func openNativeRooms() {
+        for chat in nativeRooms.keys where !caughtUp.contains(chat) { openChannel(chat) }
+    }
+
+    /// `user:<id>` of everyone in a people chat, in the relay's spelling.
+    private func nativeMembers(_ chatId: Id) -> [String] {
+        (myUserId.map { [$0] } ?? []) + (peopleChat(chatId)?.humans.map(\.member) ?? [])
+    }
+
+    /// A native chat's rows as the transcript's messages. Who sent a row is the account the
+    /// homeserver says sent it (`row.sender`). That names a person by Matrix localpart, which
+    /// is lower-case; `members` (`user:<id>`, the relay's spelling) puts the id back so "mine"
+    /// and the roster lookups match, for a row's sender and for who reacted.
+    static func nativeMessages(_ rows: [ArbosFFI.MatrixMessageRow], chatId: Id, members: [String]) -> [Message] {
+        func exact(_ who: String) -> String {
+            members.first { $0.caseInsensitiveCompare(who) == .orderedSame } ?? who
+        }
+        return rows.compactMap { row in
+            guard var m = decodeMatrixRow(row, chatId: chatId) else { return nil }
+            m.chatId = chatId
+            m.sender = exact(row.sender)
+            m.pending = row.pending
+            for i in m.reactions.indices { m.reactions[i].senders = m.reactions[i].senders.map(exact) }
+            return m
+        }
+    }
+
+    /// The homeserver's event for a row of a native chat, by message id.
+    private func nativeEventId(_ client: ArbosFFI.MatrixClient, room: String, messageId: Id) async -> String? {
+        (try? await client.openRoom(roomId: room))?.first { $0.id == messageId && !$0.pending }?.eventId
+    }
+
+    /// A message into a native chat; `replyTo` is a row id of this chat. The row shows through
+    /// the timeline (`pending`) before the homeserver has it and leaves again if the send
+    /// fails. The client encrypts it in an encrypted room or does not send it.
+    ///
+    /// Files go where the chat's messages are readable from (the Mac's rule, `native_send`).
+    /// In an end-to-end encrypted chat each is encrypted on this phone and its ciphertext kept
+    /// on the homeserver, the key inside the message; the relay sees none of it. In any other
+    /// native chat they are the relay's blobs, like a Loro room's, so the row the relay
+    /// carries back to the Loro room still finds them.
+    func sendNativePeople(chatId: Id, text: String, replyTo: Id?, attachments: [PendingAttachment] = []) {
+        guard let client = matrixClient, let room = nativeRoom(chatId),
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
+              let work = accountWork(expectedOwner: owner.account) else {
+            setSendError(chatId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
+            return
+        }
+        let messageId = newId()
+        // Not knowing counts as encrypted, as it does for the client.
+        let encrypted = nativePeopleRow(chatId)?.encrypted ?? true
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                var answers: String?
+                if let replyTo {
+                    answers = await nativeEventId(client, room: room, messageId: replyTo)
+                    guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                    guard answers != nil else {
+                        failRefused("send your message", "That message is no longer here.")
+                        return
+                    }
+                }
+                if attachments.isEmpty {
+                    if let answers {
+                        _ = try await client.sendReply(roomId: room, text: text, replyTo: answers, localId: messageId)
+                    } else {
+                        _ = try await client.sendText(roomId: room, text: text, localId: messageId)
+                    }
+                } else if encrypted {
+                    let files = attachments.map {
+                        ArbosFFI.MatrixUpload(name: $0.name, mime: $0.mime,
+                                              kind: Self.attachmentKind(mime: $0.mime, name: $0.name), bytes: $0.data)
+                    }
+                    _ = try await client.sendFiles(roomId: room, text: text, files: files, replyTo: answers, localId: messageId)
+                } else {
+                    var parts: [String] = []
+                    for a in attachments {
+                        let key = try await uploadBlob(slot: "\(peopleSlot):\(chatId)", name: a.name, mime: a.mime, data: a.data, work: work)
+                        guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                        parts.append(try Self.attachmentPart(Attachment(
+                            name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name))))
+                    }
+                    _ = try await client.sendParts(roomId: room, text: text, partsJson: parts, replyTo: answers, localId: messageId)
+                }
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("send your message", error)
+            }
+        }
+    }
+
+    /// The `attachment` part of a row for a file already on the relay, as the chat doc writes
+    /// it (crdt-sync §6.2), as JSON.
+    static func attachmentPart(_ attachment: Attachment) throws -> String {
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(attachment))
+        let part: [String: Any] = ["id": newId(), "kind": "attachment", "attachment": body]
+        return String(decoding: try JSONSerialization.data(withJSONObject: part), as: UTF8.self)
+    }
+
+    /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
+    /// arrives.
+    func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
+        guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId,
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
+        // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
+        // Ceiling: one another app put on with a skin tone is not taken back from here.
+        let key = MessageReaction.normalizeEmoji(emoji)
+        let mine = messages(of: chatId).first { $0.id == messageId }?.reactions
+            .contains { $0.emoji == key && $0.senders.contains(me) } ?? false
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled,
+                  let event = await nativeEventId(client, room: room, messageId: messageId),
+                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                try await client.react(roomId: room, eventId: event, key: key, on: !mine)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                Haptics.pick()
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("update the reaction", error)
+            }
+        }
+    }
+
+    /// Remove a native chat's message; the homeserver decides whether this person may.
+    func deleteNativePeople(chatId: Id, messageId: Id) {
+        guard let client = matrixClient, let room = nativeRoom(chatId),
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled,
+                  let event = await nativeEventId(client, room: room, messageId: messageId),
+                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                try await client.redact(roomId: room, eventId: event)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                Haptics.pick()
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("delete the message", error)
+            }
+        }
+    }
+}
+
+/// Files of a native chat kept on the homeserver (an attachment whose `ref` is
+/// `mx:<event>/<part>`), for everything that loads an attachment by URL: `AppModel.blobURL`
+/// answers such a ref with a URL of this scheme, and this answers the URL with what the
+/// Matrix client decrypts. Nothing leaves the phone under it and the URL cache keeps none of
+/// it. Ceiling: `URLSession.shared` only, which is what every attachment loader here uses.
+final class MatrixMediaProtocol: URLProtocol, @unchecked Sendable {
+    static let scheme = "arbos-mx"
+    /// What an attachment's `ref` starts with when its file is on the homeserver
+    /// (`arbos_matrix::rows::MEDIA_REF`).
+    static let refPrefix = "mx:"
+
+    typealias Fetch = @Sendable (_ chatId: Id, _ reference: String) async throws -> (mime: String, bytes: Data)
+    private static let lock = NSLock()
+    private static var fetch: Fetch?
+
+    /// Answer this scheme with `fetch` from now on.
+    static func serve(_ fetch: @escaping Fetch) {
+        lock.withLock {
+            if self.fetch == nil { URLProtocol.registerClass(MatrixMediaProtocol.self) }
+            self.fetch = fetch
+        }
+    }
+
+    /// The URL of the file `key` names in the people chat whose blob slot is `slot`, or nil
+    /// when `key` is a relay blob's.
+    static func url(slot: String, key: String) -> URL? {
+        guard key.hasPrefix(refPrefix), slot.hasPrefix("\(peopleSlot):") else { return nil }
+        var comps = URLComponents()
+        comps.scheme = scheme
+        comps.host = "media"
+        comps.path = "/" + slot.dropFirst(peopleSlot.count + 1)
+        comps.queryItems = [URLQueryItem(name: "ref", value: String(key.dropFirst(refPrefix.count)))]
+        return comps.url
+    }
+
+    private var loading: Task<Void, Never>?
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.scheme == scheme }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let reference = comps.queryItems?.first(where: { $0.name == "ref" })?.value,
+              let fetch = Self.lock.withLock({ Self.fetch }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let chat = String(comps.path.dropFirst())
+        loading = Task {
+            do {
+                let (mime, bytes) = try await fetch(chat, reference)
+                guard !Task.isCancelled,
+                      let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                     headerFields: ["Content-Type": mime]) else { return }
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: bytes)
+                client?.urlProtocolDidFinishLoading(self)
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+            }
+        }
+    }
+
+    override func stopLoading() { loading?.cancel() }
 }

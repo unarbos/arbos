@@ -1,0 +1,3386 @@
+[
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersActionTests/testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls()",
+    "result": "Passed",
+    "seconds": 0.03623795509338379
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersActionTests/testARefusalIsReportedAndNothingIsClaimed()",
+    "result": "Passed",
+    "seconds": 0.009186983108520508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersActionTests/testOneBatchCallAddsAPersonAndAnAgentAndReplacesTheRoster()",
+    "result": "Passed",
+    "seconds": 0.006195068359375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersPlanTests/testAddTargetsThisGroupAndSkipsWhoIsInIt()",
+    "result": "Passed",
+    "seconds": 0.0005890130996704102
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersPlanTests/testExistingMembersCountAsAlreadyInTheGroup()",
+    "result": "Passed",
+    "seconds": 0.0003399848937988281
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AddMembersPlanTests/testNothingNewMakesAnEmptyPlan()",
+    "result": "Passed",
+    "seconds": 0.0003800392150878906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentAvatarFlipTests/testARelayPushLandsInPlaceAndAnOlderPushIsIgnored()",
+    "result": "Passed",
+    "seconds": 0.014410972595214844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentAvatarFlipTests/testChangingThePictureMovesEverySurfaceAndNeverFlipsBack()",
+    "result": "Passed",
+    "seconds": 0.002369999885559082
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentAvatarFlipTests/testColdLaunchOverThePersistedStoreResolvesThePictureOnEverySurface()",
+    "result": "Passed",
+    "seconds": 0.007863044738769531
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentAvatarFlipTests/testThePictureUrlIsThePublicVersionedRoute()",
+    "result": "Passed",
+    "seconds": 0.000308990478515625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentAvatarFlipTests/testTheSharedResolverDrawsTheNewestCopy()",
+    "result": "Passed",
+    "seconds": 0.0006070137023925781
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentIdentityTests/testAnAgentNoCardKnowsStillAgreesWithItself()",
+    "result": "Passed",
+    "seconds": 0.0018219947814941406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentIdentityTests/testPresenceRowAndBubbleShareOneIdentityForAForeignAgent()",
+    "result": "Passed",
+    "seconds": 0.0012750625610351562
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentIdentityTests/testResolverTable()",
+    "result": "Passed",
+    "seconds": 0.0004239082336425781
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentIdentityTests/testTheRosterCardWinsOverAStaleCopyInMyProjectsAndCarriesThePicture()",
+    "result": "Passed",
+    "seconds": 0.0012149810791015625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentPickerTests/testAPickBecomesAChipAndLeavesTheListAndTheCrossRemovesIt()",
+    "result": "Passed",
+    "seconds": 0.0031729936599731445
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentPickerTests/testCandidatesHideGrantedPickedAndSharedAgentsAndFollowTheQuery()",
+    "result": "Passed",
+    "seconds": 0.0005860328674316406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentPickerTests/testChipsFollowRegistryOrderNotPickOrder()",
+    "result": "Passed",
+    "seconds": 0.0002980232238769531
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentPickerTests/testEverySecretsFormUsesTheSharedPicker()",
+    "result": "Passed",
+    "seconds": 0.01100301742553711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AgentPickerTests/testTheFilterIsTheSharedMatcher()",
+    "result": "Passed",
+    "seconds": 0.0007370710372924805
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarGenerateErrorStateTests/testFailureIsTheSharedUserErrorUnderTheGenerateVerb()",
+    "result": "Passed",
+    "seconds": 0.008327007293701172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarGenerateErrorStateTests/testRunShowsProgressThenACleanErrorAndTryAgainClearsIt()",
+    "result": "Passed",
+    "seconds": 0.613103985786438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarGenerateErrorStateTests/testTimeoutsLineUpSoTheRelayAnswersFirst()",
+    "result": "Passed",
+    "seconds": 0.0006079673767089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testAGroupStoredNeutralDrawsItsIdsColour()",
+    "result": "Passed",
+    "seconds": 0.00043702125549316406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testALargeFlatMarkBecomesAShadedPngMaster()",
+    "result": "Passed",
+    "seconds": 0.11709702014923096
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testANewEntityStoresNoColourSoItsIdPicksOne()",
+    "result": "Passed",
+    "seconds": 0.000764012336730957
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testAPhotoBecomesAJpeg()",
+    "result": "Passed",
+    "seconds": 0.06581497192382812
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testAStoredNeutralResolvesToTheSameVividDiscAsTheOtherSurfaces()",
+    "result": "Passed",
+    "seconds": 0.0004590749740600586
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testEveryTargetGetsBotGenerateUploadAndReset()",
+    "result": "Passed",
+    "seconds": 0.0006029605865478516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testMyProfileGetsGenerateAndUploadWithoutABotTab()",
+    "result": "Passed",
+    "seconds": 0.0004699230194091797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testRelayPicturesAreFetchedAtTheDrawnSize()",
+    "result": "Passed",
+    "seconds": 0.0005630254745483398
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testTheCreateSheetOffersUploadAndGenerateOnly()",
+    "result": "Passed",
+    "seconds": 0.0003370046615600586
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testTheDraftHandsOverItsPick()",
+    "result": "Passed",
+    "seconds": 0.0008660554885864258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "AvatarPickerTabsTests/testTheNeutralInitialIsTheFirstLetter()",
+    "result": "Passed",
+    "seconds": 0.0004169940948486328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testADiagonalDragLetGoEarlyStillMovedTheScreen()",
+    "result": "Passed",
+    "seconds": 0.0006170272827148438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testADiagonalDragTracksFromItsFirstSample()",
+    "result": "Passed",
+    "seconds": 0.0003600120544433594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testADragTooShortToGoBackStillMovesTheScreenTheWholeWay()",
+    "result": "Passed",
+    "seconds": 0.0005190372467041016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testALeftwardDragNeverGoesBack()",
+    "result": "Passed",
+    "seconds": 0.0003230571746826172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testAnUnmeasuredScreenTracksNothing()",
+    "result": "Passed",
+    "seconds": 0.0003000497817993164
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testAShortFlickStillGoesBack()",
+    "result": "Passed",
+    "seconds": 0.00037300586700439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testASlowDragTracksJustTheSame()",
+    "result": "Passed",
+    "seconds": 0.00031697750091552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testATakenAwayTouchPutsTheScreenBack()",
+    "result": "Passed",
+    "seconds": 0.0003720521926879883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testNothingHappensBeforeTheDragIsClaimed()",
+    "result": "Passed",
+    "seconds": 0.0003339052200317383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testTheReleaseIsStillFullScreenPopsAndNothingElse()",
+    "result": "Passed",
+    "seconds": 0.0003020763397216797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testTheScreenFollowsTheFingerOneToOne()",
+    "result": "Passed",
+    "seconds": 0.00040793418884277344
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackDragTests/testTheScreenMovesOnEverySampleAndNotOnlyOnTheRelease()",
+    "result": "Passed",
+    "seconds": 0.0003229379653930664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackSwipeTests/testTheComposerBarIsNeverBack()",
+    "result": "Passed",
+    "seconds": 0.0003629922866821289
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackSwipeTests/testTheEdgeZoneBelongsToTheSystemPop()",
+    "result": "Passed",
+    "seconds": 0.00027298927307128906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackSwipeTests/testTheFullScreenBackDecidesOnceAtTwelvePoints()",
+    "result": "Passed",
+    "seconds": 0.00033092498779296875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BackSwipeTests/testTheFullScreenBackPopsOnAClearRightPan()",
+    "result": "Passed",
+    "seconds": 0.00030303001403808594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testABlankPeopleChatShowsTheSpinnerAndRereads()",
+    "result": "Passed",
+    "seconds": 0.0372389554977417
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testABlankStoredCopyIsRefetched()",
+    "result": "Passed",
+    "seconds": 0.0004420280456542969
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testAKeywordStillKeysTheStack()",
+    "result": "Passed",
+    "seconds": 0.00042700767517089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testAnEmptyReadNeverReplacesADocWithRows()",
+    "result": "Passed",
+    "seconds": 0.00035202503204345703
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testANewEmptyChatIsStillKnownEmpty()",
+    "result": "Passed",
+    "seconds": 0.0012880563735961914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testAOverlyDeepRowIsSkippedNotTheWholeTranscript()",
+    "result": "Passed",
+    "seconds": 0.0010360479354858398
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testEveryLeadChildComingOrGoingRekeysTheStack()",
+    "result": "Passed",
+    "seconds": 0.0003401041030883789
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testOffendingRowShapesDoNotDropTheirNeighbours()",
+    "result": "Passed",
+    "seconds": 0.0003190040588378906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testRealDocReadsTheSameRowByRowAsInOneCall()",
+    "result": "Passed",
+    "seconds": 0.0016219615936279297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testRowsArrivingUnderTheEmptyHintRekeysTheStack()",
+    "result": "Passed",
+    "seconds": 0.0004950761795043945
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testTheKeyIsStillConstantWithTheRowsUp()",
+    "result": "Passed",
+    "seconds": 0.0003210306167602539
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testTheLeadChildIsTheOneTheTranscriptDraws()",
+    "result": "Passed",
+    "seconds": 0.0004950761795043945
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testTheShapeIsBlindToTheKeyword()",
+    "result": "Passed",
+    "seconds": 0.00029397010803222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlankTranscriptGuardTests/testUnreadableListFallsBackToRowsAndSkipsOnlyTheBadRow()",
+    "result": "Passed",
+    "seconds": 0.0006539821624755859
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockRowTests/testBlockedMatchesByIdThenHandle()",
+    "result": "Passed",
+    "seconds": 0.004431009292602539
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockRowTests/testBlockRowFlipsWithTheList()",
+    "result": "Passed",
+    "seconds": 0.0003789663314819336
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockRowTests/testForeignAgentRunByLineIsAnOwnerLink()",
+    "result": "Passed",
+    "seconds": 0.0004469156265258789
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedHiddenRowsTests/testABlockedSendersRunsFoldIntoHiddenRows()",
+    "result": "Passed",
+    "seconds": 0.0031780004501342773
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedHiddenRowsTests/testTheHiddenLine()",
+    "result": "Passed",
+    "seconds": 0.000538945198059082
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedHiddenRowsTests/testTheModelHidesForTheBlockerAndRevealsOnUnblock()",
+    "result": "Passed",
+    "seconds": 0.008040904998779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedHiddenRowsTests/testTheSurfacesSkipHiddenRows()",
+    "result": "Passed",
+    "seconds": 0.011049032211303711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testBlockedMatchesByIdThenHandle()",
+    "result": "Passed",
+    "seconds": 0.0003770589828491211
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testTheDmHeaderTagsAndTheComposerIsTheBlockedBar()",
+    "result": "Passed",
+    "seconds": 0.007462978363037109
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testThePersonSheetAndMemberRowsSayBlocked()",
+    "result": "Passed",
+    "seconds": 0.009433984756469727
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testTheRefusalNoticeUsesTheRelaysReason()",
+    "result": "Passed",
+    "seconds": 0.014514923095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testTheRefusalSentenceFollowsTheRelaysReason()",
+    "result": "Passed",
+    "seconds": 0.0003789663314819336
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BlockedStateTests/testTheWords()",
+    "result": "Passed",
+    "seconds": 0.00061798095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testACorrectDeviceMeasuresExactlyTheDesignedGeometry()",
+    "result": "Passed",
+    "seconds": 0.000697016716003418
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testAnImplausibleMeasurementFallsBackToTheDesignedGeometry()",
+    "result": "Passed",
+    "seconds": 0.0003600120544433594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testAWrongInsetIsCorrectedFromTheMeasuredComposer()",
+    "result": "Passed",
+    "seconds": 0.0004469156265258789
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testChatBarFloats_rowsReadBehindThePlusTheFieldAndThePill()",
+    "result": "Passed",
+    "seconds": 0.0011609792709350586
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testFadeIsShortOnThePixelAndTheListsClearIt()",
+    "result": "Passed",
+    "seconds": 0.00033104419708251953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testHomeCapsuleFloats_rowsReadBehindIt()",
+    "result": "Passed",
+    "seconds": 0.0004099607467651367
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testNewestRowAndStatusRowAtRestAreOutsideTheRamp()",
+    "result": "Passed",
+    "seconds": 0.00037097930908203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testPillsAreGlassOnGlassAndSolidOnMatte()",
+    "result": "Passed",
+    "seconds": 0.0004150867462158203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomBarFadeTests/testRampIsGroksSoftDimNotABand()",
+    "result": "Passed",
+    "seconds": 0.0003190040588378906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testASectionIsCapped()",
+    "result": "Passed",
+    "seconds": 0.0004279613494873047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testBottomEdgeIsOneSearchBarAndNothingElse()",
+    "result": "Passed",
+    "seconds": 0.00045490264892578125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testFormerTabsKeepAHome()",
+    "result": "Passed",
+    "seconds": 0.0019780397415161133
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testNameHitsComeBeforeMemberAndMessageHits()",
+    "result": "Passed",
+    "seconds": 0.0003809928894042969
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testPrefixBeatsWordStartBeatsIndirect()",
+    "result": "Passed",
+    "seconds": 0.0003999471664428711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testSectionsComeInJacobsOrderWithAChannelAndAFile()",
+    "result": "Passed",
+    "seconds": 0.0003949403762817383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testSubtitlesReadNaturally()",
+    "result": "Passed",
+    "seconds": 0.0004190206527709961
+  },
+  {
+    "target": "ArbosTests",
+    "case": "BottomSearchBarTests/testTheEmptyQueryShowsRecents()",
+    "result": "Passed",
+    "seconds": 0.0009479522705078125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testAChartPartJoinsTheCaptionsBubbleAndHidesItsPicture()",
+    "result": "Passed",
+    "seconds": 0.0017240047454833984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testAChartWithoutACaptionIsItsOwnBubble()",
+    "result": "Passed",
+    "seconds": 0.0004839897155761719
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testTheCardSourceCarriesTheChrome()",
+    "result": "Passed",
+    "seconds": 0.0072710514068603516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testTheCoreModelCarriesDomainsTicksColumnsAndTheTsv()",
+    "result": "Passed",
+    "seconds": 0.010621070861816406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testThePaletteFollowsTheThemeAndAGivenColourIsKept()",
+    "result": "Passed",
+    "seconds": 0.0006899833679199219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testThePartParsesWithItsCamelCaseFields()",
+    "result": "Passed",
+    "seconds": 0.0004240274429321289
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChartCardTests/testTheScrubClaimsHorizontalPansAndYieldsVerticalOnesToTheScroll()",
+    "result": "Passed",
+    "seconds": 0.00036597251892089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatDensityMetricsTests/testJacobsOwnScreenMatchesTheWidthsHeMeasured()",
+    "result": "Passed",
+    "seconds": 0.0003390312194824219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatDensityMetricsTests/testPeopleChatBubblesKeepASixteenPointFarMarginAndAgentChatsKeepGroks()",
+    "result": "Passed",
+    "seconds": 0.00031507015228271484
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatDensityMetricsTests/testSenderAvatarIsDiscordStandardAndTheGapToTheBubbleIsFour()",
+    "result": "Passed",
+    "seconds": 0.0003470182418823242
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatDensityMetricsTests/testTheAvatarColumnIsFixedAtTwelveAndNoLongerFollowsTheComposer()",
+    "result": "Passed",
+    "seconds": 0.00039505958557128906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatDensityMetricsTests/testThePhotoBubbleWidthIsUntouchedByTheWiderCaps()",
+    "result": "Passed",
+    "seconds": 0.00032401084899902344
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testBlocksMatchTheMacGrammar()",
+    "result": "Passed",
+    "seconds": 0.0004469156265258789
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testEscapesAndMathSurvive()",
+    "result": "Passed",
+    "seconds": 0.000843048095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testInlineStylesComeFromTheSharedRuns()",
+    "result": "Passed",
+    "seconds": 0.003401041030883789
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testLinkHostsSeeInsideQuotes()",
+    "result": "Passed",
+    "seconds": 0.0006020069122314453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testOneLinePreviewFlattensQuotes()",
+    "result": "Passed",
+    "seconds": 0.00036597251892089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testPlainTextIsNeverMangled()",
+    "result": "Passed",
+    "seconds": 0.0014400482177734375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testQuotesNestThroughTheFFI()",
+    "result": "Passed",
+    "seconds": 0.00034797191619873047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testSpoilersHideUntilTappedForThisViewer()",
+    "result": "Passed",
+    "seconds": 0.0034090280532836914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatMarkdownTests/testUnsafeLinksStayLiteral()",
+    "result": "Passed",
+    "seconds": 0.0004750490188598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testAResultRowOwnsTheTapsInsideIt()",
+    "result": "Passed",
+    "seconds": 0.00037992000579833984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testATapOnAResultClosesThenReveals()",
+    "result": "Passed",
+    "seconds": 0.0003439188003540039
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testChatViewWiresTheClosePaths()",
+    "result": "Passed",
+    "seconds": 0.01594102382659912
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testEveryRouteOutOfAResultRowAsksThatOneRule()",
+    "result": "Passed",
+    "seconds": 0.029576897621154785
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testTapOutsideClosesAndSwipeClosesOnlyWithoutAKeyword()",
+    "result": "Passed",
+    "seconds": 0.000370025634765625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchCloseTests/testTheCloseButtonIsAFullHeightCellNotTheGlyph()",
+    "result": "Passed",
+    "seconds": 0.005079984664916992
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchShortcutTests/testChatViewCarriesTheShortcutAndEscape()",
+    "result": "Passed",
+    "seconds": 0.0034810304641723633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchShortcutTests/testCommandFOnAnOpenBarClosesIt()",
+    "result": "Passed",
+    "seconds": 0.0003319978713989258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchShortcutTests/testCommandFOpensAClosedBarAndFocusesIt()",
+    "result": "Passed",
+    "seconds": 0.0003579854965209961
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchShortcutTests/testTheShortcutIsCommandF()",
+    "result": "Passed",
+    "seconds": 0.00032699108123779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ChatSearchShortcutTests/testToggleIsAnInvolution()",
+    "result": "Passed",
+    "seconds": 0.0003510713577270508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testCopyPutsTheBlockOnThePasteboard()",
+    "result": "Passed",
+    "seconds": 0.022011995315551758
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testDetectionFallsBackFromTagToFirstLineToKeywordsToPlain()",
+    "result": "Passed",
+    "seconds": 0.001006007194519043
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testEveryLanguageClassifiesItsLandmarks()",
+    "result": "Passed",
+    "seconds": 0.20631802082061768
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testIndentGuidesAndSidewaysScroll()",
+    "result": "Passed",
+    "seconds": 0.0006700754165649414
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testTheBubbleSortCardIsClassifiedLikeGrok()",
+    "result": "Passed",
+    "seconds": 0.015707015991210938
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CodeHighlightTests/testThePaletteMapsEveryKindAndTheThemesDiffer()",
+    "result": "Passed",
+    "seconds": 0.0014181137084960938
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerDraftLifetimeTests/testAClosedChatFreesItsDraft()",
+    "result": "Passed",
+    "seconds": 1.21150803565979
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerDraftLifetimeTests/testRetainedDraftIsDetectedWhenAnUnrelatedDraftFrees()",
+    "result": "Passed",
+    "seconds": 0.005418062210083008
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerDraftLifetimeTests/testUnrelatedDraftReleaseCannotFailTheInstanceObservation()",
+    "result": "Passed",
+    "seconds": 0.0007959604263305664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testActionIsAWhiteCircleNotACapsule()",
+    "result": "Passed",
+    "seconds": 0.0005708932876586914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testBackspaceOnAnEmptyDraftRemovesTheLastPendingAttachment()",
+    "result": "Passed",
+    "seconds": 0.00037097930908203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testBottomPaddingIsGroksWithTheKeyboardUp()",
+    "result": "Passed",
+    "seconds": 0.0002840757369995117
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testDiscFieldAndInsetsAreGroksKeyboardUp()",
+    "result": "Passed",
+    "seconds": 0.0003159046173095703
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testEveryMetricLandsOnAPixel()",
+    "result": "Passed",
+    "seconds": 0.0003980398178100586
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testFieldTextStartsAtGroksCaret()",
+    "result": "Passed",
+    "seconds": 0.0003820657730102539
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testMicGlyphIsGroksFilledMicWithoutABase()",
+    "result": "Passed",
+    "seconds": 0.00037801265716552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testPendingRemoveHitTargetIsAtLeastTwentyPoints()",
+    "result": "Passed",
+    "seconds": 0.0004750490188598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testPlusGlyphIsGroksSize()",
+    "result": "Passed",
+    "seconds": 0.0002830028533935547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testRemovingOnePendingAttachmentKeepsTheOthers()",
+    "result": "Passed",
+    "seconds": 0.00036895275115966797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testRimFadesInOverOnePoint()",
+    "result": "Passed",
+    "seconds": 0.0016731023788452148
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testStatusRowIsGroksPictureWordsAndGap()",
+    "result": "Passed",
+    "seconds": 0.000431060791015625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testStatusRowRisesIntoTheTranscriptTail()",
+    "result": "Passed",
+    "seconds": 0.00033092498779296875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testTheMicOnlyLeavesOnceThePillHasBecomeSend()",
+    "result": "Passed",
+    "seconds": 0.0002859830856323242
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testTheSwapIsQuick()",
+    "result": "Passed",
+    "seconds": 0.00029599666595458984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds()",
+    "result": "Passed",
+    "seconds": 0.0013849735260009766
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerMetricsTests/testVoiceWaveGlyphIsGroksFiveBars()",
+    "result": "Passed",
+    "seconds": 0.0003050565719604492
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerPlaceholderTests/testADMIsNamedByTheOtherPerson()",
+    "result": "Passed",
+    "seconds": 0.0005470514297485352
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ComposerPlaceholderTests/testAGroupIsNamedByItsTitleNeverByAMember()",
+    "result": "Passed",
+    "seconds": 0.0003229379653930664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ConfirmFormTests/testAPlainConfirmIsNotRed()",
+    "result": "Passed",
+    "seconds": 0.0003179311752319336
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ConfirmFormTests/testASpecIsTitleNoteActionThenCancel()",
+    "result": "Passed",
+    "seconds": 0.00034296512603759766
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ConfirmFormTests/testNoConfirmationDialogOffItsControl()",
+    "result": "Passed",
+    "seconds": 0.08324193954467773
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ConfirmFormTests/testNoHandBuiltConfirmAlert()",
+    "result": "Passed",
+    "seconds": 0.07128500938415527
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ConfirmFormTests/testTheBlockConfirmsSayWhatHappens()",
+    "result": "Passed",
+    "seconds": 0.00037097930908203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlMetricsTests/testEveryExceptionIsWrittenDown()",
+    "result": "Passed",
+    "seconds": 0.001107931137084961
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlMetricsTests/testEveryMainScreenUsesTheFamilySizes()",
+    "result": "Passed",
+    "seconds": 0.0003459453582763672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlMetricsTests/testGlyphScalesWithTheDisc()",
+    "result": "Passed",
+    "seconds": 0.0002900362014770508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlMetricsTests/testPillPictureSitsConcentricWithTheCapsuleEnd()",
+    "result": "Passed",
+    "seconds": 0.00026404857635498047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlMetricsTests/testTheFamilyIsTheComposers()",
+    "result": "Passed",
+    "seconds": 0.00033593177795410156
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlTokenLintTests/testNoHandSizedControlOutsideTheTokenFile()",
+    "result": "Passed",
+    "seconds": 0.055390000343322754
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ControlTokenLintTests/testTheSourceFixtureIsReadable()",
+    "result": "Passed",
+    "seconds": 0.0007910728454589844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testAnimatedImageFramesFixtures()",
+    "result": "Passed",
+    "seconds": 0.010959982872009277
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testAnswerPlanFulfillThenJoinOrFail()",
+    "result": "Passed",
+    "seconds": 0.0005218982696533203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testApiErrorDtoDecodesIntoRelayError()",
+    "result": "Passed",
+    "seconds": 0.003672003746032715
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCallKitUUIDStablePerCallId()",
+    "result": "Passed",
+    "seconds": 0.00039398670196533203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCallParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.005216002464294434
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCallPayloadFixtures()",
+    "result": "Passed",
+    "seconds": 0.0054569244384765625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCallPersonMetadataFixture()",
+    "result": "Passed",
+    "seconds": 0.001186966896057129
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testChannelsSkillsLocalFeedbackFixtures()",
+    "result": "Passed",
+    "seconds": 0.0078089237213134766
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testChatMemberParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.002062082290649414
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testClearOnReadBadgeArithmetic()",
+    "result": "Passed",
+    "seconds": 0.00037801265716552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testConnectorsFixtures()",
+    "result": "Passed",
+    "seconds": 0.006706953048706055
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCoreChatDocReadsFixture()",
+    "result": "Passed",
+    "seconds": 0.006122946739196777
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testCoreChatDocReadsLegacyFixture()",
+    "result": "Passed",
+    "seconds": 0.002382040023803711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testFfiDecodesFrameFixtures()",
+    "result": "Passed",
+    "seconds": 0.0010919570922851562
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testFfiReadsCoreChatDocFixture()",
+    "result": "Passed",
+    "seconds": 0.0009210109710693359
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testGoalParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.003036022186279297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testLeaveAndVoipResponseFixtures()",
+    "result": "Passed",
+    "seconds": 0.0013059377670288086
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testMachineStatusFixture()",
+    "result": "Passed",
+    "seconds": 0.0032949447631835938
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testMergeSkippedProjects()",
+    "result": "Passed",
+    "seconds": 0.0003509521484375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testPairTokenHealthVoicesFixtures()",
+    "result": "Passed",
+    "seconds": 0.006754040718078613
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testParseChatFixture()",
+    "result": "Passed",
+    "seconds": 0.001565098762512207
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testParseChatWithoutIdReturnsNil()",
+    "result": "Passed",
+    "seconds": 0.006515979766845703
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testPeopleChatParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.0008449554443359375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testPeopleUnreadCountFollowsTheUserCursorNotRowSeqs()",
+    "result": "Passed",
+    "seconds": 0.00033795833587646484
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testProjectDtoFixture()",
+    "result": "Passed",
+    "seconds": 0.002474069595336914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testProjectMembersFixture()",
+    "result": "Passed",
+    "seconds": 0.00221097469329834
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testPushItemParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.02381300926208496
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testReadPutPlan()",
+    "result": "Passed",
+    "seconds": 0.0003470182418823242
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testReleasesAndPushRegisterFixtures()",
+    "result": "Passed",
+    "seconds": 0.0027990341186523438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testRoomsToPrune()",
+    "result": "Passed",
+    "seconds": 0.000286102294921875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testSecretsParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.007030010223388672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testShouldDeferRoomOpen()",
+    "result": "Passed",
+    "seconds": 0.0003390312194824219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testShouldPrune()",
+    "result": "Passed",
+    "seconds": 0.00028693675994873047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testShouldRecreateRoom()",
+    "result": "Passed",
+    "seconds": 0.00032699108123779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testStartCallResponseFixture()",
+    "result": "Passed",
+    "seconds": 0.0031800270080566406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testUnreadFixture()",
+    "result": "Passed",
+    "seconds": 0.002393007278442383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testUserCardParseFixtures()",
+    "result": "Passed",
+    "seconds": 0.001732945442199707
+  },
+  {
+    "target": "ArbosTests",
+    "case": "CoreFixturesTests/testVoipPlanIdleRingDuplicateAndBusy()",
+    "result": "Passed",
+    "seconds": 0.0003420114517211914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DeliveryStateTests/testAnAckedBubbleIsDeliveredWhateverFollows()",
+    "result": "Passed",
+    "seconds": 0.00033295154571533203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DeliveryStateTests/testOnlyPendingIsDimmed()",
+    "result": "Passed",
+    "seconds": 0.0004899501800537109
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DeliveryStateTests/testPendingAndFailedAreTheOnlyOtherStates()",
+    "result": "Passed",
+    "seconds": 0.0003110170364379883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DeliveryStateTests/testRowsCarryTheStateOnMyBubblesOnly()",
+    "result": "Passed",
+    "seconds": 0.00043404102325439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DevicesVisibleTests/testParseReadsRevokedAtAndTreatsMissingAsLive()",
+    "result": "Passed",
+    "seconds": 0.0005099773406982422
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DevicesVisibleTests/testRevokedRowsAreHiddenAndThisIphoneIsFirst()",
+    "result": "Passed",
+    "seconds": 0.00037300586700439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DevicesVisibleTests/testTheFixtureHasNoRevokedRows()",
+    "result": "Passed",
+    "seconds": 0.000370025634765625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testADMIAlreadyHaveOpensAsBefore()",
+    "result": "Passed",
+    "seconds": 0.004033923149108887
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testAlreadyCancelledFixtureFirstSendIsNotAdmitted()",
+    "result": "Passed",
+    "seconds": 0.0036929845809936523
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testBackingOutDropsTheDraft()",
+    "result": "Passed",
+    "seconds": 0.0029540061950683594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testFixtureFirstSendsStayInOrder()",
+    "result": "Passed",
+    "seconds": 0.025180935859680176
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testQueuedFixtureFirstSendIsRetiredWithTheAccount()",
+    "result": "Passed",
+    "seconds": 0.014288902282714844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testStartingAChatFromSearchCreatesNothing()",
+    "result": "Passed",
+    "seconds": 0.02595198154449463
+  },
+  {
+    "target": "ArbosTests",
+    "case": "DraftDMTests/testTheFirstSendMakesTheDMAndGoesOutThere()",
+    "result": "Passed",
+    "seconds": 0.0254439115524292
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ErrorUILintTests/testEverySurfaceHasItsOneNote()",
+    "result": "Passed",
+    "seconds": 0.03747999668121338
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ErrorUILintTests/testNoAdHocRedFailureTextOutsideErrorNote()",
+    "result": "Passed",
+    "seconds": 0.030998945236206055
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ErrorUILintTests/testNoRawErrorStringsReachANoticeOrTheScreen()",
+    "result": "Passed",
+    "seconds": 0.11999797821044922
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupTitlePushTests/testDmIsTitledWithTheSender()",
+    "result": "Passed",
+    "seconds": 0.0027829408645629883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupTitlePushTests/testGroupIsTitledWithTheGroupAndCarriesTheSenderInTheBody()",
+    "result": "Passed",
+    "seconds": 0.0003350973129272461
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupTitlePushTests/testRelayPayloadWithoutChatKindDefaultsFromTheTitle()",
+    "result": "Passed",
+    "seconds": 0.0003600120544433594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testADateLineBreaksTheRun()",
+    "result": "Passed",
+    "seconds": 0.00046896934509277344
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testAgentsGroupLikePeopleUnlessTheyQuote()",
+    "result": "Passed",
+    "seconds": 0.0005159378051757812
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testASenderChangeOrTheWindowPassingStartsANewRun()",
+    "result": "Passed",
+    "seconds": 0.00039398670196533203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testASystemLineOrAQuoteBreaksTheRun()",
+    "result": "Passed",
+    "seconds": 0.0007390975952148438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testContinuesRunRule()",
+    "result": "Passed",
+    "seconds": 0.00028395652770996094
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testMyOwnMessagesGroupTooAndADMGroupsItsAvatars()",
+    "result": "Passed",
+    "seconds": 0.0030630826950073242
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testSameSenderWithinTheWindowContinuesTheRun()",
+    "result": "Passed",
+    "seconds": 0.0003839731216430664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testTheAvatarSitsOnTheLastAvatarRowOfTheRunsFirstMessage()",
+    "result": "Passed",
+    "seconds": 0.0004559755325317383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testTheAvatarSlotIsTheAvatarsWidth()",
+    "result": "Passed",
+    "seconds": 0.00029599666595458984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "GroupedMessagesTests/testTheWindowIsTwoMinutesAndTheGapsAreTighter()",
+    "result": "Passed",
+    "seconds": 0.0003039836883544922
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HeaderGlassStructureTests/testEveryKindHasTheSameThreeControls()",
+    "result": "Passed",
+    "seconds": 0.00040209293365478516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HeaderGlassStructureTests/testFrostTintIsThinEnoughToSeeThrough()",
+    "result": "Passed",
+    "seconds": 0.0003120899200439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HeaderGlassStructureTests/testGlassSurfacePutsTheGlassMaterialOnEveryControlOfEveryKind()",
+    "result": "Passed",
+    "seconds": 0.0024129152297973633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HeaderGlassStructureTests/testMatteKeepsSolidControls()",
+    "result": "Passed",
+    "seconds": 0.00036704540252685547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HeaderGlassStructureTests/testSearchBarWearsTheHeaderMaterial()",
+    "result": "Passed",
+    "seconds": 0.0003559589385986328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenChatOpenTests/testNewActivityAndUnarchiveStillBringTheRowBack()",
+    "result": "Passed",
+    "seconds": 0.00400090217590332
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenChatOpenTests/testOpeningAHiddenAgentChatOrDMOnlyViewsIt()",
+    "result": "Passed",
+    "seconds": 0.002335071563720703
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenJobRowAttachmentTests/testAHiddenJobRowStillDrawsItsAttachmentCardUnderTheAgent()",
+    "result": "Passed",
+    "seconds": 0.0025949478149414062
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenJobRowAttachmentTests/testAHiddenJobRowWithoutAFileStillDrawsNothing()",
+    "result": "Passed",
+    "seconds": 0.0005639791488647461
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenJobRowAttachmentTests/testHiddenRowAgentFallsBackToTheRowItself()",
+    "result": "Passed",
+    "seconds": 0.0003459453582763672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenWorkerRowTests/testASenderlessBlankRowDrawsNothingInAPeopleChat()",
+    "result": "Passed",
+    "seconds": 0.0005799531936645508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenWorkerRowTests/testAWorkerSpawnRowDrawsNothingButATeammateSendKeepsItsLine()",
+    "result": "Passed",
+    "seconds": 0.0003418922424316406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HiddenWorkerRowTests/testWorkerFlagParsesAndDefaultsOff()",
+    "result": "Passed",
+    "seconds": 0.00029599666595458984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeBarFadeTests/testBottomCapsuleIsTheSharedSeeThroughFade()",
+    "result": "Passed",
+    "seconds": 0.00041604042053222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeBarFadeTests/testFadeHeightsAreShortOnThePixelAndTheListsClearThem()",
+    "result": "Passed",
+    "seconds": 0.0005140304565429688
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeBarFadeTests/testMatteAndGlassShareTheGeometryAndDifferOnlyInMaterial()",
+    "result": "Passed",
+    "seconds": 0.00029909610748291016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeBarFadeTests/testSearchModeKeepsTheSameFloatingDiscsWithoutTabs()",
+    "result": "Passed",
+    "seconds": 0.0003070831298828125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeBarFadeTests/testTopBarsFloat_rowsReadUnderTheDiscsAndTabsAndAreGoneWhereTheFirstRowRests()",
+    "result": "Passed",
+    "seconds": 0.00029397010803222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeListFilterTests/testAgentsShowsMyAgentsOnly()",
+    "result": "Passed",
+    "seconds": 0.0007340908050537109
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeListFilterTests/testAllShowsEverything()",
+    "result": "Passed",
+    "seconds": 0.0002989768981933594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeListFilterTests/testPeopleShowsPeopleChatsOnly()",
+    "result": "Passed",
+    "seconds": 0.0002620220184326172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeListFilterTests/testServersShowsServersOnly()",
+    "result": "Passed",
+    "seconds": 0.0003129243850708008
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeListFilterTests/testTheFourSegmentsInOrder()",
+    "result": "Passed",
+    "seconds": 0.0004750490188598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomePinsTests/testLegacyLocalPinsBecomeRelayRowKeysOnceInOrder()",
+    "result": "Passed",
+    "seconds": 0.0018770694732666016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomePinsTests/testPinsLandOnTopStopAtTheCapAndReorder()",
+    "result": "Passed",
+    "seconds": 0.004418015480041504
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomePinsTests/testRowKeysAreTheMacsAndTheRelays()",
+    "result": "Passed",
+    "seconds": 0.000738978385925293
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomePreviewWhoTests/testAOneToOneRowDoesNotRepeatThePersonItsHeaderNames()",
+    "result": "Passed",
+    "seconds": 0.0005270242691040039
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomePreviewWhoTests/testMyOwnLineStaysMineAndAnAgentKeepsItsName()",
+    "result": "Passed",
+    "seconds": 0.00030791759490966797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testAgentRowsMatchNameChatTitlesAndAgents()",
+    "result": "Passed",
+    "seconds": 0.0006389617919921875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testCaseAndDiacriticsFoldBothWays()",
+    "result": "Passed",
+    "seconds": 0.0039020776748657227
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testDisplayNameFindsThePerson()",
+    "result": "Passed",
+    "seconds": 0.0004450082778930664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testEmptyQueryShowsEverythingAndNothingMatchesGibberish()",
+    "result": "Passed",
+    "seconds": 0.00037598609924316406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testGroupWithThePersonAsMemberSaysSo()",
+    "result": "Passed",
+    "seconds": 0.0004000663757324219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testHandlePrefixFindsThePersonWithOrWithoutAt()",
+    "result": "Passed",
+    "seconds": 0.0004000663757324219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testMessageBodyHitNamesTheMessage()",
+    "result": "Passed",
+    "seconds": 0.0003999471664428711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testRankingPeopleThenTitlesThenMembersThenMessages()",
+    "result": "Passed",
+    "seconds": 0.00042700767517089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testServersMatchNameOrChannel()",
+    "result": "Passed",
+    "seconds": 0.00033795833587646484
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testSnippetsCutAroundTheMatch()",
+    "result": "Passed",
+    "seconds": 0.000308990478515625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "HomeSearchTests/testUnrelatedGroupDoesNotAppear()",
+    "result": "Passed",
+    "seconds": 0.0003509521484375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testCaptionTextAndRadii()",
+    "result": "Passed",
+    "seconds": 0.0003249645233154297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testHostedPhotoBubbleTakesTheBubbleCap()",
+    "result": "Passed",
+    "seconds": 0.002547025680541992
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testLandscapePictureStaysFlushWithItsCaptionUnderIt()",
+    "result": "Passed",
+    "seconds": 0.0006139278411865234
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testPortraitPictureIsASliverAndTheCaptionDoesNotFollowIt()",
+    "result": "Passed",
+    "seconds": 0.0003819465637207031
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testShortCaptionAndNoCaptionKeepThePictureFlush()",
+    "result": "Passed",
+    "seconds": 0.00033402442932128906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ImageCaptionBubbleTests/testTheRowCapWins()",
+    "result": "Passed",
+    "seconds": 0.0003679990768432617
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JobTabsTests/testAFinishedJobEndsWithTheResultAndNoLiveRow()",
+    "result": "Passed",
+    "seconds": 0.0007429122924804688
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JobTabsTests/testARunningJobReadsAsBriefWordsStepsAndALiveRow()",
+    "result": "Passed",
+    "seconds": 0.00034499168395996094
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JobTabsTests/testATypedSteerShowsUntilTheBoxEchoesIt()",
+    "result": "Passed",
+    "seconds": 0.00035500526428222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JobTabsTests/testIdsAndTabsRoundTrip()",
+    "result": "Passed",
+    "seconds": 0.00029599666595458984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JobTabsTests/testTheRelayDocumentParsesAndMergesBySeq()",
+    "result": "Passed",
+    "seconds": 0.0003399848937988281
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JumpToLatestWindowTests/testAnOversizedTailWindowIsCappedNotRecut()",
+    "result": "Passed",
+    "seconds": 0.0003399848937988281
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JumpToLatestWindowTests/testAnySlideIntoHistoryCountsAsDeep()",
+    "result": "Passed",
+    "seconds": 0.00034999847412109375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JumpToLatestWindowTests/testDeepInHistoryLandsOnOneOpeningPage()",
+    "result": "Passed",
+    "seconds": 0.00034499168395996094
+  },
+  {
+    "target": "ArbosTests",
+    "case": "JumpToLatestWindowTests/testWithinTheTailWindowNothingIsRebuilt()",
+    "result": "Passed",
+    "seconds": 0.0003349781036376953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testBareFileNamesAndUntypedHostsAreNotLinks()",
+    "result": "Passed",
+    "seconds": 0.014283061027526855
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testDayLabelsAreTheHomeListsWords()",
+    "result": "Passed",
+    "seconds": 0.0010499954223632812
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testInjectedCalendarOwnsDayBoundariesAndClock()",
+    "result": "Passed",
+    "seconds": 0.0009670257568359375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testOneListByDayFiveRowsThenShowMore()",
+    "result": "Passed",
+    "seconds": 0.001708984375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testRelativeTimesAreCompact()",
+    "result": "Passed",
+    "seconds": 0.0003279447555541992
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testTheMocksNumbers()",
+    "result": "Passed",
+    "seconds": 0.00044906139373779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testToolPartsJobRowsAndTheAgentsPagesNeverEnterTheLibraryButChatSentThingsDo()",
+    "result": "Passed",
+    "seconds": 0.014514923095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LibraryListTests/testTypeLabelsAndMenus()",
+    "result": "Passed",
+    "seconds": 0.0003370046615600586
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkIconTests/testASiteWithoutAnIconKeepsThePlaceholderAndIsNotAskedAgain()",
+    "result": "Passed",
+    "seconds": 0.049993038177490234
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkIconTests/testHostsOfNamedLinksOnlyAndEachOnce()",
+    "result": "Passed",
+    "seconds": 0.0014380216598510742
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkIconTests/testTheLimaTableCellsCarryTheirSitesAndTheFixtureHasTheirIcons()",
+    "result": "Passed",
+    "seconds": 0.004480957984924316
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkIconTests/testTheNYPostListHasSevenNamedLinksToOneHostAndOneFetch()",
+    "result": "Passed",
+    "seconds": 0.02457904815673828
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testAnAgentsLinkPreviewIsTheBubblesLastBlock()",
+    "result": "Passed",
+    "seconds": 0.0008189678192138672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testIsLinkOnlyMatchesTheTypedOrCanonicalUrlAlone()",
+    "result": "Passed",
+    "seconds": 0.0003470182418823242
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testMissingUserRowIsAnAssertionFailure()",
+    "result": "Expected Failure",
+    "seconds": 0.015992045402526855
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testPreviewOffAndTheCallerSettingHideTheCard()",
+    "result": "Passed",
+    "seconds": 0.0005830526351928711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testTextPlusLinkKeepsTheTextAndABareLinkBecomesTheCard()",
+    "result": "Passed",
+    "seconds": 0.006291031837463379
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testTheCardHostsCompactAndExpanded()",
+    "result": "Passed",
+    "seconds": 0.024482011795043945
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testTheMenuOffersRemovePreviewOnlyWhereDeleteIsOffered()",
+    "result": "Passed",
+    "seconds": 0.00038695335388183594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkPreviewCardTests/testThePartParsesAndUnknownFieldsAreIgnored()",
+    "result": "Passed",
+    "seconds": 0.0019919872283935547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testEveryBrandHasAVectorAssetAndAnInk()",
+    "result": "Passed",
+    "seconds": 0.0019990205764770508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testFillsFlipSoAMarkNeverSitsOnItsOwnTone()",
+    "result": "Passed",
+    "seconds": 0.00033104419708251953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testKnownHostsMapToTheirBrand()",
+    "result": "Passed",
+    "seconds": 0.0003679990768432617
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testMetricsFollowThePaneKit()",
+    "result": "Passed",
+    "seconds": 0.0004950761795043945
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testTheGoogleEditorsAreToldApartByPath()",
+    "result": "Passed",
+    "seconds": 0.00042700767517089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testTheKindPrefersTheBrandThenThePictureThenTheLetter()",
+    "result": "Passed",
+    "seconds": 0.0006129741668701172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testTonesTellADarkMarkFromALightOneAndAnOpaqueIcon()",
+    "result": "Passed",
+    "seconds": 0.0064280033111572266
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LinkTileTests/testUnknownHostsHaveNoBrand()",
+    "result": "Passed",
+    "seconds": 0.00034308433532714844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ListTopFadeTests/testBarOnlyListsAndPanePagesFadeToWhereTheirContentStarts()",
+    "result": "Passed",
+    "seconds": 0.0004419088363647461
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ListTopFadeTests/testEveryListFadeStartsAtTheTopEdgeAndCoversStatusBarAndChrome()",
+    "result": "Passed",
+    "seconds": 0.00045800209045410156
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ListTopFadeTests/testHomeFloatsItsBarsOverTheRowsAndFadesOutWhereTheFirstRowStarts()",
+    "result": "Passed",
+    "seconds": 0.0002930164337158203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LongTranscriptPerfTests/testReadAllOfTwoThousandRowsIsFast()",
+    "result": "Passed",
+    "seconds": 0.2486029863357544
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LongTranscriptPerfTests/testRowsForFiveThousandMessagesBuildFast()",
+    "result": "Passed",
+    "seconds": 0.11852598190307617
+  },
+  {
+    "target": "ArbosTests",
+    "case": "LongTranscriptPerfTests/testSingleRowReadMatchesReadAll()",
+    "result": "Passed",
+    "seconds": 0.03464794158935547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testAnOlderImageDrawsOnlyWhatItReports()",
+    "result": "Passed",
+    "seconds": 0.0007759332656860352
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testAnUnansweringBoxSaysSoOnceAndNoReportKeepsTheOldRows()",
+    "result": "Passed",
+    "seconds": 0.00031697750091552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testBreakdownExpandsToOneRowPerWorkspace()",
+    "result": "Passed",
+    "seconds": 0.0003820657730102539
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testGaugesReadUsedOfTotalAndTheDiskNamesFileSlots()",
+    "result": "Passed",
+    "seconds": 0.00032699108123779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testParserReadsTheSamplersResourcesAndPerWorkspaceUsage()",
+    "result": "Passed",
+    "seconds": 0.0005519390106201172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testPlanOrderOnALiveBox()",
+    "result": "Passed",
+    "seconds": 0.0003600120544433594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testThePollStartsWithThePageAndStopsWhenItLeaves()",
+    "result": "Passed",
+    "seconds": 0.0003319978713989258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testThresholdsAre85AmberAnd90Red()",
+    "result": "Passed",
+    "seconds": 0.00032508373260498047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MachineMetricsTests/testWarningAppearsAtTheThresholdWithTheTwoWaysOut()",
+    "result": "Passed",
+    "seconds": 0.0003999471664428711
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MarkdownTableTests/testColumnsLineUpAndTheWideColumnCaps()",
+    "result": "Passed",
+    "seconds": 0.005455970764160156
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MarkdownTableTests/testPipeRowsWithoutASeparatorDegradeToAMonoBlock()",
+    "result": "Passed",
+    "seconds": 0.0004450082778930664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MarkdownTableTests/testTableInsideAReplyKeepsItsNeighboursAndPreviewsAsWords()",
+    "result": "Passed",
+    "seconds": 0.0006920099258422852
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MarkdownTableTests/testTheLimaTableIsOneTableOfLinkedRows()",
+    "result": "Passed",
+    "seconds": 0.0027039051055908203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MathTextTests/testBigOIsMathAndPricesAreNot()",
+    "result": "Passed",
+    "seconds": 0.0003529787063598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MathTextTests/testDisplayMathIsItsOwnCentredBlock()",
+    "result": "Passed",
+    "seconds": 0.0005429983139038086
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MathTextTests/testTheBubbleSortReplyRendersItsComplexityAsMath()",
+    "result": "Passed",
+    "seconds": 0.0007039308547973633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MathTextTests/testTypesetVectorsMatchTheMac()",
+    "result": "Passed",
+    "seconds": 0.0005420446395874023
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionChipSnapshotTests/testAChipOnALaterLineSitsOnThatLine()",
+    "result": "Passed",
+    "seconds": 0.06533300876617432
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionChipSnapshotTests/testEachChipIsOnePillWithEvenInsetsAndThePictureOnItsCentre()",
+    "result": "Passed",
+    "seconds": 0.0528109073638916
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testAnAgentChipReadsItsSlug()",
+    "result": "Passed",
+    "seconds": 0.00042998790740966797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testARestoredDraftGetsItsChipsBack()",
+    "result": "Passed",
+    "seconds": 0.0004030466079711914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testASharedHandleStaysPlainUnlessItIsMine()",
+    "result": "Passed",
+    "seconds": 0.0003809928894042969
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testCandidatesMatchHandleOrNameWordMixedAndOrdered()",
+    "result": "Passed",
+    "seconds": 0.0005890130996704102
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testCollectivesAreOfferedAndChippedInPeopleChats()",
+    "result": "Passed",
+    "seconds": 0.0003540515899658203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testExactHandleAndSeparatorResolveWithoutThePicker()",
+    "result": "Passed",
+    "seconds": 0.0003260374069213867
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testOpenTokenIsTheAtWordTheCaretEnds()",
+    "result": "Passed",
+    "seconds": 0.00032591819763183594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testPickedRowBecomesOneChipAndTheSendCarriesItsId()",
+    "result": "Passed",
+    "seconds": 0.000370025634765625
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testPlainAndAttributedOffsetsAgree()",
+    "result": "Passed",
+    "seconds": 0.0004140138626098633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testSpliceShiftsLaterChipsAndRemovesATouchedOneWhole()",
+    "result": "Passed",
+    "seconds": 0.0003160238265991211
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testTagOnlyOnASharedHandle()",
+    "result": "Passed",
+    "seconds": 0.0003000497817993164
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MentionDraftTests/testTheSentRowCarriesTheCollectiveAsMemberIds()",
+    "result": "Passed",
+    "seconds": 0.0003210306167602539
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsHitAreaTests/testCapsuleCellsTileTheCapsule()",
+    "result": "Passed",
+    "seconds": 0.0004949569702148438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsHitAreaTests/testDestructiveBandIsPartOfTheDeleteRow()",
+    "result": "Passed",
+    "seconds": 0.0003380775451660156
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsHitAreaTests/testEveryMenuShapeTiles()",
+    "result": "Passed",
+    "seconds": 0.0014820098876953125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsHitAreaTests/testMenuHeightMatchesTheRows()",
+    "result": "Passed",
+    "seconds": 0.00035500526428222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsHitAreaTests/testStandardMenuRowsTileWithNoDeadZone()",
+    "result": "Passed",
+    "seconds": 0.0021849870681762695
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsKeyboardTests/testActionsThatKeepTheChatRestoreTheKeyboard()",
+    "result": "Passed",
+    "seconds": 0.0004200935363769531
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsKeyboardTests/testActionsThatOpenAnotherSurfaceLeaveTheKeyboardDown()",
+    "result": "Passed",
+    "seconds": 0.00036895275115966797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsKeyboardTests/testDismissOrReactionGivesTheKeyboardBack()",
+    "result": "Passed",
+    "seconds": 0.00030493736267089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsKeyboardTests/testKeyboardNeverComesBackIfItWasDown()",
+    "result": "Passed",
+    "seconds": 0.00030303001403808594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testBubbleUnderTheKeyboardIsBroughtIntoView()",
+    "result": "Passed",
+    "seconds": 0.00034809112548828125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testEveryKeyboardInsetKeepsTheGroupVisible()",
+    "result": "Passed",
+    "seconds": 0.0004030466079711914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testKeyboardDownKeepsMenuBelowTheBubble()",
+    "result": "Passed",
+    "seconds": 0.0003889799118041992
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testKeyboardUpFlipsTheMenuAboveWhenThatFits()",
+    "result": "Passed",
+    "seconds": 0.0003559589385986328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testKeyboardUpKeepsEveryPieceAboveTheKeyboard()",
+    "result": "Passed",
+    "seconds": 0.0003019571304321289
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testLongestMenuStillFitsWithTheKeyboardUp()",
+    "result": "Passed",
+    "seconds": 0.0002989768981933594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testNoRoomAboveShiftsTheGroupDown()",
+    "result": "Passed",
+    "seconds": 0.001242995262145996
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testNoRoomBelowFlipsTheMenuAboveTheBubble()",
+    "result": "Passed",
+    "seconds": 0.0002999305725097656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageActionsLayoutTests/testTallBubbleIsClippedBetweenCapsuleAndMenu()",
+    "result": "Passed",
+    "seconds": 0.0002840757369995117
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageButtonTests/testTheHeroActionSitsUnderTheSubtitle()",
+    "result": "Passed",
+    "seconds": 0.00035500526428222656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageButtonTests/testTheMessagePillIsForOtherUnblockedPeople()",
+    "result": "Passed",
+    "seconds": 0.0014699697494506836
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageButtonTests/testThePillFollowsTheBlockList()",
+    "result": "Passed",
+    "seconds": 0.00031197071075439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageDeleteRuleTests/testMemberDeletesOwnAndOwnAgentsOnly()",
+    "result": "Passed",
+    "seconds": 0.0002779960632324219
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageDeleteRuleTests/testMenuHidesDeleteWhenNotAllowed()",
+    "result": "Passed",
+    "seconds": 0.00029909610748291016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageDeleteRuleTests/testOwnerModeratesEverything()",
+    "result": "Passed",
+    "seconds": 0.0011000633239746094
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testCopyOfAMultiBlockBubbleIsTheWholeMessage()",
+    "result": "Passed",
+    "seconds": 0.00041997432708740234
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testItemsAreExactlyCopyReplyForwardReplyInDMDelete()",
+    "result": "Passed",
+    "seconds": 0.00031697750091552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testNoEmojiOrExtraItems()",
+    "result": "Passed",
+    "seconds": 0.00032198429107666016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testNonMessageRowsCopyOnly()",
+    "result": "Passed",
+    "seconds": 0.0011370182037353516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testOnlyDeleteIsDestructive()",
+    "result": "Passed",
+    "seconds": 0.0003459453582763672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testOwnMessageAddsEditBeforeDelete()",
+    "result": "Passed",
+    "seconds": 0.00029098987579345703
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessageMenuTests/testPrivateChatOmitsReplyInDM()",
+    "result": "Passed",
+    "seconds": 0.0003139972686767578
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAFileStagesOnlyWithoutWords()",
+    "result": "Passed",
+    "seconds": 0.009186983108520508
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAFileTravelsUnderItsOwnType()",
+    "result": "Passed",
+    "seconds": 0.0006799697875976562
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAnImagePasteStillAttaches()",
+    "result": "Passed",
+    "seconds": 0.005661964416503906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAnUploadingPictureIsNotCopiedYet()",
+    "result": "Passed",
+    "seconds": 0.0004749298095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAPictureRenderedNextToRichTextIsNotStaged()",
+    "result": "Passed",
+    "seconds": 0.012614011764526367
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAUIKitTextCopyStagesNoFile()",
+    "result": "Passed",
+    "seconds": 0.0055190324783325195
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testAWordsOnlyPasteboardStagesNothing()",
+    "result": "Passed",
+    "seconds": 0.002707958221435547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testGifTypeIsPreserved()",
+    "result": "Passed",
+    "seconds": 0.001314997673034668
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testHtmlNextToPlainTextPastesTheWordsOnly()",
+    "result": "Passed",
+    "seconds": 0.005729079246520996
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testImageOnlyKeepsThePngUnderItsOwnTypeAndNoText()",
+    "result": "Passed",
+    "seconds": 0.0007249116897583008
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testJpegStaysJpegWithAPngTwin()",
+    "result": "Passed",
+    "seconds": 0.003345966339111328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testMixedMessageIsOneRichItemWithTextAndPicture()",
+    "result": "Passed",
+    "seconds": 0.001109004020690918
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testMultipleImagesAreMultipleItemsInMessageOrderTextOnTheFirst()",
+    "result": "Passed",
+    "seconds": 0.0017380714416503906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testPicksOnDeclaredTypes()",
+    "result": "Passed",
+    "seconds": 0.0010169744491577148
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testRtfNextToPlainTextPastesTheWordsOnly()",
+    "result": "Passed",
+    "seconds": 0.00581204891204834
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testTextOnlyIsOneTextItem()",
+    "result": "Passed",
+    "seconds": 0.0004960298538208008
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testTheComposerReadsTheNativeTypeBeforeAPngTwin()",
+    "result": "Passed",
+    "seconds": 0.014999985694885254
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testTheFormatComesFromTheBytesThenTheMimeThenTheName()",
+    "result": "Passed",
+    "seconds": 0.0005929470062255859
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testThePictureOnlyMessageHasABodyToCopy()",
+    "result": "Passed",
+    "seconds": 0.0009360313415527344
+  },
+  {
+    "target": "ArbosTests",
+    "case": "MessagePasteboardTests/testWrittenItemsReadBackByTypeAndTheComposerStagesThem()",
+    "result": "Passed",
+    "seconds": 0.0165560245513916
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NewMessageSheetTests/testAvatarWarmupCoversTheFirstScreensOnly()",
+    "result": "Passed",
+    "seconds": 0.00032699108123779297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NewMessageSheetTests/testCreateRowsAndPeopleRowsShareOneLeftEdge()",
+    "result": "Passed",
+    "seconds": 0.0003560781478881836
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NewMessageSheetTests/testDirectoryCacheRoundTrip()",
+    "result": "Passed",
+    "seconds": 0.0031909942626953125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NewMessageSheetTests/testRestoredDirectoryIsRefreshedInTheBackgroundThenHonoursTheTtl()",
+    "result": "Passed",
+    "seconds": 0.00040209293365478516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NewMessageSheetTests/testUnchangedRefreshDoesNotRepublish()",
+    "result": "Passed",
+    "seconds": 0.0003180503845214844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NoAnswerLineTests/testATurnThatSaidNothingKeepsTheStockLine()",
+    "result": "Passed",
+    "seconds": 0.0004749298095703125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "NoAnswerLineTests/testNoStockLineWhenTheTurnAnsweredInAnotherRow()",
+    "result": "Passed",
+    "seconds": 0.0003719329833984375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OneAddRowPerPaneTests/testEveryPaneDrawsOneAddMembersRowAndNoAddAgentRow()",
+    "result": "Passed",
+    "seconds": 0.03301501274108887
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OneAddRowPerPaneTests/testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn()",
+    "result": "Passed",
+    "seconds": 0.004416942596435547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testAddMembersPaintsTheNoticeBeforeTheRelayAnswers()",
+    "result": "Passed",
+    "seconds": 0.002703070640563965
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testALocalNoticeSurvivesSnapshotsUntilTheRelayRowConfirmsIt()",
+    "result": "Passed",
+    "seconds": 0.00041806697845458984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testFactsConfirmTheLocalNoticeWhateverTheWords()",
+    "result": "Passed",
+    "seconds": 0.00030601024627685547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testNoticeTextFollowsTheLiveNames()",
+    "result": "Passed",
+    "seconds": 0.00040400028228759766
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testOtherNoticesAndOldRowsDoNotConfirmAndAStaleNoticeExpires()",
+    "result": "Passed",
+    "seconds": 0.00032389163970947266
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticNoticeTests/testTheLocalLineReadsLikeTheRelays()",
+    "result": "Passed",
+    "seconds": 0.0003120899200439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticSendTests/testGroupSendPaintsOwnRowBeforeReturning()",
+    "result": "Passed",
+    "seconds": 0.004629015922546387
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticSendTests/testOneToOneSendPaintsOwnRowBeforeReturning()",
+    "result": "Passed",
+    "seconds": 0.0036200284957885742
+  },
+  {
+    "target": "ArbosTests",
+    "case": "OptimisticSendTests/testPaintedRowSurvivesTheDocReadWithoutADuplicate()",
+    "result": "Passed",
+    "seconds": 1.0257909297943115
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PaneCardGlassTests/testGlassCardIsATranslucentWashWithTheMacsNumbers()",
+    "result": "Passed",
+    "seconds": 0.0007339715957641602
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PaneCardGlassTests/testMatteKeepsTheSolidCardAndNoRim()",
+    "result": "Passed",
+    "seconds": 0.0008800029754638672
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PaneCardGlassTests/testOnlyGlassMakesTheCardGlass()",
+    "result": "Passed",
+    "seconds": 0.0006499290466308594
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PictureReplyQuoteTests/testFileReplyQuotesOnTheCardNotTheNote()",
+    "result": "Passed",
+    "seconds": 0.0011500120162963867
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PictureReplyQuoteTests/testForwardedPictureNeverQuotes()",
+    "result": "Passed",
+    "seconds": 0.0005209445953369141
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PictureReplyQuoteTests/testPictureRepliesQuoteAboveTheFirstCard()",
+    "result": "Passed",
+    "seconds": 0.0004819631576538086
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PictureReplyQuoteTests/testQuoteHeaderSitsAboveThePicture()",
+    "result": "Passed",
+    "seconds": 0.00039207935333251953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PictureReplyQuoteTests/testRowBuilderKeepsReplyToWithAttachments()",
+    "result": "Passed",
+    "seconds": 0.0009450912475585938
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PillGlassTests/testFadeUnderThePillsLetsTheTextRead()",
+    "result": "Passed",
+    "seconds": 0.0003249645233154297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PillGlassTests/testGlassPillsAreClearUntintedSystemGlass()",
+    "result": "Passed",
+    "seconds": 0.0002690553665161133
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PillGlassTests/testMatteStaysSolid()",
+    "result": "Passed",
+    "seconds": 0.00033092498779296875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PresenceRowTests/testBubblePictureSitsOnItsOwnColumnAndTheRowPictureIsGroks()",
+    "result": "Passed",
+    "seconds": 0.0020579099655151367
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PresenceRowTests/testDetailAndQueueApplyToASingleWorkerOnly()",
+    "result": "Passed",
+    "seconds": 0.0003540515899658203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PresenceRowTests/testFirstNamesFromTwoParticipantsOn()",
+    "result": "Passed",
+    "seconds": 0.0005789995193481445
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PresenceRowTests/testOneLineWhateverTheCount()",
+    "result": "Passed",
+    "seconds": 0.00037598609924316406
+  },
+  {
+    "target": "ArbosTests",
+    "case": "PresenceRowTests/testTypingMarksAreOnePerHandleNewestFirstAndExpire()",
+    "result": "Passed",
+    "seconds": 0.0012649297714233398
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePaneStructureTests/testAgentComputerFollowsTheReport()",
+    "result": "Passed",
+    "seconds": 0.0004150867462158203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePaneStructureTests/testAgentDetailsIsSettingsAloneAndReadsLikeTheMac()",
+    "result": "Passed",
+    "seconds": 0.0003120899200439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePaneStructureTests/testEveryKindLaysOutHeroThenPillThenOptions()",
+    "result": "Passed",
+    "seconds": 0.001127004623413086
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePaneStructureTests/testKindsKeepTheirOwnTabSets()",
+    "result": "Passed",
+    "seconds": 0.00032198429107666016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePictureViewTests/testAProfilePictureIsOnePictureOnlyViewerPage()",
+    "result": "Passed",
+    "seconds": 0.00030493736267089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfilePictureViewTests/testThePickerOffersViewOnlyWhenThereIsAPicture()",
+    "result": "Passed",
+    "seconds": 0.0012990236282348633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testADifferentPersonSwapsInPlace()",
+    "result": "Passed",
+    "seconds": 0.00028502941131591797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testASheetHostKeepsTheSheetPresentation()",
+    "result": "Passed",
+    "seconds": 0.0009069442749023438
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testEveryChatTargetRoutesThroughToggleProfile()",
+    "result": "Passed",
+    "seconds": 0.01975405216217041
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testNothingUpOpensTheTarget()",
+    "result": "Passed",
+    "seconds": 0.0004410743713378906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testSameSubjectIsByPersonNotByPage()",
+    "result": "Passed",
+    "seconds": 0.00031197071075439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testTheLabelSaysWhatTheTapDoes()",
+    "result": "Passed",
+    "seconds": 0.0003529787063598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testTheModelTogglesAndSwapsOnTheStack()",
+    "result": "Passed",
+    "seconds": 0.0016189813613891602
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ProfileToggleTests/testTheSameSubjectDismissesFromAnyTarget()",
+    "result": "Passed",
+    "seconds": 0.00037097930908203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionCapsuleTests/testCapsuleWidthCountsTheAddControl()",
+    "result": "Passed",
+    "seconds": 0.00030100345611572266
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionCapsuleTests/testMenuUnderTheCapsuleCarriesNoEmoji()",
+    "result": "Passed",
+    "seconds": 0.00032889842987060547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionCapsuleTests/testPaletteIsQuickReactSetInOrder()",
+    "result": "Passed",
+    "seconds": 0.0016529560089111328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionCapsuleTests/testPickedEmojiTakesOnlyAnEmoji()",
+    "result": "Passed",
+    "seconds": 0.00041496753692626953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionCapsuleTests/testPickedEmojiTakesTheKeyboardsSymbolsAndKeycaps()",
+    "result": "Passed",
+    "seconds": 0.0003039836883544922
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionChipAnchorTests/testChipsStartAtTheEdgeInTheAgentChat()",
+    "result": "Passed",
+    "seconds": 0.0006619691848754883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionChipAnchorTests/testChipsStartOnTheBubblesLeadingEdgeInAPeopleGroup()",
+    "result": "Passed",
+    "seconds": 0.0005140304565429688
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionPickTests/testOneKeyboardInsertReportedTwicePicksOnce()",
+    "result": "Passed",
+    "seconds": 0.0013079643249511719
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionPickTests/testOnlyTheFirstEmojiOfAFieldCounts()",
+    "result": "Passed",
+    "seconds": 0.0002789497375488281
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionPickTests/testPickedFireReachesTheDocRowOnce()",
+    "result": "Passed",
+    "seconds": 0.0012890100479125977
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionPickTests/testPickedKeycapReachesTheDocRow()",
+    "result": "Passed",
+    "seconds": 0.001128077507019043
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionPickTests/testTwoTogglesOfOnePickWouldClearTheRow()",
+    "result": "Passed",
+    "seconds": 0.0006579160690307617
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionToggleTests/testToggleOnThenOffMatchesCoreFlatShape()",
+    "result": "Passed",
+    "seconds": 0.0007270574569702148
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReactionToggleTests/testUnReactClearsFlatKey()",
+    "result": "Passed",
+    "seconds": 0.0005780458450317383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReplyInDMTests/testDMSendWritesReplyRefAndTheBubbleQuotesWithChatName()",
+    "result": "Passed",
+    "seconds": 0.004433989524841309
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReplyInDMTests/testQuoteLinksOnlyWhenTheViewerIsInTheSourceChat()",
+    "result": "Passed",
+    "seconds": 0.0037069320678710938
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReplyInDMTests/testReplyInDMArmsTheDMComposer()",
+    "result": "Passed",
+    "seconds": 0.07895302772521973
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ReplyInDMTests/testReplyRefCarriesAddressAndSnapshot()",
+    "result": "Passed",
+    "seconds": 0.003798961639404297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "RowStorageTests/testAStreamedTokenSplicesToTheFullRebuild()",
+    "result": "Passed",
+    "seconds": 0.06128501892089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "RowStorageTests/testChangingACopiedRowLeavesTheOriginalAlone()",
+    "result": "Passed",
+    "seconds": 0.01370394229888916
+  },
+  {
+    "target": "ArbosTests",
+    "case": "RowStorageTests/testEditsThatAreNotAppendsGiveThePlainAnswer()",
+    "result": "Passed",
+    "seconds": 0.06328999996185303
+  },
+  {
+    "target": "ArbosTests",
+    "case": "RowStorageTests/testRowsBuiltApartCompareEqualThroughTheFullCompare()",
+    "result": "Passed",
+    "seconds": 0.0090409517288208
+  },
+  {
+    "target": "ArbosTests",
+    "case": "RowStorageTests/testTheDenseMixHasEveryKindOfRow()",
+    "result": "Passed",
+    "seconds": 0.004812002182006836
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchIndexTests/testFindsAttachmentsAndLinksByName()",
+    "result": "Passed",
+    "seconds": 0.0007559061050415039
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchIndexTests/testFindsMessageTextFoldedWithASnippet()",
+    "result": "Passed",
+    "seconds": 0.0004699230194091797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchIndexTests/testSyncIsLazyPerChatVersion()",
+    "result": "Passed",
+    "seconds": 0.0003839731216430664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testAgentSettingsComeOncePerOwnedAgent()",
+    "result": "Passed",
+    "seconds": 0.002442002296447754
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testEveryListedSettingsPageIsIndexedWithARoute()",
+    "result": "Passed",
+    "seconds": 0.010861039161682129
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testExactKeywordPutsSettingsFirstAndNamesTheKeyword()",
+    "result": "Passed",
+    "seconds": 0.0018409490585327148
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testPrefixHitListsAfterPeopleChatsAndServers()",
+    "result": "Passed",
+    "seconds": 0.0006740093231201172
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testSectionOrderAndLabel()",
+    "result": "Passed",
+    "seconds": 0.00027000904083251953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SearchSettingsTests/testTitleHitsOutrankKeywordHitsAndNothingShowsWithoutAQuery()",
+    "result": "Passed",
+    "seconds": 0.00115203857421875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SecretHandoffTests/testAnUnknownPartStillDecodesToUnknown()",
+    "result": "Passed",
+    "seconds": 0.0003949403762817383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SecretHandoffTests/testASecretGivenInChatSaysSoInSettings()",
+    "result": "Passed",
+    "seconds": 0.0009719133377075195
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SecretHandoffTests/testRedactedPartIsTheGhostRowAndHasNoText()",
+    "result": "Passed",
+    "seconds": 0.0004279613494873047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SecretHandoffTests/testRequestCardDecodesWithoutRowsOrAValueField()",
+    "result": "Passed",
+    "seconds": 0.0036079883575439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SenderNameRowTests/testAgentChatBubblesCarryNoName()",
+    "result": "Passed",
+    "seconds": 0.0005370378494262695
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SenderNameRowTests/testDMBubblesCarryNoName()",
+    "result": "Passed",
+    "seconds": 0.0004850625991821289
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SenderNameRowTests/testGroupAndChannelBubblesNameTheirSenderButNotMine()",
+    "result": "Passed",
+    "seconds": 0.00043201446533203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SenderNameRowTests/testNamedBubbleStacksNameQuoteText()",
+    "result": "Passed",
+    "seconds": 0.002521991729736328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ServerChannelSenderTests/testAChannelRowTakesNameAndPictureFromTheRoster()",
+    "result": "Passed",
+    "seconds": 0.0004429817199707031
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ServerChannelSenderTests/testAMemberRowRendersTheDisplayNameNotTheHandle()",
+    "result": "Passed",
+    "seconds": 0.0028520822525024414
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ServerChannelSenderTests/testRosterLookupGoesByUserIdThenHandle()",
+    "result": "Passed",
+    "seconds": 0.0011349916458129883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ServerChannelSenderTests/testThePreviewLabelsPeopleLikeAGroupDoes()",
+    "result": "Passed",
+    "seconds": 0.0002969503402709961
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testChatToRetryNamesOnlyMembershipAndSettingsChanges()",
+    "result": "Passed",
+    "seconds": 0.00045502185821533203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testFailedRowImportLeavesCursorAndReconnects()",
+    "result": "Passed",
+    "seconds": 0.06384098529815674
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testHttp403DoesNotReconnect()",
+    "result": "Passed",
+    "seconds": 0.23954391479492188
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testNoHelloBeforeOpen()",
+    "result": "Passed",
+    "seconds": 0.013431072235107422
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testNotAvailableDoesNotCallOnUnavailableOrOpenANewSocket()",
+    "result": "Passed",
+    "seconds": 0.39757204055786133
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testPlainReceiveErrorStillReconnects()",
+    "result": "Passed",
+    "seconds": 0.27076399326324463
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testRateLimitedDoesNotOpenANewSocket()",
+    "result": "Passed",
+    "seconds": 0.38225698471069336
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testRetryRefusedResendsPendingWithTheSameBatchIdOnTheSameSocket()",
+    "result": "Passed",
+    "seconds": 0.07387900352478027
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testStaleCheckpointIgnored()",
+    "result": "Passed",
+    "seconds": 0.43026793003082275
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SessionRoomTests/testTerminal403And404IgnoreLateOpenCallbacks()",
+    "result": "Passed",
+    "seconds": 0.10671603679656982
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testAffFindsDisplayNamesAndTheHandleRanked()",
+    "result": "Passed",
+    "seconds": 0.0012940168380737305
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testAgentAndServerPickersUseTheMatcher()",
+    "result": "Passed",
+    "seconds": 0.0016900300979614258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testEmptyQueryKeepsDirectoryOrderAndDiacriticsFold()",
+    "result": "Passed",
+    "seconds": 0.0010169744491577148
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testEveryPickerRoutesThroughTheSharedMatcher()",
+    "result": "Passed",
+    "seconds": 0.012306928634643555
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testMatcherRanksExactPrefixWordStartNameBeforeHandle()",
+    "result": "Passed",
+    "seconds": 0.006162047386169434
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testMentionPickerRanksNameBeforeHandle()",
+    "result": "Passed",
+    "seconds": 0.0005530118942260742
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testNoPickerFileKeepsAnAdHocFilter()",
+    "result": "Passed",
+    "seconds": 0.01538705825805664
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SharedSearchTests/testRemoteHitsJoinTheDirectoryOnceAndNeverMe()",
+    "result": "Passed",
+    "seconds": 0.00043201446533203125
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testAddMembersToArbonitesKeepsAddWholeOnAnIPhone17()",
+    "result": "Passed",
+    "seconds": 0.0007139444351196289
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testAFittingTitleIsCentredOnTheBarNotBetweenUnequalControls()",
+    "result": "Passed",
+    "seconds": 0.0002830028533935547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testAVeryLongTitleShrinksThenCutsWithoutMovingTheControls()",
+    "result": "Passed",
+    "seconds": 0.00031697750091552734
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testEveryLongTitleSheetUsesTheSharedHeader()",
+    "result": "Passed",
+    "seconds": 0.012205958366394043
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testTheActionLabelCountsThePicks()",
+    "result": "Passed",
+    "seconds": 0.0003490447998046875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testTheBarIsAMemberOfTheControlFamily()",
+    "result": "Passed",
+    "seconds": 0.00035011768341064453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "SheetHeaderLayoutTests/testTheConfirmControlIsNeverSqueezedAtAnyTitleOnAnyPhone()",
+    "result": "Passed",
+    "seconds": 0.010565996170043945
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ShellApprovalCardTests/testAnsweredShellCardKnowsItsRow()",
+    "result": "Passed",
+    "seconds": 0.0004559755325317383
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ShellApprovalCardTests/testCardsWithoutOptionsKeepApproveReject()",
+    "result": "Passed",
+    "seconds": 0.0004329681396484375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ShellApprovalCardTests/testShellCardOffersFourRowsAndNamesTheAgent()",
+    "result": "Passed",
+    "seconds": 0.00040590763092041016
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ShellApprovalCardTests/testSummaryLine()",
+    "result": "Passed",
+    "seconds": 0.0003559589385986328
+  },
+  {
+    "target": "ArbosTests",
+    "case": "StatusDotLintTests/testNoColouredStatusDotIsDrawnInTheApp()",
+    "result": "Passed",
+    "seconds": 0.07086193561553955
+  },
+  {
+    "target": "ArbosTests",
+    "case": "StatusDotLintTests/testTheLintCatchesADotAndHonoursTheMarker()",
+    "result": "Passed",
+    "seconds": 0.00044596195220947266
+  },
+  {
+    "target": "ArbosTests",
+    "case": "StatusDotLintTests/testTheMachineMarkIsSpinnerFaultOrNothing()",
+    "result": "Passed",
+    "seconds": 0.0003720521926879883
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testAChatWhoseMessagesAreMinutesApartDrawsOneLineAtItsStart()",
+    "result": "Passed",
+    "seconds": 0.0008590221405029297
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testANewDayDrawsALineOnAGapTooShortForTheHour()",
+    "result": "Passed",
+    "seconds": 0.00034105777740478516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testAnHourOfSilenceDrawsALineAndTheRestOfTheRunDoesNot()",
+    "result": "Passed",
+    "seconds": 0.0004220008850097656
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testARowWithNoClockNeitherDrawsALineNorMovesTheOneBeforeIt()",
+    "result": "Passed",
+    "seconds": 0.0003509521484375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testTheDayIsTheReadersDay()",
+    "result": "Passed",
+    "seconds": 0.0003420114517211914
+  },
+  {
+    "target": "ArbosTests",
+    "case": "TimeDividerTests/testTheRuleIsTheSharedCoreRule()",
+    "result": "Passed",
+    "seconds": 0.0002930164337158203
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ToastStackTests/testAHoldHasACapUnlessDetailsAreOpen()",
+    "result": "Passed",
+    "seconds": 0.0023800134658813477
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ToastStackTests/testAtMostThreeAreVisibleAndTheRestFoldIntoACount()",
+    "result": "Passed",
+    "seconds": 0.0012900829315185547
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ToastStackTests/testTheSameFailureEightTimesIsOneToastWithACount()",
+    "result": "Passed",
+    "seconds": 0.0012379884719848633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ToastStackTests/testTheSlotIsUnderTheChatHeaderPill()",
+    "result": "Passed",
+    "seconds": 0.004756927490234375
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testAFailureIsAnErrorToastAndAClaimedVerbStaysWithItsSurface()",
+    "result": "Passed",
+    "seconds": 0.002550959587097168
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testAPermission403ReadsAsTheRelaysSentence()",
+    "result": "Passed",
+    "seconds": 0.0003319978713989258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testARelayTimeoutKeepsTheMeasuredSecondsAndTheDetailForDetails()",
+    "result": "Passed",
+    "seconds": 0.0005490779876708984
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testSentencesNeverCarryURLsVerbsIdsOrChains()",
+    "result": "Passed",
+    "seconds": 0.00034105777740478516
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testTheTenClassesMakeTheAgreedSentences()",
+    "result": "Passed",
+    "seconds": 0.00036895275115966797
+  },
+  {
+    "target": "ArbosTests",
+    "case": "UserErrorTests/testWordsAloneAreClassified()",
+    "result": "Passed",
+    "seconds": 0.00037300586700439453
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ViewerChromeTests/testGlyphReadsOnAWhitePicture()",
+    "result": "Passed",
+    "seconds": 0.00036597251892089844
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ViewerChromeTests/testGlyphReadsOnEveryGrey()",
+    "result": "Passed",
+    "seconds": 0.00040793418884277344
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ViewerChromeTests/testRimReadsOnABlackPicture()",
+    "result": "Passed",
+    "seconds": 0.00033402442932128906
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ViewerChromeTests/testSurfaceKeepsItsMaterial()",
+    "result": "Passed",
+    "seconds": 0.0003349781036376953
+  },
+  {
+    "target": "ArbosTests",
+    "case": "ViewerChromeTests/testTheOldDiscFailedOnWhite()",
+    "result": "Passed",
+    "seconds": 0.00027501583099365234
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testAPeopleRowsCountPillWinsTheSlotOverTheSpinner()",
+    "result": "Passed",
+    "seconds": 0.001934051513671875
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testATickPublishesOnlyWhenTheFrameChanges()",
+    "result": "Passed",
+    "seconds": 0.0023980140686035156
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testOneTickerForEverySpinnerAndItParksWhenNoneIsLeft()",
+    "result": "Passed",
+    "seconds": 0.0003650188446044922
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testReduceMotionGlyphIsTheFullSixDotCell()",
+    "result": "Passed",
+    "seconds": 0.0003529787063598633
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheCellIsTheUnreadDotsFootprintAndTheGlyphTheTimeLabelsSize()",
+    "result": "Passed",
+    "seconds": 0.0002980232238769531
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheFramesAreTheClassicCycleAtEightyToAHundredMs()",
+    "result": "Passed",
+    "seconds": 0.0003319978713989258
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheRowStatusShowsOneThingInThisOrder()",
+    "result": "Passed",
+    "seconds": 0.0005509853363037109
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheSpinnerCellLaysOutAtTheDotsSize()",
+    "result": "Passed",
+    "seconds": 0.00245511531829834
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheTickerParksInTheBackgroundAndResumesWithTheApp()",
+    "result": "Passed",
+    "seconds": 0.00034797191619873047
+  },
+  {
+    "target": "ArbosTests",
+    "case": "WorkingSpinnerTests/testTheTimerRunsInTheDefaultModeSoScrollTrackingPausesIt()",
+    "result": "Passed",
+    "seconds": 0.0005949735641479492
+  },
+  {
+    "target": "ArbosUITests",
+    "case": "AvatarBackSwipeUITests/testASwipeRightStartingOnASenderAvatarGoesBack()",
+    "result": "Passed",
+    "seconds": 8.748204946517944
+  },
+  {
+    "target": "ArbosUITests",
+    "case": "AvatarBackSwipeUITests/testASwipeRightStartingOnTheHeaderAvatarGoesBack()",
+    "result": "Passed",
+    "seconds": 9.412912011146545
+  },
+  {
+    "target": "ArbosUITests",
+    "case": "AvatarBackSwipeUITests/testATapOnASenderAvatarStillOpensTheProfile()",
+    "result": "Passed",
+    "seconds": 8.761107921600342
+  },
+  {
+    "target": "ArbosUITests",
+    "case": "AvatarBackSwipeUITests/testATapOnTheHeaderAvatarStillOpensTheProfile()",
+    "result": "Passed",
+    "seconds": 8.487100958824158
+  },
+  {
+    "target": "ArbosUITests",
+    "case": "AvatarBackSwipeUITests/testAVerticalDragStartingOnASenderAvatarStillScrolls()",
+    "result": "Passed",
+    "seconds": 9.399693012237549
+  }
+]

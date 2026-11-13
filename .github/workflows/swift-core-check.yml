@@ -4,21 +4,21 @@ name: Swift core check
 # signing, no TestFlight upload). Covers the shared client core surface the
 # phone embeds as ArbosFFI.
 
+# The push trigger filters nothing, and that is the whole correctness argument of this workflow.
+#
+# A `paths:` filter here is evaluated on the pushed commit's two-dot diff, while whether this gate
+# APPLIES is judged on the pull request's three-dot diff — scripts/merge/checks.sh's gate_applies,
+# because the three-dot diff is what the merge would bring. A branch that touches a gated path
+# early and then lands a final push outside those paths therefore ended up with a head the gate
+# applies to and no run that could ever answer it, presenting as all-green with nothing red. See
+# scripts/release/swift-gate-applies.sh for the measured case (#2751 at f4f010268).
+#
+# So every push starts a run, and the `decide` job below works out on the same three-dot diff
+# whether the macOS job is needed. The pull_request list stays: checks.sh reads the quoted patterns
+# under this `on:` block to learn the gate's scope and BLOCKS on a block it can read but finds
+# empty, so this is the one declaration of what the gate covers.
 on:
   push:
-    paths:
-      - "crates/arbos-core/**"
-      - "crates/arbos-client/**"
-      - "crates/arbos-ffi/**"
-      - "crates/arbos-matrix/**"
-      - "scripts/build-xcframework.sh"
-      - "packages/ArbosFFI/**"
-      - "assets/avatars/leaves/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "apps/ios/Arbos/**"
-      - ".github/workflows/swift-core-check.yml"
   pull_request:
     paths:
       - "crates/arbos-core/**"
@@ -32,26 +32,87 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "apps/ios/Arbos/**"
+      - ".improve/finish-checks/source-consumers/**"
       - ".github/workflows/swift-core-check.yml"
 
 permissions:
   contents: read
 
+# Unfiltered pushes also repair this group. A push that created no run joined no group and so
+# displaced nothing: run 41918138101 was still building c187a9c00 forty-five minutes after that sha
+# stopped being the branch tip, holding a runner to judge superseded content.
+#
+# main gets one group per commit, for the reason ci.yml sets out at length. `cancel-in-progress`
+# governs only the run that is already RUNNING. A run still PENDING is evicted the moment a newer run
+# joins its group, whatever the flag says, because GitHub keeps exactly one pending run per group. So
+# a single `swift-core-check-refs/heads/main` never protected main: it made each push queue behind the
+# last, and queueing is precisely what got it evicted.
+#
+# Measured over main's last 60 runs. Thirteen ended `cancelled` holding ZERO jobs, and every one of
+# the thirteen ended 1-2 s after the next main run was created — 41955344354, 41956850035,
+# 41961696311, 41964304636, 42097308479, 42098818203, 42104333539, 42106233057, 42108010666,
+# 42112177873, 42117199568, 42137566683, 42159522725. A zero-job run schedules nothing, so it tests
+# nothing, and merge.sh reads a cancelled gate as a refusal. Each one is therefore a main commit this
+# gate can never answer for. ci.yml took this same fix; this file was missed.
 concurrency:
-  group: swift-core-check-${{ github.ref }}
+  group: swift-core-check-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.sha) || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  decide:
+    name: Swift core check applies?
+    # A branch in this repo gets the push run, so its pull_request run would be the same commit
+    # again on GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33
+    # queued, ~4 h wait; 2026-11-04: 2 h 25 min from queue to first job). Pull requests from forks
+    # have no push run here, so they keep theirs. That deferral is only sound because the push
+    # trigger above filters nothing — when it filtered paths, the push run it defers to did not
+    # always exist, and that is what turned the deferral into a missing verdict.
+    #
+    # The deferral is declared HERE, on the first job, and not on the macOS job it is about. A run
+    # is only "skipped" when every job in it skipped; one cheap job succeeding beside a skipped
+    # macOS job concludes the whole run "success". scripts/merge/checks.sh reads that run-level
+    # conclusion, so a guard on the macOS job alone turns a correctly-read missing verdict into a
+    # silent pass — the exact failure this workflow exists to prevent. Measured on 6f3061016:
+    # run 41926276679 concluded success with build-xcframework skipped. `check` needs `decide`,
+    # so skipping here skips the run entirely and it still reads as no verdict.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    outputs:
+      applies: ${{ steps.applies.outputs.applies }}
+    steps:
+      # The three-dot diff needs the merge base, which a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The screen's own invariants
+        run: ./scripts/release/swift-gate-applies.sh selftest
+      - name: Does the gate apply to this commit?
+        id: applies
+        run: ./scripts/release/swift-gate-applies.sh decide
+
   check:
     name: build-xcframework + fastlane test
-    # A branch in this repo already gets the push run; its pull_request run is the same commit again on
-    # GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33 queued, ~4 h wait).
-    # Pull requests from forks have no push run here, so they keep theirs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: decide
+    # This gate's scope, decided on the three-dot diff rather than on what the trigger happened to
+    # fire for. A head the gate applies to always reaches this job. Deduplication is not repeated
+    # here: it lives on `decide`, which this job needs, for the run-conclusion reason given there.
+    if: needs.decide.outputs.applies == 'true'
     runs-on: macos-15
-    # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
-    # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
-    timeout-minutes: 90
+    # The old 60 killed runs mid-bundle, which is no verdict rather than a red one, and 90 was set
+    # against a 46-63 min spread. That spread has moved. Re-measured 2026-11-03 20:51Z to
+    # 2026-11-05 20:16Z over 121 completed jobs: p50 65.3, p90 79.7, max 86.2. So 90 now leaves
+    # under 4 minutes above the worst observed run, and a run that trips it is killed outright —
+    # no verdict, not a red one, and `Keep the xcodebuild logs` never uploads the only record of
+    # what was running. The rerun costs another ~65 minutes and a second slot out of the five this
+    # repo gets, so the false red is dearer than the hang it would catch. 120 clears max by 39%
+    # and still bounds a genuine hang; 180 would hold a slot for three hours to learn the same
+    # thing. Measured near-miss: run 42089362322 (#2804) SUCCEEDED at 84.2 min.
+    # 2026-11-12: with no Darwin Rust cache to restore (it is evicted, and only main saves one)
+    # main run 43117138400 took 114 min, and PR runs 43191323492 and 43192095308 were killed at
+    # 120 with every test passed. 150 clears the cold-cache worst case by the same margin.
+    timeout-minutes: 150
     env:
       APP_DIR: apps/ios/Arbos
     steps:
@@ -68,6 +129,8 @@ jobs:
           newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
           if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
           xcodebuild -version
+      - name: Selected actual source consumer contracts
+        run: python3 .improve/finish-checks/source-consumers/check.py --tree . --out "$RUNNER_TEMP/arbos-source-consumers"
       - name: Rust toolchain
         run: |
           set -euo pipefail
@@ -78,16 +141,110 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      # rust-cache's default key hashes Cargo.lock and every workspace Cargo.toml, and continuous
+      # delivery rewrites a dozen `version =` lines after every merge. Over the last 400 commits on
+      # main that key took 62 distinct values; the external dependency set those entries actually
+      # hold took one. Each new value is a full miss that rebuilds the dependency graph on one of
+      # the five macOS slots this repo gets, and saves another ~1.14 GB under a key nothing will
+      # ask for again.
+      #
+      # That matters because the cache is over budget and evicting. Measured 2026-11-06 02:45Z:
+      # 11.43 GB active against 10 GB, and entries survive by being read rather than by being
+      # recent, so the churn evicts the entries every lane depends on.
+      #
+      # So key on what the entry holds, as ci.yml does for Linux. `source`/`checksum` are the lines
+      # Cargo.lock gives external packages; a workspace crate has neither, which keeps the version
+      # bump out of the key. `add-rust-environment-hash-key: false` drops rust-cache's own
+      # environment and lockfile digests — in its config.ts both the env digest and the whole
+      # lockfile-hash block hang off that one input — leaving `v0-rust-swift-core-check-<rust>-
+      # <deps>-check-Darwin-arm64`, which the version bump cannot move.
+      #
+      # This cannot turn a wrong build green. The key only chooses which bytes to restore; cargo
+      # chooses what to reuse, every artifact carries its own fingerprint over compiler, flags,
+      # profile, features and dependency versions, and anything that disagrees is rebuilt. A key
+      # that is too loose costs rebuild time, never a verdict.
+      - name: Cache key for the dependency build
+        id: cache-key
+        run: |
+          set -euo pipefail
+          rustc -vV
+          # The key is only as good as this grep. If Cargo.lock ever stops spelling external
+          # packages this way, say so here rather than hashing an empty string forever.
+          lines=$(grep -cE '^(source|checksum) = ' Cargo.lock)
+          if [ "$lines" -lt 100 ]; then
+            echo "::error title=Cache key::Cargo.lock yielded $lines source/checksum lines, too few to be the dependency set. The cache key no longer tracks what it caches."
+            exit 1
+          fi
+          echo "$lines external dependency lines in Cargo.lock"
+          deps=$(grep -E '^(source|checksum) = ' Cargo.lock | shasum -a 256 | cut -c1-16)
+          # `rust-toolchain.toml` says `channel = "stable"`, so the file alone pins no compiler;
+          # `rustc -vV` carries the release and its commit hash. `.cargo/config.toml` does not
+          # exist today, but it is where a `[build] rustflags` would go, and an entry saved under
+          # one set of flags must not answer for another.
+          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; cat .cargo/config.toml 2>/dev/null || true; } | shasum -a 256 | cut -c1-16)
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      # `save-if` restricts the write to main. A run on a feature branch saves into that branch's
+      # cache scope, which no sibling branch and not main may read, so the entry is written once
+      # and read never: of the four largest Darwin entries on 2026-11-06, three (3.26 GB together)
+      # had `last_accessed_at` equal to `created_at`. main's entry is readable from every branch,
+      # and this workflow completes on main every 20-40 minutes, so restricting the write costs no
+      # freshness and stops each lane minting its own 1.14 GB copy.
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
         with:
-          key: swift-core-check
+          add-rust-environment-hash-key: false
+          key: swift-core-check-${{ steps.cache-key.outputs.rust }}-${{ steps.cache-key.outputs.deps }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # With the environment hash off, rust-cache's restore key equals its cache key, so it has no
+      # prefix left to fall back on, and the miss it cannot soften is the dear one: a cold
+      # dependency build holds a macOS slot for the better part of an hour. When the dependency set
+      # really does change, start from the newest entry built by this same compiler; cargo rebuilds
+      # the crates that moved and keeps the rest. This runs only when rust-cache restored nothing,
+      # so target/ is empty and no second archive is unpacked over the first.
+      - name: Fall back to the newest cache for this compiler
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # No entry is named by the bare prefix, so the lookup always falls to `restore-keys`,
+          # which takes the most recent entry that shares the compiler.
+          key: v0-rust-swift-core-check-${{ steps.cache-key.outputs.rust }}-
+          restore-keys: v0-rust-swift-core-check-${{ steps.cache-key.outputs.rust }}-
       - name: Build ArbosFFI xcframework
         run: |
           set -euo pipefail
           ./scripts/build-xcframework.sh
           test -d packages/ArbosFFI/ArbosFFIRust.xcframework
           test -f packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+      # The hosted image does not always carry the iPhone 17 simulator runtime, and the lanes' old
+      # hardcoded `name=iPhone 17` destination then failed xcodebuild in ~12 s with "Unable to find a
+      # device matching the provided destination specifier" (run 41598907652 on main). Name a device
+      # this runner actually has: iPhone 17 when it is there, else the newest available iPhone.
+      - name: Pick an available simulator
+        run: |
+          set -euo pipefail
+          name="$(xcrun simctl list devices available --json | python3 -c '
+          import json, re, sys
+          names = {d["name"] for devices in json.load(sys.stdin)["devices"].values() for d in devices}
+          iphones = [n for n in names if n.startswith("iPhone")]
+          if not iphones:
+              sys.exit("no iPhone simulator is available on this runner")
+          def newest(name):
+              model = re.search(r"[0-9]+", name)
+              # Highest model number first, and the plain model ahead of its Pro / Plus variants.
+              return (int(model.group()) if model else 0, -len(name))
+          print("iPhone 17" if "iPhone 17" in iphones else max(iphones, key=newest))
+          ')"
+          echo "ARBOS_SIM_NAME=$name" >> "$GITHUB_ENV"
+          echo "simulator for the test lane: $name"
       - name: fastlane test
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm

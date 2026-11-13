@@ -24,12 +24,12 @@ enum SheetRow {
     static var textLeading: CGFloat { cardInset + textInset }
 }
 
-/// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
-/// from the bottom, search on top, then New agent / New group, then your
-/// agents, then every other Arbos user. Typing filters agents, servers and the
-/// directory and also asks `GET /users/search` and `GET /servers/search`, so a
-/// GitHub handle not on Arbos yet can be invited and an open server can be joined
-/// without an invite link.
+/// "+" on home — Telegram's "New Message" panel in Grok's dark skin. Pushed onto
+/// Home's stack from the right ([feedback iphone-compose-nav-push-2026-11-10]),
+/// search on top, then New agent / New group, then your agents, then every other
+/// Arbos user. Typing filters agents, servers and the directory and also asks
+/// `GET /users/search` and `GET /servers/search`, so a GitHub handle not on Arbos
+/// yet can be invited and an open server can be joined without an invite link.
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -53,6 +53,9 @@ struct NewChatSheet: View {
     }()
     @State private var showGroupPicker = DebugHooks.show == "newgroup2"
     @FocusState private var focused: Bool
+
+    /// Close the whole compose push (Create's Cancel / Close), not only the Create page.
+    private var closeCompose: () -> Void { { model.dismissNewMessage() } }
 
     private var trimmed: String {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
@@ -90,9 +93,15 @@ struct NewChatSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
+        let work = model.accountWork()
+        // Pushed onto Home's stack (`AppModel.Route.newMessage`): no NavigationStack of
+        // its own, so Create screens push onto the same stack and the edge swipe pops
+        // one level — the same structure Settings and chats use.
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     searchField
                         .padding(.horizontal, SheetSearchField.inset)
                         .padding(.top, 6)
@@ -100,25 +109,37 @@ struct NewChatSheet: View {
 
                     if trimmed.isEmpty {
                         card {
-                            NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .agent, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
                             }
                             .buttonStyle(.plain)
                             rowDivider
                             // Connect an agent (#2142): an agent that runs elsewhere joins as a member.
-                            NavigationLink { CreateEntityView(kind: .connect, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .connect, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "link", title: "Connect an agent", subtitle: "Claude Code, Grok or your own bot, with a key")
                             }
                             .buttonStyle(.plain)
                             rowDivider
-                            NavigationLink { CreateEntityView(kind: .group, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .group, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
                             if model.serversAvailable {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
-                                NavigationLink { CreateEntityView(kind: .server, onDone: { dismiss() }) } label: {
+                                NavigationLink {
+                                    CreateEntityView(kind: .server, onDone: closeCompose)
+                                        .backSwipeToPop()
+                                } label: {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
@@ -135,7 +156,7 @@ struct NewChatSheet: View {
                         sectionHeader(trimmed.isEmpty ? "Your agents" : "Agents")
                         card {
                             ForEach(Array(agents.enumerated()), id: \.element.id) { i, p in
-                                Button { openAgent(p) } label: { AgentPickRow(project: p) }
+                                Button { openAgent(p, work: work) } label: { AgentPickRow(project: p) }
                                     .buttonStyle(.plain)
                                 if i < agents.count - 1 { rowDivider }
                             }
@@ -148,7 +169,7 @@ struct NewChatSheet: View {
                         sectionHeader("Servers")
                         card {
                             ForEach(Array(servers.enumerated()), id: \.element.id) { i, s in
-                                Button { openServer(s) } label: { ServerPickRow(server: s) }
+                                Button { openServer(s, work: work) } label: { ServerPickRow(server: s) }
                                     .buttonStyle(.plain)
                                 if i < servers.count - 1 { rowDivider }
                             }
@@ -166,7 +187,7 @@ struct NewChatSheet: View {
                         } else {
                             card {
                                 ForEach(Array(people.enumerated()), id: \.element.id) { i, p in
-                                    Button { open(p) } label: { PersonRow(person: p) }
+                                    Button { open(p, work: work) } label: { PersonRow(person: p) }
                                         .buttonStyle(.plain)
                                     if i < people.count - 1 { rowDivider }
                                 }
@@ -179,39 +200,58 @@ struct NewChatSheet: View {
             }
             .scrollIndicators(.visible)
             .scrollDismissesKeyboard(.interactively)
-            .background(theme.bg)
-            .navigationTitle("New Message")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
-                CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
-            }
-            .navigationDestination(isPresented: $showGroupPicker) {
-                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", leaf: LeafArt.pick(seed: "rig")))
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
-            }
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .task {
-                loadingDirectory = model.directory.isEmpty
-                await model.loadDirectory()
-                loadingDirectory = false
-            }
-            .onChange(of: query) { _, _ in search() }
+            topBar
         }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
+            CreateEntityView(kind: showCreate ?? .agent, onDone: closeCompose)
+                .backSwipeToPop()
+        }
+        .navigationDestination(isPresented: $showGroupPicker) {
+            NewGroupView(onDone: closeCompose, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
+                .backSwipeToPop()
+        }
+        .task {
+            guard model.acceptsAccountWork(work) else { return }
+            loadingDirectory = model.directory.isEmpty
+            await model.loadDirectory(expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            loadingDirectory = false
+        }
+        .onChange(of: query) { _, _ in search(work: work) }
         .tint(theme.text)
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .presentationBackground(theme.bg)
-        .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        // Page id on a zero-size marker — not on this container. Putting
+        // `.accessibilityIdentifier` on the pushed root collapsed every child
+        // (including `new-message-back`) out of the XCTest tree.
+        .background {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("new-message")
+        }
+    }
+
+    /// Same glass back as Settings (`ProfileTopBar`) plus a centred title.
+    /// Title is VoiceOver-hidden so it cannot collapse `new-message-back` out of the tree.
+    private var topBar: some View {
+        ZStack(alignment: .top) {
+            ProfileTopBar(screen: .newMessage, backIdentifier: "new-message-back") { EmptyView() }
+            Text("New Message")
+                .font(.system(size: Theme.body, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .padding(.top, 16)
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     // MARK: Pieces
 
     private var searchField: some View {
-        HStack(spacing: 8) {
+        let work = model.accountWork()
+        return HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
             TextField("", text: $query, prompt: Text("Search people, agents or servers").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
@@ -221,10 +261,10 @@ struct NewChatSheet: View {
                 .focused($focused)
                 .submitLabel(.go)
                 .onSubmit {
-                    if let first = agents.first { openAgent(first) }
-                    else if let first = servers.first { openServer(first) }
-                    else if let first = people.first { open(first) }
-                    else if !trimmed.isEmpty { openHandle(trimmed) }
+                    if let first = agents.first { openAgent(first, work: work) }
+                    else if let first = servers.first { openServer(first, work: work) }
+                    else if let first = people.first { open(first, work: work) }
+                    else if !trimmed.isEmpty { openHandle(trimmed, work: work) }
                 }
             if searching {
                 ProgressView().controlSize(.small).tint(theme.muted)
@@ -274,7 +314,8 @@ struct NewChatSheet: View {
     }
 
     private var peopleEmpty: some View {
-        Group {
+        let work = model.accountWork()
+        return Group {
             if loadingDirectory || searching {
                 HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 28)
             } else if trimmed.isEmpty {
@@ -290,7 +331,7 @@ struct NewChatSheet: View {
                     Text("No one on Arbos or GitHub matches @\(trimmed).")
                         .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     if trimmed.count >= 2 {
-                        Button { openHandle(trimmed) } label: {
+                        Button { openHandle(trimmed, work: work) } label: {
                             Text("Invite @\(trimmed)")
                                 .font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
                                 .padding(.horizontal, 18).frame(height: 38)
@@ -307,24 +348,30 @@ struct NewChatSheet: View {
 
     // MARK: Actions
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; remoteServers = []; searching = false; return }
         searching = true
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            async let peopleHits = model.searchPeople(q)
-            async let serverHits = model.searchOpenServers(q)
-            remote = await peopleHits
-            remoteServers = await serverHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            async let peopleHits = model.searchPeople(q, expectedOwner: work?.owner)
+            async let serverHits = model.searchOpenServers(q, expectedOwner: work?.owner)
+            let people = await peopleHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = people
+            let servers = await serverHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remoteServers = servers
             if q == trimmed { searching = false }
         }
     }
 
-    private func open(_ p: Person) { openHandle(p.handle) }
+    private func open(_ p: Person, work: AccountWork?) { openHandle(p.handle, work: work) }
 
-    private func openAgent(_ p: Project) {
+    private func openAgent(_ p: Project, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         model.open(project: p)
@@ -332,7 +379,8 @@ struct NewChatSheet: View {
         opening = false
     }
 
-    private func openServer(_ s: Server) {
+    private func openServer(_ s: Server, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         if s.isMember {
@@ -342,16 +390,23 @@ struct NewChatSheet: View {
             return
         }
         Task {
-            if await model.joinOpenServer(s.id) { dismiss() }
+            guard model.acceptsAccountWork(work) else { return }
+            let opened = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if opened { dismiss() }
             opening = false
         }
     }
 
-    private func openHandle(_ handle: String) {
+    private func openHandle(_ handle: String, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         Task {
-            if await model.openDM(handle: handle) != nil { dismiss() }
+            guard model.acceptsAccountWork(work) else { return }
+            let opened = await model.openDM(handle: handle)
+            guard model.acceptsAccountWork(work) else { return }
+            if opened != nil { dismiss() }
             opening = false
         }
     }
@@ -397,7 +452,7 @@ struct AgentPickRow: View {
 
     var body: some View {
         HStack(spacing: SheetRow.gap) {
-            AgentAvatar(project: project, theme: theme, size: SheetRow.avatar, still: true)
+            AgentAvatar(project: project, theme: theme, size: SheetRow.avatar)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text(note.map { "@\(mentionSlug(project.name)) · \($0)" } ?? "@\(mentionSlug(project.name))")
@@ -525,27 +580,24 @@ enum ConnectTransport: String, CaseIterable, Identifiable {
     }
 }
 
-/// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
-/// layout: title + close ×, the preview, a centred name field, the picture options, Cancel + the
-/// action pinned above the home indicator. Grok's sizes in points (measured on the 2x reference)
-/// inside the shipped bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation
-/// (touch minimum). Agents create here; a group goes on to the member picker (`NewGroupView`) as
-/// step two with the name + picture as its draft; a server keeps its one-line explainer under
-/// the field. Pushed from New Message with its own header; × and Cancel close the whole sheet.
+/// The one Create screen for a new agent, group or server — Grok Bot's Edit-page hierarchy
+/// pushed from New Message ([feedback iphone-create-entity-edit-style-2026-11-10]): glass back,
+/// white Create/Next pill, centred avatar with a pencil badge, then sectioned cards (Name,
+/// Appearance with Upload | Generate, plus Connection for connect / an explainer for server).
+/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two; Cancel
+/// / back still clears the whole compose push via `onDone`.
 ///
 /// **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-ios-2026-10-25]):
-/// the sixteen-leaf grid and the ten pastel swatches are gone. Under the name field sit the
-/// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
-/// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
-/// chosen photo, the generated picture, or, when neither was picked, the fallback every new
-/// agent / group / server gets: the name's first letter on a neutral grey disc (`NeutralAvatar`).
-/// The entity is stored with the neutral pair (`LeafArt.neutral`), never an automatic leaf;
-/// existing agents keep theirs.**
+/// the sixteen-shape grid and the ten pastel swatches are gone. Appearance offers
+/// `Upload | Generate` only (`AvatarTabPill` + `AvatarSourceBody` on an `AvatarSourceState`).
+/// The hero shows the chosen photo, the generated picture, or the name's first letter on a
+/// grey disc (`NeutralAvatar`) — sheet chrome, not a default avatar. The entity is stored with
+/// no colour; the disc follows from the id the relay assigns.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let kind: CreateKind
-    /// Closes the whole sheet (a pushed view's own dismiss only pops).
+    /// Closes the whole compose push (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = DebugHooks.newAgentName ?? ""
     @State private var option: AvatarPickerTab = CreateEntityView.initialOption
@@ -553,229 +605,185 @@ struct CreateEntityView: View {
     @State private var creating = false
     @State private var localError: UserError?
     @State private var next = false
-    /// Connect an agent (#2142): the transport picked under the explainer, then the reveal.
+    /// Connect an agent (#2142): the transport picked under Appearance, then the reveal.
     @State private var transport: ConnectTransport = .acp
     @State private var reveal: ConnectReveal?
+    /// Appearance body is expanded after a tap on the pencil / Avatar row.
+    @State private var showAppearance = true
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
     private var canGo: Bool { !clean.isEmpty && !creating && !source.generating }
 
-    /// The two options every Create sheet offers, in order — the draft picker's tabs.
+    /// The two options every Create screen offers, in order — the draft picker's tabs.
     static let options: [AvatarPickerTab] = [.upload, .generate]
-    /// The leaf pair a new entity is stored with: the neutral one, whatever else was picked, so
-    /// no leaf is ever auto-assigned (a later Reset lands on the initial, not on a leaf).
-    static var storedLeaf: LeafPick { LeafArt.neutralPick }
-    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
+    /// The disc colour a new entity is stored with: **none**. The relay has not assigned the id
+    /// the colour derives from, and no default is grey any more, so there is nothing to store
+    /// that would mean "draw me grey" (Jacob, 2026-11-06).
+    static var storedDisc: UInt8? { nil }
+    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens on Generate.
     private static var initialOption: AvatarPickerTab {
         (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
     }
 
-    // Grok's palette, approved as is.
-    private let sheetBg = AvatarSheetPalette.sheetBg
-    private let line = AvatarSheetPalette.line
-    private let placeholder = AvatarSheetPalette.placeholder
-    private let cancelBg = AvatarSheetPalette.pillBg
-    private let createBg = AvatarSheetPalette.disabledBg
-    private let createText = AvatarSheetPalette.disabledText
-
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
-            // create, or a failed generation (`source.error`); the body below moves down.
-            if let error = source.error ?? localError {
-                ErrorNote(id: "create-entity-error", error: error,
-                          detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
-                          onTryAgain: source.error != nil ? generate : nil)
-                    .padding(.horizontal, 16.5)
-                    .padding(.top, 12)
-            } else {
-                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
-                    .padding(.horizontal, 16.5)
-                    .padding(.top, 12)
-            }
-            // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
-            // so the action is always reachable); at rest it is Grok's fixed layout.
-            ScrollView(showsIndicators: false) {
-                ZStack(alignment: .top) {
-                    preview
-                        .padding(.top, 62 - 54.5)
-                        .animation(.snappy, value: source.generatedKey)
-                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218; the
-                    // option capsules start where Grok's first icon row began (246); the chosen
-                    // option's body 16 under them. The server explainer adds 40 under the field.
-                    VStack(spacing: 0) {
-                        field.padding(.top, 183 - 54.5)
-                        if let explainer = kind.explainer {
-                            Text(explainer)
-                                .font(.system(size: 13))
-                                .foregroundStyle(placeholder)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .lineSpacing(3)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity)
-                                .padding(.horizontal, 16.5)
-                                .padding(.top, 8)
-                                .frame(height: 40, alignment: .top)
+        let work = model.accountWork()
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                EntityEditTopBar(
+                    title: kind.title,
+                    doneTitle: creating ? "Creating…" : kind.action,
+                    doneEnabled: canGo,
+                    onDone: { go(work: work) },
+                    onBack: { guard model.acceptsAccountWork(work) else { return }; onDone() }
+                )
+                if let error = source.error ?? localError {
+                    ErrorNote(id: "create-entity-error", error: error,
+                              detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
+                              onTryAgain: source.error != nil ? { generate(work: work) } : nil)
+                        .padding(.horizontal, PaneKit.inset)
+                        .padding(.top, 8)
+                } else {
+                    SheetErrorNote(id: "create-entity-error", onTryAgain: { go(work: work) })
+                        .padding(.horizontal, PaneKit.inset)
+                        .padding(.top, 8)
+                }
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        EntityEditHero(onAvatar: { showAppearance = true }) { preview }
+                            .padding(.top, 12)
+                            .animation(.snappy, value: source.generatedKey)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Name")
+                            PaneCard {
+                                EntityNameField(text: $name, placeholder: kind.placeholder, focused: $focused,
+                                                submitLabel: kind == .group ? .next : .done, onSubmit: { go(work: work) })
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                            if let explainer = kind.explainer {
+                                Text(explainer)
+                                    .font(theme.font(Theme.tiny))
+                                    .foregroundStyle(theme.muted)
+                                    .padding(.horizontal, PaneKit.inset)
+                            }
                         }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            EntitySectionHeader(title: "Appearance")
+                            PaneCard {
+                                Button { showAppearance.toggle() } label: {
+                                    PaneRow(title: "Avatar", value: option.rawValue, chevron: true)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("create-avatar-row")
+                                if showAppearance {
+                                    VStack(spacing: 12) {
+                                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
+                                            .accessibilityIdentifier("create-entity-options")
+                                        AvatarSourceBody(state: source, tab: option,
+                                                         keepsLine: "Create keeps this one.",
+                                                         uploadsLine: "Create uploads it.",
+                                                         generate: { generate(work: work) }) { EmptyView() }
+                                    }
+                                    .padding(.horizontal, PaneKit.inset)
+                                    .padding(.bottom, 14)
+                                }
+                            }
+                            .padding(.horizontal, PaneKit.inset)
+                        }
+
                         if kind == .connect {
-                            transportRow
-                                .frame(height: 40, alignment: .top)
+                            VStack(alignment: .leading, spacing: 8) {
+                                EntitySectionHeader(title: "Connection")
+                                ProfileCard {
+                                    ForEach(ConnectTransport.allCases) { t in
+                                        Button { transport = t } label: {
+                                            PaneRow(title: t.label,
+                                                    trailing: transport == t
+                                                        ? AnyView(Image(systemName: "checkmark")
+                                                            .font(theme.font(14, weight: .semibold))
+                                                            .foregroundStyle(theme.text))
+                                                        : nil)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityIdentifier("connect-transport-\(t.rawValue)")
+                                        .accessibilityAddTraits(transport == t ? [.isSelected] : [])
+                                    }
+                                }
                                 .accessibilityIdentifier("connect-transports")
+                            }
                         }
-                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
-                            .padding(.top, 246 - 218)
-                            .accessibilityIdentifier("create-entity-options")
-                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
-                            EmptyView()
-                        }
-                        .padding(.top, 16)
+
+                        Color.clear.frame(height: 40)
                     }
                 }
-                .padding(.bottom, 24)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .scrollDismissesKeyboard(.interactively)
-            footer
         }
         .claimFailures("create-entity", ["create the server", "create the agent", "create the group", "connect the agent"])
-        .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .backSwipeToPop()
         .navigationDestination(isPresented: $next) {
-            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, discColor: Self.storedDisc, picture: source.draftPicture(for: option)))
+                .backSwipeToPop()
         }
         .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
             if let reveal {
                 ConnectRevealView(reveal: reveal, onDone: onDone)
+                    .backSwipeToPop()
             }
         }
-        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
         .onAppear {
             if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true }
             if let spec = DebugHooks.createPicture, let colon = spec.firstIndex(of: ":") {
                 source.prompt = String(spec[spec.index(after: colon)...])
             }
         }
+        .accessibilityIdentifier("create-entity")
     }
 
-    private var header: some View {
-        HStack {
-            Text(kind.title)
-                .font(.system(size: 14.2, weight: .semibold))
-                .foregroundStyle(Color(white: 0xF5 / 255))
-                .padding(.leading, 17.5)
-            Spacer()
-            Button(action: onDone) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color(white: 0xD2 / 255))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 5.5)
-            .accessibilityLabel("Close")
-        }
-        .frame(height: 54.5)
-        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
-    }
-
-    /// The 114 pt preview: the chosen photo, the generated picture (fetched from my own slot),
-    /// else the neutral initial of the typed name — an empty disc until something is typed.
+    /// The hero preview: chosen photo, generated picture, or the neutral initial of the name.
     @ViewBuilder
     private var preview: some View {
         if option == .upload, let image = source.uploadPreview {
             Image(uiImage: image).resizable().scaledToFill()
-                .frame(width: 114, height: 114).clipShape(Circle())
+                .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar).clipShape(Circle())
         } else if option == .generate, let key = source.generatedKey, let url = model.draftPictureURL(key: key) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
                 } else {
                     ZStack {
-                        NeutralAvatar(name: clean, size: 114)
-                        if phase.error == nil { ProgressView().tint(placeholder) }
+                        NeutralAvatar(name: clean, size: PaneKit.heroAvatar)
+                        if phase.error == nil { ProgressView().tint(theme.muted) }
                     }
                 }
             }
-            .frame(width: 114, height: 114)
+            .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             .clipShape(Circle())
         } else {
-            NeutralAvatar(name: clean, size: 114)
+            NeutralAvatar(name: clean, size: PaneKit.heroAvatar)
         }
-    }
-
-    /// Connect an agent: the three transports as capsules (the Create sheet's option style).
-    private var transportRow: some View {
-        HStack(spacing: 2) {
-            ForEach(ConnectTransport.allCases) { t in
-                Button { transport = t } label: {
-                    Text(t.label)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(transport == t ? Color(white: 0xF5 / 255) : AvatarSheetPalette.labelMuted)
-                        .padding(.horizontal, 11)
-                        .frame(height: 28)
-                        .background(Capsule().fill(transport == t ? cancelBg : .clear))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("connect-transport-\(t.rawValue)")
-            }
-        }
-        .padding(.top, 6)
-    }
-
-    private var field: some View {
-        TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
-            .font(.system(size: 15.5))
-            .foregroundStyle(Color(white: 0xF5 / 255))
-            .multilineTextAlignment(.center)
-            .autocorrectionDisabled()
-            .focused($focused)
-            .submitLabel(kind == .group ? .next : .done)
-            .onSubmit(go)
-            .padding(.horizontal, 12)
-            .frame(height: 35)
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
-            .padding(.horizontal, 16.5)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Spacer()
-            Button(action: onDone) {
-                Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(white: 0xF5 / 255))
-                    .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
-            }
-            .buttonStyle(.plain)
-            Button(action: go) {
-                Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(canGo ? theme.onPrimary : createText)
-                    .frame(width: 92, height: 44).background(Capsule().fill(canGo ? theme.primary : createBg))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canGo)
-        }
-        .padding(.trailing, 16)
-        .padding(.top, 25)
-        .padding(.bottom, 35)
-        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
     /// Generate into my own slot (`POST /me/avatar/generate`): the entity does not exist yet.
-    private func generate() {
+    private func generate(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
         let model = model
-        source.run { try await model.generateDraftAvatar(prompt: text) }
+        source.run(isCurrent: { model.acceptsAccountWork(work) }) { try await model.generateDraftAvatar(prompt: text, expectedOwner: work?.owner) }
     }
 
-    private func go() {
+    private func go(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canGo else { return }
         let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, leaf: Self.storedLeaf, picture: picture)
+            model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
             onDone()
         case .group:
             next = true
@@ -783,10 +791,12 @@ struct CreateEntityView: View {
             creating = true
             localError = nil
             Task {
-                if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
+                guard model.acceptsAccountWork(work) else { return }
+                let created = await model.createServer(name: clean, discColor: Self.storedDisc, picture: picture, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if created {
                     onDone()
                 }
-                // A refusal is the claimed failure drawn by the note above the hero.
                 creating = false
             }
         case .connect:
@@ -794,7 +804,10 @@ struct CreateEntityView: View {
             localError = nil
             let transport = transport
             Task {
-                if let r = await model.connectAgent(name: clean, transport: transport.rawValue) {
+                guard model.acceptsAccountWork(work) else { return }
+                let connected = await model.connectAgent(name: clean, transport: transport.rawValue, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if let r = connected {
                     reveal = r
                 }
                 creating = false
@@ -828,8 +841,9 @@ struct ConnectRevealView: View {
     private let tileBg = AvatarSheetPalette.ring
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
-            header
+            header(work: work)
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     NeutralAvatar(name: reveal.name, size: 92)
@@ -842,9 +856,9 @@ struct ConnectRevealView: View {
                         .padding(.top, 12)
                     sectionTitle("Give this to your agent")
                     card {
-                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link)
+                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link, work: work)
                         Rectangle().fill(line).frame(height: 0.5).padding(.leading, 16)
-                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key)
+                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key, work: work)
                     }
                     footnote(reveal.rotated
                         ? "The old key stopped working. This one is shown once."
@@ -855,21 +869,23 @@ struct ConnectRevealView: View {
                 }
                 .padding(.bottom, 24)
             }
-            footer
+            footer(work: work)
         }
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task(id: reveal.projectId) {
             // Poll the relay while the screen is up; stop once connected.
-            while !Task.isCancelled {
-                if let fresh = await model.refreshOutsideInfo(reveal.projectId) { info = fresh }
+            while model.acceptsAccountWork(work) {
+                let fresh = await model.refreshOutsideInfo(reveal.projectId, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if let fresh { info = fresh }
                 if connected { return }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
     }
 
-    private var header: some View {
+    private func header(work: AccountWork?) -> some View {
         HStack {
             Text(reveal.rotated ? "New key for \(reveal.name)" : "Connect \(reveal.name)")
                 .font(.system(size: 14.2, weight: .semibold))
@@ -877,7 +893,7 @@ struct ConnectRevealView: View {
                 .lineLimit(1)
                 .padding(.leading, 17.5)
             Spacer()
-            Button(action: onDone) {
+            Button { guard model.acceptsAccountWork(work) else { return }; onDone() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(white: 0xD2 / 255))
@@ -917,7 +933,7 @@ struct ConnectRevealView: View {
             .padding(.horizontal, 16)
     }
 
-    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String) -> some View {
+    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String, work: AccountWork?) -> some View {
         HStack(spacing: 14) {
             Image(systemName: glyph)
                 .font(.system(size: 17, weight: .medium))
@@ -934,6 +950,7 @@ struct ConnectRevealView: View {
             }
             Spacer(minLength: 8)
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 UIPasteboard.general.string = full
                 copied = id
             } label: {
@@ -972,10 +989,10 @@ struct ConnectRevealView: View {
         .accessibilityIdentifier(connected ? "connect-status-connected" : "connect-status-waiting")
     }
 
-    private var footer: some View {
+    private func footer(work: AccountWork?) -> some View {
         HStack(spacing: 10) {
             Spacer()
-            Button(action: onDone) {
+            Button { guard model.acceptsAccountWork(work) else { return }; onDone() } label: {
                 Text("Done").font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(theme.onPrimary)
                     .frame(width: 92, height: 44).background(Capsule().fill(theme.primary))
@@ -1008,7 +1025,8 @@ struct ConnectRevealView: View {
 /// What the Create group screen hands to the member picker (step 2).
 struct GroupDraft: Equatable {
     var title: String
-    var leaf: LeafPick
+    /// `nil` = no colour was stored, so the group's id picks one.
+    var discColor: UInt8?
     /// The Create screen's uploaded / generated picture, applied once the group exists.
     var picture: DraftPicture? = nil
 }
@@ -1028,7 +1046,7 @@ struct NewGroupView: View {
     /// Secret id whose People list the picks join (Secret page › "Give a person access…",
     /// spec §7.7): people only, listed people greyed.
     var addToSecret: String? = nil
-    /// D93 step 1's name + leaf picture (nil when opened as Add members).
+    /// D93 step 1's name + disc colour (nil when opened as Add members).
     var draft: GroupDraft? = nil
     @State private var query = ""
     @State private var remote: [Person] = []
@@ -1140,13 +1158,14 @@ struct NewGroupView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
             if !picked.isEmpty || !pickedAgents.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(pickedAgents) { p in
                             MemberChip(label: "@\(mentionSlug(p.name))", onRemove: { toggleAgent(p) }) {
-                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar, still: true)
+                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar)
                             }
                         }
                         ForEach(picked) { p in
@@ -1167,7 +1186,7 @@ struct NewGroupView: View {
             }
             .sheetSearchFieldChrome(theme)
             .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
-            .onChange(of: query) { _, _ in search() }
+            .onChange(of: query) { _, _ in search(work: work) }
 
             // The sheet's note: under the search field, before the list (a refused add, nobody
             // picked, the relay's reason) — the shared element.
@@ -1221,24 +1240,29 @@ struct NewGroupView: View {
         // with it. The controls keep their width; the title shrinks, then truncates.
         .sheetHeader(title: title,
                      leading: adding ? .cancel : .back,
-                     onLeading: { if adding { onDone() } else { dismiss() } },
+                     onLeading: { guard model.acceptsAccountWork(work) else { return }; if adding { onDone() } else { dismiss() } },
                      action: actionLabel,
                      actionEnabled: canSubmit && !creating,
-                     onAction: { if adding { add() } else { create() } })
-        .task { await model.loadDirectory() }
+                     onAction: { if adding { add(work: work) } else { create(work: work) } })
+        .task {
+            guard model.acceptsAccountWork(work) else { return }
+            await model.loadDirectory(expectedOwner: work?.owner)
+        }
         .onAppear {
             // Rig: `ARBOS_RIG_PICK=<agent name>,@<handle>,…` pre-picks rows; `ARBOS_RIG_AUTO_ADD=<ms>`
-            // then taps Add — the same `add()` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
+            // then taps Add — the same `add(work: work)` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
             guard adding, let picks = DebugHooks.rigPick else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 for pick in picks {
                     if pick.hasPrefix("@"), let p = candidates.first(where: { "@\($0.handle)".caseInsensitiveCompare(pick) == .orderedSame }) { toggle(p) }
                     else if let a = agentCandidates.first(where: { $0.name.caseInsensitiveCompare(pick) == .orderedSame }) { toggleAgent(a) }
                 }
                 if let ms = DebugHooks.rigAutoAddMs {
                     try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
-                    add()
+                    guard model.acceptsAccountWork(work) else { return }
+                    add(work: work)
                 }
             }
         }
@@ -1262,14 +1286,18 @@ struct NewGroupView: View {
     }
 
     /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
-    private func add() {
+    private func add(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         if let secret {
             let new = picked.filter { !isIn($0) }
             guard !new.isEmpty else { localError = UserError.refused("add them", "Pick someone who is not on the list yet."); return }
             creating = true
             localError = nil
             Task {
-                if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
+                guard model.acceptsAccountWork(work) else { return }
+                let accepted = await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle), expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if accepted {
                     onDone()
                 }
                 creating = false
@@ -1282,7 +1310,10 @@ struct NewGroupView: View {
             creating = true
             localError = nil
             Task {
-                if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
+                guard model.acceptsAccountWork(work) else { return }
+                let accepted = await model.addServerMembers(serverId: s.id, userIds: new.map(\.id), expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if accepted {
                     onDone()
                 }
                 creating = false
@@ -1297,30 +1328,41 @@ struct NewGroupView: View {
         creating = true
         localError = nil
         Task {
-            if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
+            guard model.acceptsAccountWork(work) else { return }
+            let accepted = await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if accepted {
                 onDone()
             }
             creating = false
         }
     }
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; return }
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            let hits = await model.searchPeople(q, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = hits
         }
     }
 
-    private func create() {
+    private func create(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canSubmit, !creating else { return }
         creating = true
         localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
+            // `draft?.discColor` is a double optional now that the draft stores no colour;
+            // `?? nil` flattens it to the one `UInt8?` the call takes.
+            let accepted = await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor ?? nil, picture: draft?.picture, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if accepted {
                 onDone()
             }
             creating = false
@@ -1355,6 +1397,7 @@ struct ProjectMembersSheet: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         NavigationStack {
             List {
                 if !project.shared {
@@ -1363,17 +1406,17 @@ struct ProjectMembersSheet: View {
                             Text("@").foregroundStyle(theme.muted)
                             TextField("", text: $handle, prompt: Text("GitHub username").foregroundStyle(theme.placeholder))
                                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .onSubmit { invite() }
+                                .onSubmit { invite(work: work) }
                             if searching {
                                 ProgressView().controlSize(.small).tint(theme.muted)
                             }
-                            Button(busy ? "…" : "Invite") { invite() }
+                            Button(busy ? "…" : "Invite") { invite(work: work) }
                                 .font(theme.font(Theme.small, weight: .semibold))
                                 .disabled(busy || trimmed.isEmpty)
                         }
                         if !trimmed.isEmpty {
                             ForEach(suggestions) { p in
-                                Button { invite(p.handle) } label: {
+                                Button { invite(p.handle, work: work) } label: {
                                     HStack(spacing: PaneKit.gap) {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
@@ -1402,7 +1445,9 @@ struct ProjectMembersSheet: View {
                 Section("Members") {
                     ForEach(members) { m in
                         HStack(spacing: PaneKit.gap) {
-                            Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
+                            // This list is itself a sheet, so the page opens as one: a push
+                            // onto the stack underneath would land behind this sheet.
+                            Button { model.showProfile(.user(ProfilePerson(m)), in: .sheet) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)
                                 Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -1411,7 +1456,11 @@ struct ProjectMembersSheet: View {
                         .swipeActions {
                             if !project.shared && m.role != "owner" {
                                 Button("Remove", role: .destructive) {
-                                    Task { await model.removeProjectMember(project.id, userId: m.id); await load() }
+                                    Task {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        await model.removeProjectMember(project.id, userId: m.id, expectedOwner: work?.owner)
+                                        await load(work: work)
+                                    }
                                 }
                             }
                         }
@@ -1425,36 +1474,49 @@ struct ProjectMembersSheet: View {
             .sheetHeader(title: "Share \(project.name)", leading: .none,
                          action: "Done", actionStyle: .text, onAction: { dismiss() })
             .task {
-                await load()
-                await model.loadDirectory()
+                await load(work: work)
+                guard model.acceptsAccountWork(work) else { return }
+                await model.loadDirectory(expectedOwner: work?.owner)
             }
-            .onChange(of: handle) { _, _ in search() }
+            .onChange(of: handle) { _, _ in search(work: work) }
         }
         .presentationDetents([.medium, .large])
     }
 
-    private func load() async { members = await model.projectMembers(project.id) }
+    private func load(work: AccountWork?) async {
+        guard model.acceptsAccountWork(work) else { return }
+        let list = await model.projectMembers(project.id, expectedOwner: work?.owner)
+        guard model.acceptsAccountWork(work) else { return }
+        members = list
+    }
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; searching = false; return }
         searching = true
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            let hits = await model.searchPeople(q, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = hits
             if q == trimmed { searching = false }
         }
     }
 
-    private func invite(_ raw: String? = nil) {
+    private func invite(_ raw: String? = nil, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let h = (raw ?? trimmed)
             .trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !h.isEmpty, !busy else { return }
         busy = true
         Task {
-            if let list = await model.inviteToProject(project.id, handle: h) {
+            guard model.acceptsAccountWork(work) else { return }
+            let invited = await model.inviteToProject(project.id, handle: h, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if let list = invited {
                 members = list
                 handle = ""
                 remote = []
@@ -1556,7 +1618,7 @@ struct GroupCallPickerSheet: View {
                                 Button { toggle(m.id) } label: {
                                     HStack(spacing: SheetRow.gap) {
                                         if m.isAgent, let p = m.project {
-                                            AgentAvatar(project: p, theme: theme, size: SheetRow.avatar, still: true)
+                                            AgentAvatar(project: p, theme: theme, size: SheetRow.avatar)
                                         } else {
                                             PersonAvatar(url: m.avatarUrl, handle: m.handle, size: SheetRow.avatar,
                                                          name: m.name, id: m.id, colorIndex: m.avatarColorIndex)

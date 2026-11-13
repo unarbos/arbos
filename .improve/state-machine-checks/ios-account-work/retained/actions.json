@@ -1,0 +1,37 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "4df94a4ef63a18416fe443c820dc65fff1e789e28b5715e0c76453e800e6508d",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "machine-current-control": true,
+      "machine-late-error": true,
+      "machine-late-success": true,
+      "machine-queued-A-no-B-authority": true,
+      "member-current-control": true,
+      "member-late-error": true,
+      "member-late-success": true,
+      "member-queued-A-no-B-authority": true,
+      "model-current-control": true,
+      "model-late-error": true,
+      "model-late-success": true,
+      "model-queued-A-no-B-authority": true,
+      "mute-current-control": true,
+      "mute-late-error": true,
+      "mute-late-success": true,
+      "mute-queued-A-no-B-authority": true,
+      "profile-current-control": true,
+      "profile-late-error-not-returned": true,
+      "profile-late-success-no-B-paint": true
+    },
+    "failed": 0,
+    "passed": 19,
+    "total": 19
+  },
+  "seconds": 0.8131534579442814
+}

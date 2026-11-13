@@ -1,0 +1,60 @@
+{
+  "status": "PASS within declared final-source scope: full unit target and five-case Avatar UI class",
+  "canonical_base": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "build": {
+    "exit_code": 0,
+    "wall_seconds": 13.296820290968753,
+    "variant_expected_sources_unchanged": true,
+    "FFI_bytes_unchanged": true,
+    "scope": "incremental actual Xcode all-target build-for-testing; reviewed DEBUG observer/test-only two-file successor; complete2689 inputs present; no app/test launch"
+  },
+  "test": {
+    "exit_code": 0,
+    "outer_1800s_ceiling_exceeded": false,
+    "wall_seconds": 77.86250624991953,
+    "corrected_expected_sources_unchanged": true,
+    "exact_C19_FFI_unchanged": true,
+    "plan_sha256_unchanged": true,
+    "all_source_modes_unchanged": true,
+    "scope": "entire ArbosTests target plus unchanged entire AvatarBackSwipeUITests class on SAME owned iPhone17Pro/iOS26.2; exact DEBUG observer/test-only successor; no credentials/provisioning/signing/provider actions; verified relay endpoint127.0.0.1:1",
+    "runtime_network_limit": "Parent process deny-network is not a whole-simulator no-egress claim; all-host/UI-app verified relay plan and fresh owned data boundary remain required."
+  },
+  "real_case_counts": {
+    "ArbosTests": {
+      "Passed": 558,
+      "Expected Failure": 1,
+      "Failed": 0,
+      "Skipped": 0
+    },
+    "ArbosUITests": {
+      "Passed": 5,
+      "Expected Failure": 0,
+      "Failed": 0,
+      "Skipped": 0
+    }
+  },
+  "xcresult": {
+    "result": "Passed",
+    "totalTestCount": 564,
+    "passedTests": 563,
+    "failedTests": 0,
+    "skippedTests": 0,
+    "expectedFailures": 1
+  },
+  "intentional_expected_case": "LinkPreviewCardTests/testMissingUserRowIsAnAssertionFailure()",
+  "selected_scope": {
+    "entire_unit_target": "ArbosTests",
+    "entire_UI_class": "AvatarBackSwipeUITests",
+    "no_test_case_or_skip_filters": true
+  },
+  "not_final_source_unfiltered_full_UI_suite": true,
+  "complete_predecessor_full_UI_evidence": "corrected-full-v1/handoff-v1:55Passed,0Failed,13Skipped; preceding complete unfiltered process65 due soleglobal-counter-unitassertion",
+  "Release_parity": "Entire ChatView outside replaced DEBUG observer section byte-identical; UI source/gesture/timing bytes unchanged. This parity is distinct from native whole-final-source UI execution.",
+  "source_expected_count": 2689,
+  "all_source_hashes_and_modes_verified_after_run": true,
+  "plan_sha256": "a063afcc584373b8eae77b613e53b31b205d3606d8b52d4934cb2bb4c01bd1d3",
+  "FFI_static_library_sha256": "586da39d02f3bf42f30cd5fc4f6e9e7af403b5896786a0fac1150faa4f65cef6",
+  "raw_log_sha256": "38f1ff0f4c5f811ec8018bdf07e4d44efb3dfc548a9d6e38d94a222ba1c36309",
+  "raw_log_bytes": 265896,
+  "no_app_speedup_inference": true
+}

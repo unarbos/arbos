@@ -17,9 +17,13 @@ final class BottomBarFadeTests: XCTestCase {
 
     /// A chat bar as the screen measures it (`ChatBarHeight`): its top pad, what rides over the
     /// composer, the composer, and the composer's bottom pad — 18 pt with the keyboard up, 2 down.
-    private func chatBar(statusRow: Bool, errorNote: CGFloat, keyboard: Bool) -> CGFloat {
-        let over = (statusRow ? Theme.presenceAvatar + Theme.presenceBottomGap - Theme.presenceLift : 0)
-            + (errorNote > 0 ? errorNote + 10 : 0)
+    ///
+    /// The status row no longer rides here: since [feedback typing-anchor-2026-11-08] it is the
+    /// transcript's last child, so the bar is the same height whether a turn is running or not
+    /// and the ramp does not climb when one starts. Only a send error's note still rides over
+    /// the composer.
+    private func chatBar(errorNote: CGFloat, keyboard: Bool) -> CGFloat {
+        let over = (errorNote > 0 ? errorNote + 10 : 0)
         return Theme.chatBarTopPad + over + Theme.composerHeight
             + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
     }
@@ -53,20 +57,18 @@ final class BottomBarFadeTests: XCTestCase {
 
     func testChatBarFloats_rowsReadBehindThePlusTheFieldAndThePill() {
         for keyboard in [false, true] {
-            for statusRow in [false, true] {
-                for note in [CGFloat(0), 44] {
-                    let bar = chatBar(statusRow: statusRow, errorNote: note, keyboard: keyboard)
-                    for below in belowBar {
-                        let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
-                        let spec = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
-                                                      composerTop: nil, layerTop: 0)
-                        XCTAssertEqual(spec.controls, Theme.composerHeight)
-                        // The ramp ends on the composer, whatever else the bar carries.
-                        XCTAssertEqual(spec.controlsTop + spec.controls,
-                                       spec.height - below - (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom),
-                                       accuracy: 0.001, "composer bottom edge")
-                        check(spec, bar: bar, below: below, "chat status=\(statusRow) note=\(note) kb=\(keyboard)")
-                    }
+            for note in [CGFloat(0), 44] {
+                let bar = chatBar(errorNote: note, keyboard: keyboard)
+                for below in belowBar {
+                    let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
+                    let spec = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                  composerTop: nil, layerTop: 0)
+                    XCTAssertEqual(spec.controls, Theme.composerHeight)
+                    // The ramp ends on the composer, whatever else the bar carries.
+                    XCTAssertEqual(spec.controlsTop + spec.controls,
+                                   spec.height - below - (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom),
+                                   accuracy: 0.001, "composer bottom edge")
+                    check(spec, bar: bar, below: below, "chat note=\(note) kb=\(keyboard)")
                 }
             }
         }
@@ -77,7 +79,7 @@ final class BottomBarFadeTests: XCTestCase {
     func testNewestRowAndStatusRowAtRestAreOutsideTheRamp() {
         for keyboard in [false, true] {
             for statusRow in [false, true] {
-                let bar = chatBar(statusRow: statusRow, errorNote: 0, keyboard: keyboard)
+                let bar = chatBar(errorNote: 0, keyboard: keyboard)
                 let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
                 let spec = BottomBarFade.chat(bottomInset: bar + 34, aboveComposer: above,
                                               composerTop: nil, layerTop: 0)
@@ -120,24 +122,22 @@ final class BottomBarFadeTests: XCTestCase {
     /// the only place that device's behaviour is pinned at all.
     func testAWrongInsetIsCorrectedFromTheMeasuredComposer() {
         for keyboard in [false, true] {
-            for statusRow in [false, true] {
-                let bar = chatBar(statusRow: statusRow, errorNote: 0, keyboard: keyboard)
-                let below: CGFloat = keyboard ? 336 : 34
-                let wrong: CGFloat = 76
-                let (designed, fixed) = chatOnADeviceReporting(wrong: wrong, bar: bar, below: below,
-                                                               keyboard: keyboard)
-                let where_ = "status=\(statusRow) kb=\(keyboard)"
-                // The ramp moves down by exactly the error, back on to the composer's top edge.
-                XCTAssertEqual(fixed.controlsTop, designed.controlsTop + wrong, accuracy: 0.001, where_)
-                // Which is the point. The newest row's bottom edge at rest is `transcriptTail`
-                // over the bar's top edge, and on this device that is `wrong` pt further down
-                // the layer than the designed geometry believes.
-                let newestRow = designed.fade - Theme.transcriptTail + wrong
-                XCTAssertGreaterThan(designed.alpha(at: newestRow), 0, "\(where_) — the bug")
-                XCTAssertEqual(fixed.alpha(at: newestRow), 0, "\(where_) — the fix")
-                // And it is still the same ramp: clear lead, dim over the composer, readable.
-                check(fixed, bar: bar, below: below + wrong, "air \(where_)")
-            }
+            let bar = chatBar(errorNote: 0, keyboard: keyboard)
+            let below: CGFloat = keyboard ? 336 : 34
+            let wrong: CGFloat = 76
+            let (designed, fixed) = chatOnADeviceReporting(wrong: wrong, bar: bar, below: below,
+                                                           keyboard: keyboard)
+            let where_ = "kb=\(keyboard)"
+            // The ramp moves down by exactly the error, back on to the composer's top edge.
+            XCTAssertEqual(fixed.controlsTop, designed.controlsTop + wrong, accuracy: 0.001, where_)
+            // Which is the point. The newest row's bottom edge at rest is `transcriptTail`
+            // over the bar's top edge, and on this device that is `wrong` pt further down
+            // the layer than the designed geometry believes.
+            let newestRow = designed.fade - Theme.transcriptTail + wrong
+            XCTAssertGreaterThan(designed.alpha(at: newestRow), 0, "\(where_) — the bug")
+            XCTAssertEqual(fixed.alpha(at: newestRow), 0, "\(where_) — the fix")
+            // And it is still the same ramp: clear lead, dim over the composer, readable.
+            check(fixed, bar: bar, below: below + wrong, "air \(where_)")
         }
     }
 
@@ -148,24 +148,22 @@ final class BottomBarFadeTests: XCTestCase {
     /// untouched.
     func testACorrectDeviceMeasuresExactlyTheDesignedGeometry() {
         for keyboard in [false, true] {
-            for statusRow in [false, true] {
-                for note in [CGFloat(0), 44] {
-                    let bar = chatBar(statusRow: statusRow, errorNote: note, keyboard: keyboard)
-                    let under = Theme.composerHeight
-                        + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
-                    let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
-                    for below in belowBar {
-                        // The layer's top edge is `fade + inset` over the screen's edge and the
-                        // composer's top edge is `below + under` over it, so a device whose
-                        // inset is right measures the one from the other as `fade + bar - under`.
-                        let designed = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
-                                                          composerTop: nil, layerTop: 0)
-                        let measured = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
-                                                          composerTop: BottomBarFade.fade + bar - under,
-                                                          layerTop: 0)
-                        XCTAssertEqual(measured, designed,
-                                       "status=\(statusRow) note=\(note) kb=\(keyboard) below=\(below)")
-                    }
+            for note in [CGFloat(0), 44] {
+                let bar = chatBar(errorNote: note, keyboard: keyboard)
+                let under = Theme.composerHeight
+                    + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
+                let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
+                for below in belowBar {
+                    // The layer's top edge is `fade + inset` over the screen's edge and the
+                    // composer's top edge is `below + under` over it, so a device whose
+                    // inset is right measures the one from the other as `fade + bar - under`.
+                    let designed = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                      composerTop: nil, layerTop: 0)
+                    let measured = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                      composerTop: BottomBarFade.fade + bar - under,
+                                                      layerTop: 0)
+                    XCTAssertEqual(measured, designed,
+                                   "note=\(note) kb=\(keyboard) below=\(below)")
                 }
             }
         }
@@ -178,7 +176,7 @@ final class BottomBarFadeTests: XCTestCase {
     /// bottom edge is the ceiling.
     func testAnImplausibleMeasurementFallsBackToTheDesignedGeometry() {
         for keyboard in [false, true] {
-            let bar = chatBar(statusRow: true, errorNote: 0, keyboard: keyboard)
+            let bar = chatBar(errorNote: 0, keyboard: keyboard)
             let below: CGFloat = keyboard ? 336 : 34
             let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
             func spec(_ composerTop: CGFloat?, _ layerTop: CGFloat? = 0) -> BottomBarFade.Spec {
@@ -249,8 +247,12 @@ final class BottomBarFadeTests: XCTestCase {
         XCTAssertLessThan(BottomBarFade.composerRamp, Theme.presenceBottomGap)
         XCTAssertLessThanOrEqual(BottomBarFade.composerRamp, BottomBarFade.fade)
         XCTAssertEqual(BottomBarFade.composerRamp * 3, (BottomBarFade.composerRamp * 3).rounded(), accuracy: 0.001)
-        // The status row's Grok gap holds (`presenceLift` follows the tail).
-        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceLift, Theme.presenceTopGap)
+        // The status row's Grok gap holds (`presenceSettle` follows the tail), and the ramp
+        // is shorter than that gap, which is what keeps the row unwashed at rest now that it
+        // is transcript content rather than part of the bar drawn over the fade.
+        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceSettle,
+                       Theme.presenceBottomGap)
+        XCTAssertLessThan(BottomBarFade.composerRamp, Theme.presenceBottomGap)
     }
 
     func testPillsAreGlassOnGlassAndSolidOnMatte() {

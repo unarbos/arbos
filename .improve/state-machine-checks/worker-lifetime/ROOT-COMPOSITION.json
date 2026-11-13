@@ -1,0 +1,202 @@
+{
+  "source_manifest": "SOURCE.json",
+  "packages_cleaned": 12,
+  "network": "validated loopback-only Seatbelt",
+  "gates": [
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 20.071124957990833,
+      "counts": [],
+      "expected": null,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-0",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "harness::worker_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 38.545848082983866,
+      "counts": [
+        [
+          16,
+          0,
+          0
+        ]
+      ],
+      "expected": 16,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-1",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "worker_lifetime::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.7748055419651791,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "expected": 3,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-2",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 3.20873195794411,
+      "counts": [
+        [
+          17,
+          0,
+          0
+        ]
+      ],
+      "expected": 17,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-3",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::shutdown_boot_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 1.9013018750119954,
+      "counts": [
+        [
+          7,
+          0,
+          0
+        ]
+      ],
+      "expected": 7,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-4",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "pi_slot::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3829079590504989,
+      "counts": [
+        [
+          4,
+          0,
+          0
+        ]
+      ],
+      "expected": 4,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-5",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "approval::delivery_claim_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.43951733293943107,
+      "counts": [
+        [
+          12,
+          0,
+          0
+        ]
+      ],
+      "expected": 12,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-6",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "approval::park_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3928820419823751,
+      "counts": [
+        [
+          6,
+          0,
+          0
+        ]
+      ],
+      "expected": 6,
+      "source_unchanged": true
+    }
+  ]
+}

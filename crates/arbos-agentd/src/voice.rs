@@ -46,7 +46,13 @@ pub fn spawn_voice_link(sup: Arc<Supervisor>) {
         let mut backoff = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            match session(&sup).await {
+            // A restored sandbox's link is dead with nothing to say so (`Supervisor::reconnect`):
+            // dropping the session drops the socket, and the loop below dials a new one.
+            let ended = tokio::select! {
+                r = session(&sup) => r,
+                _ = sup.relinked.notified() => Ok(()),
+            };
+            match ended {
                 Ok(()) => tracing::info!("voice link closed"),
                 Err(e) => tracing::warn!(error = %e, "voice link failed"),
             }
@@ -282,8 +288,10 @@ impl Agent {
                 }
             }
         }
-        let recent = match self.sync.host(chat_id).await {
-            Some(host) => {
+        // A call can start on a chat nobody has touched for hours, whose room the idle close
+        // took (#2367); without opening it the agent joins the call knowing none of the chat.
+        let recent = match self.room(chat_id).await {
+            Ok(host) => {
                 let h = host.lock().await;
                 let msgs = h.doc.messages();
                 let mut out: Vec<Value> = msgs
@@ -307,7 +315,7 @@ impl Agent {
                 }
                 out
             }
-            None => Vec::new(),
+            Err(_) => Vec::new(),
         };
         json!({
             "name": st.name,
@@ -383,6 +391,7 @@ impl Agent {
                 }
             }
             h.mark_seen(&cmd_id);
+            self.note_own_row(&msg_id);
             CommandView {
                 id: cmd_id,
                 kind: "send".into(),
@@ -426,15 +435,15 @@ impl Agent {
                     break;
                 }
                 if !running {
-                    // Turn gone, no final bubble yet (a subagent / job delivers later): give it
-                    // the bounded wait, but stop early once nothing new lands for 3 s after an
-                    // ack-only or progress-only turn that was never going to add more.
+                    // Turn gone, no final bubble yet (a subagent / job delivers later): stop
+                    // early once nothing new lands for 3 s after an ack-only or progress-only
+                    // hand-off. The job's outcome reaches the live call through the relay
+                    // VoiceInbox (same wake as any chat bubble), not by holding this tool call
+                    // open for up to SUBAGENT_WAIT — that left the person waiting on the call
+                    // with only "I'll report back" and no spoken follow-up when the inbox path
+                    // was the one that had to speak.
                     let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
-                    if since.elapsed() > std::time::Duration::from_secs(3)
-                        && replies.iter().any(|m| {
-                            m.rest.get("turnRole").and_then(Value::as_str) == Some("progress")
-                        })
-                    {
+                    if since.elapsed() > std::time::Duration::from_secs(3) && !replies.is_empty() {
                         break;
                     }
                 } else {
@@ -709,7 +718,9 @@ mod reply_tests {
             reply_text(&rows),
             "Checking.\n\nThree places deliver tonight."
         );
-        // An ack-only turn (work handed off) reads back the ack, and is not settled.
+        // An ack-only turn (work handed off) reads back the ack, and is not settled —
+        // voice_request returns that ack after a short quiet wait; the job's outcome
+        // reaches the live call through VoiceInbox, which must speak the follow-up.
         let ack = vec![row("a", "ack", "done", "I'll run that in the background.")];
         assert!(!reply_settled(&ack));
         assert_eq!(reply_text(&ack), "I'll run that in the background.");

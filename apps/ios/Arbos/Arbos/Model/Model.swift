@@ -109,6 +109,18 @@ struct Machine: Equatable {
     var cpu: Int? = nil
     var memGib: Int? = nil
     var image: String? = nil
+    /// `lifecycle_state`: where a machine that sleeps by itself was last left (`warm`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold`, …). Nil for every other machine.
+    var lifecycle: String? = nil
+    /// `storage`: what its disk held when it last went to sleep, in bytes. The relay keeps it,
+    /// so it is there for a machine that is asleep or in cold storage too.
+    var storage: Storage? = nil
+
+    struct Storage: Equatable {
+        var files: Int64
+        var scratch: Int64?
+        var trash: Int64?
+    }
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
@@ -179,6 +191,8 @@ struct Machine: Equatable {
             memGib: Int(dto.spec.mem_gib),
             image: dto.image.current ?? (dto.spec.`class`.isEmpty ? nil : dto.spec.`class`)
         )
+        lifecycle = dto.lifecycle_state
+        storage = dto.storage.map { Storage(files: $0.files_bytes, scratch: $0.scratch_bytes, trash: $0.trash_bytes) }
     }
 
     /// The state the UI may show: always-on boxes collapse everything but
@@ -236,10 +250,9 @@ enum WorkspaceState: String, Codable, Equatable {
     }
 }
 
-/// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
-/// sheet offers Upload and Generate only; with neither the entity is stored neutral —
-/// `avatar_leaf` = `LeafArt.neutral`, the name's initial on a grey disc — never an automatic
-/// leaf).
+/// The Create sheet's pending picture, applied once the entity exists (the sheet offers Upload
+/// and Generate only; with neither the entity is stored with no `avatar_disc_color` at all, and
+/// the colour follows from the id the relay assigns — Jacob, 2026-11-06).
 enum DraftPicture: Equatable {
     /// The photo as chosen, already the encoded master (PNG or JPEG, ≤ 1024 px —
     /// `PictureMaster`); uploaded into the new entity's slot.
@@ -282,13 +295,12 @@ struct Project: Identifiable, Equatable, Codable {
     var avatarColorIndex: Int? = nil
     var avatarColorIndexEffective: Int? = nil
     var effectiveAvatarColorIndex: Int? { AvatarPalette.clamp(avatarColorIndexEffective) ?? AvatarPalette.clamp(avatarColorIndex) }
-    /// D92: the owner's leaf picks (`avatar_leaf` 0–8, `avatar_leaf_color` 0–9); nil → derived
-    /// from the id by the shared rule (`LeafArt.pick`), the same pair the relay reports as
-    /// `avatar_leaf_effective` / `avatar_leaf_color_effective`.
-    var avatarLeaf: Int? = nil
-    var avatarLeafColor: Int? = nil
+    /// D92: the owner's disc colour pick (`avatar_disc_color` 0–9); nil → derived from the id
+    /// by the shared rule (`DiscArt.pick`), the same colour the relay reports as
+    /// `avatar_disc_color_effective`.
+    var avatarDiscColor: Int? = nil
     /// D92 amendment: the agent's uploaded / generated picture — a blob name in the project's own
-    /// slot (`/blob/{id}/{key}`); wins over the leaf while set.
+    /// slot (`/blob/{id}/{key}`); wins over the disc while set.
     var imageKey: String? = nil
     /// `imageKey` as a fetchable URL — the relay's public picture route
     /// `/projects/{id}/avatar.jpg?v={avatarVersion}` (`Project.pictureURL`), filled in by the
@@ -353,8 +365,7 @@ extension Project {
         self.avatarColor = dto.avatar_color.isEmpty ? nil : dto.avatar_color
         self.avatarColorIndex = dto.avatar_color_index.map(Int.init)
         self.avatarColorIndexEffective = Int(dto.avatar_color_index_effective)
-        self.avatarLeaf = dto.avatar_leaf.map(Int.init)
-        self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
+        self.avatarDiscColor = dto.avatar_disc_color.map(Int.init)
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
         self.avatarVersion = dto.avatar_version.map(Int.init) ?? 0
         self.instructions = dto.instructions
@@ -670,6 +681,46 @@ struct SecretOffer: Equatable {
     var projectId: String
 }
 
+/// A poll (`docs/polls.md`) as the chat doc's projection hands it over: the options and who
+/// holds each. Bounds and vote validity are checked in `arbos_core::poll` before it gets here.
+struct Poll: Equatable {
+    var question: String
+    var options: [ChoiceOption]
+    /// How many options one person may hold: 1, or the option count for "multiple answers".
+    var max: Int
+    /// Option id → the senders (`user:<id>`) who hold it.
+    var votes: [String: [String]]
+
+    var multiple: Bool { max > 1 }
+    var voters: Int { Set(votes.values.joined()).count }
+
+    /// The option ids `sender` holds, in the poll's order.
+    func picked(by sender: String?) -> [String] {
+        guard let sender else { return [] }
+        return options.map(\.id).filter { votes[$0]?.contains(sender) == true }
+    }
+
+    /// `sender`'s vote after a tap on `id`: a single-choice poll swaps to it, or retracts when
+    /// it is the one already held; a multiple-answer poll toggles it.
+    func picking(_ id: String, by sender: String) -> [String] {
+        let mine = picked(by: sender)
+        if mine.contains(id) { return multiple ? mine.filter { $0 != id } : [] }
+        return multiple ? mine + [id] : [id]
+    }
+
+    /// The card's foot: "Ana's poll · 3 voted · pick one".
+    func foot(by name: String?) -> String {
+        "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · \(multiple ? "pick any" : "pick one")"
+    }
+}
+
+/// What the poll sheet collected; `pollText` says whether it is a poll within bounds.
+struct PollDraft: Equatable {
+    var question: String
+    var options: [String]
+    var multiple: Bool
+}
+
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
 /// `.unknown` and render as nothing, per the "additive only" rule.
 enum Part: Equatable {
@@ -691,6 +742,11 @@ enum Part: Equatable {
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
+    /// A TAO cheque (Sync/Wallet.swift): the signed transfer as 0x-hex. What it pays is read
+    /// from these bytes, never from the message text.
+    case cheque(id: Id, bytes: String)
+    /// A poll; the message's text part is the same poll in plain words, for builds without polls.
+    case poll(id: Id, poll: Poll)
     case unknown(id: Id)
 
     var id: Id {
@@ -698,7 +754,7 @@ enum Part: Equatable {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
              .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
-             .unknown(let id):
+             .cheque(let id, _), .poll(let id, _), .unknown(let id):
             return id
         }
     }
@@ -706,6 +762,16 @@ enum Part: Equatable {
     /// The vault name when this is a `secret_redacted` ghost part.
     var secretRedactedName: String? {
         if case .secretRedacted(_, let name, _, _) = self { return name }
+        return nil
+    }
+
+    var chequeBytes: String? {
+        if case .cheque(_, let bytes) = self { return bytes }
+        return nil
+    }
+
+    var pollValue: Poll? {
+        if case .poll(_, let poll) = self { return poll }
         return nil
     }
 
@@ -1055,6 +1121,41 @@ struct JobRollout: Equatable {
 /// A cross-chat reply reference (crdt-sync §6.2 `replyRef`, core `ReplyRef`): where the
 /// quoted message lives plus a snapshot of it, so a reader who is not in the source chat
 /// still sees the quote.
+/// Agent-to-agent hand-off payload (`agentMessage` on a spawn / receive row).
+/// The send-side row names the destination; the receive-side copy keeps the
+/// same `id` so a tap on "Messaged ◉ X" can find the landed message.
+struct AgentMessageRef: Equatable, Hashable {
+    var id: String
+    var toProjectId: String
+    var toName: String
+    var status: String
+    /// Destination chat when agentd recorded it (absent on older notices).
+    var chatId: Id?
+    /// Destination message when agentd recorded it (absent on older notices).
+    var messageId: Id?
+
+    init(id: String, toProjectId: String, toName: String, status: String,
+         chatId: Id? = nil, messageId: Id? = nil) {
+        self.id = id; self.toProjectId = toProjectId; self.toName = toName
+        self.status = status; self.chatId = chatId; self.messageId = messageId
+    }
+
+    /// The row's `agentMessage` map when it carries enough to be useful.
+    init?(row: Any?) {
+        guard let m = row as? [String: Any] else { return nil }
+        let s = { (k: String) -> String in (m[k] as? String) ?? "" }
+        let id = s("id")
+        let toProjectId = s("toProjectId")
+        let toName = s("toName")
+        // A receive-side copy only has fromProjectId; a send-side notice needs a target.
+        guard !id.isEmpty || !toProjectId.isEmpty || !toName.isEmpty else { return nil }
+        let chat = s("chatId")
+        let msg = s("messageId")
+        self.init(id: id, toProjectId: toProjectId, toName: toName, status: s("status"),
+                  chatId: chat.isEmpty ? nil : chat, messageId: msg.isEmpty ? nil : msg)
+    }
+}
+
 struct ReplyRef: Equatable, Hashable {
     var chatId: Id
     /// `"people"` for DMs and people groups, else the project id.
@@ -1259,6 +1360,9 @@ struct Message: Identifiable, Equatable {
     var notice: MembershipNotice? = nil
     /// `"off"` once the sender removed the link preview for everyone (#2066).
     var preview: String? = nil
+    /// Agent-to-agent messaging: the send-side hand-off payload (`agentMessage`), with the
+    /// destination chat/message ids once the target box has landed the words.
+    var agentMessage: AgentMessageRef? = nil
 
     var isStreaming: Bool { status == .streaming }
 
@@ -1334,7 +1438,7 @@ struct Message: Identifiable, Equatable {
             switch part {
             case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .reasoning, .status, .subagentResult, .unknown: return true
-            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted, .cheque, .poll: return false
             }
         }
     }
@@ -1499,7 +1603,8 @@ enum DocJSON {
             greeting: bool(m["greeting"]),
             reactions: reactions(m["reactions"]),
             notice: MembershipNotice(row: m["notice"]),
-            preview: str(m["preview"])
+            preview: str(m["preview"]),
+            agentMessage: AgentMessageRef(row: m["agentMessage"])
         )
     }
 
@@ -1604,6 +1709,18 @@ enum DocJSON {
             return .question(id: id, question: approval(pm))
         case "subagent_result":
             return .subagentResult(id: id)
+        case "cheque":
+            guard let bytes = str(pm["cheque"]), bytes.count <= 4096 else { return .unknown(id: id) }
+            return .cheque(id: id, bytes: bytes)
+        case "poll":
+            let options = ((pm["options"] as? [Any]) ?? []).compactMap { o -> ChoiceOption? in
+                guard let om = o as? [String: Any], let oid = str(om["id"]), let label = str(om["label"]) else { return nil }
+                return ChoiceOption(id: oid, label: label)
+            }
+            guard let question = str(pm["question"]), options.count >= 2 else { return .unknown(id: id) }
+            let votes = (pm["votes"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
+            return .poll(id: id, poll: Poll(question: question, options: options,
+                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes))
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))
@@ -2116,7 +2233,7 @@ extension Project {
     /// the agent's *current* picture, stamped with `avatar_version` so a change is a new URL and
     /// no cache (URLCache, `AvatarImageCache`) ever serves the old bytes. Why not the blob slot:
     /// `/blob/{project}/{key}` is readable by the owner and the project's guests only, so a
-    /// viewer who merely shares a group with the agent got 403 and drew the leaf (Jacob,
+    /// viewer who merely shares a group with the agent got 403 and drew the disc (Jacob,
     /// 2026-10-25, "Hezbola"). nil without a picture or without a relay.
     static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
         guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }

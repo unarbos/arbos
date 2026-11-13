@@ -1,0 +1,33 @@
+{
+  "canonical_commit": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+  "standalone_phase4_commit": "9e50073163c844bd6a4f6393e742e37a37d8d3b6",
+  "before_canonical": {
+    ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+    ".improve/state-machine-checks/voice-settlement/native/Cargo.lock": "e26a00c68de27b4cf460f4e8978f0babdfc9e86509a37494394a0dfd99423b91",
+    ".improve/state-machine-checks/voice-settlement/native/Cargo.toml": "dd2dfd42223654e413675bc4272275068997b5f28615b3540674dcc6aed4da86",
+    ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+    "crates/arbos-core/src/ids.rs": "6849afcd728a470ca36382afe7525eb65f7056a90daf88e82efdc142b387a311",
+    "crates/arbos-relay/src/credits.rs": "4835284e4b5c6bd355fbda94277833dd32746d75f62f5970cc2ecaa111eaf2ae",
+    "crates/arbos-relay/src/db.rs": "4c4a96d2213fcb4e8f64476b6f600da3a1370411f17a3267a85a3e186561b383",
+    "crates/arbos-relay/src/db_accounts.rs": "caa5e4e26a7d50dbcea3dfeda401a98aaaf175a2739ca068a18527c83eee3d92",
+    "crates/arbos-relay/src/db_voice.rs": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+    "crates/arbos-relay/src/proxy.rs": "bdb626b6df1e852f71162a5882ecd10a3864a772d73994beaf0823fe556f9b81",
+    "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+  },
+  "before_phase4": {
+    ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+    ".improve/state-machine-checks/voice-settlement/native/Cargo.lock": "e26a00c68de27b4cf460f4e8978f0babdfc9e86509a37494394a0dfd99423b91",
+    ".improve/state-machine-checks/voice-settlement/native/Cargo.toml": "dd2dfd42223654e413675bc4272275068997b5f28615b3540674dcc6aed4da86",
+    ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+    "crates/arbos-core/src/ids.rs": "6849afcd728a470ca36382afe7525eb65f7056a90daf88e82efdc142b387a311",
+    "crates/arbos-relay/src/credits.rs": "4835284e4b5c6bd355fbda94277833dd32746d75f62f5970cc2ecaa111eaf2ae",
+    "crates/arbos-relay/src/db.rs": "3d08c6397f24bc570c4c57221b47dde01ca09eaf489111e99b60ac7e4527a350",
+    "crates/arbos-relay/src/db_accounts.rs": "029b0adb718175fc50b24426f352b800814b8d3972cc2e804506ffa98e4412fd",
+    "crates/arbos-relay/src/db_voice.rs": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+    "crates/arbos-relay/src/proxy.rs": "bdb626b6df1e852f71162a5882ecd10a3864a772d73994beaf0823fe556f9b81",
+    "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+  },
+  "after_extractor_sha256": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+  "only_changed_source": ".improve/state-machine-checks/voice-settlement/extract.py",
+  "strict_test_and_bridge_unchanged": true
+}

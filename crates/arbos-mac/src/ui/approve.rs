@@ -208,7 +208,10 @@ impl ApprovalView {
                 Some(class) => format!("{ANSWER_GRANT_PREFIX}{class}"),
                 None => ANSWER_ONCE.to_string(),
             }),
-            ApprovalState::Pending | ApprovalState::Expired => None,
+            ApprovalState::Pending
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled
+            | ApprovalState::Unknown => None,
         }
     }
 
@@ -226,7 +229,10 @@ impl ApprovalView {
                     "always"
                 })
             }
-            ApprovalState::Pending | ApprovalState::Expired => None,
+            ApprovalState::Pending
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled
+            | ApprovalState::Unknown => None,
         }
     }
 }
@@ -331,7 +337,10 @@ pub fn approval_card(
             ApprovalState::Pending => (RowState::Open, RowState::Open),
             ApprovalState::Approved => (RowState::Chosen, RowState::Faded),
             ApprovalState::Rejected => (RowState::Faded, RowState::Chosen),
-            ApprovalState::Expired => (RowState::Faded, RowState::Faded),
+            // Nothing to claim either way: faded like a card nobody answered.
+            ApprovalState::Expired | ApprovalState::Cancelled | ApprovalState::Unknown => {
+                (RowState::Faded, RowState::Faded)
+            }
         };
         let approve_row = option_row(
             format!("{row_id}-approve"),
@@ -385,13 +394,20 @@ pub fn approval_card(
     }
 
     if !pending {
-        let mut note = view.state.label().to_string();
-        if let Some(by) = &view.decided_by {
-            note.push_str(&format!(" by {by}"));
-        }
-        if let Some(reason) = view.reason.as_deref().filter(|r| !r.trim().is_empty()) {
-            note.push_str(&format!(" · {reason}"));
-        }
+        // An unrecognised state stands alone: `decidedBy` and `reason` describe an outcome this
+        // build cannot name, so dressing them up as one would be a guess.
+        let note = if view.state == ApprovalState::Unknown {
+            "This card was closed by a newer Arbos".to_string()
+        } else {
+            let mut note = view.state.label().to_string();
+            if let Some(by) = &view.decided_by {
+                note.push_str(&format!(" by {by}"));
+            }
+            if let Some(reason) = view.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+                note.push_str(&format!(" · {reason}"));
+            }
+            note
+        };
         list = list.child(
             div()
                 .border_t_1()
@@ -494,5 +510,39 @@ mod tests {
         assert_eq!(wide.shell_answers().len(), 3);
         let plain = shell_view(ApprovalState::Pending, None, json!([]));
         assert!(plain.shell_answers().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unknown_state_tests {
+    //! A card in a state only a newer agentd knows renders inert: no rows to click, no answer
+    //! inferred, and a note that does not pretend to know what happened.
+
+    use super::*;
+    use serde_json::json;
+
+    fn view(state: ApprovalState) -> ApprovalView {
+        ApprovalView {
+            approval_id: "ap1".into(),
+            title: "Send the draft".into(),
+            summary: "Hello".into(),
+            risk: ApprovalRisk::Send,
+            state,
+            payload: json!({}),
+            decided_by: Some("arbos:cancelled".into()),
+            reason: Some("the work was called off".into()),
+            grant: None,
+            agent: Some("Doug".into()),
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_card_is_inert_and_claims_nothing() {
+        let v = view(ApprovalState::Unknown);
+        assert_ne!(v.state, ApprovalState::Pending, "it would offer buttons");
+        assert!(!v.state.decided(), "it would claim a decision");
+        assert_eq!(v.picked_shell_answer(), None, "it invented a shell answer");
+        assert_eq!(v.picked_answer(), None, "it invented a secret answer");
+        assert_eq!(v.state.label(), "Unrecognised");
     }
 }

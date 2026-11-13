@@ -14,8 +14,6 @@ enum DebugHooks {
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
     /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
     static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
-    /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
-    static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
@@ -46,7 +44,7 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
-    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
+    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers among the home chats.
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
     /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
     static var fixtureGroupRole: String? {
@@ -60,6 +58,14 @@ enum DebugHooks {
     /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the
     /// "save this" ghost row (`ghost`) or the offer card for a pasted key (`detect`).
     static var fixtureSecretHandoff: String? { value("ARBOS_FIXTURE_SECRET_HANDOFF") }
+    /// `ARBOS_FIXTURE_COMPOSER_ATTACHMENT=<n>`: open with n pictures already staged in the
+    /// composer. The real route to a staged picture is the system photo picker, which a UI
+    /// test cannot drive and a capture cannot reproduce twice the same way. A count rather
+    /// than a flag because one picture and several are different pictures of the composer —
+    /// several is the row ([feedback attachment-in-composer-2026-11-09]).
+    static var fixtureComposerAttachments: Int {
+        max(0, value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT").flatMap { Int($0) } ?? 0)
+    }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
@@ -67,6 +73,16 @@ enum DebugHooks {
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
     /// (Settings › Machine's warning state on the rig).
     static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
+    /// `ARBOS_FIXTURE_MACHINE=waking`: the box starts waking and reaches awake 3 s in, so the
+    /// transcript's "Waking your machine…" banner is there when a chat opens and leaves while
+    /// it is on screen — the one thing a real launch does and the fixture's always-awake box
+    /// never did ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureMachineWaking: Bool { value("ARBOS_FIXTURE_MACHINE") == "waking" }
+    /// `ARBOS_FIXTURE_ROWS_DELAY=<ms>`: every fixture chat starts with no rows and gets them
+    /// that many ms after launch. A chat opened inside that window is on screen when its rows
+    /// land — the shape of a real open over a slow link, and the one the always-ready fixture
+    /// could never make ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureRowsDelayMs: Int? { value("ARBOS_FIXTURE_ROWS_DELAY").flatMap { Int($0) } }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
@@ -138,7 +154,9 @@ enum DebugHooks {
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
-    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture;
+    /// `agent-links` opens Agent access link, `agent-links-copy` lands with the copy sheet up and
+    /// `agent-links-copied` with its Copy already pressed.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
@@ -175,6 +193,9 @@ enum DebugHooks {
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `ARBOS_TIME_REVEAL=1`: the open chat holds the iMessage time peek fully drawn out, for
+    /// screenshot rigs (`simctl` cannot drag the transcript).
+    static var timeReveal: Bool { value("ARBOS_TIME_REVEAL") == "1" }
     /// `system | light | dark`: the theme for one launch, over the saved choice and the
     /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }

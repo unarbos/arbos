@@ -18,6 +18,31 @@ use crate::state::AppState;
 /// `app_id` of the relay's pusher on every flipped device.
 pub const PUSHER_APP_ID: &str = "life.arbos.relay";
 
+/// What an alert says of a message the relay cannot read (an end-to-end encrypted one).
+const NEW_MESSAGE: &str = "New message";
+
+/// What the alert for a chat's event says to a device of someone whose reads are `flipped`
+/// or not, in a chat that is `native` (read and written on the homeserver) or not; `None`
+/// for no alert from here.
+///
+/// Someone not flipped is alerted here only in a native chat, and there only for what a
+/// device sent: a row of the Loro room that the relay mirrored names its sender
+/// (`life.arbos.sender`), and `notify::announce` has told them of it. Nobody is alerted for
+/// a reaction or a row of the chat's earlier history (`history.rs`): those say what they are
+/// in the one field an encrypted room leaves readable, and each account's push rules keep
+/// the homeserver from announcing them; an account whose rule is missing is not told here
+/// either. An encrypted message says only that there is one.
+fn alert_text(flipped: bool, native: bool, ev: &Value) -> Option<&str> {
+    let content = &ev["content"];
+    let quiet = matches!(
+        content["m.relates_to"]["rel_type"].as_str(),
+        Some("life.arbos.reaction" | "life.arbos.history")
+    );
+    let announced = !flipped && content.get("life.arbos.sender").is_some();
+    ((flipped || native) && !quiet && !announced)
+        .then(|| content["body"].as_str().unwrap_or(NEW_MESSAGE))
+}
+
 /// Are this user's reads served from the homeserver?
 pub fn reads_on(state: &AppState, user_id: &str) -> bool {
     state.matrix.cfg.mode == Mode::On
@@ -147,6 +172,14 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
     if chat.is_none() && channel.is_none() {
         return rejected;
     }
+    // Phase 3: a people chat its members read and write on the homeserver. What a device
+    // sends there is announced by nothing else.
+    let native = chat
+        .as_ref()
+        .filter(|c| c.project_id.is_none())
+        .and_then(|c| crate::people::load_chat(state, &c.chat_id).ok())
+        .and_then(|cm| super::people_native_room(state, &cm))
+        .is_some_and(|room| room == room_id);
     let server = channel
         .as_ref()
         .and_then(|c| state.db.server(&c.server_id).ok().flatten());
@@ -164,7 +197,8 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
         let mxid = state.matrix.cfg.user_mxid(&user_id);
         match (&chat, &channel) {
             (Some(chat), _) => {
-                if !state.push.is_on() || !reads_on(state, &user_id) {
+                let flipped = reads_on(state, &user_id);
+                if !state.push.is_on() || !(flipped || native) {
                     // Not flipped: `notify::announce` covers mirrored chats. The pusher stays
                     // (it carries the channel pushes too).
                     continue;
@@ -174,6 +208,9 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                     continue;
                 };
                 let content = &ev["content"];
+                let Some(text) = alert_text(flipped, native, &ev) else {
+                    continue;
+                };
                 let Some(sender) = sender_of_event(state, &ev) else {
                     continue;
                 };
@@ -181,10 +218,10 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                     continue;
                 }
                 let message_id = content["life.arbos.id"].as_str().unwrap_or(event_id);
-                let text = content["body"].as_str().unwrap_or("New message");
                 let badge = unread_total(state, &user_id).await;
+                let sealed = (ev["type"] == "m.room.encrypted").then_some((room_id, &ev));
                 crate::notify::alert_device(
-                    state, chat, &sender, message_id, text, badge, device_id,
+                    state, chat, &sender, message_id, text, badge, device_id, sealed,
                 )
                 .await;
             }
@@ -262,4 +299,57 @@ fn sender_of_event(state: &AppState, ev: &Value) -> Option<Sender> {
     let p = member.strip_prefix("agent:")?;
     let project = state.db.project(p).ok().flatten()?;
     Some(Sender::agent(state, &project))
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+
+    #[test]
+    fn an_encrypted_message_alerts_without_its_words_and_history_and_reactions_not_at_all() {
+        let sealed = |relates: Value| {
+            json!({ "type": "m.room.encrypted", "content": { "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "AwgA", "m.relates_to": relates } })
+        };
+        let text = |ev: &Value| alert_text(true, true, ev).map(str::to_owned);
+        assert_eq!(text(&sealed(Value::Null)).as_deref(), Some("New message"));
+        assert_eq!(text(&sealed(json!({}))).as_deref(), Some("New message"));
+        for kind in ["life.arbos.reaction", "life.arbos.history"] {
+            assert_eq!(text(&sealed(json!({ "rel_type": kind }))), None, "{kind}");
+            let clear = json!({ "type": "m.room.message",
+                "content": { "body": "old words", "m.relates_to": { "rel_type": kind } } });
+            assert_eq!(text(&clear), None, "{kind}, unencrypted");
+        }
+        let clear = json!({ "type": "m.room.message", "content": { "body": "see you at noon" } });
+        assert_eq!(text(&clear).as_deref(), Some("see you at noon"));
+        // Never the ciphertext, whatever else the event carries.
+        let odd =
+            json!({ "type": "m.room.encrypted", "content": { "ciphertext": "AwgA", "body": 7 } });
+        assert_eq!(text(&odd).as_deref(), Some("New message"));
+    }
+
+    #[test]
+    fn a_native_chat_alerts_everyone_once_and_any_other_chat_only_the_flipped() {
+        let sent = json!({ "type": "m.room.message", "content": { "body": "hi" } });
+        let mirrored = json!({ "type": "m.room.message",
+            "content": { "body": "hi", "life.arbos.sender": "user:gh_1" } });
+        // (flipped, native, event) -> alerted from here
+        for (flipped, native, ev, alerted) in [
+            (false, false, &sent, false),
+            (false, false, &mirrored, false),
+            (true, false, &sent, true),
+            (true, false, &mirrored, true),
+            (false, true, &sent, true),
+            // `notify::announce` told them when the Loro row landed.
+            (false, true, &mirrored, false),
+            (true, true, &sent, true),
+            (true, true, &mirrored, true),
+        ] {
+            assert_eq!(
+                alert_text(flipped, native, ev).is_some(),
+                alerted,
+                "flipped {flipped}, native {native}, {ev}"
+            );
+        }
+    }
 }

@@ -78,6 +78,9 @@ struct MediaItem: Identifiable, Equatable {
     /// A picker sticker: fixed square, no bubble.
     var sticker: Bool = false
 
+    /// The message it came in (the part of `id` before `#`): pictures sent together.
+    var messageId: Substring { id.prefix { $0 != "#" } }
+
     /// What the decoded picture is cached under: the blob ref, or `url:<url>` for a GIF.
     var cacheKey: String? { blobRef ?? remoteURL.map { "url:" + $0 } }
 
@@ -185,6 +188,63 @@ struct ForwardTarget: Identifiable, Equatable {
     var activity: Int64
 }
 
+/// An immutable UI origin: private media uses the existing account receipt;
+/// anonymous profile pictures retain public, zero-bearer reads only.
+enum MediaOrigin {
+    case account(WorkLifetime.Ticket)
+    case fixture(WorkLifetime.Ticket)
+    case publicPicture(ObjectIdentifier, WorkLifetime.State)
+    case unavailable
+
+    @MainActor
+    init(_ model: AppModel, account: ChatAccountContext? = nil) {
+        guard !Task.isCancelled else { self = .unavailable; return }
+        if let account {
+            switch account {
+            case .account(let work): self = .account(work.owner)
+            case .fixture(let owner): self = .fixture(owner)
+            case .unavailable: self = .unavailable
+            }
+        } else if model.isFixture {
+            self = model.accountLifetime.ticket.map(Self.fixture) ?? .unavailable
+        } else if model.credentials != nil {
+            self = model.accountLifetime.ticket.map(Self.account) ?? .unavailable
+        } else {
+            self = .publicPicture(ObjectIdentifier(model), model.accountLifetime.state)
+        }
+    }
+
+    @MainActor
+    func allowsView(_ model: AppModel) -> Bool {
+        guard !Task.isCancelled else { return false }
+        switch self {
+        case .account(let owner): return model.accountLifetime.accepts(owner)
+        case .fixture(let owner): return model.isFixture && model.accountLifetime.accepts(owner)
+        case .publicPicture(let identity, let state):
+            return model.credentials == nil && !model.isFixture
+                && identity == ObjectIdentifier(model) && state == model.accountLifetime.state
+        case .unavailable: return false
+        }
+    }
+
+    @MainActor
+    func allowsPrivate(_ model: AppModel) -> Bool {
+        switch self {
+        case .account, .fixture: return allowsView(model)
+        case .publicPicture, .unavailable: return false
+        }
+    }
+
+    @MainActor
+    func allowsReading(_ item: MediaItem, _ model: AppModel) -> Bool {
+        guard allowsView(model) else { return false }
+        if case .publicPicture = self { return item.pictureURL != nil }
+        return true
+    }
+
+
+}
+
 // MARK: - Viewer
 
 struct MediaViewer: View {
@@ -198,6 +258,9 @@ struct MediaViewer: View {
     var openForward = false
     /// The Library row's "Save": open and download at once (Photos / share sheet).
     var openDownload = false
+    /// Supplied by a rendered chat/library owner; nil captures this standalone viewer once.
+    var origin: MediaOrigin? = nil
+    @State private var capturedOrigin: MediaOrigin?
 
     /// Fades the chrome and backdrop while a swipe-down is in flight (0…1).
     @State private var dismissProgress: CGFloat = 0
@@ -210,45 +273,51 @@ struct MediaViewer: View {
     private var canAct: Bool { item?.blobRef.map { !$0.hasPrefix("local:") } ?? false }
 
     var body: some View {
+        let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
         ZStack {
-            Color.black.opacity(1 - Double(dismissProgress) * 0.65).ignoresSafeArea()
+            Color.black.opacity(max(0, 1 - Double(dismissProgress) * 0.65)).ignoresSafeArea()
             if album.count > 1 {
                 TabView(selection: $index) {
                     ForEach(Array(album.enumerated()), id: \.element.id) { i, item in
-                        page(item).tag(i)
+                        page(item, origin: origin).tag(i)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .ignoresSafeArea()
             } else if let item {
-                page(item).ignoresSafeArea()
+                page(item, origin: origin).ignoresSafeArea()
             }
         }
         // Overlays sit above the UIKit page TabView (which can punch through a
         // ZStack sibling and eat the top × hits — feedback ABUo19aGqPpSnnw4Ha6F6H0).
         .overlay(alignment: .top) {
-            topBar.opacity(1 - Double(dismissProgress))
+            topBar(origin: origin).opacity(1 - Double(dismissProgress))
         }
         .overlay(alignment: .bottom) {
-            bottomBar.opacity(1 - Double(dismissProgress))
+            bottomBar(origin: origin).opacity(1 - Double(dismissProgress))
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
+        // The cover itself is clear, so the black layer above fades to the chat during the dismiss drag.
+        .presentationBackground(.clear)
         .onAppear {
-            if openForward { showForward = true }
-            if openDownload { Task { await download() } }
+            if capturedOrigin == nil { capturedOrigin = origin }
+            guard origin.allowsView(model) else { return }
+            if openForward && origin.allowsPrivate(model) { showForward = true }
+            if openDownload { Task { await download(origin: origin) } }
             #if DEBUG
             if let ms = DebugHooks.viewerCloseMs {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { close() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { close(origin: origin) }
             }
             #endif
         }
         .sheet(isPresented: $showForward) {
             if let item {
-                ForwardSheet(fromName: item.by, attachmentNote: true) { target in
+                ForwardSheet(fromName: item.by, attachmentNote: true, origin: origin) { target in
+                    guard origin.allowsPrivate(model) else { return }
                     showForward = false
                     model.forward(item, to: target)
-                    flash("Forwarded to \(target.title)")
+                    flash("Forwarded to \(target.title)", origin: origin)
                 }
                 .environmentObject(model)
                 .environment(\.theme, theme)
@@ -257,34 +326,35 @@ struct MediaViewer: View {
             }
         }
         .sheet(item: $shareURL) { file in
-            ActivityView(items: [file.url])
+            if origin.allowsPrivate(model) { ActivityView(items: [file.url]) }
         }
-        .accessibilityAction(.escape, close)
+        .accessibilityAction(.escape) { close(origin: origin) }
     }
 
     /// Dismiss the cover: clear the caller's item binding and the environment dismiss.
-    private func close() {
+    private func close(origin: MediaOrigin) {
+        guard origin.allowsView(model) else { return }
         onClose()
         dismiss()
     }
 
     @ViewBuilder
-    private func page(_ item: MediaItem) -> some View {
+    private func page(_ item: MediaItem, origin: MediaOrigin) -> some View {
         switch item.kind {
         case .image:
-            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: close)
+            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: { close(origin: origin) }, origin: origin)
         case .video:
-            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: close)
+            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: { close(origin: origin) }, origin: origin)
         case .file:
-            FilePage(item: item, dismissProgress: $dismissProgress, onClose: close)
+            FilePage(item: item, dismissProgress: $dismissProgress, onClose: { close(origin: origin) }, origin: origin)
         }
     }
 
     // ----- top bar, pills, dots ----------------------------------------------
 
-    private var topBar: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Button(action: close) {
+    private func topBar(origin: MediaOrigin) -> some View {
+        return HStack(alignment: .center, spacing: 12) {
+            Button(action: { close(origin: origin) }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
@@ -327,8 +397,8 @@ struct MediaViewer: View {
         .padding(.bottom, 4)
     }
 
-    private var bottomBar: some View {
-        VStack(spacing: 0) {
+    private func bottomBar(origin: MediaOrigin) -> some View {
+        return VStack(spacing: 0) {
             if let toast {
                 Text(toast)
                     .font(theme.font(13, weight: .medium))
@@ -338,58 +408,85 @@ struct MediaViewer: View {
                     .padding(.bottom, 10)
                     .transition(.opacity)
             }
-            if album.count > 1 {
+            // iMessage's dots: the pictures sent together with this one, while paging still
+            // runs through the whole chat. One dot per picture of the chat was a row of
+            // hundreds running off both edges under "349 of 349".
+            if let dots = Self.dots(album, at: index) {
                 HStack(spacing: 4) {
-                    ForEach(album.indices, id: \.self) { i in
-                        Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
+                    ForEach(0..<dots.count, id: \.self) { i in
+                        Circle().fill(Color.white.opacity(i == dots.current ? 1 : 0.35)).frame(width: 6, height: 6)
                     }
                 }
                 .modifier(ViewerTextShadow())
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
-            HStack(spacing: 12) {
+            HStack(spacing: 0) {
                 // Close beside Download / Forward — same as Mac; always exits even
                 // when swipe-down or the top × lose the gesture race with zoom/paging.
-                pill("Close", system: "xmark") { close() }
+                pill("Close", system: "xmark") { close(origin: origin) }
                 // A profile picture is not a chat attachment: Close only.
                 if item?.pictureURL == nil {
                     // The picture itself, original bytes under its own type
                     // ([feedback copy-image-messages-ios-2026-10-27]).
-                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
+                    pill("Copy", system: "doc.on.doc") { Task { await copy(origin: origin) } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
-                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                    pill("Download", system: "arrow.down.to.line") { Task { await download(origin: origin) } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
-                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                    pill("Forward", system: "arrowshape.turn.up.right") { if origin.allowsPrivate(model) { showForward = true } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
                 }
             }
+            .padding(.horizontal, 12)
             .padding(.bottom, 14)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
 
-    private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: system).font(.system(size: 14, weight: .semibold))
-                Text(label).font(theme.font(15, weight: .medium))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .frame(height: 38)
-            .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
-        }
-        .buttonStyle(.plain)
+    static let maxDots = 10
+
+    /// The run of `album` that came in the same message as `album[index]`: how many dots,
+    /// and which one is lit. Nil for a lone picture, or a run too long for dots to read.
+    static func dots(_ album: [MediaItem], at index: Int) -> (count: Int, current: Int)? {
+        guard album.indices.contains(index) else { return nil }
+        let message = album[index].messageId
+        let start = album[..<index].lastIndex { $0.messageId != message }.map { $0 + 1 } ?? 0
+        let end = album[index...].firstIndex { $0.messageId != message } ?? album.endIndex
+        let count = end - start
+        return (2...maxDots).contains(count) ? (count, index - start) : nil
     }
 
-    private func flash(_ text: String) {
+    /// A round glass button over its one-line label, one equal column each: four side-by-side
+    /// text pills were wider than a phone and wrapped mid-word ("Clos / e").
+    private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: system)
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 48, height: 48)
+                    .background(ViewerChromeBackground(shape: Circle(), interactive: true))
+                Text(label)
+                    .font(theme.font(12, weight: .medium))
+                    .lineLimit(1)
+                    .modifier(ViewerTextShadow())
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private func flash(_ text: String, origin: MediaOrigin) {
+        guard origin.allowsView(model) else { return }
         toast = text
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
+            guard origin.allowsView(model) else { return }
             if toast == text { toast = nil }
         }
     }
@@ -398,14 +495,16 @@ struct MediaViewer: View {
 
     /// The open picture or file on the pasteboard (`AppModel.copyAttachment`).
     @MainActor
-    private func copy() async {
-        guard let item, canAct else { return }
+    private func copy(origin: MediaOrigin) async {
+        guard origin.allowsPrivate(model), let item, canAct else { return }
         busy = true
-        defer { busy = false }
+        defer { if origin.allowsView(model) { busy = false } }
         let attachment = Attachment(name: item.name, mime: item.mime, blobRef: item.blobRef,
                                     kind: item.kind == .image ? "image" : item.kind == .video ? "video" : nil)
-        if await model.copyAttachment(attachment, slot: item.slot) {
-            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)")
+        let copied = await model.copyAttachment(attachment, slot: item.slot, isCurrent: { origin.allowsPrivate(model) })
+        guard origin.allowsPrivate(model) else { return }
+        if copied {
+            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)", origin: origin)
         }
     }
 
@@ -414,17 +513,20 @@ struct MediaViewer: View {
     /// Pictures and videos go to Photos (add-only permission); anything else
     /// opens the share sheet so it can be saved to Files or sent on.
     @MainActor
-    private func download() async {
-        guard let item, canAct else { return }
+    private func download(origin: MediaOrigin) async {
+        guard origin.allowsPrivate(model), let item, canAct else { return }
         busy = true
-        defer { busy = false }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
-            flash("Couldn't download \(item.name)")
+        defer { if origin.allowsView(model) { busy = false } }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) }) else {
+            guard origin.allowsPrivate(model) else { return }
+            flash("Couldn't download \(item.name)", origin: origin)
             return
         }
+        guard origin.allowsPrivate(model) else { return }
         switch item.kind {
         case .image, .video:
             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard origin.allowsPrivate(model) else { return }
             guard status == .authorized || status == .limited else {
                 // No Photos access: fall back to the share sheet (Save to Files is in it).
                 shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)
@@ -440,9 +542,11 @@ struct MediaViewer: View {
                         req.addResource(with: .video, fileURL: file, options: nil)
                     }
                 }
-                flash("Saved to Photos")
+                guard origin.allowsPrivate(model) else { return }
+                flash("Saved to Photos", origin: origin)
             } catch {
-                flash("Couldn't save to Photos")
+                guard origin.allowsPrivate(model) else { return }
+                flash("Couldn't save to Photos", origin: origin)
             }
         case .file:
             shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)
@@ -562,6 +666,8 @@ private struct DismissDrag: ViewModifier {
     let onClose: () -> Void
     var enabled: Bool = true
     @State private var offset: CGFloat = 0
+    /// The progress at which the viewer's backdrop (`1 - progress * 0.65`) is fully clear.
+    static let gone: CGFloat = 1 / 0.65
 
     func body(content: Content) -> some View {
         content
@@ -628,11 +734,25 @@ private struct VerticalDismissProbe: UIViewRepresentable {
             case .ended, .cancelled:
                 // `dragOffset` only advances on a clearly vertical pull, so past
                 // 120 pt is enough — do not re-test the final point (a slight
-                // sideways lift at the end used to cancel a good dismiss).
-                if dragOffset > 120 {
-                    onClose()
-                } else {
+                // sideways lift at the end used to cancel a good dismiss). A downward
+                // flick closes from a shorter pull.
+                let vy = pan.velocity(in: pan.view).y
+                if dragOffset > 120 || (pan.state == .ended && dragOffset > 24 && vy > 800) {
+                    // A swiped-away page leaves by itself: it keeps falling and the backdrop
+                    // clears in place, then the cover goes with no slide. The cover is clear
+                    // (the chat shows through the drag), so the system slide would show what
+                    // is left of the tint falling after the picture.
                     withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = pan.view?.bounds.height ?? 900
+                        progress.wrappedValue = DismissDrag.gone
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [onClose] in
+                        var cut = Transaction()
+                        cut.disablesAnimations = true
+                        withTransaction(cut) { onClose() }
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                         offset.wrappedValue = 0
                         progress.wrappedValue = 0
                     }
@@ -695,9 +815,11 @@ private struct VerticalDismissProbe: UIViewRepresentable {
             pan = gr
         }
 
-        /// First ancestor large enough to be the page (the probe is zero-sized).
+        /// First ancestor large enough to be the page, past the probe's own SwiftUI host:
+        /// that host fills the background behind the page and never takes a touch, so a
+        /// recognizer on it never begins.
         private static func pageHost(from view: UIView) -> UIView? {
-            var node: UIView? = view.superview
+            var node: UIView? = view.superview?.superview
             while let current = node {
                 if current.bounds.width > 100, current.bounds.height > 100 { return current }
                 node = current.superview
@@ -714,6 +836,7 @@ private struct ZoomableImagePage: View {
     let item: MediaItem
     @Binding var dismissProgress: CGFloat
     let onClose: () -> Void
+    let origin: MediaOrigin
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -732,16 +855,17 @@ private struct ZoomableImagePage: View {
         GeometryReader { geo in
             ZStack {
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    PlayingImage(image: image)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        // The picture is a UIImageView, which takes no touches by itself:
+                        // without a shape of its own the pinch and the double tap never begin.
+                        .contentShape(Rectangle())
                         .scaleEffect(scale)
                         .offset(offset)
-                        .gesture(magnify)
+                        .gesture(magnify(in: geo.size))
                         // Pan only while zoomed: an always-on DragGesture steals the
                         // album's horizontal page swipe at 1× and freezes it.
-                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
+                        .simultaneousGesture(pan(in: geo.size), including: scale > minScale + 0.01 ? .all : .subviews)
                         .onTapGesture(count: 2, perform: toggleZoom)
                         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
                         .accessibilityLabel("Image")
@@ -759,31 +883,48 @@ private struct ZoomableImagePage: View {
                 }
             }
         }
-        .task(id: item.blobRef ?? item.pictureURL) {
-            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
-                image = img
-            } else {
-                failed = true
-            }
+        .task(id: item.blobRef ?? item.pictureURL) { await load(origin: origin) }
+    }
+
+    @MainActor
+    private func load(origin: MediaOrigin) async {
+        guard origin.allowsReading(item, model) else { return }
+        let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
+        guard origin.allowsReading(item, model) else { return }
+        if let (data, _) = bytes, let img = AnimatedImageFrames.animatedImage(from: data) ?? UIImage(data: data) {
+            image = img
+        } else {
+            failed = true
         }
     }
 
-    private var magnify: some Gesture {
+    private func magnify(in size: CGSize) -> some Gesture {
         MagnifyGesture()
             .onChanged { v in scale = min(max(baseScale * v.magnification, minScale), maxScale) }
             .onEnded { _ in
                 baseScale = scale
-                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } }
+                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } } else { settle(in: size) }
             }
     }
 
-    private var pan: some Gesture {
+    /// The zoomed picture springs back so it still covers the viewport (or is centred on an
+    /// axis where it is smaller); the limit is the fitted picture, not the letterboxed frame.
+    private func settle(in size: CGSize) {
+        let fit = image.map { AVMakeRect(aspectRatio: $0.size, insideRect: CGRect(origin: .zero, size: size)).size } ?? size
+        let mx = max(0, (fit.width * scale - size.width) / 2), my = max(0, (fit.height * scale - size.height) / 2)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            offset = CGSize(width: min(max(offset.width, -mx), mx), height: min(max(offset.height, -my), my))
+        }
+        baseOffset = offset
+    }
+
+    private func pan(in size: CGSize) -> some Gesture {
         DragGesture()
             .onChanged { v in
                 guard scale > minScale else { return }
                 offset = CGSize(width: baseOffset.width + v.translation.width, height: baseOffset.height + v.translation.height)
             }
-            .onEnded { _ in if scale > minScale { baseOffset = offset } }
+            .onEnded { _ in if scale > minScale { settle(in: size) } }
     }
 
     private func toggleZoom() {
@@ -806,6 +947,7 @@ private struct VideoPage: View {
     let item: MediaItem
     @Binding var dismissProgress: CGFloat
     let onClose: () -> Void
+    let origin: MediaOrigin
 
     @State private var player: AVPlayer?
     @State private var loading = false
@@ -819,7 +961,7 @@ private struct VideoPage: View {
             if let player {
                 VideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
-                    .onAppear { player.play() }
+                    .onAppear { if origin.allowsReading(item, model) { player.play() } }
                     .onDisappear { player.pause() }
             } else {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -862,10 +1004,12 @@ private struct VideoPage: View {
 
     @MainActor
     private func load() async {
+        guard origin.allowsReading(item, model) else { return }
         loading = true
-        defer { loading = false }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
-              let file = MediaFetch.tempFile(data, name: item.name) else {
+        defer { if origin.allowsView(model) { loading = false } }
+        let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
+        guard origin.allowsReading(item, model) else { return }
+        guard let (data, _) = bytes, let file = MediaFetch.tempFile(data, name: item.name) else {
             failed = true
             return
         }
@@ -880,6 +1024,7 @@ private struct FilePage: View {
     let item: MediaItem
     @Binding var dismissProgress: CGFloat
     let onClose: () -> Void
+    let origin: MediaOrigin
 
     @State private var previewURL: URL?
     @State private var loading = false
@@ -930,16 +1075,21 @@ private struct FilePage: View {
 
     @MainActor
     private func open() async {
+        guard origin.allowsReading(item, model) else { return }
         if let previewURL {
             // `.quickLookPreview` only presents when the binding becomes non-nil.
             self.previewURL = nil
-            Task { @MainActor in self.previewURL = previewURL }
+            Task { @MainActor in
+                guard origin.allowsReading(item, model) else { return }
+                self.previewURL = previewURL
+            }
             return
         }
         loading = true
-        defer { loading = false }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
-              let file = MediaFetch.tempFile(data, name: item.name) else {
+        defer { if origin.allowsView(model) { loading = false } }
+        let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
+        guard origin.allowsReading(item, model) else { return }
+        guard let (data, _) = bytes, let file = MediaFetch.tempFile(data, name: item.name) else {
             failed = true
             return
         }
@@ -958,10 +1108,10 @@ struct ForwardSheet: View {
     let fromName: String
     /// Media forward: footer mentions the “Forwarded from …” line the attachment travels with.
     var attachmentNote = false
+    var origin: MediaOrigin? = nil
+    @State private var capturedOrigin: MediaOrigin?
     let onPick: (ForwardTarget) -> Void
     @State private var query = ""
-
-    private var targets: [ForwardTarget] { model.forwardTargets(matching: query) }
 
     private var footer: String {
         if attachmentNote {
@@ -971,6 +1121,8 @@ struct ForwardSheet: View {
     }
 
     var body: some View {
+        let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
+        let targets = origin.allowsPrivate(model) ? model.forwardTargets(matching: query) : []
         NavigationStack {
             List {
                 if targets.isEmpty {
@@ -979,7 +1131,7 @@ struct ForwardSheet: View {
                         .frame(maxWidth: .infinity).listRowBackground(Color.clear)
                 }
                 ForEach(targets) { target in
-                    Button { onPick(target) } label: {
+                    Button { if origin.allowsPrivate(model) { onPick(target) } } label: {
                         HStack(spacing: 14) {
                             avatar(target)
                             VStack(alignment: .leading, spacing: 2) {
@@ -1003,16 +1155,17 @@ struct ForwardSheet: View {
             .navigationTitle("Forward to")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { if origin.allowsView(model) { dismiss() } } }
             }
         }
+        .onAppear { if capturedOrigin == nil { capturedOrigin = origin } }
     }
 
     @ViewBuilder
     private func avatar(_ target: ForwardTarget) -> some View {
         switch target.kind {
         case .agent(let p):
-            AgentAvatar(project: p, theme: theme, size: 44, still: true)
+            AgentAvatar(project: p, theme: theme, size: 44)
         case .people(let c):
             if c.isGroup {
                 // The group's own picture first; the member stack only when it has none.
@@ -1031,7 +1184,8 @@ enum MediaFetch {
     /// The bytes of a viewer item: the relay blob with the device bearer, or —
     /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
     @MainActor
-    static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+    static func bytes(for item: MediaItem, model: AppModel, isCurrent: @MainActor () -> Bool) async -> (Data, String)? {
+        guard isCurrent() else { return nil }
         // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
         // tokened blob URL) — never with the device bearer, which must not reach another host.
         if let picture = item.pictureURL {
@@ -1089,10 +1243,13 @@ struct BlobImage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let item: MediaItem
+    var origin: MediaOrigin? = nil
+    @State private var capturedOrigin: MediaOrigin?
     @State private var image: UIImage?
     @State private var failed = false
 
     var body: some View {
+        let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
         ZStack {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
@@ -1102,12 +1259,19 @@ struct BlobImage: View {
                 ProgressView().tint(theme.muted)
             }
         }
-        .task(id: item.blobRef ?? item.pictureURL) {
-            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
-                image = img
-            } else {
-                failed = true
-            }
+        .onAppear { if capturedOrigin == nil { capturedOrigin = origin } }
+        .task(id: item.blobRef ?? item.pictureURL) { await load(origin: origin) }
+    }
+
+    @MainActor
+    private func load(origin: MediaOrigin) async {
+        guard origin.allowsReading(item, model) else { return }
+        let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
+        guard origin.allowsReading(item, model) else { return }
+        if let (data, _) = bytes, let img = UIImage(data: data) {
+            image = img
+        } else {
+            failed = true
         }
     }
 }
@@ -1324,11 +1488,16 @@ extension AppModel {
         }
         #endif
         guard let url = blobURL(projectId: item.slot, key: ref) else { return }
+        guard let work = accountWork() else { return }
+        let headers = authHeaders
         Task { @MainActor in
-            guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            guard accountLifetime.accepts(work.owner) else { return }
+            guard let (data, _) = await MediaFetch.data(url, headers: headers) else {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail(UserError.fromText("forward \(item.name)", "the file could not be fetched"))
                 return
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
             switch target.kind {
             case .people(let c):
@@ -1386,10 +1555,14 @@ extension AppModel {
             return
         }
         #endif
+        guard let work = accountWork() else { return }
         Task { @MainActor in
+            guard accountLifetime.accepts(work.owner) else { return }
             var pending: [PendingAttachment] = []
             for a in payload.attachments {
-                guard let data = await fetchForForward(a, slot: slot) else { continue }
+                let fetched = await fetchForForward(a, slot: slot, work: work)
+                guard accountLifetime.accepts(work.owner) else { return }
+                guard let data = fetched else { continue }
                 pending.append(PendingAttachment(name: a.name, mime: a.mime, data: data))
             }
             // A chart's fallback picture is written as its own part, linked to the chart,
@@ -1397,15 +1570,18 @@ extension AppModel {
             var extraParts: [[String: Any]] = []
             for c in payload.charts {
                 var fallbackRef: String?
-                if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
+                if let a = c.fallback, let data = await fetchForForward(a, slot: slot, work: work) {
                     do {
-                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data, work: work)
                     } catch {
+                        guard accountLifetime.accepts(work.owner) else { return }
                         fail("forward the chart's picture", error)
                     }
                 }
+                guard accountLifetime.accepts(work.owner) else { return }
                 extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
                 notice = Notice(text: "Couldn't forward the message")
                 return
@@ -1423,12 +1599,15 @@ extension AppModel {
 
     /// The bytes of one attachment being forwarded, from the source chat's slot; a
     /// miss is reported and the attachment is left out.
-    private func fetchForForward(_ a: Attachment, slot: String) async -> Data? {
+    private func fetchForForward(_ a: Attachment, slot: String, work: AccountWork) async -> Data? {
+        guard accountLifetime.accepts(work.owner) else { return nil }
         guard let ref = a.blobRef, let url = blobURL(projectId: slot, key: ref),
               let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             notice = Notice(text: "Couldn't forward \(a.name)")
             return nil
         }
+        guard accountLifetime.accepts(work.owner) else { return nil }
         return data
     }
 }

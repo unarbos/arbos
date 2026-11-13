@@ -5,7 +5,7 @@ import os
 import httpx
 
 PROXY = os.environ.get("ARBOS_MODEL_PROXY_URL", "http://127.0.0.1:7791/v1")
-TOKEN = os.environ.get("ARBOS_BOX_TOKEN", "")
+TOKEN = os.environ.get("ARBOS_MODEL_TOKEN") or os.environ.get("ARBOS_BOX_TOKEN", "")
 MODEL = os.environ.get("ARBOS_TALKING_MODEL", "anthropic/claude-haiku-5.5")
 
 
