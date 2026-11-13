@@ -3320,6 +3320,18 @@ impl Composer {
         self.attachments.iter().map(|a| a.path.clone()).collect()
     }
 
+    /// Which staged attachments decoded a thumbnail. A tile's shape follows
+    /// this, so a layout test reads it before it measures: a picture whose
+    /// bytes did not decode is a file chip, and the width says so without
+    /// saying why.
+    #[cfg(test)]
+    fn staged_previews(&self) -> Vec<bool> {
+        self.attachments
+            .iter()
+            .map(|a| a.preview.is_some())
+            .collect()
+    }
+
     /// ⌘V with files (Finder copy) or an image (screenshot, copied picture):
     /// staged exactly like a drop — files as attachment chips, images as
     /// tiles. Directories are skipped like everywhere else.
@@ -6553,12 +6565,16 @@ mod staged_tests {
 
     /// A scratch dir with two pictures (a wide one and a tall one, so Cover
     /// has something to crop) and one text file.
+    ///
+    /// The directory carries a fresh id, not a millisecond stamp. The four
+    /// tests of this module sort together, so a parallel run starts them at
+    /// once and they reach this line inside the same millisecond — measured at
+    /// 199 runs in 200. Sharing the directory means sharing
+    /// `profile-card.png`, and `save` truncates the file before it rewrites
+    /// it, so a neighbour's `image_preview_for` can read a half-written PNG,
+    /// fail to decode it and stage the picture as a file chip.
     fn fixtures() -> (PathBuf, Vec<PathBuf>) {
-        let dir = std::env::temp_dir().join(format!(
-            "arbos-staged-{}-{}",
-            std::process::id(),
-            crate::model::now_ms()
-        ));
+        let dir = std::env::temp_dir().join(format!("arbos-staged-{}", crate::model::new_id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let wide = dir.join("profile-card.png");
         image::RgbaImage::from_pixel(300, 160, image::Rgba([40, 120, 220, 255]))
@@ -6645,6 +6661,10 @@ mod staged_tests {
 
     fn staged(composer: &Entity<Composer>, vcx: &VisualTestContext) -> Vec<PathBuf> {
         composer.read_with(vcx, |c, _| c.staged_paths())
+    }
+
+    fn previews(composer: &Entity<Composer>, vcx: &VisualTestContext) -> Vec<bool> {
+        composer.read_with(vcx, |c, _| c.staged_previews())
     }
 
     fn text(composer: &Entity<Composer>, vcx: &VisualTestContext) -> String {
@@ -6768,6 +6788,15 @@ mod staged_tests {
         let (_dir, paths) = fixtures();
         stage(&composer, &paths, vcx);
         settle(&shell, vcx);
+
+        // The condition every width below rests on. A picture tile is square
+        // because its thumbnail decoded; without this line an undecoded
+        // fixture reports itself as a layout bug at the chip's width.
+        assert_eq!(
+            previews(&composer, vcx),
+            vec![true, true, false],
+            "both pictures decoded a thumbnail and the text file has none"
+        );
 
         let strip = vcx
             .debug_bounds("composer-staged-strip")
