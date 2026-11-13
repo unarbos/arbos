@@ -430,14 +430,29 @@ struct ChatSession: View {
     /// messages also get a soft accent wash while the keyword is set
     /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
-        let q = searchText.trimmingCharacters(in: .whitespaces)
+        let q = Self.searchKeyword(searchText)
         guard showSearch, !q.isEmpty else { return rows }
-        return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+        return rows.filter { Self.searchMatches(m_text($0), keyword: q) }
+    }
+
+    /// The typed text as the filter compares it. Empty means no filter at all.
+    static func searchKeyword(_ typed: String) -> String { HomeSearch.fold(typed) }
+
+    /// Does one message body hold the keyword? Both halves go through the one fold the
+    /// app-wide search already uses on message bodies (`HomeSearch.fold`), so case,
+    /// diacritics and width fold on both sides: "canvas" finds "cánvas" and "cánvas"
+    /// finds "canvas". This site used to compare case alone and so found neither, while
+    /// the Mac's in-chat search, the Mac's app-wide search and this app's own app-wide
+    /// search all found both — one client disagreeing with itself
+    /// ([feedback iphone-chat-search-accent-folding-2026-11-05]). `ChatSearchFoldTests`
+    /// names the comparison that was here, and guards that it does not come back.
+    static func searchMatches(_ text: String, keyword: String) -> Bool {
+        keyword.isEmpty || HomeSearch.fold(text).contains(keyword)
     }
 
     /// True while Search-in-chat has a keyword: every filtered message is a hit.
     private var searchHitsActive: Bool {
-        showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+        showSearch && !Self.searchKeyword(searchText).isEmpty
     }
 
     /// What the transcript draws above its rows. At most one of these is in the lazy stack at a
