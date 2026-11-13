@@ -1,10 +1,44 @@
 name: Swift iOS 27 (advisory)
 
+# DISABLED SINCE 2026-10-31, AND NOT CURRENTLY RUNNING. GitHub holds this workflow in
+# `disabled_manually` state, so neither trigger below fires; its last run of any kind was
+# 2026-10-31T23:08Z. Nothing refuses on its absence — it is not a gate in scripts/merge/checks.sh —
+# so the iOS 27 coverage this file describes is NOT being obtained today, and has not been for the
+# whole time this notice has been missing from it.
+#
+# It has never had a trial longer than one day: all 53 of its lifetime runs ran on 2026-10-31, so
+# the lane was added, ran for a single day and was switched off the same day.
+#
+# Do not quote "8 of 53 succeeded" as a reliability figure. 39 of the 53 were cancelled rather
+# than judged, and most of those cancellations are this file's own doing: the concurrency block
+# below sets `cancel-in-progress: true` per ref, so every fresh push to a branch supersedes that
+# branch's running advisory. 23 of the 39 are exactly that — a newer run on the same ref was
+# created 1 to 61 seconds before the old one died. By design, and benign. So the raw ratio mostly
+# measures how often branches pushed, not whether this lane works.
+#
+# Of the runs that reached a verdict, 8 of 14 succeeded: 8 success against 6 failure. That is not
+# a clean record either.
+#
+# The remaining 16 cancellations are unaccounted for, and 15 are two bursts on the evening the
+# lane went off: 8 within ten seconds of each other from 23:38:58Z, then 7 within ninety seconds
+# from 23:47:37Z, across fifteen branches, each killing a run that had been going between 31
+# minutes and 2h55m. Nothing joined those refs to supersede them. Why they died is not understood,
+# and that is the open question gating any re-enable — a low-priority item to drain, not a
+# decision waiting on anyone. Who switched the lane off is recorded nowhere: this repo is a User
+# account, so it has no audit log.
+#
+# `Swift core check` (.github/workflows/swift-core-check.yml) is the only live Swift gate on push
+# and pull request, and it runs on GitHub's hosted `macos-15`. Neither Swift check runs on the
+# self-hosted EC2 Mac: `arbos-mac` is the default runner for ios.yml's TestFlight lane and for
+# ios-capture.yml, and release.yml's Mac job uses it when `vars.ARBOS_MAC_RUNNER` selects it.
+#
+# What this lane covers when it is switched on, which is still accurate and still worth reading:
+#
 # The Swift core check's build and `fastlane test`, on GitHub's hosted `xcode-27` image (a public
 # preview): the toolchain and simulator testers' builds meet, which the macos-15 gate has neither of
 # (Xcode 26.3, iOS 26.2). Advisory only. It is its own workflow file so nothing in it can feed the
 # Swift core check's jobs or its verdict: a red, cancelled or queued run here says nothing about
-# that check. The EC2 Mac stays the real gate.
+# that check.
 
 on:
   push:
