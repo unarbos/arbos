@@ -34,6 +34,20 @@ on:
       - "apps/ios/Arbos/**"
       - ".improve/finish-checks/source-consumers/**"
       - ".github/workflows/swift-core-check.yml"
+  # A head whose tip commit is a merge of main has no run here: the merge's own first-parent diff
+  # is main's incoming content, which touches none of the paths above, so `push` never fires, and
+  # the `pull_request` arm then skips itself because an in-repo branch "already gets the push run".
+  # Both triggers defer to the other and the commit goes untested, presenting as skipping, not red.
+  # Dispatch is the way to ask for the verdict those two declined, and it needs no new trust from
+  # scripts/merge/checks.sh: gate_state already takes the first successful run on a head sha
+  # without asking which event produced it.
+  #
+  # scripts/release/gate-can-decide.sh exists because release-gate.yml's dispatch trigger was a
+  # fail-open, and its header names this workflow as the one not to copy that screen into. The
+  # reason is that this job needs no pull request: it checks out a commit, builds the xcframework
+  # and runs ArbosTests, so a dispatch run is a real verdict on a real tree, exactly as its push
+  # runs are. Nothing here reads github.event.pull_request, so there is no fallback to misland.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -260,3 +274,64 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # CONSTRAINT — this is the "matching constraint comment on the workflow side" that
+  # scripts/merge/checks.sh's gate_state header points at, and which was missing from this file.
+  #
+  # gate_state reads this gate's RUN conclusion rather than a named check row, and GitHub concludes
+  # a run `success` when every job is success-or-skipped. So a run conclusion equals a real verdict
+  # only while no job here can succeed without testing. Until now that held by accident of
+  # arithmetic: one job meant a skipped check produced a `skipped` run, which gate_state does not
+  # read as a pass. The accident becomes a fail-open the moment this file gains a second job that
+  # can succeed while `check` did not — so the second job added here is the one that cannot, and
+  # that is the invariant anyone adding a third job has to preserve. Do not give this job
+  # `continue-on-error: true`, and do not add a job that always succeeds.
+  #
+  # TWO NARROWINGS from the `if: always()` checks.sh describes. Both only ever withhold a failure,
+  # never add a pass, so the invariant above survives them — but they are narrowings, and a third
+  # job added later has to respect what they leave open. See the requirement at the end.
+  #
+  # `!cancelled()` rather than `always()`. On main, 264 of this workflow's 428 runs concluded
+  # `cancelled` against 87 failed and 77 passed, because a queued run in a concurrency group is
+  # evicted when the next is created — documented at scripts/merge/merge-window.sh:182-184 as "260
+  # of 264 cancelled runs, median gap one second", and the reason range_gate treats an intermediate
+  # red as a finding rather than a refusal. With always(), this job would run on each of those and
+  # fail it, turning 264 known-benign evictions on main into red. gate_state already reads
+  # `cancelled` as RED, so nothing is gained for the cost of quadrupling main's failure count, and
+  # an alarm that fires routinely is an alarm that gets reclassified.
+  #
+  # `check`'s own condition, copied verbatim. Bare always() would fail every in-repo pull request
+  # run, where `check` skips by design because the push twin covers it; #2448 can afford always()
+  # only because its `push-run` mirror supplies the twin's verdict in that case. So this job runs
+  # exactly when `check` was meant to run, and skips alongside it otherwise.
+  #
+  # REQUIREMENT ON ANY THIRD JOB. Because this job skips when `check` skips, a third job that
+  # succeeds while both are skipped would make the run conclude `success` with nothing tested —
+  # the fail-open, back again. So a third job must either skip whenever `check` skips, or fail
+  # closed itself. #2448's version does not need that caveat, which is one more reason it should
+  # replace this wholesale rather than be merged with it.
+  #
+  # #2448 carries the full version, with a `route` job and a `push-run` mirror that waits for the
+  # twin's verdict, and that is the one checks.sh's comments describe. This is the same guarantee
+  # reduced to main's current single-job shape, because the branch checks.sh tells its reader is
+  # unreachable is in fact reachable, and fires today.
+  verdict:
+    name: Swift verdict
+    needs: check
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          CHECK: ${{ needs.check.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHECK" == success ]]; then
+            echo "build-xcframework + fastlane test passed on ${GITHUB_SHA:0:9}."
+            exit 0
+          fi
+          echo "::error title=No passing Swift verdict::build-xcframework + fastlane test did not" \
+            "pass on ${GITHUB_SHA:0:9} (result: ${CHECK:-none}). Skipped and cancelled are not" \
+            "failures to GitHub, so this job fails in their place rather than let the run conclude" \
+            "without a verdict."
+          exit 1
