@@ -3706,7 +3706,7 @@ struct ChatSession: View {
         HStack(spacing: 8) {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
             Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .lineLimit(1).fixedSize()
+                .lineLimit(1)
             if let ref = quotedImageRef(r) {
                 ReplyThumb(account: account, projectId: projectId, blobRef: ref)
             }
@@ -3733,7 +3733,7 @@ struct ChatSession: View {
         HStack(spacing: 8) {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
             Text(r.label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .lineLimit(1).fixedSize()
+                .lineLimit(1)
             Text(Quote.firstWords(Quote.oneLine(r.text), maxChars: Theme.replyPreviewChars))
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
                 .lineLimit(1).truncationMode(.tail)

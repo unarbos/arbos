@@ -564,6 +564,11 @@ struct MediaViewer: View {
 /// Matte an opaque dark fill. Both have a 1 pt rim and a 1 pt lift, so the
 /// white glyphs read on white, dark and busy pictures alike.
 enum ViewerChrome {
+    /// Whether a released pull down closes the viewer: a real pull (24 pt) whose projected
+    /// end, the pull plus 0.15 s of its speed, is past 120 pt.
+    static func dragCloses(pull: CGFloat, velocity: CGFloat) -> Bool {
+        pull > 24 && pull + velocity * 0.15 > 120
+    }
     /// Black over the glass: what keeps a white picture from showing through.
     static let glassPlate: Double = 0.6
     /// White over the plate (the round-button wash).
@@ -732,12 +737,13 @@ private struct VerticalDismissProbe: UIViewRepresentable {
                 offset.wrappedValue = t.y
                 progress.wrappedValue = min(1, t.y / 400)
             case .ended, .cancelled:
-                // `dragOffset` only advances on a clearly vertical pull, so past
-                // 120 pt is enough — do not re-test the final point (a slight
-                // sideways lift at the end used to cancel a good dismiss). A downward
-                // flick closes from a shorter pull.
+                // Closes on where the pull is heading, not where it has been: the pull plus
+                // 0.15 s of its speed past 120 pt. A flick closes from a short pull, a pull
+                // taken back up stays, and a cancelled pan never closes. `dragOffset` only
+                // advances on a clearly vertical pull, so the final point's direction is not
+                // re-tested (a slight sideways lift at the end used to cancel a good dismiss).
                 let vy = pan.velocity(in: pan.view).y
-                if dragOffset > 120 || (pan.state == .ended && dragOffset > 24 && vy > 800) {
+                if pan.state == .ended, ViewerChrome.dragCloses(pull: dragOffset, velocity: vy) {
                     // A swiped-away page leaves by itself: it keeps falling and the backdrop
                     // clears in place, then the cover goes with no slide. The cover is clear
                     // (the chat shows through the drag), so the system slide would show what

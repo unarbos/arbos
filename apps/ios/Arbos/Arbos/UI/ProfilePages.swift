@@ -1129,7 +1129,7 @@ struct UserProfileView: View {
                     PaneRow(
                         leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
                         title: g.title,
-                        subtitle: "\(g.humans.count) members",
+                        subtitle: "\(g.humans.count) member\(g.humans.count == 1 ? "" : "s")",
                         chevron: true
                     )
                 }

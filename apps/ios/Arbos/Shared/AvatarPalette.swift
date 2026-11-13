@@ -60,8 +60,10 @@ enum AvatarPalette {
     /// uppercase; the first grapheme for non-Latin scripts.
     static func initials(name: String?, handle: String?) -> String {
         let n = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = n.split(whereSeparator: { $0 == " " || $0 == "-" }).filter { !$0.isEmpty }
-        let letters = words.prefix(2).compactMap { $0.first }.map { String($0) }
+        // The Mac's rule (`avatars::initials`): words split on space, - _ · /, and a word gives
+        // its first letter or digit, so an emoji, quote or bracket in front is stepped over.
+        let letters = n.split(whereSeparator: { $0.isWhitespace || "-_·/".contains($0) })
+            .compactMap { $0.first(where: { $0.isLetter || $0.isNumber }) }.prefix(2).map { String($0) }
         if !letters.isEmpty { return letters.joined().uppercased() }
         let h = (handle ?? "").trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         if let f = h.first { return String(f).uppercased() }

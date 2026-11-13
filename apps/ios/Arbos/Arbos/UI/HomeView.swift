@@ -1035,6 +1035,8 @@ struct HomeView: View {
         if let week = cal.date(byAdding: .day, value: -6, to: Date()), date > week {
             return date.formatted(.dateTime.weekday(.wide))
         }
+        // Another year's date says so: "Sep 3" would read as this September.
+        guard cal.isDate(date, equalTo: Date(), toGranularity: .year) else { return date.formatted(date: .numeric, time: .omitted) }
         return date.formatted(.dateTime.month(.abbreviated).day())
     }
 }

@@ -40,4 +40,12 @@ final class ViewerChromeTests: XCTestCase {
     func testRimReadsOnABlackPicture() {
         XCTAssertGreaterThan(ViewerChrome.rimAlpha, ViewerChrome.glassWash)
     }
+
+    func testAPullClosesOnWhereItIsHeading() {
+        XCTAssertTrue(ViewerChrome.dragCloses(pull: 130, velocity: 0), "a long pull, let go")
+        XCTAssertTrue(ViewerChrome.dragCloses(pull: 30, velocity: 800), "a short flick down")
+        XCTAssertFalse(ViewerChrome.dragCloses(pull: 200, velocity: -700), "pulled far, then taken back up")
+        XCTAssertFalse(ViewerChrome.dragCloses(pull: 60, velocity: 0), "a short pull, let go")
+        XCTAssertFalse(ViewerChrome.dragCloses(pull: 10, velocity: 3000), "a twitch is not a pull")
+    }
 }
