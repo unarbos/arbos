@@ -85,3 +85,85 @@ final class OptimisticSendTests: XCTestCase {
         XCTAssertTrue(own.pending, "still pending: no ACK arrived")
     }
 }
+
+/// The reaction chip is on the bubble the moment `toggleReaction` returns — before the
+/// doc's change event, the coalesced re-read or the relay ACK
+/// ([feedback iphone-reaction-instant-2026-11-13]; TestFlight
+/// app-01M7B901FGH3KDZPX8T7DYXPPZ / #3048). Mirrors `OptimisticSendTests` for reactions.
+@MainActor
+final class OptimisticReactionTests: XCTestCase {
+    private func fixtureModel(chatId: String) -> AppModel {
+        let model = AppModel()
+        model.loadFixture()
+        model.fixtureAttachDoc(chatId: chatId)
+        return model
+    }
+
+    private func rows(_ model: AppModel, _ chatId: String) -> [Row] {
+        Transcript.rows(model.messages(of: chatId), projectId: "\(peopleSlot):\(chatId)", me: model.myUserId,
+                        people: true, multiParty: true)
+    }
+
+    private func reactionOn(_ model: AppModel, chatId: String, messageId: Id, emoji: String) -> MessageReaction? {
+        model.messages(of: chatId).first { $0.id == messageId }?
+            .reactions.first { MessageReaction.sameBase($0.emoji, emoji) }
+    }
+
+    func testAddPaintsTheChipBeforeReturning() throws {
+        let chatId = "fx-group-launch"
+        let model = fixtureModel(chatId: chatId)
+        let target = try XCTUnwrap(model.messages(of: chatId).first { $0.role == .user })
+        let me = try XCTUnwrap(model.myUserId)
+        let version = model.messagesVersion[chatId] ?? 0
+        XCTAssertNil(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "🔥"),
+                     "start with no fire on this row")
+
+        model.toggleReaction(chatId: chatId, messageId: target.id, emoji: "🔥")
+
+        // No run-loop turn in between: this is what the view sees in the same frame as the tap.
+        let chip = try XCTUnwrap(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "🔥"))
+        XCTAssertEqual(chip.emoji, "🔥")
+        XCTAssertEqual(chip.senders, [me])
+        XCTAssertGreaterThan(model.messagesVersion[chatId] ?? 0, version, "the view's change key moved with the paint")
+
+        let built = rows(model, chatId)
+        let row = try XCTUnwrap(built.first { $0.messageId == target.id && !$0.reactions.isEmpty })
+        XCTAssertEqual(row.reactions.map(\.emoji), ["🔥"])
+        XCTAssertEqual(row.reactions.first?.senders, [me])
+    }
+
+    func testRemovePaintsTheChipAwayBeforeReturning() throws {
+        let chatId = "fx-group-launch"
+        let model = fixtureModel(chatId: chatId)
+        let target = try XCTUnwrap(model.messages(of: chatId).first { $0.role == .user })
+        let me = try XCTUnwrap(model.myUserId)
+
+        model.toggleReaction(chatId: chatId, messageId: target.id, emoji: "❤️")
+        XCTAssertEqual(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "❤️")?.senders, [me])
+
+        model.toggleReaction(chatId: chatId, messageId: target.id, emoji: "❤️")
+
+        XCTAssertNil(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "❤️"),
+                     "the chip is gone in the same turn as the second tap")
+        let built = rows(model, chatId)
+        let row = built.first { $0.messageId == target.id }
+        XCTAssertEqual(row?.reactions.contains { MessageReaction.sameBase($0.emoji, "❤️") } ?? false, false)
+    }
+
+    func testPaintedReactionSurvivesTheDocRead() throws {
+        let chatId = "fx-group-launch"
+        let model = fixtureModel(chatId: chatId)
+        let target = try XCTUnwrap(model.messages(of: chatId).first { $0.role == .user })
+        let me = try XCTUnwrap(model.myUserId)
+
+        model.toggleReaction(chatId: chatId, messageId: target.id, emoji: "💯")
+        XCTAssertEqual(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "💯")?.senders, [me])
+
+        // Let the doc's change event, the coalesce window and the re-read run.
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        let chip = try XCTUnwrap(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "💯"))
+        XCTAssertEqual(chip.senders, [me], "the re-read keeps my reaction; it does not drop the paint")
+    }
+}
