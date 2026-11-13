@@ -4596,6 +4596,14 @@ pub fn build_rows_with_cache(
         let rows_before_message = rows.len();
         match message.role {
             Role::User => {
+                // A hidden row draws nothing, the same as the assistant arm below. Until now
+                // only that arm looked, because the only hidden rows were a background job's.
+                // A routine's wake is the second kind: the prompt has to be in the doc for the
+                // turn to reply to, and nobody needs to read it every minute. iOS checks this
+                // once for every role; here the two arms that can carry one check it.
+                if message.hidden {
+                    continue;
+                }
                 // Secret hand-off: a redacted row carries one `secret_redacted` part and no
                 // text; it draws as the ghost bubble ("Secret saved as NAME").
                 let ghost = message.parts.iter().find_map(|p| match p {
