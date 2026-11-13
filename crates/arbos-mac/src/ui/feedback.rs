@@ -376,6 +376,7 @@ impl FeedbackSheet {
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.76))
         } else {
             highlight::washed(
                 base.text_color(theme.text)

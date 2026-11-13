@@ -139,10 +139,12 @@ fn tile(
             .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
+            // A long name ends in an ellipsis inside the tile, not cut at its edge.
+            .max_w(gpui::relative(0.85))
             .when(p.muted, |el| {
                 el.child(sf_symbols::glyph("mic.slash", 12.0, theme.text_muted))
             })
-            .child(label),
+            .child(div().min_w_0().truncate().child(label)),
     )
 }
 
@@ -176,6 +178,7 @@ fn round_button(
                     theme.surface_2
                 })
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .child(sf_symbols::glyph(
                     glyph,
                     24.0,
@@ -639,6 +642,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .cursor_pointer()
             .bg(fill)
             .hover(|s| s.opacity(0.85))
+            .active(|s| s.opacity(0.7))
             .child(sf_symbols::glyph(glyph, 14.0, ink))
     };
     div()
@@ -814,6 +818,8 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .bg(Theme::with_alpha(gpui::black(), 0.55))
             .text_size(px(TEXT_TINY))
             .text_color(gpui::white())
+            .max_w(gpui::relative(0.85))
+            .truncate()
             .child(label),
     )
     .when_some(seeing, |el, agent| {
@@ -1041,6 +1047,7 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
                         .text_color(theme.text)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
+                        .active(|s| s.opacity(0.76))
                         .child(sf_symbols::glyph("phone.down.fill", 14.0, theme.text))
                         .child("Decline")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1063,6 +1070,7 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
                         .text_color(theme.bg)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
+                        .active(|s| s.opacity(0.76))
                         .child(sf_symbols::glyph("phone", 14.0, theme.bg))
                         .child("Accept")
                         .on_click(cx.listener(|this, _, _, cx| {

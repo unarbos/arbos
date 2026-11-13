@@ -1157,6 +1157,7 @@ impl SecretsPanel {
                             .text_color(theme.accent)
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.8))
+                            .active(|s| s.opacity(0.6))
                             .child("Replace…")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.replacing = true;
@@ -2178,6 +2179,7 @@ impl SecretsPanel {
                     .text_color(theme.accent)
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.8))
+                    .active(|s| s.opacity(0.6))
                     .child("Open 1password.com ›")
                     .on_click(|_, _, cx| {
                         cx.open_url("https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/");

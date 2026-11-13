@@ -282,6 +282,8 @@ fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui:
     div()
         .id(id)
         .flex_shrink_0()
+        // A long name must not take the text field's room in a narrow chat column.
+        .max_w(px(220.0))
         .h(px(metrics::CHIP_HEIGHT))
         .rounded_full()
         .pl(px(3.0))
@@ -300,7 +302,12 @@ fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui:
             metrics::CHIP_AVATAR,
             theme,
         ))
-        .child(format!("From {}", sender.name))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(format!("From {}", sender.name)),
+        )
 }
 
 /// The pinned sender: accent chip with a ✕ that unpins it.
