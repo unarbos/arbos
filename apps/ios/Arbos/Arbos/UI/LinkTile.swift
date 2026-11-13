@@ -202,6 +202,20 @@ enum LinkIconTone: Equatable {
         if mean > lightMarkMin { return .lightMark }
         return .neutral
     }
+
+    /// The fill a transparent mark needs so it does not vanish on this appearance, or `nil` when
+    /// the picture is fine on whatever it already sits on.
+    ///
+    /// Shared with the bubbles' inline icon, which has no tile under it: it takes a fill only in
+    /// these two cases, so an icon that was already legible is left alone and the inline site
+    /// never has to answer what a tile would be against a user bubble.
+    func flipFill(dark: Bool) -> Color? {
+        switch self {
+        case .darkMark where dark: return Color(hex: "#ECECEE")
+        case .lightMark where !dark: return Color(hex: "#2C2C2E")
+        default: return nil
+        }
+    }
 }
 
 /// The tile: a rounded square with the brand mark, the fetched icon or the host's
@@ -249,8 +263,7 @@ struct LinkTile: View {
     /// mark would vanish on it.
     static func fill(_ kind: Kind, theme: Theme) -> Color {
         switch kind {
-        case .picture(.darkMark) where theme.isDark: return Color(hex: "#ECECEE")!
-        case .picture(.lightMark) where !theme.isDark: return Color(hex: "#2C2C2E")!
+        case .picture(let tone): return tone.flipFill(dark: theme.isDark) ?? theme.field
         default: return theme.field
         }
     }
