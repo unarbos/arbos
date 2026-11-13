@@ -86,4 +86,47 @@ final class MessageActionsHitAreaTests: XCTestCase {
         // A cell is wider than the emoji glyph it holds: the margin is tappable too.
         XCTAssertGreaterThan(ReactionCapsule.cell, ReactionCapsule.emojiSize)
     }
+
+    // MARK: A hold that slides to its choice
+
+    /// A point over a capsule cell or a menu row is that cell or row; the band above Delete
+    /// and the space between the two groups are nothing.
+    func testAHeldFingerIsOverTheCellOrRowUnderIt() {
+        let rows = MessageActionsMenuRows.compute(items: [.copy, .reply, .delete], width: 250)
+        let capsule = CGPoint(x: 16, y: 100), menu = CGPoint(x: 16, y: 300)
+        func at(_ x: CGFloat, _ y: CGFloat) -> MessageActionsTarget? {
+            MessageActionsTarget.at(CGPoint(x: x, y: y), capsule: capsule, menu: menu, rows: rows)
+        }
+        let cell = ReactionCapsule.cell, pad = ReactionCapsule.padding
+        XCTAssertEqual(at(16 + pad + 1, 100 + pad + 1), .cell(0))
+        XCTAssertEqual(at(16 + pad + cell * CGFloat(ReactionCapsule.palette.count) + 1, 100 + pad + 1),
+                       .cell(ReactionCapsule.palette.count), "the add-emoji control is the last cell")
+        XCTAssertEqual(at(20, 301), .row(.copy))
+        XCTAssertEqual(at(265, 300 + MessageActionsMenuRows.rowHeight + 1), .row(.reply))
+        let deleteTop = 300 + 2 * MessageActionsMenuRows.rowHeight
+        XCTAssertNil(at(20, deleteTop + 1), "the band above Delete is not Delete")
+        XCTAssertEqual(at(20, deleteTop + MessageActionsMenuRows.destructiveBand + 1), .row(.delete))
+        XCTAssertNil(at(20, 200), "between the capsule and the menu")
+        XCTAssertNil(at(300, 301), "right of the menu")
+    }
+
+    /// A finger that never left where it pressed chooses nothing when it lifts; one that
+    /// slid away lifts where it is.
+    @MainActor
+    func testAHoldChoosesOnlyAfterItSlides() {
+        let finger = HeldFinger()
+        finger.press(at: CGPoint(x: 100, y: 100))
+        finger.move(to: CGPoint(x: 104, y: 103))
+        XCTAssertNil(finger.point, "still holding")
+        finger.lift()
+        XCTAssertNil(finger.lifted, "a hold that lifts in place leaves the menu open")
+
+        finger.press(at: CGPoint(x: 100, y: 100))
+        finger.move(to: CGPoint(x: 100, y: 140))
+        finger.move(to: CGPoint(x: 101, y: 101))
+        XCTAssertEqual(finger.point, CGPoint(x: 101, y: 101), "once it has slid it is followed, even back")
+        finger.lift()
+        XCTAssertEqual(finger.lifted, CGPoint(x: 101, y: 101))
+        XCTAssertFalse(finger.isDown)
+    }
 }
