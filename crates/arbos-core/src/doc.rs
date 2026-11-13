@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalRequest, ApprovalState};
 use crate::ids::{now_ms, ulid};
+use crate::poll::Poll;
 use crate::widget::QuestionState;
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -100,6 +101,10 @@ pub struct MessageChanges {
     /// diff name the wrong message as deleted. Applying the delta is the only exact way, and
     /// the walk that reports the changes is already doing it.
     pub ids_after: Vec<MessageIdentity>,
+    /// `(message id, its poll fields after the update)` for each message the update inserted
+    /// with a poll on it, and each one it wrote a poll field on: [`POLL_FIELD`] and the
+    /// [`POLL_VOTE_PREFIX`] keys. [`Self::rewritten`] says which of them were written.
+    pub polls: Vec<(String, Value)>,
     /// The diff could not be read, so nothing above is known to be complete. A caller deciding
     /// authorisation must treat this as "anything may have changed".
     pub unreadable: bool,
@@ -303,6 +308,63 @@ pub fn project_reactions(json: &mut Value) {
         }
     }
     obj.insert("reactions".into(), Value::Object(nested));
+}
+
+/// The message field a poll is stored in (`docs/polls.md`): one plain value, written with the
+/// message and never again.
+pub const POLL_FIELD: &str = "poll";
+
+/// Prefix of the message field holding one person's vote: `"vote|<sender>" → ["<option id>"]`.
+///
+/// Votes are fields on the message, not a nested map like `reactions`, because the relay's
+/// push guard sees which fields a push wrote on a message and nothing deeper. A vote stored
+/// here is one it can check the owner of.
+pub const POLL_VOTE_PREFIX: &str = "vote|";
+
+fn is_poll_key(key: &str) -> bool {
+    key == POLL_FIELD || key.starts_with(POLL_VOTE_PREFIX)
+}
+
+/// The poll fields of a message map, as a JSON object (empty when it has none).
+fn poll_fields(m: &LoroMap) -> Value {
+    let mut out = serde_json::Map::new();
+    if let LoroValue::Map(fields) = m.get_value() {
+        for (key, value) in fields.iter().filter(|(k, _)| is_poll_key(k)) {
+            out.insert(key.clone(), lv_to_json(value));
+        }
+    }
+    Value::Object(out)
+}
+
+/// Reader projection: a message carrying a valid poll gains a `poll` part with the tally
+/// folded in — `votes: { "<option id>": ["<sender>", …] }` — after its text part, which stays
+/// as the plain form for previews, search and copy. An invalid poll is left alone and the
+/// message reads as its text. Call before deserializing a message row.
+pub fn project_poll(json: &mut Value) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    let Some(poll) = obj.get(POLL_FIELD).and_then(Poll::parse) else {
+        return;
+    };
+    let mut votes = serde_json::Map::new();
+    for (key, value) in obj.iter() {
+        let Some(sender) = key.strip_prefix(POLL_VOTE_PREFIX) else {
+            continue;
+        };
+        for option in poll.selections(value).unwrap_or_default() {
+            if let Value::Array(who) = votes.entry(option).or_insert_with(|| Value::Array(vec![])) {
+                who.push(Value::from(sender));
+            }
+        }
+    }
+    let mut part = serde_json::to_value(&poll).unwrap_or_default();
+    part["id"] = Value::from("poll");
+    part["kind"] = Value::from("poll");
+    part["votes"] = Value::Object(votes);
+    if let Some(Value::Array(parts)) = obj.get_mut("parts") {
+        parts.push(part);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,6 +934,7 @@ impl ChatDoc {
         let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
         project_hidden_parts(&mut json);
         project_reactions(&mut json);
+        project_poll(&mut json);
         Some(json)
     }
 
@@ -1104,6 +1167,50 @@ impl ChatDoc {
             }
         }
         Ok(())
+    }
+
+    /// Client write: a poll (`docs/polls.md`). A user row whose text part is the poll's plain
+    /// form — all a build without polls shows — with the poll itself in [`POLL_FIELD`].
+    /// Does not commit.
+    pub fn append_poll_message(
+        &self,
+        msg_id: &str,
+        poll: &Poll,
+        device_id: &str,
+        opts: &UserMessageOpts,
+    ) -> CoreResult<()> {
+        self.append_user_message(msg_id, &poll.fallback_text(), device_id, opts)?;
+        let m = self
+            .find_message(msg_id)
+            .ok_or_else(|| CoreError::msg("poll message missing"))?;
+        let value = serde_json::to_value(poll).map_err(|e| CoreError::msg(e.to_string()))?;
+        loro_err(m.insert(POLL_FIELD, json_to_lv(&value)))
+    }
+
+    /// Client write: `sender`'s vote on a poll, replacing any earlier one; empty retracts.
+    /// One key per person, last write wins. Does not commit. No-op when the message is
+    /// missing; an error when it holds no poll or the selection is not one the poll allows.
+    pub fn set_poll_vote(
+        &self,
+        msg_id: &str,
+        sender: &str,
+        selections: &[String],
+    ) -> CoreResult<()> {
+        let Some(m) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        let picked = Value::from(selections);
+        let allowed = poll_fields(&m)
+            .get(POLL_FIELD)
+            .and_then(Poll::parse)
+            .is_some_and(|poll| poll.selections(&picked).is_some());
+        if sender.is_empty() || !allowed {
+            return Err(CoreError::msg("not a vote this poll allows"));
+        }
+        loro_err(m.insert(
+            format!("{POLL_VOTE_PREFIX}{sender}").as_str(),
+            json_to_lv(&picked),
+        ))
     }
 
     /// Client write: remove one message from the shared `messages` list (delete for
@@ -2139,6 +2246,10 @@ impl ChatDoc {
                                         m.and_then(|m| map_str(m, "sender")),
                                     ));
                                     if let (Some(id), Some(m)) = (id, m) {
+                                        let poll = poll_fields(m);
+                                        if poll.as_object().is_some_and(|o| !o.is_empty()) {
+                                            out.polls.push((id.clone(), poll));
+                                        }
                                         out.inserted.push((id, map_str(m, "sender")));
                                     }
                                 }
@@ -2151,7 +2262,10 @@ impl ChatDoc {
                 Diff::Map(delta) => {
                     // A map somewhere in the doc. It is a message only if its own `id` is one
                     // of the ids the list held at `from`; parts carry an `id` too.
-                    let Some(id) = self.doc.try_get_map(cid).and_then(|m| map_str(&m, "id")) else {
+                    let Some(m) = self.doc.try_get_map(cid) else {
+                        continue;
+                    };
+                    let Some(id) = map_str(&m, "id") else {
                         continue;
                     };
                     if !before_ids.iter().any(|(b, _)| *b == id) {
@@ -2159,6 +2273,9 @@ impl ChatDoc {
                     }
                     for key in delta.updated.keys() {
                         out.rewritten.push((id.clone(), key.to_string()));
+                    }
+                    if delta.updated.keys().any(|k| is_poll_key(k)) {
+                        out.polls.push((id, poll_fields(&m)));
                     }
                 }
                 _ => {}
@@ -2517,6 +2634,7 @@ mod secret_redaction_tests {
 #[cfg(test)]
 mod message_change_tests {
     use super::*;
+    use serde_json::json;
 
     fn with(sender: &str) -> UserMessageOpts {
         UserMessageOpts {
@@ -2564,6 +2682,106 @@ mod message_change_tests {
         assert!(changes.inserted.is_empty());
         assert!(changes.rewritten.is_empty());
         assert!(!changes.unreadable);
+    }
+
+    /// A poll and its votes are fields on the message, so the diff names them: the poll with
+    /// the row that carries it, each vote as a field written on an existing row, both with the
+    /// values the caller needs to judge them.
+    #[test]
+    fn a_poll_and_each_vote_are_reported_with_their_values() {
+        let (doc, ids) = seeded();
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let before = doc.frontiers();
+        doc.append_poll_message("p1", &poll, "dev", &with("user:alice"))
+            .unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.polls,
+            [("p1".to_owned(), json!({ "poll": poll }))],
+            "the poll arrives with its row"
+        );
+        assert!(changes.rewritten.is_empty());
+
+        let ids = changes.ids_after;
+        let before = doc.frontiers();
+        doc.set_poll_vote("p1", "user:bob", &["2".to_owned()])
+            .unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.rewritten,
+            [("p1".to_owned(), "vote|user:bob".to_owned())]
+        );
+        assert_eq!(
+            changes.polls,
+            [(
+                "p1".to_owned(),
+                json!({ "poll": poll, "vote|user:bob": ["2"] })
+            )]
+        );
+
+        // The writer refuses what the poll does not allow, and a row without a poll.
+        assert!(doc
+            .set_poll_vote("p1", "user:bob", &["1".into(), "2".into()])
+            .is_err());
+        assert!(doc.set_poll_vote("p1", "user:bob", &["9".into()]).is_err());
+        assert!(doc.set_poll_vote("m1", "user:bob", &["1".into()]).is_err());
+        assert!(doc.set_poll_vote("gone", "user:bob", &["1".into()]).is_ok());
+    }
+
+    /// Readers get the design's `poll` part with the tally folded in. One key per person, so a
+    /// changed vote replaces the old one, a retraction empties it, and two replicas that voted
+    /// apart agree once merged.
+    #[test]
+    fn a_poll_projects_as_a_part_with_the_latest_vote_per_person() {
+        let mut a = ChatDoc::new(Some(10), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        a.append_poll_message("p1", &poll, "dev:a", &with("user:alice"))
+            .unwrap();
+        a.commit_now();
+        let mut b = ChatDoc::new(Some(20), false);
+        b.import(&a.snapshot()).unwrap();
+
+        let (base_a, base_b) = (a.oplog_vv(), b.oplog_vv());
+        a.set_poll_vote("p1", "user:alice", &["1".into()]).unwrap();
+        a.set_poll_vote("p1", "user:alice", &["2".into()]).unwrap();
+        a.set_poll_vote("p1", "user:carol", &["1".into()]).unwrap();
+        a.set_poll_vote("p1", "user:carol", &[]).unwrap();
+        a.commit_now();
+        b.set_poll_vote("p1", "user:bob", &["2".into()]).unwrap();
+        b.commit_now();
+        let (upd_a, upd_b) = (
+            a.export_updates_since(&base_a),
+            b.export_updates_since(&base_b),
+        );
+        a.import(&upd_b).unwrap();
+        b.import(&upd_a).unwrap();
+
+        for peer in [&a, &b] {
+            let row = &peer.projected_rows()[0];
+            let parts = row["parts"].as_array().unwrap();
+            assert_eq!(parts[0]["kind"], "text");
+            assert_eq!(message_text(row), "Poll: Where?\n1. Lisbon\n2. Berlin");
+            assert_eq!(
+                parts[1],
+                json!({ "id": "poll", "kind": "poll", "question": "Where?", "max": 1,
+                    "options": [{ "id": "1", "label": "Lisbon" }, { "id": "2", "label": "Berlin" }],
+                    "votes": { "2": ["user:alice", "user:bob"] } })
+            );
+        }
+
+        // A poll that does not validate is not a poll: the row keeps only its text.
+        let mut row = json!({ "poll": { "question": "Q", "options": [], "max": 1 },
+            "parts": [{ "id": "t", "kind": "text", "text": "Poll: Q" }] });
+        let untouched = row.clone();
+        project_poll(&mut row);
+        assert_eq!(row, untouched);
+        // And a vote the poll does not allow counts for nothing.
+        let mut row = json!({ "poll": poll, "vote|user:x": ["9"], "vote|user:y": ["1", "2"],
+            "parts": [] });
+        project_poll(&mut row);
+        assert_eq!(row["parts"][0]["votes"], json!({}));
     }
 
     /// An insert reports the `sender` the writer put on the row, which is what lets the caller
