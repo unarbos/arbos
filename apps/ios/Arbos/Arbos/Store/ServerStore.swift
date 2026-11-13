@@ -904,6 +904,7 @@ extension AppModel {
         applyNativeRooms([:])
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
+        heldReactions = [:]
         channelAtStart = []
         channelLoading = []
         historyAsked = []
@@ -963,6 +964,10 @@ extension AppModel {
             ? Self.nativeMessages(rows, chatId: channelId, members: nativeMembers(channelId))
             : rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
         for i in decoded.indices { _ = fillChannelSender(&decoded[i]) }
+        if let me = myUserId, var held = heldReactions[channelId] {
+            Self.holdReactions(&decoded, held: &held, me: me, now: nowMs())
+            heldReactions[channelId] = held.isEmpty ? nil : held
+        }
         let ids = Set(decoded.map(\.id))
         let cutoff = nowMs() - 60_000
         for m in channelRows[channelId] ?? [] where !native && m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
@@ -1288,28 +1293,78 @@ extension AppModel {
         return String(decoding: try JSONSerialization.data(withJSONObject: part), as: UTF8.self)
     }
 
-    /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
-    /// arrives.
+    /// Flip my reaction on a native chat's row. The row changes at once and the homeserver's
+    /// event confirms it (`holdReactions`); a send that fails puts the row back.
     func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
         guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId,
               case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
         // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
         // Ceiling: one another app put on with a skin tone is not taken back from here.
         let key = MessageReaction.normalizeEmoji(emoji)
-        let mine = messages(of: chatId).first { $0.id == messageId }?.reactions
-            .contains { $0.emoji == key && $0.senders.contains(me) } ?? false
+        guard let on = holdReaction(chatId: chatId, messageId: messageId, emoji: key, me: me) else { return }
+        Haptics.pick()
         Task {
-            guard acceptsMatrix(owner), !Task.isCancelled,
-                  let event = await nativeEventId(client, room: room, messageId: messageId),
-                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
             do {
-                try await client.react(roomId: room, eventId: event, key: key, on: !mine)
+                // No event for the row (it is still being sent): nothing to react to.
+                guard let event = await nativeEventId(client, room: room, messageId: messageId) else {
+                    if acceptsMatrix(owner) { dropReaction(chatId: chatId, messageId: messageId, emoji: key, me: me) }
+                    return
+                }
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
-                Haptics.pick()
+                try await client.react(roomId: room, eventId: event, key: key, on: on)
             } catch {
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                dropReaction(chatId: chatId, messageId: messageId, emoji: key, me: me)
                 fail("update the reaction", error)
             }
+        }
+    }
+
+    /// A reaction of mine shown ahead of the homeserver: what was asked for, and when (ms).
+    struct HeldReaction: Equatable {
+        var messageId: Id
+        var emoji: String
+        var on: Bool
+        var at: Int64
+    }
+
+    /// Show my reaction flipped on a native chat's row before the homeserver has it, and
+    /// remember what was asked for so a timeline that arrives first does not undo it. Returns
+    /// what was asked for (on or off); nil when nothing was flipped.
+    /// Ceiling: a second tap on the same emoji is ignored until the first is confirmed or
+    /// refused, because the client can only take back a reaction whose event it has seen.
+    func holdReaction(chatId: Id, messageId: Id, emoji: String, me: String) -> Bool? {
+        guard var rows = channelRows[chatId], let i = rows.firstIndex(where: { $0.id == messageId }),
+              heldReactions[chatId]?.contains(where: { $0.messageId == messageId && $0.emoji == emoji }) != true
+        else { return nil }
+        let on = !rows[i].reactions.contains { $0.emoji == emoji && $0.senders.contains(me) }
+        rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: emoji, sender: me)
+        heldReactions[chatId, default: []].append(HeldReaction(messageId: messageId, emoji: emoji, on: on, at: nowMs()))
+        channelRows[chatId] = rows
+        return on
+    }
+
+    /// The send was refused: forget the held reaction and put the row back as it was.
+    func dropReaction(chatId: Id, messageId: Id, emoji: String, me: String) {
+        guard let held = heldReactions[chatId]?.first(where: { $0.messageId == messageId && $0.emoji == emoji }) else { return }
+        heldReactions[chatId]?.removeAll { $0 == held }
+        guard var rows = channelRows[chatId], let i = rows.firstIndex(where: { $0.id == messageId }),
+              rows[i].reactions.contains(where: { $0.emoji == emoji && $0.senders.contains(me) }) == held.on else { return }
+        rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: emoji, sender: me)
+        channelRows[chatId] = rows
+    }
+
+    /// Lay my held reactions over rows fresh from the homeserver. One the rows already agree
+    /// with is confirmed and forgotten; so is one whose row is gone, or that is older than a
+    /// minute (the event went missing: the homeserver's rows win, as for a pending send).
+    static func holdReactions(_ rows: inout [Message], held: inout [HeldReaction], me: String, now: Int64) {
+        held.removeAll { h in
+            guard h.at > now - 60_000, let i = rows.firstIndex(where: { $0.id == h.messageId }),
+                  rows[i].reactions.contains(where: { $0.emoji == h.emoji && $0.senders.contains(me) }) != h.on
+            else { return true }
+            rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: h.emoji, sender: me)
+            return false
         }
     }
 

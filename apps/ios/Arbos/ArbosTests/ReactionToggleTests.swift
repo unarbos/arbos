@@ -109,3 +109,65 @@ final class PollTests: XCTestCase {
                        "the plain-text twin draws no bubble")
     }
 }
+
+/// A people chat on the homeserver shows my reaction with the tap, not with the homeserver's
+/// event (feedback 2026-11-13, "a little lag when selecting an emoji reaction"; taking one off
+/// lagged the same way).
+final class NativeReactionTests: XCTestCase {
+    private let me = "user:gh_me"
+
+    private func row(_ id: String, reactions: [MessageReaction] = []) -> Message {
+        var m = Message(id: id, chatId: "dm1", role: .user, sender: "user:gh_alice", status: .done, turn: nil, decision: nil,
+                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: 1_700_000_000_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "\(id)-t", text: "hi")], hiddenCount: 0)
+        m.reactions = reactions
+        return m
+    }
+
+    @MainActor func testAReactionShowsWithTheTapAndLeavesWhenTheSendFails() {
+        let model = AppModel()
+        model.isFixture = true
+        model.channelRows["dm1"] = [row("m1")]
+        func mine() -> Bool { model.messages(of: "dm1")[0].reactions.contains { $0.emoji == "👍" && $0.senders.contains(me) } }
+
+        // No await in between: this is what the view reads in the frame of the tap.
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), true)
+        XCTAssertTrue(mine(), "the row carries my reaction before the homeserver answers")
+        XCTAssertNil(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), "a second tap waits for the first")
+
+        model.dropReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me)
+        XCTAssertFalse(mine(), "a refused reaction does not stay on the row")
+        XCTAssertNil(model.heldReactions["dm1"]?.first)
+
+        // Taking one off is the same in reverse.
+        model.channelRows["dm1"] = [row("m1", reactions: [MessageReaction(emoji: "👍", senders: [me, "user:gh_alice"])])]
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), false)
+        XCTAssertFalse(mine())
+        XCTAssertEqual(model.messages(of: "dm1")[0].reactions.first?.senders, ["user:gh_alice"], "only mine left")
+        model.dropReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me)
+        XCTAssertTrue(mine(), "a refused removal puts it back")
+    }
+
+    @MainActor func testATimelineThatArrivesFirstDoesNotUndoItAndTheEchoSettlesIt() {
+        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
+        // Someone else's message came in before my reaction's event: the rows do not have it yet.
+        var rows = [row("m1"), row("m2")]
+        AppModel.holdReactions(&rows, held: &held, me: me, now: 2_000)
+        XCTAssertEqual(rows[0].reactions, [MessageReaction(emoji: "👍", senders: [me])])
+        XCTAssertEqual(held.count, 1, "still waiting for the homeserver")
+
+        // The echo: the rows agree, nothing is laid over them any more.
+        rows = [row("m1", reactions: [MessageReaction(emoji: "👍", senders: [me])])]
+        AppModel.holdReactions(&rows, held: &held, me: me, now: 3_000)
+        XCTAssertEqual(rows[0].reactions, [MessageReaction(emoji: "👍", senders: [me])])
+        XCTAssertTrue(held.isEmpty)
+
+        // An event that never comes back does not pin the row for good.
+        held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
+        rows = [row("m1")]
+        AppModel.holdReactions(&rows, held: &held, me: me, now: 61_001)
+        XCTAssertTrue(rows[0].reactions.isEmpty)
+        XCTAssertTrue(held.isEmpty)
+    }
+}
