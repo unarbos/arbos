@@ -2611,6 +2611,9 @@ struct ChatSession: View {
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
+            // The finger that held a bubble into its menu may slide to a choice: the
+            // transcript does not scroll under it.
+            .scrollDisabled(actionsRow != nil)
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
@@ -3263,6 +3266,7 @@ struct ChatSession: View {
     /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
     private func closeActions(after item: MessageMenuItem? = nil) {
         ChatGestures.heldIntoMenu = false
+        HeldFinger.shared.reset()
         guard account.accepts(model) else { return }
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
