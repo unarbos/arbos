@@ -185,6 +185,9 @@ enum RowKind: Equatable {
     case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
     /// A TAO cheque card (UI/WalletViews.swift), in the sender's slot like the secret ghost.
     case cheque(bytes: String, mine: Bool, handle: String, avatar: String?)
+    /// A poll (`docs/polls.md`): the question card kept open, each option with its count and my
+    /// vote marked. `by` names whose poll it is when it is not mine.
+    case poll(poll: Poll, by: String?)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -512,6 +515,13 @@ enum Transcript {
                                                    avatar: message.senderAvatar)))
                     break
                 }
+                // A poll is the card and nothing else: its text part is the same poll in plain
+                // words, for builds without polls.
+                if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+                    chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone")))
+                    break
+                }
                 // Collect picture / video attachments first so a typed description can sit
                 // as a caption bar on the last one instead of a second bubble.
                 var mediaParts: [(id: String, a: Attachment)] = []
@@ -754,7 +764,7 @@ enum Transcript {
                         break
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .cheque, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown:
                         break
                     }
                 }
@@ -770,7 +780,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .cheque, .unknown, .chart, .linkPreview: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown, .chart, .linkPreview: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -895,7 +905,7 @@ enum Transcript {
         case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
-        case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
+        case .user, .assistant, .system, .hidden, .question, .poll, .voiceMemo, .forwardHint, .error: return false
         }
     }
 
@@ -1601,7 +1611,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1947,6 +1957,22 @@ struct RowView: View, Equatable {
                     Spacer(minLength: 0)
                 }
             }
+        case .poll(let poll, let by):
+            // The question card's row: after the avatar lane, the cap width of an incoming bubble.
+            let lane = Theme.memberLane(composerInset: composerInset)
+            HStack(spacing: 0) {
+                Color.clear.frame(width: lane, height: 1)
+                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
+                             multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: true,
+                             onPick: { id in
+                                 guard let me = model.myUserId else { return }
+                                 model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                             },
+                             foot: poll.foot(by: by))
+                    .frame(maxWidth: maxBubble - lane, alignment: .leading)
+                Spacer(minLength: 0)
+            }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
@@ -2172,6 +2198,7 @@ struct RowView: View, Equatable {
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
         case .cheque(_, let mine, _, _): return mine ? 0 : lane
+        case .poll: return lane
         case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
         case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0

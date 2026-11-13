@@ -47,7 +47,9 @@ use crate::ui::theme::{
 };
 use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
-use crate::ui::widgets::QuestionCard;
+use crate::ui::widgets::{
+    card_frame, card_header, letter, option_list, option_row, CardLook, QuestionCard, RowState,
+};
 use serde_json::Value;
 
 actions!(transcript, [Copy]);
@@ -735,6 +737,17 @@ pub enum RowKind {
         view: ApprovalView,
         /// People chat: the card sits after the sender's avatar lane, like its bubble.
         lane: bool,
+    },
+    /// A poll (`docs/polls.md`): a card of its options, each with who holds it. A click
+    /// casts, changes or retracts my vote.
+    Poll {
+        question: String,
+        /// `(option id, label, the doc senders who hold it)`, in the poll's order.
+        options: Vec<(String, String, Vec<String>)>,
+        /// "Allow multiple answers".
+        multiple: bool,
+        /// Whose poll, when it is not mine.
+        by: Option<String>,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
@@ -3571,6 +3584,86 @@ impl Transcript {
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
+            RowKind::Poll {
+                question,
+                options,
+                multiple,
+                by,
+            } => {
+                let me = format!("user:{}", self.state.read(cx).me_id());
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let look = CardLook::of(&theme);
+                let mine: Vec<String> = options
+                    .iter()
+                    .filter(|(_, _, voters)| voters.contains(&me))
+                    .map(|(id, ..)| id.clone())
+                    .collect();
+                let voted = options
+                    .iter()
+                    .flat_map(|(_, _, voters)| voters)
+                    .collect::<HashSet<_>>()
+                    .len();
+                let mut list = option_list(&look.palette);
+                for (ix, (id, label, voters)) in options.iter().enumerate() {
+                    let on = mine.contains(id);
+                    let next = poll_pick(&mine, id, multiple);
+                    let names: SharedString = voters
+                        .iter()
+                        .map(|s| self.reaction_sender_label(s, &me, cx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into();
+                    let (state, chat, message_id) =
+                        (self.state.clone(), chat_id.clone(), row.message_id.clone());
+                    let selector: SharedString = format!("poll-option#{id}").into();
+                    list = list.child(
+                        option_row(
+                            format!("{}#{id}", row.id),
+                            Some(letter(ix)),
+                            label,
+                            if on { RowState::Chosen } else { RowState::Open },
+                            ix > 0,
+                            &look,
+                        )
+                        .debug_selector(move || selector.to_string())
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(voters.len().to_string()),
+                        )
+                        // Who voted for it, behind a hover — the reaction chip's tip.
+                        .when(!voters.is_empty(), |el| {
+                            el.tooltip(move |_, cx| {
+                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                            })
+                        })
+                        .on_click(move |_, _, cx| {
+                            let (chat, message_id, next) =
+                                (chat.clone(), message_id.clone(), next.clone());
+                            state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                        }),
+                    );
+                }
+                let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
+                let rule = if multiple { "pick any" } else { "pick one" };
+                let card = card_frame(format!("{}-card", row.id), &look.palette)
+                    .debug_selector(|| "poll-card".into())
+                    .child(card_header("", &question, None, &look.palette, &theme))
+                    .child(list)
+                    .child(
+                        div()
+                            .px(px(1.0))
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(look.palette.badge_ink)
+                            .child(format!("{whose} · {voted} voted · {rule}")),
+                    );
+                // Right-click is the message menu, as on a bubble: its author deletes it there.
+                let card = self.menu_target(card, &row.message_id, cx);
+                card_row(card, true).into_any_element()
+            }
             RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
@@ -3846,6 +3939,18 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
         people_slot(bubble)
     } else {
         assistant_slot(bubble)
+    }
+}
+
+/// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
+/// the one already held; a multiple-answer poll toggles it.
+fn poll_pick(mine: &[String], id: &str, multiple: bool) -> Vec<String> {
+    let held = mine.iter().any(|m| m == id);
+    match (multiple, held) {
+        (true, true) => mine.iter().filter(|m| *m != id).cloned().collect(),
+        (true, false) => mine.iter().cloned().chain([id.to_owned()]).collect(),
+        (false, true) => Vec::new(),
+        (false, false) => vec![id.to_owned()],
     }
 }
 
@@ -4756,7 +4861,41 @@ pub fn build_rows_with_cache(
                         },
                     });
                 }
-                if show_text || attachment_parts.is_empty() || preview.is_some() {
+                // A poll draws as its card; its text part is the same poll in plain words,
+                // for builds without polls, and gets no bubble here.
+                let poll = message.parts.iter().find_map(|p| match p {
+                    Part::Poll {
+                        question,
+                        options,
+                        max,
+                        votes,
+                        ..
+                    } => Some(RowKind::Poll {
+                        question: question.clone(),
+                        options: options
+                            .iter()
+                            .map(|o| {
+                                let voters = votes.get(&o.id).cloned().unwrap_or_default();
+                                (o.id.clone(), o.label.clone(), voters)
+                            })
+                            .collect(),
+                        multiple: *max > 1,
+                        by: from
+                            .as_ref()
+                            .map(|p| p.name.clone().unwrap_or_else(|| p.handle.clone())),
+                    }),
+                    _ => None,
+                });
+                let is_poll = poll.is_some();
+                if let Some(kind) = poll {
+                    rows.push(Row {
+                        version: hash_version(&format!("{kind:?}"), false),
+                        id: format!("{}#poll", message.id),
+                        message_id: message.id.clone(),
+                        kind,
+                    });
+                }
+                if !is_poll && (show_text || attachment_parts.is_empty() || preview.is_some()) {
                     // The quote is on the first card when the message has any.
                     let quote = quote.filter(|_| attachment_parts.is_empty());
                     let delivery = delivery_state(message, is_mine);
@@ -5285,6 +5424,7 @@ pub fn build_rows_with_cache(
                         | Part::Browser { .. }
                         | Part::Skills { .. }
                         | Part::SecretRedacted { .. }
+                        | Part::Poll { .. }
                         | Part::Unknown => {}
                     }
                 }
@@ -11940,6 +12080,114 @@ mod time_divider_tests {
             person("m3", "with a clock again", NOON + 12 * MINUTE),
         ];
         assert_eq!(stamps(&messages), ["m1".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod poll_rows_tests {
+    //! A poll (`docs/polls.md`) draws as one card row built from the doc's own projection:
+    //! the options in order with who holds each, and no bubble for its plain-text twin.
+    use std::collections::{HashMap, HashSet};
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::poll::Poll;
+
+    use super::*;
+    use crate::model::Message;
+
+    #[test]
+    fn a_poll_is_one_card_row_with_its_votes_and_no_text_bubble() {
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let from = |user: &str| UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            sender_name: Some("Ana".into()),
+            ..Default::default()
+        };
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &from("ana"))
+                .unwrap();
+            d.set_poll_vote("p1", "user:ana", &["2".into()]).unwrap();
+            d.set_poll_vote("p1", "user:me", &["2".into()]).unwrap();
+        });
+        let messages: Vec<Message> = doc
+            .projected_rows()
+            .into_iter()
+            .map(|row| serde_json::from_value(row).expect("a core row reads as a Message"))
+            .collect();
+        assert!(matches!(messages[0].parts[1], Part::Poll { .. }));
+
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        // The date stamp and the bottom inset frame every transcript; between them, one row.
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["p1#stamp", "p1#poll", "chat#bottom-inset"]);
+        let RowKind::Poll {
+            question,
+            options,
+            multiple,
+            by,
+        } = &rows[1].kind
+        else {
+            panic!("the poll row is a poll card");
+        };
+        assert_eq!(question, "Where?");
+        assert_eq!(by.as_deref(), Some("Ana"));
+        assert!(!multiple);
+        assert_eq!(
+            options,
+            &[
+                ("1".to_owned(), "Lisbon".to_owned(), vec![]),
+                (
+                    "2".to_owned(),
+                    "Berlin".to_owned(),
+                    vec!["user:ana".to_owned(), "user:me".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    /// A build without polls reads the row as the doc stores it — no projection, so no poll
+    /// part — and gets an ordinary message whose text is the poll in plain words. The poll and
+    /// vote fields on the row are fields it does not know and skips.
+    #[test]
+    fn a_build_without_polls_reads_the_row_as_its_plain_text() {
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
+                .unwrap();
+            d.set_poll_vote("p1", "user:ana", &["2".into()]).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        assert!(row.get("poll").is_some() && row.get("vote|user:ana").is_some());
+        arbos_core::doc::project_reactions(&mut row);
+        let message: Message = serde_json::from_value(row).expect("the row still reads");
+        assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
+        assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
+    #[test]
+    fn a_click_swaps_or_retracts_a_single_choice_and_toggles_a_multiple_one() {
+        let held = ["1".to_owned()];
+        assert_eq!(poll_pick(&[], "1", false), ["1"]);
+        assert_eq!(poll_pick(&held, "2", false), ["2"]);
+        assert!(poll_pick(&held, "1", false).is_empty());
+        assert_eq!(poll_pick(&held, "2", true), ["1", "2"]);
+        assert!(poll_pick(&held, "1", true).is_empty());
     }
 }
 

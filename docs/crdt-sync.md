@@ -115,6 +115,7 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `waitingUser` | bool? | open question |
 | `answersQuestionId` | string? | user answer row |
 | `reactions` | Map | CRDT: flat `"emoji\|senderId" → true`. Readers project to `emoji → { senderId → true }` via `project_reactions`. Core writers create an empty map at message creation. |
+| `poll`, `vote\|<sender>` | value | A poll and each person's vote on it (`docs/polls.md` §10): plain values on the message, so the relay's push guard can check who wrote each. Readers get a `poll` part via `project_poll`. |
 | `voice` / `callId` / `greeting` | various | voice lines, call system lines, D82 greeting |
 
 **Reactions shape.** Writers store flat keys under `reactions` (`"👍|user:ken" → true`) so concurrent first reacts on the **same** emoji merge as map-key inserts. An empty `reactions` map is created with the message (`append_user_message`, `append_system_line`, `append_greeting`, `append_done_message`, `start_assistant_message`, `append_user_answer`, `append_system_note`) so peers do not race on creating that container. `set_reaction(..., on=false)` is a no-op when the `reactions` map is missing. UI / serde still see `emoji → { sender → true }` after `project_reactions` (also folds legacy nested emoji-bucket maps).

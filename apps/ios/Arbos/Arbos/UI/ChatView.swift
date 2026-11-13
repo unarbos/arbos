@@ -331,6 +331,7 @@ struct ChatSession: View {
     /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
     @State private var showFun = false
     @State private var showCheque = false
+    @State private var showPoll = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -952,6 +953,8 @@ struct ChatSession: View {
     private var isChannel: Bool { projectId == channelSlot }
     /// Cheques go to one person: a direct chat with exactly one other human and no agents.
     private var chequeable: Bool { Wallet.chequesEnabled && (people.map { !$0.isGroup } ?? false) }
+    /// Polls live in people chats (`docs/polls.md`), DMs and groups alike.
+    private var pollable: Bool { people != nil }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     /// The DM's other person while they are on my block list ([feedback
@@ -3265,7 +3268,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -3860,8 +3863,17 @@ struct ChatSession: View {
                 guard account.accepts(model) else { return }
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showCheque = true }
+            } : nil, onPoll: pollable ? {
+                guard account.accepts(model) else { return }
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showPoll = true }
             } : nil)
             .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showPoll) {
+            SendPollSheet(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
         .sheet(isPresented: $showCheque) {
             SendChequeSheet(chatId: chatId)
@@ -4554,6 +4566,7 @@ struct AttachSheet: View {
     let onFile: () -> Void
     var onFun: (() -> Void)? = nil
     var onCheque: (() -> Void)? = nil
+    var onPoll: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -4568,11 +4581,15 @@ struct AttachSheet: View {
                 row(icon: "signature", title: "Send TAO", subtitle: "A cheque they can cash for about 7 hours", action: onCheque)
                     .accessibilityIdentifier("attach-cheque")
             }
+            if let onPoll {
+                row(icon: "chart.bar", title: "Poll", subtitle: "Ask the chat a question", action: onPoll)
+                    .accessibilityIdentifier("attach-poll")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(190 + (onFun == nil ? 0 : 68) + (onCheque == nil ? 0 : 68))])
+        .presentationDetents([.height(190 + (onFun == nil ? 0 : 68) + (onCheque == nil ? 0 : 68) + (onPoll == nil ? 0 : 68))])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
@@ -4783,7 +4800,7 @@ extension ChatSession {
     /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
     private static func isMessageBubble(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true

@@ -681,6 +681,46 @@ struct SecretOffer: Equatable {
     var projectId: String
 }
 
+/// A poll (`docs/polls.md`) as the chat doc's projection hands it over: the options and who
+/// holds each. Bounds and vote validity are checked in `arbos_core::poll` before it gets here.
+struct Poll: Equatable {
+    var question: String
+    var options: [ChoiceOption]
+    /// How many options one person may hold: 1, or the option count for "multiple answers".
+    var max: Int
+    /// Option id → the senders (`user:<id>`) who hold it.
+    var votes: [String: [String]]
+
+    var multiple: Bool { max > 1 }
+    var voters: Int { Set(votes.values.joined()).count }
+
+    /// The option ids `sender` holds, in the poll's order.
+    func picked(by sender: String?) -> [String] {
+        guard let sender else { return [] }
+        return options.map(\.id).filter { votes[$0]?.contains(sender) == true }
+    }
+
+    /// `sender`'s vote after a tap on `id`: a single-choice poll swaps to it, or retracts when
+    /// it is the one already held; a multiple-answer poll toggles it.
+    func picking(_ id: String, by sender: String) -> [String] {
+        let mine = picked(by: sender)
+        if mine.contains(id) { return multiple ? mine.filter { $0 != id } : [] }
+        return multiple ? mine + [id] : [id]
+    }
+
+    /// The card's foot: "Ana's poll · 3 voted · pick one".
+    func foot(by name: String?) -> String {
+        "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · \(multiple ? "pick any" : "pick one")"
+    }
+}
+
+/// What the poll sheet collected; `pollText` says whether it is a poll within bounds.
+struct PollDraft: Equatable {
+    var question: String
+    var options: [String]
+    var multiple: Bool
+}
+
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
 /// `.unknown` and render as nothing, per the "additive only" rule.
 enum Part: Equatable {
@@ -705,6 +745,8 @@ enum Part: Equatable {
     /// A TAO cheque (Sync/Wallet.swift): the signed transfer as 0x-hex. What it pays is read
     /// from these bytes, never from the message text.
     case cheque(id: Id, bytes: String)
+    /// A poll; the message's text part is the same poll in plain words, for builds without polls.
+    case poll(id: Id, poll: Poll)
     case unknown(id: Id)
 
     var id: Id {
@@ -712,7 +754,7 @@ enum Part: Equatable {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
              .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
-             .cheque(let id, _), .unknown(let id):
+             .cheque(let id, _), .poll(let id, _), .unknown(let id):
             return id
         }
     }
@@ -725,6 +767,11 @@ enum Part: Equatable {
 
     var chequeBytes: String? {
         if case .cheque(_, let bytes) = self { return bytes }
+        return nil
+    }
+
+    var pollValue: Poll? {
+        if case .poll(_, let poll) = self { return poll }
         return nil
     }
 
@@ -1391,7 +1438,7 @@ struct Message: Identifiable, Equatable {
             switch part {
             case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .reasoning, .status, .subagentResult, .unknown: return true
-            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted, .cheque: return false
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted, .cheque, .poll: return false
             }
         }
     }
@@ -1665,6 +1712,15 @@ enum DocJSON {
         case "cheque":
             guard let bytes = str(pm["cheque"]), bytes.count <= 4096 else { return .unknown(id: id) }
             return .cheque(id: id, bytes: bytes)
+        case "poll":
+            let options = ((pm["options"] as? [Any]) ?? []).compactMap { o -> ChoiceOption? in
+                guard let om = o as? [String: Any], let oid = str(om["id"]), let label = str(om["label"]) else { return nil }
+                return ChoiceOption(id: oid, label: label)
+            }
+            guard let question = str(pm["question"]), options.count >= 2 else { return .unknown(id: id) }
+            let votes = (pm["votes"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
+            return .poll(id: id, poll: Poll(question: question, options: options,
+                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes))
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))

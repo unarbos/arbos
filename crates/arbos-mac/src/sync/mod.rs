@@ -881,6 +881,19 @@ pub enum ClientCommand {
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
     },
+    /// Post a poll in a people chat (`docs/polls.md`): a message whose text is the poll in
+    /// plain words, with the poll on it.
+    SendPoll {
+        chat_id: Id,
+        message_id: Id,
+        poll: arbos_core::poll::Poll,
+    },
+    /// My vote on a poll, replacing any earlier one; empty retracts.
+    VotePoll {
+        chat_id: Id,
+        message_id: Id,
+        selections: Vec<String>,
+    },
     /// Guide: inject `text` into the agent's currently running turn (`steer` command).
     /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
     Steer {
