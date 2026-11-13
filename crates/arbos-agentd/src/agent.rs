@@ -7734,6 +7734,14 @@ impl Agent {
                             tracing::warn!(error = %e2, job = %j.id, "job fallback turn");
                         }
                     }
+                    // Bug AJ. The fallback above is a turn, so it needs the main pi child — the
+                    // process most likely to be gone here, because whatever took the worker
+                    // usually took it too. Every row this branch wrote before it was settled
+                    // quietly, so without a last word the job simply vanishes: in `r16burst` six
+                    // of eight asks got no row of any kind. `report_lost_job` is silent when
+                    // something did answer (`job_delivery.rs`).
+                    me.report_lost_job(&chat, &host2, &user_msg, j, &e.to_string())
+                        .await;
                     return;
                 }
                 // One plain line in the chat, on the helper's own progress row when it has one,
