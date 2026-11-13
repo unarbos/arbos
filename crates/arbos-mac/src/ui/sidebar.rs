@@ -2650,9 +2650,9 @@ pub(crate) const CHAT_MENU_WIDTH: f32 = 180.0;
 /// Right-click / control-click menu of a session row in the header's tab
 /// dropdown (#1256): Rename, Fork and Delete (archive, or permanently close
 /// when already archived). The caller anchors it to the row; the dropdown
-/// stays open behind it with the row highlighted. Delete first swaps the
-/// menu for `Delete "title"?` with Cancel / Delete, so the session being
-/// removed is always named.
+/// stays open behind it with the row highlighted. Delete closes the chat at
+/// once — no `Delete "title"?` step (Jacob, 2026-11-04), the same as the
+/// row's × and as the sidebar row menu's Delete.
 pub fn chat_menu(
     shell: &Shell,
     chat_id: &str,
@@ -2677,63 +2677,6 @@ pub fn chat_menu(
     let delete_id = chat.id.clone();
     let delete_archived = archived;
     let title = crate::ui::header::tab_title(&chat, &project);
-
-    if shell.chat_delete_armed && can_delete {
-        let note = if archived {
-            "Removes this chat from Previous chats for good."
-        } else {
-            "Closes this chat. It moves to Previous chats."
-        };
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(8.0))
-            .child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(format!("Delete “{title}”?")),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .child(note),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        confirm_button("chat-menu-delete-cancel", "Cancel", false, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.chat_menu = None;
-                                this.chat_delete_armed = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        confirm_button("chat-menu-delete-go", "Delete", true, &theme).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.chat_menu = None;
-                                this.chat_delete_armed = false;
-                                let id = delete_id.clone();
-                                this.state.update(cx, |s, cx| {
-                                    if delete_archived {
-                                        s.delete_chat_tab(id, cx);
-                                    } else {
-                                        s.close_tab(id, cx);
-                                    }
-                                });
-                            }),
-                        ),
-                    ),
-            );
-        return Some(glass::frosted_menu(240.0, &theme, body).into_any_element());
-    }
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if !archived && !project.is_people() {
@@ -2774,9 +2717,16 @@ pub fn chat_menu(
         }
         body = body.child(
             glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.chat_delete_armed = true;
-                    cx.notify();
+                cx.listener(move |this, _, _, cx| {
+                    this.chat_menu = None;
+                    let id = delete_id.clone();
+                    this.state.update(cx, |s, cx| {
+                        if delete_archived {
+                            s.delete_chat_tab(id, cx);
+                        } else {
+                            s.close_tab(id, cx);
+                        }
+                    });
                 }),
             ),
         );

@@ -977,7 +977,6 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     }
                     this.tab_menu_open = false;
                     this.chat_menu = None;
-                    this.chat_delete_armed = false;
                     this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                     Composer::focus(&this.composer, window, cx);
                 }),
@@ -1062,7 +1061,6 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                             }
                             this.tab_menu_open = false;
                             this.chat_menu = None;
-                            this.chat_delete_armed = false;
                             let id = id.clone();
                             this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
                             Composer::focus(&this.composer, window, cx);

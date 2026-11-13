@@ -455,9 +455,6 @@ pub struct Shell {
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
     pub(crate) chat_menu: Option<crate::model::Id>,
-    /// The session menu's Delete was clicked once: it shows `Delete "title"?`
-    /// with Cancel / Delete instead of the action list.
-    pub(crate) chat_delete_armed: bool,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -1222,7 +1219,6 @@ impl Shell {
             member_menu: None,
             library: Default::default(),
             chat_menu: None,
-            chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
@@ -3393,7 +3389,6 @@ impl Shell {
         // stays (standard menu behaviour).
         if self.chat_menu.is_some() {
             self.chat_menu = None;
-            self.chat_delete_armed = false;
             cx.notify();
             return;
         }
@@ -3534,7 +3529,6 @@ impl Shell {
         self.channel_menu = None;
         self.tab_menu_open = true;
         self.chat_menu = Some(chat_id);
-        self.chat_delete_armed = false;
         cx.notify();
     }
 
@@ -3600,7 +3594,6 @@ impl Shell {
             self.channel_menu = None;
             self.channel_delete_armed = false;
             self.chat_menu = None;
-            self.chat_delete_armed = false;
             self.message_menu = None;
             self.close_reaction_capsule(cx);
             cx.notify();
