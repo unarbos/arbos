@@ -339,6 +339,19 @@ and re-indexed on every snapshot, upsert and channel page: message text,
 attachments (name + title) and `http(s)` links, folded once and scanned in
 memory on each keystroke, never a relay round trip.
 
+The index holds **only what the chat exchanged** ([feedback
+search-chat-only-mac-2026-10-30], the Library's rule on this surface — Jacob,
+2026-10-25): a hidden job row (duplex §2.3) and an unnamed worker's spawn row
+are the agent's own machinery — the files it read, the pages it fetched — and
+the transcript draws neither, so neither is indexed (`search_index::shared_in_chat`,
+the same predicate as `ui::profiles::shared_in_chat`). System lines never were.
+A row that turns hidden drops out on its next upsert. **Unlike the Library**,
+a link the agent typed in a *visible* reply stays indexed: it is in the chat,
+and the URL is part of the indexed prose anyway, so dropping the link row
+would hide the direct hit while leaving the same page one section above.
+Pinned by `search_index::tests::the_agents_machinery_is_never_indexed_but_the_chat_stays_searchable`;
+`ARBOS_FIXTURE_READS=1` with `ARBOS_SEARCH=<text>` shows it on the real shell.
+
 **People & agents** (DMs and agents by name; people met in a group, a shared
 project or the directory who have no DM yet — opening one starts the DM) →
 **Chats** (groups; member and chat-title hits with the reason as subtitle) →
