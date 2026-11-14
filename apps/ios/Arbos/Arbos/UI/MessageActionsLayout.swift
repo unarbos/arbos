@@ -15,6 +15,10 @@ import Foundation
 ///    that brings it into view (the bubble is "scrolled into view").
 /// 5. The group is taller than the visible area → capsule at the top, menu at the
 ///    bottom, and the bubble is clipped between them.
+/// 6. The emoji keyboard is up (the capsule's add-emoji control) → the menu is hidden and
+///    only the capsule and the bubble are fitted above the keyboard: a tall menu has no
+///    room there and its last rows ended up under the keyboard
+///    ([feedback iphone-emoji-picker-layout-2026-11-13]).
 struct MessageActionsLayout: Equatable {
     enum Placement: Equatable {
         /// Capsule · bubble · menu (top to bottom).
@@ -38,6 +42,8 @@ struct MessageActionsLayout: Equatable {
         /// How far the keyboard (system or emoji) reaches up from the overlay's bottom edge;
         /// 0 when it is down.
         var keyboardInset: CGFloat = 0
+        /// The emoji keyboard was asked for: the menu is hidden (rule 6).
+        var pickerOpen = false
         /// Breathing room kept from the visible edges.
         var margin: CGFloat = 8
     }
@@ -61,6 +67,17 @@ struct MessageActionsLayout: Equatable {
         let bottom = i.height - max(i.safeBottom, i.keyboardInset) - i.margin
         let bubbleH = i.bubble.height
         let gap = i.gap
+
+        // Rule 6: no menu. Capsule above the bubble, shifted the least distance into view;
+        // only a bubble taller than what is left is cut. `menuY` is where the hidden menu would start.
+        if i.pickerOpen {
+            let height = min(bubbleH, bottom - top - i.capsuleHeight - gap)
+            let capsuleY = min(max(i.bubble.minY - gap - i.capsuleHeight, top), bottom - height - gap - i.capsuleHeight)
+            let bubbleY = capsuleY + i.capsuleHeight + gap
+            return MessageActionsLayout(placement: .menuBelow, capsuleY: capsuleY, bubbleY: bubbleY,
+                                        menuY: bubbleY + height + gap, bubbleHeight: height,
+                                        visibleTop: top, visibleBottom: bottom)
+        }
 
         // Rule 2: the bubble stays put, capsule above, menu below.
         let capsuleBelowTop = i.bubble.minY - gap - i.capsuleHeight
