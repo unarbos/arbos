@@ -83,6 +83,36 @@ final class ComposerParityUITests: XCTestCase {
                           + "the box climbed \(climb)")
     }
 
+    /// Two testers, 2026-11-13: while typing "the whole keyboard glitches away" and the box
+    /// has to be tapped again.
+    ///
+    /// The text view was a different view on each side of the wrap, so the keyboard lost its
+    /// first responder mid-word. The simulator hands focus to the new view fast enough that
+    /// the keyboard stays, but it comes back as a fresh one, on letters: the numbers plane is
+    /// what shows the swap here. Tapped key by key, as a thumb does, so the layout the last
+    /// digit caused has landed before the next.
+    func testTheKeyboardIsNotReplacedWhenTheDraftWraps() {
+        let app = openChat()
+        let box = field(app)
+        XCTAssertTrue(box.waitForExistence(timeout: appear), "the composer is on screen")
+        box.tap()
+        let numbers = app.keys["more"]
+        XCTAssertTrue(numbers.waitForExistence(timeout: 10), "the keyboard is up")
+        numbers.tap()
+
+        let top = box.frame.minY
+        let digit = app.keys["8"]
+        for typed in 0..<30 {
+            XCTAssertTrue(digit.waitForExistence(timeout: 3),
+                          "the numbers plane is still up after \(typed) digits")
+            digit.tap()
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        XCTAssertGreaterThan(top - box.frame.minY, 15, "the draft wrapped: the field grew")
+        XCTAssertEqual(box.value as? String, String(repeating: "8", count: 30),
+                       "every digit reached the draft")
+    }
+
     /// [feedback attachment-in-composer-2026-11-09]
     ///
     /// A staged picture previews inside the composer — a big rounded thumbnail of the picture

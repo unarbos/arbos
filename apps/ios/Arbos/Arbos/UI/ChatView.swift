@@ -5613,33 +5613,34 @@ private struct ComposerField<Leading: View>: View {
     }
 
     var body: some View {
-        Group {
+        // One tree for both arrangements, so the text view keeps its identity when the
+        // controls change rows. As two branches the field was torn down and made again at
+        // the wrap and at the send that empties it: the keyboard lost its first responder
+        // mid-word, and what came back was a new keyboard on the letters plane.
+        //
+        // Grok's wrapped composer: the text runs the full width, and the controls sit on
+        // their own row beneath it, bottom-aligned.
+        VStack(alignment: .leading, spacing: Theme.composerStackGap) {
+            if stacked, !pending.isEmpty {
+                ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
+                                      onOpen: onOpenPending, onRemove: onRemovePending)
+            }
+            HStack(spacing: 8) {
+                if !stacked { leadingSlot }
+                // Full width in both rows when stacked: the text is no longer sharing the
+                // line with the controls, and the trailing cluster needs the whole width to
+                // be pushed to the right edge.
+                middle
+                    .frame(maxWidth: stacked ? .infinity : nil, alignment: .leading)
+                if !stacked { trailingCluster }
+            }
             if stacked {
-                // Grok's wrapped composer: the text runs the full width, and the
-                // controls sit on their own row beneath it, bottom-aligned.
-                VStack(alignment: .leading, spacing: Theme.composerStackGap) {
-                    if !pending.isEmpty {
-                        ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
-                                              onOpen: onOpenPending, onRemove: onRemovePending)
-                    }
-                    // Full width in both rows: the text is no longer sharing the line with
-                    // the controls, and the trailing cluster needs the whole width to be
-                    // pushed to the right edge.
-                    middle
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 8) {
-                        leadingSlot
-                        Spacer(minLength: 0)
-                        trailingCluster
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            } else {
                 HStack(spacing: 8) {
                     leadingSlot
-                    middle
+                    Spacer(minLength: 0)
                     trailingCluster
                 }
+                .frame(maxWidth: .infinity)
             }
         }
         // Latched here rather than recomputed in `stacked`, so the arrangement is remembered
