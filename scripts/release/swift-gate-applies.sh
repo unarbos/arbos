@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Does the Swift core check apply to the commit this run is building?
+# Does a path-filtered macOS gate apply to the commit this run is building?
 #
 #   scripts/release/swift-gate-applies.sh decide     prints applies=true|false, and appends it to
 #                                                    $GITHUB_OUTPUT when that is set
-#   scripts/release/swift-gate-applies.sh selftest   asserts the invariants this screen and
-#                                                    .github/workflows/swift-core-check.yml rely on
+#   scripts/release/swift-gate-applies.sh selftest   asserts the invariants this screen and the
+#                                                    workflow it decides for rely on
+#
+# WHICH GATE, AND WHY THE NAME IS STILL "swift". This screen was written for
+# .github/workflows/swift-core-check.yml and now serves .github/workflows/mac-check.yml as well;
+# $GATE_WF names the workflow being decided and defaults to the Swift one. The file keeps its old
+# name on purpose: .github/workflows/swift-core-check.yml lists ITSELF in its own `paths:`, so
+# renaming this script would mean editing that workflow, and editing it cuts a 46-110 min macOS
+# job on the five-slot hosted pool for every push of the pull request doing the renaming. Rename it
+# when something else already has to touch that file.
 #
 # WHY THE DECISION MOVED OUT OF THE PUSH TRIGGER'S `paths:` FILTER.
 #
@@ -60,7 +68,26 @@
 # cancel-in-progress reaches those builds.
 set -euo pipefail
 
-WF=.github/workflows/swift-core-check.yml
+WF=${GATE_WF:-.github/workflows/swift-core-check.yml}
+
+# A GATE SCREEN MUST DECIDE ABOUT THE WORKFLOW IT IS RUNNING INSIDE, and $GATE_WF has a default, so
+# a second workflow that forgets to set it would decide on the Swift gate's filter and call the
+# answer its own. That is this kit's recurring failure in a new place: something answers a question
+# it was not asked, and the answer is a pass.
+#
+# $GITHUB_WORKFLOW_REF is `<owner>/<repo>/<path to this workflow>@<ref>`, so the run states its own
+# identity and the two can be compared. Outside Actions there is nothing to compare against and the
+# check does not apply; inside, a mismatch is refused rather than decided.
+if [ -n "${GITHUB_WORKFLOW_REF:-}" ]; then
+  own=${GITHUB_WORKFLOW_REF#"${GITHUB_REPOSITORY:-}"/}
+  own=${own%@*}
+  if [ "$own" != "$WF" ]; then
+    echo "This run is $own, and GATE_WF says to decide $WF. A gate screen that judges another" \
+         "workflow's path filter reports a verdict about a gate nobody asked it about. Set" \
+         "GATE_WF to the workflow this step runs in." >&2
+    exit 2
+  fi
+fi
 
 # Every quoted path pattern under a workflow's top level `on:` block, read from stdin.
 #
@@ -166,7 +193,7 @@ decide() {
 
   echo "applies=$applies"
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "applies=$applies" >> "$GITHUB_OUTPUT"
-  echo "$(printf '%s\n' "$files" | grep -c .) file(s) changed, against $(printf '%s\n' "$pats" | grep -c .) gated path(s)" >&2
+  echo "$WF: $(printf '%s\n' "$files" | grep -c .) file(s) changed, against $(printf '%s\n' "$pats" | grep -c .) gated path(s)" >&2
   return 0
 }
 
@@ -227,22 +254,30 @@ selftest() {
   #    identical whenever nobody has changed the filter — so this stands a synthetic head beside
   #    the real main and requires both lists in the answer. Head-only loses main's paths and skips
   #    a build main still gates; main-only loses the head's and skips one this branch adds.
-  local synth union main_pats
+  #
+  # A GATE THAT IS NOT ON main YET IS THE ONE CASE WHERE AN EMPTY main LIST IS NOT A FAULT. The
+  # pull request that ADDS a gate carries the workflow in its own tree and in no tree on main, so
+  # demanding main's patterns here would fail the only run that could ever introduce the gate.
+  # checks.sh's gate_applies already treats a workflow in neither tree as "not required" for the
+  # same reason. Absent and unreadable are told apart by `git cat-file`, never by an empty answer:
+  # a workflow that IS on main and yields no patterns is still the fault this case was written for.
+  local synth union main_pats on_main=0
+  git cat-file -e "origin/main:$WF" 2>/dev/null && on_main=1
   main_pats=$( { git show "origin/main:$WF" 2>/dev/null || true; } | patterns_in | sort -u)
-  if [ -z "$main_pats" ]; then
-    bad "origin/main has no readable pattern list for $WF, so this screen cannot tell whether it is deciding on main's scope — fetch origin/main"
+  synth=$(mktemp)
+  printf 'name: synthetic\non:\n  push:\n    paths:\n      - "nowhere/in/main/**"\n' > "$synth"
+  union=$(HEAD_WF=$synth patterns)
+  rm -f "$synth"
+  if ! printf '%s\n' "$union" | grep -qx 'nowhere/in/main/\*\*'; then
+    bad "the head's own patterns are missing from the decision basis — a path this branch adds to the filter would not gate this branch"
+  elif [ "$on_main" -eq 0 ]; then
+    ok "the decision basis carries this head's patterns; $WF is in no tree on main, so this is the commit that introduces the gate and main has no scope to union in"
+  elif [ -z "$main_pats" ]; then
+    bad "origin/main has $WF but no readable pattern list in it, so this screen cannot tell whether it is deciding on main's scope — fetch origin/main"
+  elif ! printf '%s\n' "$main_pats" | while IFS= read -r p; do printf '%s\n' "$union" | grep -qxF "$p" || exit 1; done; then
+    bad "main's patterns are missing from the decision basis — a path added to the filter after this branch forked still gates the merged result, and the build for it would be skipped while checks.sh asks for the verdict"
   else
-    synth=$(mktemp)
-    printf 'name: synthetic\non:\n  push:\n    paths:\n      - "nowhere/in/main/**"\n' > "$synth"
-    union=$(HEAD_WF=$synth patterns)
-    rm -f "$synth"
-    if ! printf '%s\n' "$union" | grep -qx 'nowhere/in/main/\*\*'; then
-      bad "the head's own patterns are missing from the decision basis — a path this branch adds to the filter would not gate this branch"
-    elif ! printf '%s\n' "$main_pats" | while IFS= read -r p; do printf '%s\n' "$union" | grep -qxF "$p" || exit 1; done; then
-      bad "main's patterns are missing from the decision basis — a path added to the filter after this branch forked still gates the merged result, and the build for it would be skipped while checks.sh asks for the verdict"
-    else
-      ok "the decision basis unions this head's patterns with main's, the same scope checks.sh asks about"
-    fi
+    ok "the decision basis unions this head's patterns with main's, the same scope checks.sh asks about"
   fi
 
   # 7. The deferral must be declared on `decide`, not on the macOS job alone. A run is only skipped
@@ -255,7 +290,7 @@ selftest() {
   fi
 
   echo
-  if [ "$fail" -eq 0 ]; then echo "swift-gate-applies selftest: PASS"; else echo "swift-gate-applies selftest: FAIL"; fi
+  if [ "$fail" -eq 0 ]; then echo "$WF gate selftest: PASS"; else echo "$WF gate selftest: FAIL"; fi
   return "$fail"
 }
 
