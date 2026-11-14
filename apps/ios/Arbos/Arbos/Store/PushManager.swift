@@ -104,9 +104,9 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     }
 
     func didFailToRegister(_ error: Error) {
-        #if DEBUG
-        print("push: registration failed: \(error.localizedDescription)")
-        #endif
+        // Logged in every build: a build signed without aps-environment fails here and never
+        // gets a token, which from outside looks like "no notification until I open the app".
+        notifyLog.error("push registration failed: \(error.localizedDescription, privacy: .public)")
     }
 
     /// Sends the token once per (token, relay) — called after sign-in and on token change.
