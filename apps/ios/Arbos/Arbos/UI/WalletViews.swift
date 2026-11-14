@@ -15,6 +15,7 @@ struct WalletPage: View {
     @State private var balance: String?
     @State private var backup: String?
     @State private var showPhrase = false
+    @State private var synced = false
     @State private var payable = UserDefaults.standard.bool(forKey: "walletPayable")
     @State private var error: UserError?
     @State private var errorDetailsOpen = false
@@ -45,9 +46,16 @@ struct WalletPage: View {
                             .frame(minHeight: SettingsRow.height)
                     }
                 }
-                SettingsGroup(footer: "The phrase opens your encrypted chats on a new device and controls your TAO. It is in your iCloud Keychain; anyone who sees it can take both.") {
+                SettingsGroup(footer: "The phrase opens your encrypted chats on a new device and controls your TAO. Anyone who sees it can take both.") {
                     SettingsValueRow("Chat history backup", value: Self.backupLabel(backup))
                     SettingsActionRow(title: showPhrase ? "Hide recovery phrase" : "Show recovery phrase") { showPhrase ? (showPhrase = false) : revealPhrase() }
+                }
+                SettingsGroup(footer: Self.syncedFooter(synced)) {
+                    Toggle("Keep in iCloud Keychain", isOn: Binding(get: { synced }, set: setSynced))
+                        .tint(theme.accent)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: SettingsRow.height)
+                        .accessibilityIdentifier("wallet-phrase-synced")
                 }
                 if showPhrase, let phrase = model.walletPhrase {
                     PhraseGrid(phrase: phrase).padding(.horizontal, 16)
@@ -65,21 +73,39 @@ struct WalletPage: View {
             }
             backup = await model.matrixClient?.backup()
         }
+        .onAppear { synced = model.user.map { WalletVault.isSynced(user: $0.id) } ?? false }
     }
 
-    /// The phrase (and its Copy button) only appears to the phone's owner: Face ID, Touch ID or
-    /// the passcode. A phone with no passcode cannot show it.
-    private func revealPhrase() {
+    /// The phrase (and its Copy button) only appears to the phone's owner, and only they move
+    /// it into or out of iCloud Keychain: Face ID, Touch ID or the passcode. A phone with no
+    /// passcode can do neither.
+    private func asOwner(_ reason: String, _ then: @escaping () -> Void) {
         error = nil
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
-            error = UserError.refused("", "Set a passcode on this iPhone to see your recovery phrase.")
+            error = UserError.refused("", "Set a passcode on this iPhone to see or move your recovery phrase.")
             return
         }
         Task {
-            showPhrase = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
-                                                            localizedReason: "Show your recovery phrase")) ?? false
+            if (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true { then() }
         }
+    }
+
+    private func revealPhrase() {
+        asOwner("Show your recovery phrase") { showPhrase = true }
+    }
+
+    private func setSynced(_ on: Bool) {
+        asOwner(on ? "Save your recovery phrase to iCloud Keychain" : "Remove your recovery phrase from iCloud Keychain") {
+            error = model.setWalletSynced(on).map { UserError.refused("", $0) }
+            synced = model.user.map { WalletVault.isSynced(user: $0.id) } ?? false
+        }
+    }
+
+    static func syncedFooter(_ synced: Bool) -> String {
+        synced
+            ? "Your recovery phrase is in your iCloud Keychain: your other Apple devices get it on their own. Turn this off and it stays on this iPhone only. It is removed from your other devices, and a new device will ask you for the words."
+            : "Your recovery phrase is on this iPhone only. A new device will ask you for the 12 words, so keep them written down: if you lose this iPhone without them, your chat history and your TAO are gone."
     }
 
     private func setPayable(_ on: Bool) {
@@ -202,10 +228,22 @@ struct WalletPromptSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             switch prompt {
             case .backup(let phrase):
-                SheetHeaderBar(title: "Your recovery phrase", leading: .none, action: "Done", onAction: { model.walletPrompt = nil })
-                Text("These 12 words unlock your encrypted chats on any new device, and they're your TAO wallet. They're saved in your iCloud Keychain — write them down too, and never share them.")
+                SheetHeaderBar(title: "Your recovery phrase", leading: .none)
+                SheetErrorNote(id: "wallet-backup-error", local: error)
+                Text("These 12 words unlock your encrypted chats on any new device, and they're your TAO wallet. Never share them. Save them to your iCloud Keychain and your other Apple devices get them on their own. Or write them down: they then stay on this iPhone only, and a new device will ask you for the words.")
                     .font(theme.font(Theme.body)).foregroundStyle(theme.muted)
                 PhraseGrid(phrase: phrase)
+                // The phrase is already on this device (`ensureKeys`); the choice is only iCloud.
+                VStack(spacing: 10) {
+                    Button { saveToICloud() } label: { Text("Save to iCloud Keychain").frame(maxWidth: .infinity) }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("wallet-phrase-icloud")
+                    Button { model.walletPrompt = nil } label: { Text("I'll write it down").frame(maxWidth: .infinity) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("wallet-phrase-device-only")
+                }
+                .controlSize(.large)
+                .tint(theme.accent)
             case .restore:
                 SheetHeaderBar(title: "Unlock your chats", leading: .cancel, onLeading: { model.walletPrompt = nil },
                             action: working ? "…" : "Unlock", actionEnabled: !working && !typed.isEmpty, onAction: unlock)
@@ -224,6 +262,11 @@ struct WalletPromptSheet: View {
         .padding(20)
         .background(theme.bg)
         .interactiveDismissDisabled(prompt != .restore)
+    }
+
+    private func saveToICloud() {
+        error = model.setWalletSynced(true).map { UserError.refused("", $0) }
+        if error == nil { model.walletPrompt = nil }
     }
 
     private func unlock() {
