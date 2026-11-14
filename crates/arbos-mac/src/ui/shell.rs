@@ -2942,8 +2942,12 @@ impl Shell {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
             let closed = self.state.update(cx, |s, cx| s.close_tab(chat_id, cx));
-            // The shake is positional motion: Reduce Motion drops it.
-            if !closed && !cx.reduce_motion() {
+            // The shake is positional motion: Reduce Motion drops it. A held ⌘W does not restart
+            // one that is still running (key repeat would hold it in its first few frames).
+            let running = self
+                .shake_started_at
+                .is_some_and(|t| now_ms().saturating_sub(t) < SHAKE_MS);
+            if !closed && !running && !cx.reduce_motion() {
                 self.shake_started_at = Some(now_ms());
                 cx.notify();
             }
