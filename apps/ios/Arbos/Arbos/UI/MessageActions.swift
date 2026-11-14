@@ -217,7 +217,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 height: height,
                 safeTop: safeTop,
                 safeBottom: safeBottom,
-                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
+                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global)),
+                pickerOpen: pickOpen
             ))
             // What the held finger is over: both groups hug the bubble's side of the chat.
             let origin = geo.frame(in: .global).origin
@@ -250,13 +251,18 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
                     .clipped()
                     .offset(y: layout.bubbleY)
-                menu(hot: hot)
-                    .frame(width: width, alignment: mine ? .trailing : .leading)
-                    .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .topTrailing : .topLeading)
-                    .offset(y: layout.menuY)
-                    .accessibilityIdentifier("message-actions-menu")
+                // The emoji keyboard takes the menu's place (layout rule 6).
+                if !pickOpen {
+                    menu(hot: hot)
+                        .frame(width: width, alignment: mine ? .trailing : .leading)
+                        .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .topTrailing : .topLeading)
+                        .offset(y: layout.menuY)
+                        .accessibilityIdentifier("message-actions-menu")
+                        .transition(.opacity)
+                }
             }
             .animation(.easeOut(duration: 0.2), value: layout)
+            .animation(.easeOut(duration: 0.2), value: pickOpen)
             .onAppear {
                 if pressedFrame == nil { pressedFrame = frame }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { shown = true }
