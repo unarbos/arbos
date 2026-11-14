@@ -2,8 +2,7 @@
 #
 # `beta` reproduces the TestFlight path that already shipped build 7 of this
 # bundle from unarbos/arbos `.github/workflows/ios.yml`, step for step:
-#   1. archive with signing off (CODE_SIGNING_ALLOWED=NO), then ad-hoc sign the archived
-#      app with its entitlements files (embed_entitlements!) so the export has them to keep,
+#   1. archive with signing off (CODE_SIGNING_ALLOWED=NO),
 #   2. export with method app-store-connect / destination upload / automatic
 #      signing, letting Xcode mint the distribution certificate and profile
 #      through the App Store Connect API key (-allowProvisioningUpdates).
@@ -141,29 +140,6 @@ def report_arbosffi_size(archive_path)
   File.write("#{out_dir}/arbosffi-size.txt", "#{bytes}\n")
 end
 
-# The archive is built with signing off, so nothing in it carries the targets' entitlements,
-# and exportArchive can only keep entitlements it finds in the archived signature: without
-# this the TestFlight build is signed with no aps-environment (no push token, so no
-# notification until the app is open), no App Group and no communication notifications.
-# Xcode refuses to ad-hoc sign these targets itself ("entitlements that require signing with
-# a development certificate"), so codesign does it: nested code first, then the extension and
-# the app with their entitlements files. The export replaces the signature and turns
-# aps-environment into production.
-def embed_entitlements!(archive_path)
-  app = "#{archive_path}/Products/Applications/Arbos.app"
-  appex = "#{app}/PlugIns/ArbosNotificationService.appex"
-  root = File.expand_path("..", __dir__)
-  Dir.glob("#{app}/Frameworks/*.{framework,dylib}").each do |nested|
-    sh("codesign --force --sign - #{nested.shellescape}", log: false)
-  end
-  sh("codesign --force --sign - --entitlements #{"#{root}/ArbosNotificationService/ArbosNotificationService.entitlements".shellescape} #{appex.shellescape}", log: false)
-  sh("codesign --force --sign - --entitlements #{"#{root}/Arbos/Arbos.entitlements".shellescape} #{app.shellescape}", log: false)
-  sh("codesign --verify --deep --strict #{app.shellescape}", log: false)
-  carried = sh("codesign -d --entitlements - --xml #{app.shellescape} 2>/dev/null", log: false)
-  UI.user_error!("archived Arbos.app carries no aps-environment entitlement: the exported build could not receive push") unless carried.include?("aps-environment")
-  UI.success("Archived app carries its entitlements (aps-environment, App Group)")
-end
-
 platform :ios do
   desc "Debug build for the iOS simulator (no signing)"
   lane :sim do
@@ -210,7 +186,6 @@ platform :ios do
       "CURRENT_PROJECT_VERSION=#{number}")
     UI.user_error!("archive has no binary (see #{log})") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
     report_arbosffi_size(archive_path)
-    embed_entitlements!(archive_path)
     UI.success("Archive #{archive_path} build #{number}")
     lane_context[:ARBOS_ARCHIVE] = archive_path
     lane_context[:ARBOS_BUILD_NUMBER] = number
