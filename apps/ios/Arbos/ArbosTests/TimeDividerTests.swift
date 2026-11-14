@@ -140,4 +140,15 @@ final class TimeDividerTests: XCTestCase {
         XCTAssertTrue(src.contains(".padding(.top, Transcript.stampTopPad)"),
                       "the centred system stamp draws the pad above its glyphs")
     }
+
+    /// A stamp from another year carries the year; an old relative stamp becomes a date.
+    func testOldStampsSayWhichYearAndStopCountingMonths() {
+        let lastYear = Calendar.current.date(byAdding: .year, value: -1, to: Date())!
+        let ms = Int64(lastYear.timeIntervalSince1970 * 1000)
+        XCTAssertEqual(HomeView.timeLabel(ms: ms), lastYear.formatted(date: .numeric, time: .omitted))
+        XCTAssertEqual(SecretsText.ago(ms), SecretsText.shortDate(ms))
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        XCTAssertEqual(SecretsText.ago(now), "just now")
+        XCTAssertNotEqual(SecretsText.ago(now - 3 * 86_400_000), SecretsText.shortDate(now - 3 * 86_400_000))
+    }
 }

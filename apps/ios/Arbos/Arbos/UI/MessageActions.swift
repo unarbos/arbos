@@ -239,8 +239,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .onTapGesture { onDismiss() }
                 capsule(hot: hot)
                     .frame(width: width, alignment: mine ? .trailing : .leading)
-                    .offset(y: layout.capsuleY)
+                    // Scale before the offset: the anchor is then the capsule's own corner, not
+                    // the unmoved frame's at the top of the screen.
                     .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .bottomTrailing : .bottomLeading)
+                    .offset(y: layout.capsuleY)
                     .accessibilityIdentifier("message-actions-capsule")
                 bubble()
                     .frame(width: width)
@@ -250,8 +252,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .offset(y: layout.bubbleY)
                 menu(hot: hot)
                     .frame(width: width, alignment: mine ? .trailing : .leading)
-                    .offset(y: layout.menuY)
                     .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .topTrailing : .topLeading)
+                    .offset(y: layout.menuY)
                     .accessibilityIdentifier("message-actions-menu")
             }
             .animation(.easeOut(duration: 0.2), value: layout)

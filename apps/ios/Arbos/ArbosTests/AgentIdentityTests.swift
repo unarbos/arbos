@@ -110,4 +110,15 @@ final class AgentIdentityTests: XCTestCase {
         XCTAssertEqual(bubble.name, "@ghost", "no name anywhere → the handle, marked as one")
         XCTAssertEqual(bubble.id, "01GHOST")
     }
+
+    /// Initials step over what is not a letter or digit, and split as the Mac does.
+    func testInitialsSkipLeadingSymbolsAndSplitAsTheMacDoes() {
+        XCTAssertEqual(AvatarPalette.initials(name: "Growth Lab", handle: nil), "GL")
+        XCTAssertEqual(AvatarPalette.initials(name: "🦊 Fox", handle: nil), "F")
+        XCTAssertEqual(AvatarPalette.initials(name: "(Ops) Team", handle: nil), "OT")
+        XCTAssertEqual(AvatarPalette.initials(name: "sam_rivera", handle: nil), "SR")
+        XCTAssertEqual(AvatarPalette.initials(name: "Jean-Luc Picard", handle: nil), "JL")
+        XCTAssertEqual(AvatarPalette.initials(name: "🦊", handle: "@fox"), "F")
+        XCTAssertEqual(AvatarPalette.initials(name: "", handle: nil), "?")
+    }
 }
