@@ -455,6 +455,8 @@ struct SendPollSheet: View {
 
     /// The most options a poll holds (`arbos_core::poll::OPTIONS_MAX`).
     static let optionsMax = 10
+    /// The fewest (`OPTIONS_MIN`): rows past these can be removed.
+    static let optionsMin = 2
 
     private var valid: Bool {
         pollText(question: draft.question, options: draft.options, multiple: draft.multiple) != nil
@@ -471,10 +473,32 @@ struct SendPollSheet: View {
                         .controlField()
                         .accessibilityIdentifier("poll-question")
                     ForEach(draft.options.indices, id: \.self) { ix in
-                        TextField("Option \(ix + 1)", text: $draft.options[ix])
-                            .focused($focused, equals: ix)
-                            .controlField()
-                            .accessibilityIdentifier("poll-option-\(ix + 1)")
+                        HStack(spacing: 8) {
+                            // Bounds-checked: SwiftUI can read a row's binding once more after
+                            // the row was removed.
+                            TextField("Option \(ix + 1)", text: Binding(
+                                get: { draft.options.indices.contains(ix) ? draft.options[ix] : "" },
+                                set: { if draft.options.indices.contains(ix) { draft.options[ix] = $0 } }))
+                                .focused($focused, equals: ix)
+                                .accessibilityIdentifier("poll-option-\(ix + 1)")
+                            if draft.options.count > Self.optionsMin {
+                                Button {
+                                    focused = nil
+                                    draft.options.remove(at: ix)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(theme.muted)
+                                        .frame(width: 44, height: Controls.height)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, -Controls.textInset)
+                                .accessibilityLabel("Remove option \(ix + 1)")
+                                .accessibilityIdentifier("poll-remove-option-\(ix + 1)")
+                            }
+                        }
+                        .controlField()
                     }
                     if draft.options.count < Self.optionsMax {
                         Button {

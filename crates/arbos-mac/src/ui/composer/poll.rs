@@ -73,7 +73,21 @@ impl Composer {
         cx.notify();
     }
 
-    /// The poll the fields hold, when it is one the relay would take.
+    /// Take one option row out and renumber the placeholders of the rest.
+    fn remove_poll_option(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(draft) = self.poll.as_mut() else {
+            return;
+        };
+        if draft.options.len() <= OPTIONS_MIN || ix >= draft.options.len() {
+            return;
+        }
+        draft.options.remove(ix);
+        for (n, input) in draft.options.iter().enumerate() {
+            input.update(cx, |i, _| i.set_placeholder(format!("Option {}", n + 1)));
+        }
+        cx.notify();
+    }
+
     fn drafted_poll(&self, cx: &App) -> Option<(String, Vec<String>, bool)> {
         let draft = self.poll.as_ref()?;
         let question = draft.question.read(cx).text().to_owned();
@@ -207,7 +221,26 @@ impl Composer {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(header)
             .child(field(&draft.question))
-            .children(draft.options.iter().map(field))
+            .children(draft.options.iter().enumerate().map(|(ix, input)| {
+                // Rows past the two a poll needs can be taken back out.
+                field(input).when(draft.options.len() > OPTIONS_MIN, |el| {
+                    el.child(
+                        div()
+                            .id(("poll-remove-option", ix))
+                            .size(px(20.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .map(|el| highlight::button(el, &theme))
+                            .child(sf_symbols::glyph("xmark", 9.0, theme.text_muted))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_poll_option(ix, cx)),
+                            ),
+                    )
+                })
+            }))
             .when(draft.options.len() < OPTIONS_MAX, |el| {
                 el.child(
                     quiet_row(
