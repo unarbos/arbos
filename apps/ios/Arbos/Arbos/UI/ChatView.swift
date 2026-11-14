@@ -5043,7 +5043,7 @@ enum TranscriptScrollLatch {
 
     /// What a sample the reader did not cause means for the latch.
     enum Settled: Equatable {
-        /// Content grew under a reader held at the end: follow it down.
+        /// Content grew, or the container moved, under a reader held at the end: follow it down.
         case stick
         /// Something moved the end relative to the reader: read where they are again.
         case reread(away: Bool)
@@ -5079,8 +5079,12 @@ enum TranscriptScrollLatch {
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
                         distance: CGFloat, pinned: Bool) -> Settled {
         if grew { return pinned ? .stick : .reread(away: true) }
-        if abs(newContainer - oldContainer) > 0.5 { return .reread(away: away(distance: distance)) }
-        return .hold
+        guard abs(newContainer - oldContainer) > 0.5 else { return .hold }
+        // A reader following the end keeps following it. The keyboard rising arrives as a
+        // sample with the container already a keyboard shorter and the offset not yet moved,
+        // so its distance says "a keyboard away" about a reader who never left — reading that
+        // unpinned them on every keyboard open, and nothing after it kept the end in view.
+        return pinned ? .stick : .reread(away: away(distance: distance))
     }
 }
 
