@@ -115,6 +115,11 @@ jobs:
           # installs, but that is on the deploy host, after the merge — this runs it on the pull request.
           shellcheck -S warning scripts/deploy/arbos-deploy-worker
           bash scripts/deploy/arbos-deploy-worker selftest
+          # The release fast path's arming check, the same way: one explicit marker at the start of
+          # one commit subject opens it, nothing else does, and a source read refuses to let it
+          # widen back into bodies, brought-in commits or a release ahead of CI (P0 #1208). Offline,
+          # on a repository it builds in /tmp, ~1s.
+          bash scripts/release/auto-stable.sh --self-test
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
