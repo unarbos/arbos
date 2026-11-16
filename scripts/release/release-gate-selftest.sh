@@ -335,6 +335,18 @@ WHY="self-test has a step with \`continue-on-error\`" \
   case_is "a step whose failure is swallowed fails closed" 2 "${QUIET[@]}"
 gate="$here/release-gate.py"
 
+# The same shape once more, reached from the other direction. Every case above is a job that
+# cannot decide and says nothing; this is a job that can decide but is handed a base with nothing
+# to measure. One deleted env line puts it back, and it is invisible on a pull request based on
+# main — which is every pull request anyone would test this on.
+unmeasured="$(throwaway)"
+grep -v 'GATE_REQUIRE_MAIN_BASE: "1"' "$root/.github/workflows/release-gate.yml" \
+  > "$unmeasured/.github/workflows/release-gate.yml"
+gate="$unmeasured/scripts/release/release-gate.py"
+WHY="does not set GATE_REQUIRE_MAIN_BASE" \
+  case_is "a deciding job that would pass on an unmeasurable base fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
+
 # ── the screen itself ───────────────────────────────────────────────────────────────────────────
 # Every job's first step. An event that hands the gate no pull request must exit 2, never 0:
 # `workflow_dispatch` supplied neither value, and the fallback that filled them in is what turned
@@ -370,6 +382,23 @@ screen_is "a head sha with no base ref cannot decide" 2 \
 screen_is "a pull request can decide" 0 \
   "base_ref=main
 head_sha=41847d26b" GATE_BASE_REF=main GATE_HEAD_SHA=41847d26b
+
+# A base that is not main. The gate job asks for GATE_REQUIRE_MAIN_BASE and must be refused; the
+# self-test job does not ask and must still be let through, because its cases are offline and
+# pinned and a stacked pull request editing the predicate is the one that most needs them run.
+# Both halves are asserted: a change that refuses everywhere would pass the first case alone.
+screen_is "a stacked base cannot be measured, so the gate job is refused" 2 \
+  "Base branch is 'cursor/some-parent-branch', not main: merging it publishes nothing" \
+  GATE_BASE_REF=cursor/some-parent-branch GATE_HEAD_SHA=41847d26b GATE_REQUIRE_MAIN_BASE=1
+screen_is "the same base is let through for a job that does not measure" 0 \
+  "base_ref=cursor/some-parent-branch
+head_sha=41847d26b" GATE_BASE_REF=cursor/some-parent-branch GATE_HEAD_SHA=41847d26b
+# The ordinary case, and the one every pull request actually takes. A different head sha from the
+# case above, because the two differ only in a variable the screen does not echo: identical output
+# would let either stand in for the other, which is what release-gate-selftest-audit.sh refuses.
+screen_is "asking for a main base changes nothing when the base is main" 0 \
+  "base_ref=main
+head_sha=6c2ea90f4" GATE_BASE_REF=main GATE_HEAD_SHA=6c2ea90f4 GATE_REQUIRE_MAIN_BASE=1
 
 if (( failures > 0 )); then
   echo

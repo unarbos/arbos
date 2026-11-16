@@ -113,6 +113,10 @@ jobs:
         env:
           GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
           GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Only this job measures what merging publishes, so only this job needs a base it can
+          # measure against. The self-test job's cases are offline and pinned and decide on any
+          # base. See gate-can-decide.sh for why a non-main base refuses rather than passing.
+          GATE_REQUIRE_MAIN_BASE: "1"
         run: scripts/release/gate-can-decide.sh
       # The phone side reads ios.yml's path filter with a real YAML parser rather than a
       # hand-rolled one, so a filter this gate cannot parse is loud instead of silently empty.
@@ -131,25 +135,21 @@ jobs:
           # there is one place that decides whether this run has a pull request to judge. No
           # fallback to github.ref_name or github.sha: a fallback is what made a dispatch look
           # like a verdict.
-          decided="$(scripts/release/gate-can-decide.sh)"
-          BASE_REF="$(sed -n 's/^base_ref=//p' <<< "$decided")"
+          # Asked for again here, with the same flag the step above used. Reaching this line
+          # already means the base is main, so this cannot refuse anything the step above let
+          # past — which is the point: the question is answered in one script rather than by a
+          # condition written twice, and BASE_REF no longer has to be read back out at all.
+          decided="$(GATE_REQUIRE_MAIN_BASE=1 scripts/release/gate-can-decide.sh)"
           HEAD_SHA="$(sed -n 's/^head_sha=//p' <<< "$decided")"
           git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
-          # Only main publishes: release.yml tags from it, and ios.yml uploads to TestFlight only
-          # for a push to it. A pull request into any other branch has no release to measure
-          # against. This is a step, not an `if:`, so the job never concludes without saying so.
-          if [[ "$BASE_REF" != main ]]; then
-            echo "Base branch is '$BASE_REF', not main: merging it publishes nothing." \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           # The merge base, not main's head: a two-dot diff against the head would count whatever
           # main changed since this branch forked as part of the pull request.
           base="$(git merge-base origin/main "$HEAD_SHA")"
           # Exit 2 is the gate failing to decide, and it fails the job: a check that cannot tell
           # must never read as a pass. There is no exit 1 — nothing about what main owes refuses
-          # a merge any more — so every red here is this gate's own problem, not the pull
-          # request's, and its output says what it could not read.
+          # a merge any more — so a red here never means the pull request is wrong. It means this
+          # gate reached no verdict, either because it could not read what it needed or because
+          # the pull request's base is not one it can measure, and its output says which.
           python3 scripts/release/release-gate.py \
             --repo "$GITHUB_REPOSITORY" --main origin/main \
             --pr-base "$base" --pr-head "$HEAD_SHA"
