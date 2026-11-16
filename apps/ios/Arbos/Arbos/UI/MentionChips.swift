@@ -92,10 +92,15 @@ final class MentionTable {
             // for me too ([feedback typed-handle-mention-chip-2026-10-29]; Mac twin
             // adds me explicitly because sync drops the viewer from `people`).
             for m in chat.members where !m.isAgent {
+                // The cap is a bitmap, so `PersonAvatar`'s own `.task` never runs: ask for the
+                // picture here, and carry the URL so the stamp sees it land.
+                let url = m.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
+                if let url { AvatarImageCache.shared.fetch(url) }
                 add(m.handle, MentionEntry(
                     name: m.name?.isEmpty == false ? m.name! : m.handle,
                     target: .user(ProfilePerson(m)),
-                    picture: AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: Self.picture, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))
+                    picture: AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: Self.picture, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)),
+                    pictureURL: url
                 ))
             }
             // Agents other people shared into my chats (#1592): their `@handle` is a chip
@@ -126,10 +131,13 @@ final class MentionTable {
             }
         }
         for person in model.directory {
+            let url = person.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
+            if let url { AvatarImageCache.shared.fetch(url) }
             add(person.handle, MentionEntry(
                 name: person.name?.isEmpty == false ? person.name! : person.handle,
                 target: .user(ProfilePerson(person)),
-                picture: AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: Self.picture, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))
+                picture: AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: Self.picture, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)),
+                pictureURL: url
             ))
         }
         for server in model.servers {
