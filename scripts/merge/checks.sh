@@ -275,7 +275,18 @@ gate_state() {
 # A gate in neither tree is not yet policy: nothing can have run for it on this head, and nothing
 # will gate the merged result either, so it is "not required" rather than a refusal. A gate in
 # main's tree but not the head's is the #2376 case above, and still asks for the verdict the head
-# cannot have — the remedy is to rebase, which is the point.
+# cannot have — the remedy is to refresh the head, which is the point.
+#
+# Refresh it by merging main in, never by rebasing. What the gate needs is the workflow file in the
+# head's tree, and a merge puts it there, which is the whole requirement. A rebase puts it there too
+# but rewrites history, so on a branch with an open pull request it needs a force-push — forbidden
+# here since #2376, the same pull request this paragraph is about. This line used to say "the remedy
+# is to rebase"; it was prescribing the thing its own case banned, and #2705 followed it on
+# 2026-11-04 and paid an hour-long Mac gate a second time for the rewritten head.
+#
+# Read this verdict BEFORE spending Mac gate time on a branch that forked before a gate landed.
+# `merge-window.sh checks <sha>` is read-only and immediate; a head refreshed after the gate has
+# already run pays that hour twice.
 gate_applies() {
   local wf=$1 sha=$2 files=$3 phead pbase hrc brc pats
   phead=$(gate_patterns "$wf" "$sha"); hrc=$?
