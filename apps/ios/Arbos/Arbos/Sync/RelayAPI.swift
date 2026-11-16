@@ -190,10 +190,14 @@ final class RelayAPI {
 
     /// JSON and raw-body requests share the same account admission boundary.
     /// Keep the returned bearer fixed for the request after its MainActor check.
-    private func requestBearer(auth: Bool = true) async throws -> String {
+    private func requestBearer(auth: Bool = true, call: String = "an upload") async throws -> String {
         if let authorization {
             // Admission and dynamic token capture share one MainActor turn.
-            guard let allowed = await authorization() else { throw CancellationError() }
+            // Named, not a bare CancellationError: phones show "Swift.CancellationError 1" under
+            // Home on every reload (2026-11-16) and that says nothing about which call or why.
+            guard let allowed = await authorization() else {
+                throw RelayError(status: 0, message: "not admitted: \(call)")
+            }
             return allowed
         }
         return auth ? token() : ""
@@ -206,7 +210,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let timeout { req.timeoutInterval = timeout }
-        let bearer = try await requestBearer(auth: auth)
+        let bearer = try await requestBearer(auth: auth, call: "\(method) \(path)")
         if auth { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         // What runs here (`ios/1.0.0 (202610192230)`): the relay's "installed version" signal for
         // continuous delivery (GET /admin/installs), on every call.
@@ -390,8 +394,10 @@ final class RelayAPI {
         try Task.checkCancellation()
         var out: [RegistryProject] = []
         var skippedIds: Set<String> = []
-        for result in results {
-            guard let result else { throw CancellationError() }
+        for (index, result) in results.enumerated() {
+            guard let result else {
+                throw RelayError(status: 0, message: "detail \(index + 1)/\(results.count) never ran")
+            }
             switch try result.get() {
             case .project(let project): out.append(project)
             case .skipped(let id): skippedIds.insert(id)
