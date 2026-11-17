@@ -1136,15 +1136,22 @@ impl Element for SelectableText {
             }
         });
         let rig = selection.read(cx).rig_chip;
-        for chip in chips.iter() {
+        let fragments: Vec<_> = chips
+            .iter()
+            .map(|c| chip_fragments(&layout, &c.range))
+            .collect();
+        let pads = mention::pill_pads(&fragments.concat());
+        let mut pads = pads.iter();
+        for (chip, fragments) in chips.iter().zip(&fragments) {
             let (alpha, still) = match rig {
                 Some(state) if chip.clickable() => (state.alpha(), false),
                 _ => selection.read(cx).chips.alpha(&chip.key, now, snap),
             };
             fading |= still;
             paint_chip_pill(
-                &layout,
-                chip,
+                layout.line_height(),
+                fragments,
+                &mut pads,
                 mention::pill_color(chip.accent, alpha),
                 window,
             );
@@ -1370,18 +1377,21 @@ fn chip_at<'a>(
 }
 
 /// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, `PILL_PAD_X` wider than the glyphs on each side and
-/// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
-fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut Window) {
-    for (start, end, top) in chip_fragments(layout, &chip.range) {
-        let line_h = layout.line_height();
+/// occupies, wider than the glyphs by its `mention::pill_pads` (`PILL_PAD_X`,
+/// less toward a close neighbour) and `PILL_PAD_Y` past the line box above
+/// and below. Painted before the text.
+fn paint_chip_pill<'a>(
+    line_h: Pixels,
+    fragments: &[(Pixels, Pixels, Pixels)],
+    pads: &mut impl Iterator<Item = &'a (Pixels, Pixels)>,
+    color: Hsla,
+    window: &mut Window,
+) {
+    for (&(start, end, top), &(left, right)) in fragments.iter().zip(pads) {
         let bounds = Bounds::new(
-            point(
-                start - px(mention::PILL_PAD_X),
-                top - px(mention::PILL_PAD_Y),
-            ),
+            point(start - left, top - px(mention::PILL_PAD_Y)),
             size(
-                end - start + px(mention::PILL_PAD_X * 2.0),
+                end - start + left + right,
                 line_h + px(mention::PILL_PAD_Y * 2.0),
             ),
         );

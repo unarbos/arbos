@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, Entity, Hsla, RenderImage};
+use gpui::{px, App, Entity, Hsla, Pixels, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
@@ -28,11 +28,46 @@ use crate::ui::theme::Theme;
 
 /// The chip's geometry, Grok Bot's mention chip (Jacob's shot, Oct 23): the
 /// pill hugs the text line with `PILL_PAD_X` on each side and `PILL_PAD_Y`
-/// above and below the glyph box; the picture is a disc `PICTURE` tall
+/// above and below the line box; the picture is a disc `PICTURE` tall
 /// centred in the `@` glyph's cell.
+///
+/// Neighbouring pills never touch (tester, 2026-11-14: "these blue '@
+/// mentions' clip into each other"): `PILL_PAD_Y` is negative, so a pill
+/// stays 1 pt inside its line and pills on consecutive lines keep 2 pt
+/// between them; on one line [`pill_pads`] keeps `PILL_GAP`.
 pub const PILL_PAD_X: f32 = 4.0;
-pub const PILL_PAD_Y: f32 = 1.0;
+pub const PILL_PAD_Y: f32 = -1.0;
 pub const PILL_RADIUS: f32 = 6.0;
+/// The least clear space between two pills on one line.
+pub const PILL_GAP: f32 = 2.0;
+
+/// How far each pill reaches (left, right) past its text fragment
+/// `(x0, x1, top)`: `PILL_PAD_X`, less toward a pill on the same line that
+/// is closer than two pads and `PILL_GAP` ("@a @b" is one space apart) —
+/// the two then share what the space leaves after the gap.
+/// O(n²) over one text's chips; sort by line if a message ever carries hundreds.
+pub fn pill_pads(fragments: &[(Pixels, Pixels, Pixels)]) -> Vec<(Pixels, Pixels)> {
+    let pad = |space: Pixels| px(PILL_PAD_X).min(((space - px(PILL_GAP)) / 2.0).max(px(0.0)));
+    fragments
+        .iter()
+        .enumerate()
+        .map(|(i, &(x0, x1, top))| {
+            let others = || {
+                fragments
+                    .iter()
+                    .enumerate()
+                    .filter(move |(j, f)| *j != i && f.2 == top)
+            };
+            let before = others()
+                .filter(|(_, f)| f.1 <= x0)
+                .fold(Pixels::MAX, |s, (_, f)| s.min(x0 - f.1));
+            let after = others()
+                .filter(|(_, f)| f.0 >= x1)
+                .fold(Pixels::MAX, |s, (_, f)| s.min(f.0 - x1));
+            (pad(before), pad(after))
+        })
+        .collect()
+}
 /// The picture disc, at most; it shrinks to its cell so it never touches
 /// the name (Grok: a clear gap between icon and name).
 pub const PICTURE: f32 = 15.0;
@@ -1187,6 +1222,33 @@ pub(crate) mod tests {
         assert_eq!(p.state(&2), ChipState::Hover);
         assert!(p.alpha(&1, t1 + PILL_FADE + half, false).1, "1 is cooling");
         assert!(p.alpha(&2, t1 + PILL_FADE + half, false).1, "2 is warming");
+    }
+
+    /// Tester (Nov 14): mentions one space apart drew into each other.
+    #[test]
+    fn neighbouring_pills_keep_a_gap() {
+        let p = |v: &[f32; 3]| (px(v[0]), px(v[1]), px(v[2]));
+        // Two chips 3.5 pt apart on one line, a third far right, a fourth
+        // on the next line right under the first.
+        let fragments = [
+            p(&[0.0, 40.0, 0.0]),
+            p(&[43.5, 90.0, 0.0]),
+            p(&[200.0, 240.0, 0.0]),
+            p(&[0.0, 40.0, 22.0]),
+        ];
+        let pads = pill_pads(&fragments);
+        let full = px(PILL_PAD_X);
+        assert_eq!(pads[0], (full, px(0.75)));
+        assert_eq!(pads[1], (px(0.75), full));
+        assert_eq!(pads[2], (full, full));
+        assert_eq!(pads[3], (full, full), "another line is no neighbour");
+        let gap = (fragments[1].0 - pads[1].0) - (fragments[0].1 + pads[0].1);
+        assert_eq!(gap, px(PILL_GAP));
+        // Closer than the gap itself: no reach at all, never a negative one.
+        let tight = pill_pads(&[p(&[0.0, 10.0, 0.0]), p(&[11.0, 20.0, 0.0])]);
+        assert_eq!((tight[0].1, tight[1].0), (px(0.0), px(0.0)));
+        // Lines: a pill is shorter than its line, so two lines never meet.
+        const { assert!(PILL_PAD_Y < 0.0) };
     }
 
     #[test]

@@ -2204,29 +2204,42 @@ impl Element for InputElement {
         let mut pills = Vec::new();
         let mut pictures = Vec::new();
         let mut chip_hits = Vec::new();
-        for ((t, mention), alpha) in tokens.iter().zip(token_mentions).zip(pill_alphas) {
-            let (Some(a), Some(b)) = (
-                position_for_index(&lines, t.range.start, bounds.size.width, text_center),
-                position_for_index(&lines, t.range.end, bounds.size.width, text_center),
-            ) else {
+        let token_fragments: Vec<Vec<(Pixels, Pixels, Pixels)>> = tokens
+            .iter()
+            .map(|t| {
+                let (Some(a), Some(b)) = (
+                    position_for_index(&lines, t.range.start, bounds.size.width, text_center),
+                    position_for_index(&lines, t.range.end, bounds.size.width, text_center),
+                ) else {
+                    return Vec::new();
+                };
+                if a.y == b.y {
+                    vec![(a.x, b.x, a.y)]
+                } else {
+                    vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
+                }
+            })
+            .collect();
+        let pads = mention::pill_pads(&token_fragments.concat());
+        let mut pads = pads.iter();
+        for (((t, mention), alpha), fragments) in tokens
+            .iter()
+            .zip(token_mentions)
+            .zip(pill_alphas)
+            .zip(token_fragments)
+        {
+            let Some(&(ax, _, ay)) = fragments.first() else {
                 continue;
             };
-            let fragments: Vec<(Pixels, Pixels, Pixels)> = if a.y == b.y {
-                vec![(a.x, b.x, a.y)]
-            } else {
-                vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
-            };
+            let a = point(ax, ay);
             let mut rects = Vec::with_capacity(fragments.len());
-            for (x0, x1, top) in fragments {
+            for ((x0, x1, top), &(left, right)) in fragments.into_iter().zip(&mut pads) {
                 let pill = Bounds::new(
                     point(
-                        bounds.left() + x0 - px(mention::PILL_PAD_X),
+                        bounds.left() + x0 - left,
                         bounds.top() + top - dy - px(mention::PILL_PAD_Y),
                     ),
-                    size(
-                        x1 - x0 + px(mention::PILL_PAD_X * 2.0),
-                        lh + px(mention::PILL_PAD_Y * 2.0),
-                    ),
+                    size(x1 - x0 + left + right, lh + px(mention::PILL_PAD_Y * 2.0)),
                 );
                 rects.push(pill);
                 pills.push(

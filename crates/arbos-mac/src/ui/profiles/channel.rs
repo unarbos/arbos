@@ -201,10 +201,36 @@ fn toggle_row(
 
 fn privacy_label(restricted: bool) -> &'static str {
     if restricted {
-        "Everyone in the server reads · admins post"
+        "Everyone in the server can read this channel. Only admins can post."
     } else {
-        "Everyone in the server"
+        "Everyone in the server can read and post in this channel."
     }
+}
+
+/// Privacy as a sentence under its label, wrapping (tester, 2026-11-15: "what
+/// is meant by privacy … text is cut off" — it was a one-line value at the
+/// row's right end, cut to an ellipsis at the pane's width).
+fn privacy_row(id: &'static str, restricted: bool, theme: &Theme) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(1.0))
+        .min_h(px(kit::ROW_MIN_H))
+        .px(px(kit::INSET))
+        .py(px(6.0))
+        .text_size(px(TEXT_BODY))
+        .text_color(theme.text)
+        .child("Privacy")
+        .child(
+            div()
+                .debug_selector(|| "channel-privacy-text".into())
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.label_muted())
+                .child(privacy_label(restricted)),
+        )
+        .into_any_element()
 }
 
 /// Profile: what the channel is, who is in it, how it is set up — read-only, plus mute.
@@ -246,15 +272,7 @@ fn profile_tab(
         }))
         .into_any_element(),
     );
-    about.push(
-        kit::value_row(
-            "channel-privacy",
-            "Privacy",
-            privacy_label(restricted),
-            theme,
-        )
-        .into_any_element(),
-    );
+    about.push(privacy_row("channel-privacy", restricted, theme));
     about.push(
         kit::value_row(
             "channel-posting",
@@ -403,15 +421,7 @@ fn settings_tab(
         },
         cx,
     ));
-    behaviour.push(
-        kit::value_row(
-            "channel-set-privacy",
-            "Privacy",
-            privacy_label(restricted),
-            theme,
-        )
-        .into_any_element(),
-    );
+    behaviour.push(privacy_row("channel-set-privacy", restricted, theme));
     if can_admin {
         let (sid, cid) = (server.id.clone(), channel.id.clone());
         behaviour.push(toggle_row(
@@ -572,4 +582,34 @@ fn danger_footer(
         }
     }
     vec![Section::Card(rows)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Privacy;
+
+    impl gpui::Render for Privacy {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            div()
+                .w(px(200.0))
+                .text_size(px(TEXT_SMALL))
+                .child(div().debug_selector(|| "one-line".into()).child("Privacy"))
+                .child(privacy_row("channel-privacy", true, &theme))
+        }
+    }
+
+    /// The Privacy sentence wraps inside the pane instead of ending in an ellipsis.
+    #[gpui::test]
+    fn the_privacy_sentence_wraps_instead_of_being_cut(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte)));
+        let (_view, vcx) = cx.add_window_view(|_, _| Privacy);
+        vcx.run_until_parked();
+        let line = vcx.debug_bounds("one-line").unwrap().size.height;
+        let text = vcx.debug_bounds("channel-privacy-text").unwrap();
+        assert!(text.size.height >= line * 2.0, "wrapped: {text:?}");
+        assert!(text.size.width <= px(200.0 - kit::INSET * 2.0), "{text:?}");
+    }
 }

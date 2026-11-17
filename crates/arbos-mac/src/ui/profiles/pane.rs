@@ -310,6 +310,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             pane.done,
             share,
             Some(&shell.profile_scroll),
+            shell.state.read(cx).media_viewer.is_some(),
             &theme,
             cx,
         )
