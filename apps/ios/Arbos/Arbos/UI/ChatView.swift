@@ -1491,6 +1491,9 @@ struct ChatSession: View {
                     // This reader ignores the safe area, so its own insets read 0; the
                     // overlay needs the real status-bar / home-indicator insets to fit.
                     let safeArea = KeyboardFrameObserver.windowSafeArea
+                    // Groups and channels name their senders (the same rule `rows` builds by).
+                    let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
+                    let named = multiParty ? row.namedForHold : nil
                     MessageActionsOverlay(
                         row: row,
                         frame: frame,
@@ -1499,6 +1502,7 @@ struct ChatSession: View {
                         safeTop: max(geo.safeAreaInsets.top, safeArea.top),
                         safeBottom: max(geo.safeAreaInsets.bottom, safeArea.bottom),
                         held: heldReactions(row),
+                        nameLift: named == nil ? 0 : RowView.nameLineHeight(theme),
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
@@ -1526,7 +1530,7 @@ struct ChatSession: View {
                             // showReactionSenders: holding the message lists who
                             // used each emoji under the held bubble (chip hold
                             // does the same one-emoji list in the transcript).
-                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: named ?? row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
                                     showReactionSenders: !row.reactions.isEmpty)
@@ -4747,7 +4751,13 @@ extension ChatSession {
             let reply = isMessageRow(row)
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    onQuoteTap: { quote in
+                        // The lift after a hold that opened the menu is not a tap on the
+                        // quote: the chat jumped to the original under the open menu
+                        // (tester reports, 2026-11-14 and 2026-11-17).
+                        guard !ChatGestures.tapEndsHold() else { return }
+                        revealQuoted(quote, from: row.messageId)
+                    },
                     onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),

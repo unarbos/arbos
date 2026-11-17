@@ -68,6 +68,8 @@ enum DebugHooks {
     }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
+    /// `ARBOS_FIXTURE_LONG_REPLY=tall`: a reply taller than the screen, links included (hold-menu rig).
+    static var fixtureTallReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "tall" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
