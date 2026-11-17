@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -28,11 +29,17 @@ enum ComposerAttachment {
 
     /// What Edit is offered on (tester report, 2026-11-17: "cut a vid or pic within the app
     /// before sending it"): a video (trim) or a still picture (crop). A GIF is left alone, a
-    /// crop would keep one frame of it.
+    /// crop would keep one frame of it. Whether this one can really be opened is only known
+    /// from its bytes (`PendingEdit.open`), which says so when it cannot.
     static func canEdit(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("video/") || (mime.hasPrefix("image/") && mime != "image/gif")
     }
+
+    /// The size the too-large note names (`UserError`, "25 MB max"). An edit can grow a file
+    /// (the trimmer re-encodes), so the result is checked here rather than failing at send.
+    static let maxBytes = 25 * 1024 * 1024
+    static func fits(_ a: AppModel.PendingAttachment) -> Bool { a.data.count <= maxBytes }
 
     /// The edited file takes the original's place in the row; an attachment removed while its
     /// editor was open is not brought back.
@@ -105,6 +112,7 @@ struct ComposerAttachmentTile: View {
         .buttonStyle(.plain)
         .disabled(!canOpen)
         .accessibilityLabel(canOpen ? "\(attachment.name), tap to open" : attachment.name)
+        .accessibilityValue(ByteCountFormatter.string(fromByteCount: Int64(attachment.data.count), countStyle: .file))
         .accessibilityIdentifier("composer-attachment")
         .task(id: attachment.id) {
             guard attachment.mime.lowercased().hasPrefix("video/") else { return }
@@ -184,51 +192,132 @@ struct ComposerAttachmentRow: View {
     }
 }
 
-/// Edit a staged attachment before it is sent (tester report, 2026-11-17): the system trimmer
-/// for a video, a crop screen for a picture. `onDone(nil)` is Cancel, and anything that cannot
-/// be opened: the original stays as it was.
+/// A staged attachment opened for editing (tester report, 2026-11-17). Everything slow —
+/// writing the video out, decoding the picture, encoding the result — runs off the main thread.
+struct PendingEdit: Identifiable {
+    enum Source {
+        case picture(UIImage)
+        /// The editor's own copy of the video, deleted when the editor closes.
+        case video(URL)
+    }
+
+    enum Opened {
+        case edit(PendingEdit)
+        /// Why it cannot be edited, as the composer's note says it.
+        case refused(UserError.Class)
+    }
+
+    let original: AppModel.PendingAttachment
+    let source: Source
+    var id: UUID { original.id }
+
+    /// The system trimmer saves at most this much (`videoMaximumDuration`: 10 minutes, and
+    /// Apple documents no way to raise it), so a longer video is not opened: saving it
+    /// untouched would cut it.
+    static let longestTrim: Double = 600
+
+    @MainActor
+    static func open(_ a: AppModel.PendingAttachment) async -> Opened {
+        guard a.mime.lowercased().hasPrefix("video/") else {
+            let image = await Task.detached { () -> UIImage? in
+                // An animated WebP / APNG is left alone as a GIF is: a crop would keep one frame.
+                AnimatedImageFrames.animatedImage(from: a.data) == nil ? UIImage(data: a.data) : nil
+            }.value
+            return image.map { .edit(PendingEdit(original: a, source: .picture($0))) } ?? .refused(.upload(.unsupported))
+        }
+        let prepared = await Task.detached { () -> (file: URL, seconds: Double)? in
+            // Its own file, so closing the editor can delete it. The name is only a hint to
+            // AVFoundation, so a known extension is all that is kept of it.
+            let ext = (a.name as NSString).pathExtension.lowercased()
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent("edit-\(UUID().uuidString).\(["mp4", "m4v"].contains(ext) ? ext : "mov")")
+            guard (try? a.data.write(to: file)) != nil else { return nil }
+            let seconds = (try? await AVURLAsset(url: file).load(.duration)).map(CMTimeGetSeconds) ?? .nan
+            return (file, seconds)
+        }.value
+        guard let prepared else { return .refused(.upload(.unreadable)) }
+        let edit = PendingEdit(original: a, source: .video(prepared.file))
+        guard prepared.seconds.isFinite, prepared.seconds > 0,
+              UIVideoEditorController.canEditVideo(atPath: prepared.file.path) else {
+            edit.close()
+            return .refused(.upload(.unsupported))
+        }
+        guard prepared.seconds <= longestTrim else {
+            edit.close()
+            return .refused(.refused(message: "Videos longer than 10 minutes can't be trimmed here"))
+        }
+        return .edit(edit)
+    }
+
+    /// The editor is done with it, saved or cancelled: its copy of the video goes.
+    func close() {
+        if case .video(let file) = source { try? FileManager.default.removeItem(at: file) }
+    }
+
+    /// The cropped picture. PNG stays PNG (a screenshot, transparency); anything else goes
+    /// out as JPEG.
+    func cropped(_ image: UIImage, to unit: CGRect) async -> AppModel.PendingAttachment? {
+        let (name, png) = (original.name, original.mime.lowercased() == "image/png")
+        return await Task.detached { () -> AppModel.PendingAttachment? in
+            let cut = PhotoCrop.cropped(image, to: unit)
+            guard let data = png ? cut.pngData() : cut.jpegData(compressionQuality: 0.9) else { return nil }
+            let stem = (name as NSString).deletingPathExtension
+            return .init(name: "\(stem).\(png ? "png" : "jpg")", mime: png ? "image/png" : "image/jpeg", data: data)
+        }.value
+    }
+
+    /// The file the trimmer saved, read and removed.
+    func trimmed(at path: String) async -> AppModel.PendingAttachment? {
+        let name = original.name
+        return await Task.detached { () -> AppModel.PendingAttachment? in
+            let file = URL(fileURLWithPath: path)
+            defer { try? FileManager.default.removeItem(at: file) }
+            guard let data = try? Data(contentsOf: file), !data.isEmpty else { return nil }
+            let ext = file.pathExtension.isEmpty ? "mov" : file.pathExtension.lowercased()
+            let stem = (name as NSString).deletingPathExtension
+            return .init(name: "\(stem).\(ext)",
+                         mime: UTType(filenameExtension: ext)?.preferredMIMEType ?? "video/quicktime", data: data)
+        }.value
+    }
+}
+
+/// The editor for a `PendingEdit`: the system trimmer for a video, a crop screen for a
+/// picture. `onDone(nil)` is Cancel: the original stays as it was.
 struct AttachmentEditor: View {
-    let attachment: AppModel.PendingAttachment
+    let edit: PendingEdit
     let onDone: (AppModel.PendingAttachment?) -> Void
 
     var body: some View {
-        if attachment.mime.lowercased().hasPrefix("video/") {
-            VideoTrimmer(attachment: attachment, onDone: onDone).ignoresSafeArea()
-        } else if let image = UIImage(data: attachment.data) {
+        switch edit.source {
+        case .video(let file):
+            VideoTrimmer(edit: edit, file: file, onDone: onDone).ignoresSafeArea()
+        case .picture(let image):
             PhotoCropper(image: image, onCancel: { onDone(nil) }) { unit in
-                // PNG stays PNG (a screenshot, transparency); anything else goes out as JPEG.
-                let png = attachment.mime.lowercased() == "image/png"
-                let cropped = PhotoCrop.cropped(image, to: unit)
-                guard let data = png ? cropped.pngData() : cropped.jpegData(compressionQuality: 0.9) else { return onDone(nil) }
-                let stem = (attachment.name as NSString).deletingPathExtension
-                onDone(.init(name: "\(stem).\(png ? "png" : "jpg")", mime: png ? "image/png" : "image/jpeg", data: data))
+                Task { onDone(await edit.cropped(image, to: unit)) }
             }
-        } else {
-            Color.black.ignoresSafeArea().onAppear { onDone(nil) }
         }
     }
 }
 
 /// `UIVideoEditorController`: the system's start / end trim. It re-encodes to a QuickTime file.
-/// The editor is presented from a plain controller: SwiftUI cannot host it directly (it has
-/// no view of its own to embed, and the app aborts).
+/// The editor is presented from a plain controller rather than returned to SwiftUI, which
+/// aborted the app when asked to embed it.
 private struct VideoTrimmer: UIViewControllerRepresentable {
-    let attachment: AppModel.PendingAttachment
+    let edit: PendingEdit
+    let file: URL
     let onDone: (AppModel.PendingAttachment?) -> Void
 
-    func makeUIViewController(context: Context) -> Host { Host(attachment, onDone) }
+    func makeUIViewController(context: Context) -> Host { Host(self) }
     func updateUIViewController(_ host: Host, context: Context) {}
 
     final class Host: UIViewController, UIVideoEditorControllerDelegate, UINavigationControllerDelegate {
-        private let attachment: AppModel.PendingAttachment
-        private let onDone: (AppModel.PendingAttachment?) -> Void
+        private let trimmer: VideoTrimmer
         private var shown = false
         /// The system calls the save delegate twice on some releases; only the first counts.
         private var finished = false
 
-        init(_ attachment: AppModel.PendingAttachment, _ onDone: @escaping (AppModel.PendingAttachment?) -> Void) {
-            self.attachment = attachment
-            self.onDone = onDone
+        init(_ trimmer: VideoTrimmer) {
+            self.trimmer = trimmer
             super.init(nibName: nil, bundle: nil)
             view.backgroundColor = .black
         }
@@ -239,34 +328,31 @@ private struct VideoTrimmer: UIViewControllerRepresentable {
             super.viewDidAppear(animated)
             guard !shown else { return }
             shown = true
-            guard let file = MediaFetch.tempFile(attachment.data, name: attachment.name),
-                  UIVideoEditorController.canEditVideo(atPath: file.path) else { return finish(nil) }
             let editor = UIVideoEditorController()
             editor.delegate = self
             editor.videoQuality = .typeHigh
-            editor.videoPath = file.path
+            // `PendingEdit.open` only lets through a video no longer than this, so the editor
+            // never shortens one the user did not trim.
+            editor.videoMaximumDuration = PendingEdit.longestTrim
+            editor.videoPath = trimmer.file.path
             editor.modalPresentationStyle = .fullScreen
             present(editor, animated: false)
         }
 
-        private func finish(_ edited: AppModel.PendingAttachment?) {
+        private func finish(saved path: String?) {
             guard !finished else { return }
             finished = true
-            dismiss(animated: false) { [onDone] in onDone(edited) }
+            let trimmer = trimmer
+            Task { @MainActor in
+                let edited = path == nil ? nil : await trimmer.edit.trimmed(at: path!)
+                trimmer.edit.close()
+                self.dismiss(animated: false) { trimmer.onDone(edited) }
+            }
         }
 
-        func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath path: String) {
-            let file = URL(fileURLWithPath: path)
-            defer { try? FileManager.default.removeItem(at: file) }
-            guard let data = try? Data(contentsOf: file), !data.isEmpty else { return finish(nil) }
-            let ext = file.pathExtension.isEmpty ? "mov" : file.pathExtension.lowercased()
-            let stem = (attachment.name as NSString).deletingPathExtension
-            finish(.init(name: "\(stem).\(ext)",
-                         mime: UTType(filenameExtension: ext)?.preferredMIMEType ?? "video/quicktime", data: data))
-        }
-
-        func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: Error) { finish(nil) }
-        func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) { finish(nil) }
+        func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath path: String) { finish(saved: path) }
+        func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: Error) { finish(saved: nil) }
+        func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) { finish(saved: nil) }
     }
 }
 
@@ -308,6 +394,9 @@ enum PhotoCrop {
                           height: max(1, (image.size.height * unit.height).rounded()))
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = image.scale
+        // 8 bits a channel: the default on a wide-colour screen writes a 16-bit PNG several
+        // times the size of the picture it was cut from.
+        format.preferredRange = .standard
         return UIGraphicsImageRenderer(size: size, format: format).image { _ in
             image.draw(at: CGPoint(x: -image.size.width * unit.minX, y: -image.size.height * unit.minY))
         }

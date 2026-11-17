@@ -318,31 +318,68 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(PhotoCrop.cropped(image, to: square).size, CGSize(width: 100, height: 100))
     }
 
-    // Tester report, 2026-11-17: a video shows its first frame, Play and its length.
+    // Tester report, 2026-11-17: a video shows its first frame, Play and its length — made
+    // from bytes already on the phone, never fetched for the poster.
+    @MainActor
     func testVideoPosterKeyFallbackAndLength() async throws {
-        XCTAssertEqual(VideoThumb.cacheRef("att-1-clip.mp4"), "poster:att-1-clip.mp4", "never the video's own cache entry")
-        XCTAssertTrue(VideoThumb.wantsPoster(kind: .video, blobRef: "att-1-clip.mp4"))
-        XCTAssertFalse(VideoThumb.wantsPoster(kind: .video, blobRef: "local:clip.mp4"), "still uploading: the card")
-        XCTAssertFalse(VideoThumb.wantsPoster(kind: .video, blobRef: nil))
-        XCTAssertFalse(VideoThumb.wantsPoster(kind: .file, blobRef: "att-1-notes.pdf"))
+        let owner = try XCTUnwrap(WorkLifetime().ticket)
+        let key = try XCTUnwrap(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "att-1-clip.mp4"))
+        XCTAssertEqual(key, ChatImageCache.Key(owner: owner, slot: "people:c1", ref: "att-1-clip.mp4"))
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "local:clip.mp4"), "still uploading: the card")
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: nil))
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .file, blobRef: "att-1-notes.pdf"))
         XCTAssertEqual(VideoThumb.durationLabel(7.2), "0:07")
         XCTAssertEqual(VideoThumb.durationLabel(3903), "1:05:03")
         XCTAssertEqual(VideoThumb.durationLabel(.nan), "")
         XCTAssertEqual(VideoThumb.durationLabel(.infinity), "")
         XCTAssertEqual(VideoThumb.durationLabel(1e300), "99:59:59")
 
-        let clip = try XCTUnwrap(FixtureMedia.clip)
-        let box = CGSize(width: 160, height: 160)
-        let made = await VideoThumb.frame(from: clip, name: "clip.mp4", maxPixels: box)
-        let frame = try XCTUnwrap(made)
-        XCTAssertEqual(frame.image.size, CGSize(width: 160, height: 90), "scaled into the box at the video's ratio")
+        let made = await Task.detached { FixtureMedia.clip }.value
+        let clip = try XCTUnwrap(made)
+        // Nothing until the bytes are in hand: the row keeps the file card and fetches nothing.
+        XCTAssertNil(VideoThumb.frame(for: key))
+        VideoThumb.remember(clip, name: "clip.mp4", for: key)
+        await VideoThumb.settled(key)
+        let frame = try XCTUnwrap(VideoThumb.frame(for: key))
+        XCTAssertEqual(frame.image.size, CGSize(width: 320, height: 180))
         XCTAssertEqual(frame.seconds, 2, accuracy: 0.1)
-        // What decides is the content: a video under a wrong name still has a frame, and
-        // bytes that are not a video have none whatever they are called.
+        // The picture cache holds nothing under the video's ref: a poster is not a blob.
+        XCTAssertNil(ChatImageCache.decoded(for: key))
+
+        // What decides is the content: a video under a wrong name still has a frame, scaled
+        // into the box, and bytes that are not a video have none whatever they are called.
+        let box = CGSize(width: 160, height: 160)
         let misnamed = await VideoThumb.frame(from: clip, name: "notes.txt", maxPixels: box)
-        XCTAssertNotNil(misnamed)
-        let junk = await VideoThumb.frame(from: Data("not a video".utf8), name: "clip.mp4", maxPixels: box)
-        XCTAssertNil(junk)
+        XCTAssertEqual(misnamed?.image.size, CGSize(width: 160, height: 90))
+        let junkKey = try XCTUnwrap(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "att-2-junk.mp4"))
+        VideoThumb.remember(Data("not a video".utf8), name: "junk.mp4", for: junkKey)
+        await VideoThumb.settled(junkKey)
+        XCTAssertNil(VideoThumb.frame(for: junkKey), "no frame: the file card stays")
+    }
+
+    // What the editor will and will not open, and what an edit may put back.
+    @MainActor
+    func testOpeningAnEditAndTheSizeCheck() async throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20)).image { _ in }
+        let png = AppModel.PendingAttachment(name: "shot.png", mime: "image/png", data: try XCTUnwrap(picture.pngData()))
+        guard case .edit(let edit) = await PendingEdit.open(png), case .picture(let image) = edit.source else {
+            return XCTFail("a still picture opens in the crop screen")
+        }
+        let half = await edit.cropped(image, to: CGRect(x: 0, y: 0, width: 0.5, height: 1))
+        XCTAssertEqual(half?.name, "shot.png")
+        XCTAssertEqual(half.flatMap { UIImage(data: $0.data) }?.size, CGSize(width: 20 * picture.scale, height: 20 * picture.scale))
+        XCTAssertLessThan(try XCTUnwrap(half).data.count, png.data.count * 2, "8-bit, not a 16-bit PNG several times the size")
+
+        // Not a picture and not a video, whatever the mime says: refused with a reason, no editor.
+        if case .edit = await PendingEdit.open(.init(name: "a.png", mime: "image/png", data: Data("junk".utf8))) { XCTFail("junk opened") }
+        let junkVideo = await PendingEdit.open(.init(name: "a.mov", mime: "video/quicktime", data: Data("junk".utf8)))
+        guard case .refused = junkVideo else { return XCTFail("junk video opened") }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("edit-") }
+        XCTAssertEqual(leftovers, [], "the editor's copy of a refused video is deleted")
+
+        XCTAssertTrue(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes))))
+        XCTAssertFalse(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes + 1))),
+                       "an edit that grew past the limit is not staged")
     }
 
     func testRemovingOnePendingAttachmentKeepsTheOthers() {

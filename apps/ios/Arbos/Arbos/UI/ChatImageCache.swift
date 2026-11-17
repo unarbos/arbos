@@ -103,41 +103,54 @@ enum ChatImageCache {
 }
 
 /// A video's poster frame, made on the device (tester report, 2026-11-17: "a preview of a
-/// sent video"). The first decodable frame, no larger than the bubble, kept in
-/// `ChatImageCache` under the video's own ref so it is made once.
+/// sent video"): the first decodable frame, no larger than the bubble.
 ///
-/// Known ceiling: a transcript row has to fetch the whole video to make its poster (the relay
-/// caps a blob at 64 MB), once per video per launch. A poster the sender uploads with the
-/// message (unarbos/arbos#2983) removes the fetch; this stays as the fallback for rows without one.
+/// Only from bytes that are already on the phone: a video being sent, or one fetched to be
+/// played. A row never fetches a video to draw its poster; without one it stays the file
+/// card. A poster the sender uploads with the message (unarbos/arbos#2983) covers the rest.
 enum VideoThumb {
     struct Frame: @unchecked Sendable {
         let image: UIImage
         let seconds: Double
     }
 
-    /// The poster's place in the picture cache: beside, never instead of, the bytes at `blobRef`.
-    static func cacheRef(_ blobRef: String) -> String { "poster:" + blobRef }
+    /// The bubble's largest tile at 2×: at most ~1.4 MB a poster.
+    static let maxPixels = CGSize(width: 560, height: 640)
+    /// Posters kept at once. Simple ceiling: at the limit the store is emptied and those rows
+    /// go back to the file card; an LRU if that ever shows.
+    static let limit = 24
 
-    /// Which rows try for a poster: a video stored on the relay. One still uploading
-    /// (`local:`) or with no ref has no bytes to read and keeps the file card.
-    static func wantsPoster(kind: MediaItem.Kind, blobRef: String?) -> Bool {
-        guard kind == .video, let blobRef, !blobRef.isEmpty else { return false }
-        return !blobRef.hasPrefix("local:")
-    }
+    /// Its own store, not `ChatImageCache`'s: a poster is never an answer for a blob ref, and
+    /// it is not purged behind a row that is still on screen.
+    @MainActor private static var frames: [ChatImageCache.Key: Frame] = [:]
+    @MainActor private static var making: [ChatImageCache.Key: Task<Void, Never>] = [:]
 
-    @MainActor private static var durations: [ChatImageCache.Key: Double] = [:]
-    /// Bytes that are not a video AVFoundation can read (WebM, a mislabelled file): not
-    /// fetched again on every trip through history.
-    @MainActor static var undecodable: Set<ChatImageCache.Key> = []
-
-    @MainActor
-    static func store(_ frame: Frame, for key: ChatImageCache.Key) {
-        ChatImageCache.store(.init(image: frame.image, stillFrame: nil, animated: false, naturalSize: frame.image.size), for: key)
-        durations[key] = frame.seconds
+    /// Which attachments can have a poster: a video stored on the relay. One still uploading
+    /// (`local:`) or with no ref has nothing to be keyed by and keeps the file card.
+    static func key(owner: WorkLifetime.Ticket, slot: String, kind: MediaItem.Kind, blobRef: String?) -> ChatImageCache.Key? {
+        guard kind == .video, let blobRef, !blobRef.isEmpty, !blobRef.hasPrefix("local:") else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: slot, ref: blobRef)
     }
 
     @MainActor
-    static func seconds(for key: ChatImageCache.Key) -> Double { durations[key] ?? 0 }
+    static func frame(for key: ChatImageCache.Key) -> Frame? { frames[key] }
+
+    /// The video's bytes are in hand: make its poster once, off the main actor.
+    @MainActor
+    static func remember(_ data: Data, name: String, for key: ChatImageCache.Key) {
+        guard frames[key] == nil, making[key] == nil else { return }
+        making[key] = Task {
+            if let made = await frame(from: data, name: name, maxPixels: maxPixels) {
+                if frames.count >= limit { frames.removeAll() }
+                frames[key] = made
+            }
+            making[key] = nil
+        }
+    }
+
+    /// Returns once a poster being made for `key` is in (or is not coming).
+    @MainActor
+    static func settled(_ key: ChatImageCache.Key) async { await making[key]?.value }
 
     /// `0:07`, `1:05`, `1:05:03`; empty when the length is unknown. The file is untrusted:
     /// anything not finite and positive has no label, and the hours are capped.

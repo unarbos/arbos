@@ -4217,7 +4217,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -6515,7 +6515,7 @@ final class AppModel: ObservableObject {
         guard let work = accountWork() else { return }
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -6645,13 +6645,21 @@ final class AppModel: ObservableObject {
 
     /// Keep two bodies in flight; preserve key/row/error order independently of
     /// completion order. The caller owns account admission and the final commit.
-    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI) async -> [AttachmentUpload]? {
+    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI,
+                                   owner: WorkLifetime.Ticket) async -> [AttachmentUpload]? {
         guard !Task.isCancelled else { return nil }
         let plans = attachments.map { input in
             let key = Self.blobKey(for: input.name)
             let row = Attachment(name: input.name, mime: input.mime, blobRef: key,
                                  kind: Self.attachmentKind(mime: input.mime, name: input.name))
             return (input: input, key: key, row: row)
+        }
+        // A video sent from here has its poster made from the bytes in hand (tester report,
+        // 2026-11-17); the upload itself is unchanged.
+        for plan in plans {
+            if let poster = VideoThumb.key(owner: owner, slot: slot, kind: MediaAlbum.kind(of: plan.row) ?? .file, blobRef: plan.key) {
+                VideoThumb.remember(plan.input.data, name: plan.input.name, for: poster)
+            }
         }
         return await withTaskGroup(of: (Int, AttachmentUpload).self) { group in
             var results = [AttachmentUpload?](repeating: nil, count: plans.count)

@@ -196,6 +196,14 @@ enum MediaOrigin {
     case publicPicture(ObjectIdentifier, WorkLifetime.State)
     case unavailable
 
+    /// The account the viewer was opened under, where there is one.
+    var owner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let owner), .fixture(let owner): return owner
+        case .publicPicture, .unavailable: return nil
+        }
+    }
+
     @MainActor
     init(_ model: AppModel, account: ChatAccountContext? = nil) {
         guard !Task.isCancelled else { self = .unavailable; return }
@@ -1019,6 +1027,11 @@ private struct VideoPage: View {
             failed = true
             return
         }
+        // The bytes are here to be played: the transcript row gets its poster from them.
+        if let owner = origin.owner,
+           let key = VideoThumb.key(owner: owner, slot: item.slot, kind: item.kind, blobRef: item.blobRef) {
+            VideoThumb.remember(data, name: item.name, for: key)
+        }
         player = AVPlayer(url: file)
     }
 }
@@ -1305,7 +1318,8 @@ enum FixtureMedia {
     }
 
     /// A two-second 320 × 180 H.264 clip, written once: fixture videos have a frame to make a
-    /// poster from, and the poster test has a real file to read.
+    /// poster from, and the poster test has a real file to read. Every wait is bounded (`nil`
+    /// rather than a hang if the encoder never answers); callers read it off the main thread.
     static let clip: Data? = {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-clip-\(UUID().uuidString).mp4")
         defer { try? FileManager.default.removeItem(at: file) }
@@ -1328,14 +1342,16 @@ enum FixtureMedia {
             memset_pattern4(CVPixelBufferGetBaseAddress(buffer), [0x20, 0x90, 0xF0, 0xFF] as [UInt8],
                             CVPixelBufferGetDataSize(buffer))
             CVPixelBufferUnlockBaseAddress(buffer, [])
-            while !input.isReadyForMoreMediaData { usleep(1_000) }
+            var waited = 0
+            while !input.isReadyForMoreMediaData, waited < 10_000 { usleep(1_000); waited += 1 }
+            guard input.isReadyForMoreMediaData else { return nil }
             adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 2))
         }
         input.markAsFinished()
         writer.endSession(atSourceTime: CMTime(value: 2, timescale: 1))
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
-        done.wait()
+        guard done.wait(timeout: .now() + 30) == .success else { return nil }
         return writer.status == .completed ? try? Data(contentsOf: file) : nil
     }()
 
