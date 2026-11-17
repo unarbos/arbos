@@ -395,10 +395,19 @@ final class RelayAPI {
         var out: [RegistryProject] = []
         var skippedIds: Set<String> = []
         for (index, result) in results.enumerated() {
-            guard let result else {
-                throw RelayError(status: 0, message: "detail \(index + 1)/\(results.count) never ran")
+            let detail: RegistryDetail
+            if let result {
+                detail = try result.get()
+            } else {
+                // A slot the group never delivered. Phones ended the loop above after the first
+                // result with no request failed and none cancelled ("detail 2/5 never ran",
+                // 2026-11-16; not reproduced off a device), and the whole reload failed on every
+                // try. Fetched here instead, one at a time: slower, never lost. A slot skipped
+                // after a failure never gets here, the failure before it throws first.
+                NSLog("registry: detail \(index + 1)/\(results.count) not delivered by the group; fetching it directly")
+                detail = try await registryDetail(entries[index].id, archivedAt: entries[index].archivedAt)
             }
-            switch try result.get() {
+            switch detail {
             case .project(let project): out.append(project)
             case .skipped(let id): skippedIds.insert(id)
             case .omitted: break
