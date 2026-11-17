@@ -22,6 +22,28 @@ final class HomeNavPushUITests: XCTestCase {
         return app
     }
 
+    /// The archived test's chat goes back on the chat list whatever happened in the test:
+    /// the archive is kept across launches, and a failure half way must not leave the
+    /// fixture changed for the tests after it.
+    private func unarchiveFixtureDM() {
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1"]
+        app.launch()
+        guard app.buttons["home-account"].waitForExistence(timeout: appear),
+              !element(app, "home-row:fx-dm-unconst").waitForExistence(timeout: 5) else { return }
+        let footer = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Archived chats'")).firstMatch
+        if !footer.waitForExistence(timeout: 3) { app.swipeUp() }
+        guard footer.waitForExistence(timeout: settle) else { return }
+        tap(footer)
+        let archived = app.staticTexts["Unconst"].firstMatch
+        guard archived.waitForExistence(timeout: settle) else { return }
+        archived.swipeLeft()
+        let unarchive = app.buttons["Unarchive"].firstMatch
+        if unarchive.waitForExistence(timeout: 5) { tap(unarchive) }
+        _ = element(app, "home-row:fx-dm-unconst").waitForExistence(timeout: 1)
+    }
+
     /// Settings / New Message chrome often marks rows and glass discs non-hittable
     /// (`hit point {-1,-1}`); coordinate-tap still reaches them (same as AgentAccessLinkUITests).
     private func tap(_ item: XCUIElement) {
@@ -219,6 +241,7 @@ final class HomeNavPushUITests: XCTestCase {
     /// Tester report, 2026-11-17: back from a chat opened in the archived list went to
     /// the chat list.
     func testBackFromAnArchivedChatLandsOnArchivedChats() {
+        addTeardownBlock { [self] in unarchiveFixtureDM() }
         let app = launch()
         let row = element(app, "home-row:fx-dm-unconst")
         if row.waitForExistence(timeout: 5) {
@@ -242,10 +265,20 @@ final class HomeNavPushUITests: XCTestCase {
         assertGone(back)
         XCTAssertTrue(page.waitForExistence(timeout: settle), "back lands on the archived list")
         XCTAssertFalse(app.buttons["home-new"].exists, "not on the chat list")
+    }
 
-        // Leave the fixture as it was for the next test.
-        archived.swipeLeft()
-        let unarchive = app.buttons["Unarchive"].firstMatch
-        if unarchive.waitForExistence(timeout: 5) { tap(unarchive) }
+    /// A channel opened from a server's pushed page is shown and stays: the open replaces
+    /// the path, and a dismiss beside it must not pop the channel.
+    func testAChannelOpenedFromAServerPageIsShown() {
+        let app = XCUIApplication()
+        // The rig pushes the server's page over its channel list, on the Channels page.
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_FIXTURE_SERVERS": "1",
+                                 "ARBOS_OPEN_SERVER": "fx-server-hq:panel", "ARBOS_PANEL_TAB": "Channels"]
+        app.launch()
+        XCTAssertTrue(element(app, "server-subpage-channels").waitForExistence(timeout: appear), "the server's Channels page opened")
+        let general = app.staticTexts["general"].firstMatch
+        XCTAssertTrue(general.waitForExistence(timeout: settle), "the channel is listed")
+        tap(general)
+        assertStays(element(app, "chat-back:fx-server-hq-general"), "the channel is shown")
     }
 }
