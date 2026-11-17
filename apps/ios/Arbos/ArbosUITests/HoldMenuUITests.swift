@@ -4,7 +4,8 @@ import XCTest
 /// the capsule and the menu closes it — on the lifted message too, whatever it holds, and
 /// nothing under the blur takes that tap; a message taller than the screen scrolls in
 /// place with the menu still there; a bubble that continues a run is lifted with its
-/// sender's name; a hold on the reply quote opens the menu and does not jump.
+/// sender's name; a hold on a button in the row — the reply quote, a sender's name — opens
+/// the menu and does not press the button.
 /// Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay, deterministic rows.
 final class HoldMenuUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
@@ -59,19 +60,65 @@ final class HoldMenuUITests: XCTestCase {
         add(attachment)
     }
 
-    /// A message with a link and a message that is a file: a tap on the lifted bubble closes
-    /// the menu and opens neither.
-    func testATapOnTheLiftedMessageClosesTheMenu() {
+    /// A tap on the link of a lifted message closes the menu and does not follow the link.
+    func testATapOnALiftedLinkClosesTheMenu() {
         let app = group()
-        for id in ["g3", "g2"] {
-            let bubble = app.descendants(matching: .any)["bubble:\(id)"]
-            reveal(bubble, in: app)
-            hold(bubble, in: app)
-            shot("lifted-\(id)")
-            lifted(app).tap()
-            assertClosed(app, "\(id): a tap on the lifted message closes the menu")
-            XCTAssertTrue(bubble.waitForExistence(timeout: settle) && bubble.isHittable, "\(id): the chat is back, nothing over it")
-        }
+        let bubble = app.descendants(matching: .any)["bubble:g3"]
+        reveal(bubble, in: app)
+        hold(bubble, in: app)
+        shot("lifted-link")
+        let text = lifted(app).staticTexts.matching(NSPredicate(format: "label CONTAINS 'arbos.life'")).firstMatch
+        XCTAssertTrue(text.exists, "the lifted message shows its link")
+        // "And the signup form: https://arbos.life/i/launch": the link ends the text, on a
+        // line of its own when the text wraps.
+        let wrapped = text.frame.height > 30
+        text.coordinate(withNormalizedOffset: wrapped ? CGVector(dx: 0.3, dy: 0.75) : CGVector(dx: 0.8, dy: 0.5)).tap()
+        assertClosed(app, "a tap on the lifted link closes the menu")
+        XCTAssertTrue(bubble.waitForExistence(timeout: settle) && bubble.isHittable, "the chat is back, nothing over it")
+    }
+
+    /// A message that is a file: a tap on the lifted card closes the menu and opens no file.
+    func testATapOnALiftedFileClosesTheMenu() {
+        let app = group()
+        let bubble = app.descendants(matching: .any)["bubble:g2"]
+        reveal(bubble, in: app)
+        hold(bubble, in: app)
+        shot("lifted-file")
+        lifted(app).tap()
+        assertClosed(app, "a tap on the lifted file closes the menu")
+        XCTAssertTrue(bubble.waitForExistence(timeout: settle) && bubble.isHittable, "the chat is back, nothing over it")
+    }
+
+    /// With the emoji keyboard up (the capsule's add-emoji cell) a tap on the lifted message
+    /// still closes the overlay, and the keyboard goes with it.
+    func testATapWhileTheEmojiKeyboardIsUpClosesTheOverlay() {
+        let app = group()
+        let bubble = app.descendants(matching: .any)["bubble:g3"]
+        reveal(bubble, in: app)
+        hold(bubble, in: app)
+        app.buttons["More emoji"].firstMatch.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the emoji keyboard came up")
+        shot("picker")
+        lifted(app).tap()
+        let capsule = app.descendants(matching: .any)["message-actions-capsule"].firstMatch
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: capsule)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: settle), .completed, "the overlay closed")
+        XCTAssertEqual(app.state, .runningForeground, "the tap opened nothing")
+    }
+
+    /// A hold that lands on a sender's name opens the menu; the lift does not open the profile.
+    func testAHoldOnASendersNameOpensTheMenuAndNotTheProfile() {
+        let app = group()
+        let name = app.descendants(matching: .any)["bubble:g3"].buttons["bubble-name"].firstMatch
+        reveal(name, in: app)
+        hold(name, in: app)
+        lifted(app).tap()
+        assertClosed(app, "a tap on the lifted message closes the menu")
+        // The profile page is the one place with this button.
+        let profile = app.buttons["Block user"].firstMatch
+        XCTAssertFalse(profile.waitForExistence(timeout: 3), "the hold did not open the profile")
+        name.tap()
+        XCTAssertTrue(profile.waitForExistence(timeout: settle), "a tap on the name still opens it")
     }
 
     /// Mira's second line continues her run and has no name in the transcript; lifted, it does.
@@ -83,6 +130,10 @@ final class HoldMenuUITests: XCTestCase {
         hold(bubble, in: app)
         let name = lifted(app).buttons["bubble-name"].firstMatch
         XCTAssertTrue(name.waitForExistence(timeout: settle), "the lifted bubble is named")
+        // The menu opens where it stays: no second pass moves it once the lifted bubble is measured.
+        let opened = menu(app).frame
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(menu(app).frame, opened, "the menu did not move after it opened")
         shot("named")
         XCTAssertLessThanOrEqual(app.descendants(matching: .any)["message-actions-capsule"].firstMatch.frame.maxY, name.frame.minY,
                                  "the capsule sits above the name")

@@ -267,7 +267,15 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 ScrollView {
                     bubble()
                         .frame(width: width)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { liftedHeight = $0 }
+                        // Not animated: the first measure lands as the overlay arrives, and the
+                        // menu must not be seen sliding to where it belongs.
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            var now = Transaction()
+                            now.disablesAnimations = true
+                            withTransaction(now) { liftedHeight = height }
+                        }
+                        // A link in the lifted copy opens nothing, for VoiceOver either.
+                        .environment(\.openURL, OpenURLAction { _ in .handled })
                         // The lifted message is a picture of itself: this cover takes every
                         // touch, so a tap closes the overlay (below) instead of opening a link,
                         // a file or the quoted message, and a drag scrolls.
@@ -314,6 +322,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
         }
         .ignoresSafeArea()
+        // VoiceOver stays in the overlay, not in the chat under the blur, and has a way out.
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape) { onDismiss() }
         .overlay {
             if pickOpen {
                 EmojiKeyboardField(onPick: onReact)

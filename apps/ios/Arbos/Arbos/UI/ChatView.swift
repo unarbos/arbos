@@ -1144,11 +1144,6 @@ struct ChatSession: View {
         }
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
-        // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
-        // `names_senders`, and the solo-1:1 quote-header hide depends on it
-        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
-        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
@@ -1262,6 +1257,12 @@ struct ChatSession: View {
         // paste path tipped the one-expression body over Xcode's limit).
         sessionRoot
     }
+
+    /// Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
+    /// Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+    /// `names_senders`, and the solo-1:1 quote-header hide depends on it
+    /// ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+    private var multiParty: Bool { isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false) }
 
     /// Transcript canvas + composer inset (no sheets / lifecycle).
     @ViewBuilder
@@ -1487,12 +1488,14 @@ struct ChatSession: View {
                                           viewport: geo.size.height)
                 }
                 if let row = actionsRow, let anchor = anchors[row.id] {
-                    let frame = geo[anchor]
+                    // The anchor takes in the gap above the row and the lifted copy has none:
+                    // without this the bubble hopped up by the gap as it lifted, and the menu
+                    // was placed for a taller bubble than the one drawn.
+                    let gap = row.id == windowedRows.first?.id ? 0 : row.gapBefore
+                    let frame = geo[anchor].inset(by: UIEdgeInsets(top: gap, left: 0, bottom: 0, right: 0))
                     // This reader ignores the safe area, so its own insets read 0; the
                     // overlay needs the real status-bar / home-indicator insets to fit.
                     let safeArea = KeyboardFrameObserver.windowSafeArea
-                    // Groups and channels name their senders (the same rule `rows` builds by).
-                    let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
                     let named = multiParty ? row.namedForHold : nil
                     MessageActionsOverlay(
                         row: row,
@@ -1763,6 +1766,11 @@ struct ChatSession: View {
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
+        // The held message left the transcript (deleted elsewhere): no row publishes a frame,
+        // so no overlay is drawn and nothing on screen could close it.
+        .onChange(of: actionsRow.map { held in rows.contains { $0.id == held.id } }) { _, present in
+            if present == false { closeActions() }
+        }
     }
 
     /// Message / membership / catch-up onChange hooks.
@@ -2643,6 +2651,13 @@ struct ChatSession: View {
             // The finger that held a bubble into its menu may slide to a choice: the
             // transcript does not scroll under it.
             .scrollDisabled(actionsRow != nil)
+            // Nor does anything in it take the lift: the row's hold runs alongside every
+            // button in the row and a button's tap has no time limit, so the finger that held
+            // a reply quote, a sender's name or a play button also pressed it when it lifted
+            // (tester reports, 2026-11-14 and 2026-11-17). Disabling the transcript as the
+            // menu opens cancels that press; `allowsHitTesting(false)` does not, the press is
+            // already under way.
+            .disabled(actionsRow != nil)
             .background(TouchWatch())
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
@@ -3299,10 +3314,12 @@ struct ChatSession: View {
     private func closeActions(after item: MessageMenuItem? = nil) {
         ChatGestures.heldIntoMenu = false
         HeldFinger.shared.reset()
+        // Before the account check: a menu that cannot close leaves the chat blurred, unscrollable
+        // and untappable. Only giving the keyboard back needs the account.
+        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         guard account.accepts(model) else { return }
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
-        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         if restore { composerFocused = true }
     }
 
@@ -4751,13 +4768,7 @@ extension ChatSession {
             let reply = isMessageRow(row)
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: { quote in
-                        // The lift after a hold that opened the menu is not a tap on the
-                        // quote: the chat jumped to the original under the open menu
-                        // (tester reports, 2026-11-14 and 2026-11-17).
-                        guard !ChatGestures.tapEndsHold() else { return }
-                        revealQuoted(quote, from: row.messageId)
-                    },
+                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
