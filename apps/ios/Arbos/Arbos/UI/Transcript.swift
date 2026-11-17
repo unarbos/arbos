@@ -399,12 +399,17 @@ enum Transcript {
     static func reactionOnlyEdit(_ list: [Message], was: [Id: Message]) -> Message? {
         var edited: Message?
         for m in list where was[m.id] != m {
-            guard edited == nil, var old = was[m.id] else { return nil }
-            old.reactions = m.reactions
-            guard old == m else { return nil }
+            guard edited == nil, reactionOnly(m, was: was[m.id]) != nil else { return nil }
             edited = m
         }
         return edited
+    }
+
+    /// `message` when it differs from `was` in its reactions and nothing else.
+    static func reactionOnly(_ message: Message, was: Message?) -> Message? {
+        guard var old = was, old.reactions != message.reactions else { return nil }
+        old.reactions = message.reactions
+        return old == message ? message : nil
     }
 
     /// Put `message`'s reactions on its rows as `rows(_:)` would, leaving every other row as

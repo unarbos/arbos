@@ -187,5 +187,19 @@ final class ReactionPickerUITests: XCTestCase {
         sleep(2)
         shot("double-tap-3-chip")
         XCTAssertFalse(heart.exists, "the tap on the chip took it off, and the double-tap did not heart the message again")
+
+        // A tap on the bubble and then one on the chip, as close together as two taps of a
+        // double-tap: the chip's tap takes the heart off and the pair is not a heart.
+        bubble.doubleTap()
+        XCTAssertTrue(heart.waitForExistence(timeout: settle))
+        // Screen points taken first, so nothing is looked up between the two taps.
+        let screen = app.coordinate(withNormalizedOffset: .zero)
+        let onBubble = screen.withOffset(CGVector(dx: bubble.frame.midX, dy: bubble.frame.midY))
+        let onChip = screen.withOffset(CGVector(dx: heart.frame.midX, dy: heart.frame.midY))
+        onBubble.tap()
+        onChip.tap()
+        sleep(2)
+        shot("double-tap-4-bubble-then-chip")
+        XCTAssertFalse(heart.exists, "a tap on the bubble and one on the chip left the chip's own tap and no heart")
     }
 }

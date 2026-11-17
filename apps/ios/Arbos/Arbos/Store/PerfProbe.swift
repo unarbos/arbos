@@ -112,7 +112,11 @@ enum PerfSignpost {
         RowsMark(state: signposter.beginInterval("rows-build", id: signposter.makeSignpostID()), started: CACurrentMediaTime())
     }
 
+    /// The branch the last refresh took, for tests.
+    static var lastRowsPath: RowsPath?
+
     static func rowsEnd(_ mark: RowsMark, path: RowsPath, messages: Int, rows: Int, window: Int) {
+        lastRowsPath = path
         signposter.endInterval("rows-build", mark.state,
                                "\(path.rawValue, privacy: .public) messages=\(messages) rows=\(rows) window=\(window)")
         FrameProbe.shared.logRows(path: path, messages: messages, rows: rows, window: window,
