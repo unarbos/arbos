@@ -9,6 +9,7 @@
 // beside it. A re-realised row paints at its final size at once from the cache; a row whose
 // picture is not cached yet still lays out at the remembered size while the bytes load.
 
+import AVFoundation
 import Foundation
 import UIKit
 
@@ -97,6 +98,74 @@ enum ChatImageCache {
                 ready = trimmed.preparingForDisplay() ?? trimmed
             }
             return Decoded(image: ready, stillFrame: nil, animated: false, naturalSize: natural)
+        }.value
+    }
+}
+
+/// A video's poster frame, made on the device (tester report, 2026-11-17: "a preview of a
+/// sent video"). The first decodable frame, no larger than the bubble, kept in
+/// `ChatImageCache` under the video's own ref so it is made once.
+///
+/// Known ceiling: a transcript row has to fetch the whole video to make its poster (the relay
+/// caps a blob at 64 MB), once per video per launch. A poster the sender uploads with the
+/// message (unarbos/arbos#2983) removes the fetch; this stays as the fallback for rows without one.
+enum VideoThumb {
+    struct Frame: @unchecked Sendable {
+        let image: UIImage
+        let seconds: Double
+    }
+
+    /// The poster's place in the picture cache: beside, never instead of, the bytes at `blobRef`.
+    static func cacheRef(_ blobRef: String) -> String { "poster:" + blobRef }
+
+    /// Which rows try for a poster: a video stored on the relay. One still uploading
+    /// (`local:`) or with no ref has no bytes to read and keeps the file card.
+    static func wantsPoster(kind: MediaItem.Kind, blobRef: String?) -> Bool {
+        guard kind == .video, let blobRef, !blobRef.isEmpty else { return false }
+        return !blobRef.hasPrefix("local:")
+    }
+
+    @MainActor private static var durations: [ChatImageCache.Key: Double] = [:]
+    /// Bytes that are not a video AVFoundation can read (WebM, a mislabelled file): not
+    /// fetched again on every trip through history.
+    @MainActor static var undecodable: Set<ChatImageCache.Key> = []
+
+    @MainActor
+    static func store(_ frame: Frame, for key: ChatImageCache.Key) {
+        ChatImageCache.store(.init(image: frame.image, stillFrame: nil, animated: false, naturalSize: frame.image.size), for: key)
+        durations[key] = frame.seconds
+    }
+
+    @MainActor
+    static func seconds(for key: ChatImageCache.Key) -> Double { durations[key] ?? 0 }
+
+    /// `0:07`, `1:05`, `1:05:03`; empty when the length is unknown. The file is untrusted:
+    /// anything not finite and positive has no label, and the hours are capped.
+    static func durationLabel(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0.5 else { return "" }
+        let total = Int(min(seconds.rounded(), 359_999))
+        let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
+    /// Decode off the main actor. `nil` when the bytes hold no frame AVFoundation can read,
+    /// whatever the name or mime says; the caller then keeps what it drew before.
+    static func frame(from data: Data, name: String, maxPixels: CGSize) async -> Frame? {
+        await Task.detached(priority: .utility) { () -> Frame? in
+            // AVFoundation reads a file and takes a hint from its extension. The name is the
+            // sender's, so only a known extension is kept and the file gets its own name.
+            let ext = (name as NSString).pathExtension.lowercased()
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent("poster-\(UUID().uuidString).\(["mov", "m4v"].contains(ext) ? ext : "mp4")")
+            guard (try? data.write(to: file)) != nil else { return nil }
+            defer { try? FileManager.default.removeItem(at: file) }
+            let asset = AVURLAsset(url: file)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = maxPixels
+            guard let frame = try? await generator.image(at: .zero).image else { return nil }
+            let seconds = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
+            return Frame(image: UIImage(cgImage: frame), seconds: seconds)
         }.value
     }
 }

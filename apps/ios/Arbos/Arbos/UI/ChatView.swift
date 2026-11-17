@@ -325,6 +325,8 @@ struct ChatSession: View {
     /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
     @State private var pendingPreviewURL: URL?
     @State private var photoItem: PhotosPickerItem?
+    /// The staged attachment open in the crop / trim editor.
+    @State private var editingPending: AppModel.PendingAttachment?
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
@@ -2707,6 +2709,11 @@ struct ChatSession: View {
                 if rigged > 0, pending.isEmpty {
                     pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
                 }
+                #if DEBUG || ARBOS_FIXTURE
+                if DebugHooks.fixtureComposerVideo, pending.isEmpty, let clip = FixtureMedia.clip {
+                    pending = [.init(name: "clip.mp4", mime: "video/mp4", data: clip)]
+                }
+                #endif
             }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
@@ -3808,6 +3815,13 @@ struct ChatSession: View {
             }
         }
         .quickLookPreview($pendingPreviewURL)
+        .fullScreenCover(item: $editingPending) { original in
+            AttachmentEditor(attachment: original) { edited in
+                guard account.accepts(model) else { return }
+                if let edited { pending = ComposerAttachment.replacing(original.id, with: edited, in: pending) }
+                editingPending = nil
+            }
+        }
     }
 
     /// The chip's ✕: that one goes, the others and the draft stay.
@@ -3991,6 +4005,7 @@ struct ChatSession: View {
             canOpenPending: { Self.isCaptionablePending($0) },
             onOpenPending: { openPendingPreview($0) },
             onRemovePending: { removePending($0) },
+            onEditPending: { if account.accepts(model) { editingPending = $0 } },
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
             memoDragX: memoDragX,
@@ -5354,6 +5369,7 @@ private struct ComposerField<Leading: View>: View {
     let canOpenPending: (AppModel.PendingAttachment) -> Bool
     let onOpenPending: (AppModel.PendingAttachment) -> Void
     let onRemovePending: (UUID) -> Void
+    let onEditPending: (AppModel.PendingAttachment) -> Void
     /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
@@ -5623,7 +5639,7 @@ private struct ComposerField<Leading: View>: View {
         VStack(alignment: .leading, spacing: Theme.composerStackGap) {
             if stacked, !pending.isEmpty {
                 ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
-                                      onOpen: onOpenPending, onRemove: onRemovePending)
+                                      onOpen: onOpenPending, onRemove: onRemovePending, onEdit: onEditPending)
             }
             HStack(spacing: 8) {
                 if !stacked { leadingSlot }

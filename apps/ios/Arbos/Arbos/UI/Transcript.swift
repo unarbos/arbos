@@ -3832,12 +3832,74 @@ struct FileCard: View {
     var quote: Quote? = nil
     var onQuoteTap: ((Quote) -> Void)? = nil
 
+    @Environment(\.displayScale) private var displayScale
     @State private var viewer: MediaViewerState?
+    /// Set when this card made the poster, so the body reads it from the cache.
+    @State private var posterMade = false
 
     private var captionText: String? {
         guard let caption else { return nil }
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
+    }
+
+    private var posterKey: ChatImageCache.Key? {
+        guard VideoThumb.wantsPoster(kind: item.kind, blobRef: item.blobRef),
+              let owner = account.owner, let ref = item.blobRef else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: item.slot, ref: VideoThumb.cacheRef(ref))
+    }
+
+    /// The poster's size in the bubble once one has been made (the size outlives the bitmap,
+    /// so a re-realised row keeps its height); `nil` keeps the file card.
+    private var posterSize: CGSize? {
+        _ = posterMade
+        guard let posterKey, let natural = ChatImageCache.naturalSize(for: posterKey),
+              natural.width > 0, natural.height > 0 else { return nil }
+        return ImageBubble.fit(natural, maxWidth: 280)
+    }
+
+    /// A video's poster frame with Play and its length, in place of the card's header
+    /// (tester report, 2026-11-17).
+    private func posterTile(_ size: CGSize, key: ChatImageCache.Key) -> some View {
+        let length = VideoThumb.durationLabel(VideoThumb.seconds(for: key))
+        return ZStack {
+            Color.black
+            if let image = ChatImageCache.decoded(for: key)?.image {
+                Image(uiImage: image).resizable().scaledToFit()
+            }
+            Circle().fill(Color.black.opacity(0.47)).frame(width: 44, height: 44)
+                .overlay(Image(systemName: "play.fill").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white).offset(x: 1))
+            if !length.isEmpty {
+                Text(length)
+                    .font(theme.font(11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(8)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("video-poster")
+    }
+
+    private func loadPoster() async {
+        guard let posterKey, account.accepts(model), !VideoThumb.undecodable.contains(posterKey) else { return }
+        if ChatImageCache.decoded(for: posterKey) != nil { return }
+        let maxPixels = CGSize(width: 280 * displayScale, height: ImageBubble.maxHeight * displayScale)
+        // A failed or cancelled fetch is tried again next time; bytes that hold no frame are not.
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) }) else { return }
+        let frame = await VideoThumb.frame(from: data, name: item.name, maxPixels: maxPixels)
+        guard account.accepts(model) else { return }
+        guard let frame else {
+            VideoThumb.undecodable.insert(posterKey)
+            return
+        }
+        VideoThumb.store(frame, for: posterKey)
+        posterMade = true
     }
 
     var body: some View {
@@ -3857,23 +3919,27 @@ struct FileCard: View {
             // Not a Button, as the picture tile above: a Button counts a back swipe that starts
             // on the card as a tap when the finger lifts, and the file opened under the pop.
             Group {
-                // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
-                // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-                HStack(spacing: 14) {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(FileCard.kindColor(item, theme: theme))
-                        .frame(width: 21, height: 27)
-                        .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1).truncationMode(.middle)
-                        Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                if let posterKey, let posterSize {
+                    posterTile(posterSize, key: posterKey)
+                } else {
+                    // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+                    // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
+                    HStack(spacing: 14) {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(FileCard.kindColor(item, theme: theme))
+                            .frame(width: 21, height: 27)
+                            .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1).truncationMode(.middle)
+                            Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                        }
                     }
+                    .padding(.leading, 15)
+                    .padding(.trailing, Theme.bubbleHPad + 4)
+                    .padding(.vertical, 13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(.leading, 15)
-                .padding(.trailing, Theme.bubbleHPad + 4)
-                .padding(.vertical, 13)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
             .onTapGesture {
                 guard item.blobRef != nil, !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
@@ -3894,6 +3960,7 @@ struct FileCard: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .task(id: item.blobRef) { await loadPoster() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
                         origin: MediaOrigin(model, account: account))

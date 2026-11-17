@@ -1300,9 +1300,44 @@ enum FixtureMedia {
         case .file:
             return (pdf(title: item.name), "application/pdf")
         case .video:
-            return nil
+            return clip.map { ($0, "video/mp4") }
         }
     }
+
+    /// A two-second 320 × 180 H.264 clip, written once: fixture videos have a frame to make a
+    /// poster from, and the poster test has a real file to read.
+    static let clip: Data? = {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-clip-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (w, h) = (320, 180)
+        guard let writer = try? AVAssetWriter(outputURL: file, fileType: .mp4) else { return nil }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h])
+        writer.add(input)
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<4 {
+            var buffer: CVPixelBuffer?
+            guard let pool = adaptor.pixelBufferPool,
+                  CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            // Opaque orange in BGRA, so the poster is plainly a picture and not an empty tile.
+            memset_pattern4(CVPixelBufferGetBaseAddress(buffer), [0x20, 0x90, 0xF0, 0xFF] as [UInt8],
+                            CVPixelBufferGetDataSize(buffer))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            while !input.isReadyForMoreMediaData { usleep(1_000) }
+            adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 2))
+        }
+        input.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(value: 2, timescale: 1))
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        done.wait()
+        return writer.status == .completed ? try? Data(contentsOf: file) : nil
+    }()
 
     private static func png(seed: String) -> Data? {
         var h: UInt32 = 0x811c_9dc5
