@@ -1631,7 +1631,7 @@ struct GroupProfileView: View {
                                     inviteCopyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
                                         inviteCopied = nil
                                     }
                                 } label: {
@@ -2489,7 +2489,7 @@ struct ServerProfileView: View {
                                     copyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
                                         copied = nil
                                     }
                                 } label: {

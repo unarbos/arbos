@@ -3770,7 +3770,9 @@ pub async fn group_invites_revoke(
         Ok(_) => return missing(),
         Err(r) => {
             if r.status().is_server_error() {
-                tracing::warn!(chat = %id, "group invite revoke: chat lookup failed");
+                let body = axum::body::to_bytes(r.into_body(), 4096).await;
+                let error = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+                tracing::warn!(chat = %id, %error, "group invite revoke: chat lookup failed");
             }
             return missing();
         }
@@ -8263,6 +8265,12 @@ mod group_invite_revoke_tests {
         state.db.insert_group_invite(&elsewhere).unwrap();
         assert_eq!(
             revoke(&state, &owner_dev, &chat, &elsewhere.id).await,
+            unknown
+        );
+        // Asked by a plain member of this group, who is not in that one: still not there (403
+        // here would mean the lookup forgot which group it was asked about).
+        assert_eq!(
+            revoke(&state, &plain_dev, &chat, &elsewhere.id).await,
             unknown
         );
         assert!(state
