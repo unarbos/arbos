@@ -49,17 +49,42 @@ final class BackSwipeTests: XCTestCase {
 
     // MARK: Swipe left on a bubble is reply
 
-    func testOnlyAClearLeftPanThatStartedOnABubbleIsAReply() {
-        XCTAssertTrue(ReplySwipe.claims(translation: CGSize(width: -12, height: 0), start: far, onBubble: true))
-        XCTAssertTrue(ReplySwipe.claims(translation: CGSize(width: -10, height: 8), start: far, onBubble: true), "mostly left")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -30, height: 0), start: far, onBubble: false), "off a bubble: the time peek")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: 30, height: 0), start: far, onBubble: true), "right is back, on a bubble too")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -9, height: 9), start: far, onBubble: true), "diagonal: the scroll's")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -3, height: -30), start: far, onBubble: true), "scroll up")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -3, height: 30), start: far, onBubble: true), "scroll down")
-        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -30, height: 0), start: CGPoint(x: 10, y: 400), onBubble: true), "the edge zone is the system's")
+    /// The transcript recognizer's one decision, for every kind of drag.
+    func testALeftPanIsAReplyOnABubbleAndThePeekOffIt() {
+        func decide(_ dx: CGFloat, _ dy: CGFloat, at start: CGPoint? = nil, onBubble: Bool = true, holding: Bool = false,
+                    timePeek: Bool = true, backSwipe: Bool = true) -> TranscriptSwipe? {
+            TranscriptSwipe.decide(translation: CGSize(width: dx, height: dy), start: start ?? far, onBubble: onBubble,
+                                   holding: holding, timePeek: timePeek, backSwipe: backSwipe)
+        }
+        XCTAssertEqual(decide(-12, 0), .reply)
+        XCTAssertEqual(decide(-10, 8), .reply, "mostly left")
+        XCTAssertEqual(decide(-30, 0, onBubble: false), .time, "off a bubble: the time peek")
+        XCTAssertEqual(decide(-30, 0, holding: true), .time, "a finger held into the menu or scrubbing a chart is not replying")
+        XCTAssertEqual(decide(-30, 0, at: CGPoint(x: 10, y: 400)), .time, "never a reply from the edge zone")
+        XCTAssertEqual(decide(30, 0), .back, "right is back, on a bubble too")
+        XCTAssertEqual(decide(30, 0, onBubble: false), .back)
+        XCTAssertEqual(decide(30, 0, holding: true), .back)
+        XCTAssertNil(decide(-9, 9), "diagonal: the scroll's")
+        XCTAssertNil(decide(-3, -30), "scroll up")
+        XCTAssertNil(decide(-3, 30), "scroll down")
+        XCTAssertNil(decide(3, 30))
+        // The rig's switches.
+        XCTAssertNil(decide(-30, 0, onBubble: false, timePeek: false))
+        XCTAssertEqual(decide(-30, 0, timePeek: false), .reply)
+        XCTAssertNil(decide(30, 0, backSwipe: false))
         // The full-screen back still claims a right pan from the same point, whatever is under it.
         XCTAssertEqual(BackSwipe.fullScreenLock(translation: CGSize(width: 30, height: 0), start: far, composerTop: nil), .claimed)
+    }
+
+    /// The lift of a reply swipe is not a tap on what the finger came down on, and only that lift.
+    func testTheLiftOfAReplySwipeIsNotATap() {
+        ChatGestures.heldIntoMenu = false
+        ChatGestures.replySwipedAt = Date()
+        XCTAssertTrue(ChatGestures.replySwiped)
+        XCTAssertTrue(ChatGestures.tapEndsHold())
+        ChatGestures.replySwipedAt = Date().addingTimeInterval(-1)
+        XCTAssertFalse(ChatGestures.replySwiped)
+        XCTAssertFalse(ChatGestures.tapEndsHold(), "a tap a second later is a real one")
     }
 
     func testAReplySwipeRepliesAtTheThresholdAndResistsPastIt() {
@@ -84,6 +109,12 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 100, y: 320), in: window), "the empty side of the row")
         XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 250, y: 380), in: window), "the gap under it")
         XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 250, y: 320), in: UIWindow()), "another window's bubble")
+        // Two markers under one point (the held copy of a bubble over its row): one answer, every time.
+        let other = ReplySwipeBubble.Marker(frame: marker.frame)
+        other.row = "row-b"
+        window.addSubview(other)
+        ReplySwipe.bubbles.add(other)
+        XCTAssertEqual(ReplySwipe.row(at: CGPoint(x: 250, y: 320), in: window), "row-a")
     }
 
     /// The finger that held a picture into the message menu lifts as a tap; that tap must not

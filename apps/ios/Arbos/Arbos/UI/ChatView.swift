@@ -2483,7 +2483,8 @@ struct ChatSession: View {
     /// decided on the first points so a vertical pan is the scroll view's alone. A nested
     /// table scrolling sideways undoes a peek in progress ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
-        guard account.accepts(model) else { return }
+        // A row a reply swipe was pulling never stays pulled.
+        guard account.accepts(model) else { replyDrag = nil; return }
         var still = Transaction()
         still.disablesAnimations = true
         switch event {
@@ -4760,7 +4761,8 @@ extension ChatSession {
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     replyDrag: replyDrag?.row == row.id ? replyDrag?.offset ?? 0 : 0,
-                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    // (The lift of a reply swipe that began on the quote is not a tap on it.)
+                    onQuoteTap: { quote in if !ChatGestures.replySwiped { revealQuoted(quote, from: row.messageId) } },
                     onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
@@ -4807,6 +4809,8 @@ extension ChatSession {
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
+                // VoiceOver's way to what the reply swipe does.
+                .accessibilityActions { if reply { Button("Reply") { beginReply(to: row) } } }
         }
     }
 

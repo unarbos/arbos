@@ -277,7 +277,7 @@ final class BackSwipeUITests: XCTestCase {
 
     // MARK: A swipe left on a bubble replies; off a bubble it is the time peek
 
-    /// My newest bubble on screen (the bubble itself, not its full-width row) and the row it is in.
+    /// My newest bubble on screen: the bubble itself, not its full-width row.
     private func ownBubble(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let own = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'own-bubble-'"))
         XCTAssertTrue(own.firstMatch.waitForExistence(timeout: settle), "the transcript shows a bubble of mine", file: file, line: line)
@@ -288,61 +288,119 @@ final class BackSwipeUITests: XCTestCase {
         return visible.last!
     }
 
-    /// Drag left from the middle of a bubble, past the threshold: the composer quotes it and
-    /// takes focus, and the chat stays.
-    func testSwipeLeftOnABubbleReplies() {
-        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
-        let back = chatBack(app, "fx-comms-main")
-        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
-        let start = ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -120, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle), "the composer quotes the message")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer took focus")
-        XCTAssertTrue(back.exists, "the chat did not go back")
+    private func openComms() -> XCUIApplication {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms", "ARBOS_SWIPE_TRACE": "1"])
+        XCTAssertTrue(chatBack(app, "fx-comms-main").waitForExistence(timeout: appear), "the Comms chat opened")
+        return app
     }
 
-    /// The same on someone else's bubble in a group.
-    func testSwipeLeftOnAnotherPersonsBubbleReplies() {
-        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])
-        let back = chatBack(app, "fx-group-launch")
-        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
+    private func openGroup() -> XCUIApplication {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_SWIPE_TRACE": "1"])
+        XCTAssertTrue(chatBack(app, "fx-group-launch").waitForExistence(timeout: appear), "the Launch week group opened")
         settleTranscript(app)
-        // 100 pt in from the row's leading edge: past the avatar lane, on the bubble.
-        let start = lastBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 100, dy: 0))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -80, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle), "the composer quotes the message")
-        XCTAssertTrue(back.exists, "the chat did not go back")
+        return app
+    }
+
+    /// Sam's picture with the caption "Hero for the landing page, v2." (fixture message `g7`),
+    /// by its id and not by where it sits: the full-width row, bubble after the avatar lane.
+    private func heroRow(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let row = app.descendants(matching: .any)["bubble:g7"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: settle) && row.isHittable, "Sam's picture message is on screen", file: file, line: line)
+        return row
+    }
+
+    private func dragLeft(from start: XCUICoordinate, _ distance: CGFloat, press: TimeInterval = 0.05) {
+        start.press(forDuration: press, thenDragTo: start.withOffset(CGVector(dx: -distance, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+    }
+
+    /// The composer quotes a message that says `text`, has focus, and the chat is still the screen.
+    private func assertReplying(_ app: XCUIApplication, to text: String, file: StaticString = #filePath, line: UInt = #line) {
+        let preview = app.descendants(matching: .any)["composer-reply-preview"]
+        XCTAssertTrue(preview.waitForExistence(timeout: settle), "the composer quotes a message", file: file, line: line)
+        XCTAssertTrue(preview.label.contains(text), "it quotes \"\(text)\": \(preview.label)", file: file, line: line)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer took focus", file: file, line: line)
+        assertOnlyTheChat(app, file: file, line: line)
+    }
+
+    private func assertNoReply(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        sleep(1)
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started", file: file, line: line)
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused", file: file, line: line)
+    }
+
+    /// Nothing opened over the chat (a picture, a profile page) and the app did not leave for a link.
+    private func assertOnlyTheChat(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        sleep(1)
+        XCTAssertEqual(app.state, .runningForeground, "no link left the app", file: file, line: line)
+        XCTAssertTrue(app.descendants(matching: .any)["chat-search-button"].firstMatch.isHittable, "nothing opened over the chat", file: file, line: line)
+    }
+
+    /// What the last left swipe was, from the rig readout: `reply` or `peek`.
+    private func leftSwipe(_ app: XCUIApplication) -> [String] {
+        let readout = app.descendants(matching: .any)["back-swipe-trace"].firstMatch
+        guard readout.waitForExistence(timeout: settle) else { return [] }
+        return ((readout.value as? String) ?? "").split(separator: " ").map(String.init)
+    }
+
+    /// Drag left from the middle of my bubble, past the threshold: the composer quotes that
+    /// message and takes focus, and the chat stays.
+    func testSwipeLeftOnABubbleReplies() {
+        let app = openComms()
+        let bubble = ownBubble(app)
+        let said = String((bubble.label.isEmpty ? bubble.staticTexts.firstMatch.label : bubble.label).prefix(12))
+        XCTAssertFalse(said.isEmpty, "the bubble's words are readable")
+        dragLeft(from: bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)), 120)
+        assertReplying(app, to: said)
+        XCTAssertTrue(leftSwipe(app).contains("reply"))
+    }
+
+    /// The same on someone else's message in a group, started on its caption.
+    func testSwipeLeftOnAnotherPersonsBubbleReplies() {
+        let app = openGroup()
+        let row = heroRow(app)
+        // 100 pt in and 20 pt up from the row's bottom-leading corner: past the avatar lane, on the caption.
+        dragLeft(from: row.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 1)).withOffset(CGVector(dx: 100, dy: -20)), 80)
+        assertReplying(app, to: "Hero for the landing page")
+    }
+
+    /// Started on a picture and let go just past the threshold: a reply, and the lift does
+    /// not open the viewer.
+    func testSwipeLeftFromAPictureRepliesAndOpensNoViewer() {
+        let app = openGroup()
+        // 150 pt in at the row's middle height: on the picture.
+        dragLeft(from: heroRow(app).coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 150, dy: 0)), 62)
+        assertReplying(app, to: "Hero for the landing page")
+    }
+
+    /// Hold a bubble into its menu, then slide the same finger left along it and lift: that
+    /// finger is choosing in the menu, it is not a reply swipe.
+    func testAHoldIntoTheMenuThatSlidesLeftStartsNoReply() {
+        let app = openComms()
+        dragLeft(from: ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)), 80, press: 0.9)
+        assertNoReply(app)
+        XCTAssertFalse(leftSwipe(app).contains("reply"))
     }
 
     /// Let go short of the threshold: nothing happens.
     func testAShortSwipeLeftOnABubbleStartsNoReply() {
-        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
-        let back = chatBack(app, "fx-comms-main")
-        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
-        let start = ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -30, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        sleep(1)
-        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
-        XCTAssertTrue(back.exists, "the chat did not go back")
+        let app = openComms()
+        dragLeft(from: ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)), 30)
+        assertNoReply(app)
+        XCTAssertTrue(chatBack(app, "fx-comms-main").exists, "the chat did not go back")
     }
 
-    /// The same drag from the empty side of my bubble's row is the time peek: no reply.
-    func testSwipeLeftBesideABubbleStartsNoReply() {
-        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
-        let back = chatBack(app, "fx-comms-main")
-        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
+    /// The same drag from the empty side of my bubble's row is still the time peek, and no reply.
+    func testSwipeLeftBesideABubbleIsTheTimePeek() {
+        let app = openComms()
         let bubble = ownBubble(app)
         let window = app.windows.firstMatch.frame
         // Mid-way between the screen's centre and the bubble's leading edge, clear of both.
         let x = (window.midX + bubble.frame.minX) / 2
         XCTAssertGreaterThan(bubble.frame.minX - x, 24, "the row has an empty side to start on")
-        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: bubble.frame.midY))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -120, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        sleep(1)
-        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
-        XCTAssertTrue(back.exists, "the chat did not go back")
+        dragLeft(from: app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: bubble.frame.midY)), 120)
+        assertNoReply(app)
+        XCTAssertEqual(leftSwipe(app).prefix(2), ["start", "peek"], "the times were peeked")
+        XCTAssertTrue(chatBack(app, "fx-comms-main").exists, "the chat did not go back")
     }
 
     /// A vertical drag that starts on a bubble still scrolls the transcript.

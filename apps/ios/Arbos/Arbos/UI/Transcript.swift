@@ -1595,6 +1595,8 @@ struct RowView: View, Equatable {
     private func openProfile(_ target: ProfileTarget) -> () -> Void {
         return {
             guard account.accepts(model), !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
+            // The lift of a reply swipe that began on the name is not a tap on it.
+            guard !ChatGestures.replySwiped else { return }
             model.toggleProfile(target)
         }
     }
@@ -2091,8 +2093,8 @@ struct RowView: View, Equatable {
     private func replyCountBadge(userBubble: Bool) -> some View {
         // This overlay spans exactly the bubble, on every kind of bubble: swipe to reply
         // reads the bubble's frame from here (`ReplySwipeBubble`; tester reports, 2026-11-13).
-        if isMessage {
-            ReplySwipeBubble(row: row.id).allowsHitTesting(false).accessibilityHidden(true)
+        if isMessage, ChatGestures.replySwipe {
+            ReplySwipeBubble(row: row.id).accessibilityHidden(true)
         }
         if row.replyCount > 0 {
             Text("\(row.replyCount)")

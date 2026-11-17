@@ -14,10 +14,8 @@ enum Haptics {
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let selection = UISelectionFeedbackGenerator()
 
-    /// Message sent, dictation finished.
+    /// Message sent, dictation finished, a reply swipe reached its threshold.
     static func send() { light.impactOccurred() }
-    /// A reply swipe reached its threshold (`ReplySwipe`).
-    static func replyArmed() { light.impactOccurred() }
     /// Hold-to-talk started.
     static func recordStart() { medium.impactOccurred() }
     /// Card option picked, chip toggled.
