@@ -161,4 +161,31 @@ final class ReactionPickerUITests: XCTestCase {
         shot("\(tag)-4-after-pick")
         XCTAssertEqual(anyChip.count, chipsBefore + 1, "the tapped emoji is a new chip under the bubble")
     }
+
+    /// Double-tap a bubble: a ❤️ chip, mine. Again: gone. Then two quick taps on the chip:
+    /// the first takes it off, and the row's double-tap does not put a heart back
+    /// (tester reports, 2026-11-13 and 2026-11-16: the heart lagged, taking it off lagged,
+    /// "double reaction").
+    func testDoubleTapHeartsAndUnheartsAndAChipKeepsItsOwnTaps() {
+        let app = launch()
+        let bubble = lastBubble(app)
+        let heart = chip(app, "❤️")
+        XCTAssertFalse(heart.exists, "no ❤️ chip before the double-tap")
+
+        bubble.doubleTap()
+        XCTAssertTrue(heart.waitForExistence(timeout: settle), "a ❤️ chip sits under the bubble")
+        XCTAssertEqual(heart.label, "❤️ reaction, 1")
+        shot("double-tap-1-on")
+
+        bubble.doubleTap()
+        assertGone(heart, "the second double-tap took the ❤️ off")
+        shot("double-tap-2-off")
+
+        bubble.doubleTap()
+        XCTAssertTrue(heart.waitForExistence(timeout: settle))
+        heart.doubleTap()
+        sleep(2)
+        shot("double-tap-3-chip")
+        XCTAssertFalse(heart.exists, "the tap on the chip took it off, and the double-tap did not heart the message again")
+    }
 }

@@ -134,7 +134,6 @@ final class NativeReactionTests: XCTestCase {
         // No await in between: this is what the view reads in the frame of the tap.
         XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), true)
         XCTAssertTrue(mine(), "the row carries my reaction before the homeserver answers")
-        XCTAssertNil(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me), "a second tap waits for the first")
 
         model.dropReaction(chatId: "dm1", messageId: "m1", emoji: "👍", me: me)
         XCTAssertFalse(mine(), "a refused reaction does not stay on the row")
@@ -180,10 +179,113 @@ final class NativeReactionTests: XCTestCase {
         XCTAssertFalse(mine(), "once settled, the homeserver's rows are the truth again")
 
         // An event that never comes back does not pin the row for good.
-        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, at: 1_000)]
+        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, sent: true, at: 1_000)]
         var rows = [row("m1")]
         AppModel.holdReactions(&rows, held: &held, me: me, now: 61_001)
         XCTAssertTrue(rows[0].reactions.isEmpty)
         XCTAssertTrue(held.isEmpty)
+    }
+
+    /// Taking a reaction off is as quick as putting it on, also while the first is still on
+    /// its way (tester reports, 2026-11-13 "and with removing it too", 2026-11-16 double-tap):
+    /// the row flips with each tap, and the homeserver is asked for the second once it has
+    /// confirmed the first.
+    @MainActor func testASecondTapFlipsTheRowAtOnceAndGoesOutWhenTheFirstIsConfirmed() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let me = try XCTUnwrap(model.myUserId)
+        model.applyNativeRooms(["dm1": "!r"])
+        model.matrixSnapshot = MatrixSnapshot(spaces: [], channels: [], people: [MatrixPeopleRow(
+            roomId: "!r", chatId: "dm1", kind: "dm", encrypted: true, unread: 0, mentions: 0,
+            lastText: "", lastSender: "", lastSenderName: "", lastTs: 0)])
+        func timeline(_ reactions: String) -> [MatrixMessageRow] {
+            [MatrixMessageRow(eventId: "$e1", id: "m1", sender: "user:gh_alice", senderName: "alice", text: "hi",
+                              createdAt: 1, locked: false, pending: false,
+                              json: #"{"id":"m1","role":"user","sender":"user:gh_alice","reactions":\#(reactions)}"#)]
+        }
+        func mine() -> Bool { model.messages(of: "dm1").first?.reactions.contains { $0.emoji == "❤️" && $0.senders.contains(me) } == true }
+        let echo = #"{"❤️":{"\#(me)":true}}"#
+
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me), true)
+        XCTAssertTrue(mine())
+        XCTAssertNil(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me), "nothing to send yet: the first is on its way")
+        XCTAssertFalse(mine(), "the row lost the heart with the second tap, no await in between")
+
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertFalse(mine())
+        XCTAssertEqual(model.heldReactions["dm1"]?.map(\.sent), [true], "still waiting for the first")
+
+        // The first is confirmed: the row keeps showing what was tapped last, and the removal goes out.
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline(echo))
+        XCTAssertFalse(mine(), "the confirmed heart does not come back onto the row")
+        XCTAssertEqual(model.heldReactions["dm1"]?.map(\.sent), [false], "the removal was sent")
+
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
+        XCTAssertFalse(mine())
+        XCTAssertNil(model.heldReactions["dm1"], "settled")
+
+        // Tapped on and off, and the first send is refused: the homeserver never had it.
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me), true)
+        XCTAssertNil(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me))
+        model.dropReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me)
+        XCTAssertFalse(mine())
+        // Tapped off and on again over one the homeserver has, refused: it is still there.
+        model.applyMatrixTimeline(roomId: "!r", rows: timeline(echo))
+        XCTAssertEqual(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me), false)
+        XCTAssertNil(model.holdReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me))
+        model.dropReaction(chatId: "dm1", messageId: "m1", emoji: "❤️", me: me)
+        XCTAssertTrue(mine())
+    }
+}
+
+/// A reaction restamps the rows of its one message instead of rebuilding the transcript, and
+/// the result is what the rebuild gives (tester report, 2026-11-16: the double-tap heart "is
+/// just not smooth").
+final class ReactionRowTests: XCTestCase {
+    @MainActor func testAReactionRestampsItsMessageAsAFullRebuildWould() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let chatId = "fx-group-launch"
+        let me = try XCTUnwrap(model.myUserId)
+        func build(_ list: [Message]) -> [Row] {
+            Transcript.rows(list, projectId: "\(peopleSlot):\(chatId)", me: me, people: true, multiParty: true)
+        }
+        let before = model.messages(of: chatId)
+        XCTAssertGreaterThan(before.count, 1)
+        for i in before.indices {
+            // On, a second emoji, then both off again: each step against the rebuild.
+            var list = before
+            var rows = build(list)
+            for emoji in ["❤️", "🔥", "❤️", "🔥"] {
+                let was = Transcript.index(list)
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                let edited = try XCTUnwrap(Transcript.reactionOnlyEdit(list, was: was), "message \(i) \(emoji)")
+                XCTAssertEqual(edited.id, list[i].id)
+                Transcript.restampReactions(&rows, for: edited)
+                XCTAssertEqual(rows, build(list), "message \(i) after \(emoji)")
+            }
+        }
+
+        // Anything but a reaction on one message is not this path.
+        let was = Transcript.index(before)
+        XCTAssertNil(Transcript.reactionOnlyEdit(before, was: was), "nothing changed")
+        var two = before
+        two[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        two[1].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        XCTAssertNil(Transcript.reactionOnlyEdit(two, was: was), "two messages changed")
+        var other = before
+        other[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        other[0].createdAt += 1
+        XCTAssertNil(Transcript.reactionOnlyEdit(other, was: was), "more than its reactions changed")
+    }
+
+    /// Two quick taps on a chip are the chip's (on, then off again), not a heart for the
+    /// message (tester report, 2026-11-16, "double reaction").
+    func testADoubleTapWithATapOnAChipInItIsNotAHeart() {
+        ChatGestures.chipTapAt = 100
+        XCTAssertTrue(ChatGestures.doubleTapOnChip(now: 100.3))
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(now: 101), "a later double-tap on the bubble is")
+        ChatGestures.chipTapAt = 0
     }
 }
