@@ -121,6 +121,24 @@ final class HoldMenuUITests: XCTestCase {
         XCTAssertTrue(profile.waitForExistence(timeout: settle), "a tap on the name still opens it")
     }
 
+    /// The hold that opened the menu slides to a reaction and lifts on it (#3038): the touch
+    /// outlives the transcript being disabled under it.
+    func testAHoldSlidesToAReaction() {
+        let app = group()
+        // A bubble that already carries its name: nothing is added above it as it lifts, so
+        // the capsule opens 8 pt above the row, at the chat's leading edge. ❤️ is its first cell.
+        let bubble = app.descendants(matching: .any)["bubble:g3"]
+        reveal(bubble, in: app)
+        let heart = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "❤️ reaction,")).firstMatch
+        XCTAssertFalse(heart.exists, "no ❤️ before the hold")
+        let cell = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 38, dy: bubble.frame.minY - 30))
+        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.8, thenDragTo: cell, withVelocity: .slow, thenHoldForDuration: 0.3)
+        shot("slid-to-reaction")
+        XCTAssertTrue(heart.waitForExistence(timeout: settle), "lifting on ❤️ reacted")
+        XCTAssertFalse(menu(app).exists, "the choice closed the menu")
+    }
+
     /// The hold that opened the menu slides to a menu row and lifts on it (#3038, #3041):
     /// the touch outlives the transcript being disabled under it. Lifting on Reply starts a reply.
     func testAHoldSlidesToAMenuRow() {
