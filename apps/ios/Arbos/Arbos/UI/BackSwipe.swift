@@ -181,16 +181,6 @@ enum ChatGestures {
         return heldIntoMenu
     }
 
-    /// When a reaction chip last took a tap (system uptime). The row's double-tap runs
-    /// alongside the chip's own tap, so two quick taps on a chip (on, then off again) also
-    /// put a heart on the message (tester report, 2026-11-16, "double reaction").
-    static var chipTapAt: TimeInterval = 0
-
-    /// True when a double-tap that ends at `now` had a tap on a chip in it.
-    static func doubleTapOnChip(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
-        now - chipTapAt < 0.6
-    }
-
     private static func on(_ name: String) -> Bool {
         #if DEBUG
         return !DebugHooks.gesturesOff.contains(name)

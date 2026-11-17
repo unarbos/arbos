@@ -29,21 +29,6 @@ extension AnyTransition {
     }
 }
 
-/// A reaction chip arriving or leaving, and the row making room for it: a short spring pop;
-/// a plain quick fade under Reduce Motion (tester report, 2026-11-16: the double-tap heart
-/// "is just not smooth").
-extension AnyTransition {
-    static var reactionPop: AnyTransition {
-        UIAccessibility.isReduceMotionEnabled ? .opacity : .scale(scale: 0.5).combined(with: .opacity)
-    }
-}
-
-extension Animation {
-    static var reactionPop: Animation {
-        UIAccessibility.isReduceMotionEnabled ? .easeOut(duration: 0.12) : .spring(response: 0.26, dampingFraction: 0.68)
-    }
-}
-
 /// Telegram-style text size steps (Q6). Index 3 = the design size.
 enum TextScale {
     static let steps: [CGFloat] = [0.85, 0.9, 0.95, 1.0, 1.1, 1.2, 1.3]

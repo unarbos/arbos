@@ -571,7 +571,7 @@ extension View {
             // [feedback app-01M5VCGAPAXY6NN8TNSWAWJ52Z]).
             .simultaneousGesture(
                 TapGesture(count: 2)
-                    .onEnded { if !ChatGestures.doubleTapOnChip() { onDoubleTap() } }
+                    .onEnded { onDoubleTap() }
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
