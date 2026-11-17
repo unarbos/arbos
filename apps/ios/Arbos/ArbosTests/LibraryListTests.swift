@@ -20,6 +20,28 @@ final class LibraryListTests: XCTestCase {
                  at: Int64(at.timeIntervalSince1970 * 1000), fromHandle: "samir", mime: "", media: media)
     }
 
+    /// A row's thumbnail is one small frame: a wide photo comes back 432 px on its longer
+    /// side, an animated GIF as its first frame alone, and bytes that are no picture as nil.
+    func testThumbnailsAreOneSmallFrame() throws {
+        let wide = UIGraphicsImageRenderer(size: CGSize(width: 2000, height: 500), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).pngData { $0.fill(CGRect(x: 0, y: 0, width: 2000, height: 500)) }
+        let small = try XCTUnwrap(BlobImage.thumbnail(wide, maxPixel: LibraryList.thumbPixel))
+        XCTAssertEqual(small.size.width * small.scale, 432)
+        XCTAssertEqual(small.size.height * small.scale, 108, "the short side still fills a 36 pt tile at 3x")
+
+        let gif = NSMutableData()
+        let out = try XCTUnwrap(CGImageDestinationCreateWithData(gif, "com.compuserve.gif" as CFString, 3, nil))
+        let frame = try XCTUnwrap(UIImage(data: wide)?.cgImage)
+        for _ in 0..<3 { CGImageDestinationAddImage(out, frame, nil) }
+        XCTAssertTrue(CGImageDestinationFinalize(out))
+        let first = try XCTUnwrap(BlobImage.thumbnail(gif as Data, maxPixel: LibraryList.thumbPixel))
+        XCTAssertNil(first.images, "one frame, not the animation")
+        XCTAssertEqual(first.size.width * first.scale, 432)
+
+        XCTAssertNil(BlobImage.thumbnail(Data("not a picture".utf8), maxPixel: LibraryList.thumbPixel))
+    }
+
     func testRelativeTimesAreCompact() {
         let now: Int64 = 1_000_000_000_000
         let min: Int64 = 60_000

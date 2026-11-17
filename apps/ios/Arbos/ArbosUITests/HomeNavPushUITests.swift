@@ -154,4 +154,98 @@ final class HomeNavPushUITests: XCTestCase {
         assertGone(back)
         assertHome(app)
     }
+
+    // MARK: Back returns to the list it came from
+
+    private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id].firstMatch
+    }
+
+    /// Still on screen after the transitions have run: the old code opened the chat and
+    /// popped it a moment later.
+    private func assertStays(_ item: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(item.waitForExistence(timeout: settle), what, file: file, line: line)
+        sleep(2)
+        XCTAssertTrue(item.exists, "\(what), and it stays", file: file, line: line)
+    }
+
+    /// Tester report, 2026-11-15: "I select a user it gives me a black screen".
+    func testAPersonPickedOnNewMessageShowsTheirChat() {
+        let app = launch()
+        tap(app.buttons["home-new"])
+        XCTAssertTrue(element(app, "new-message").waitForExistence(timeout: settle), "New Message opened")
+        let person = app.staticTexts["Alex Rivera"].firstMatch
+        if !person.waitForExistence(timeout: 3) { app.swipeUp() }
+        XCTAssertTrue(person.waitForExistence(timeout: settle), "the person is listed")
+        tap(person)
+        assertStays(element(app, "chat-header-pill"), "the chat with the person is shown")
+        XCTAssertFalse(app.buttons["home-new"].exists, "not back on Home")
+    }
+
+    /// Tester report, 2026-11-17: back from a profile opened in a group's members list
+    /// went to the page before the list. Then the profile's Message with a chat that
+    /// already exists, which must show that chat.
+    func testBackFromAMembersProfileLandsOnMembers() {
+        let app = launch()
+        tap(element(app, "home-row:fx-group-launch"))
+        let pill = element(app, "chat-header-pill")
+        XCTAssertTrue(pill.waitForExistence(timeout: settle), "the group chat opened")
+        tap(pill)
+        let membersRow = element(app, "group-overview-members")
+        XCTAssertTrue(membersRow.waitForExistence(timeout: settle), "the group page opened")
+        tap(membersRow)
+        let mira = app.staticTexts["Mira Kaplan"].firstMatch
+        XCTAssertTrue(mira.waitForExistence(timeout: settle), "the members list opened")
+
+        tap(mira)
+        let viewProfile = app.buttons["View profile"].firstMatch
+        XCTAssertTrue(viewProfile.waitForExistence(timeout: settle), "the member's actions are offered")
+        viewProfile.tap()
+        let message = app.buttons["Message"].firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: settle), "the member's profile opened")
+        edgeSwipeBack(app)
+        assertGone(message)
+        XCTAssertTrue(mira.waitForExistence(timeout: settle), "back lands on the members list")
+        XCTAssertFalse(membersRow.exists, "not on the group page before it")
+
+        tap(app.staticTexts["Unconst"].firstMatch)
+        XCTAssertTrue(viewProfile.waitForExistence(timeout: settle), "the member's actions are offered")
+        viewProfile.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: settle), "the member's profile opened")
+        tap(message)
+        assertStays(element(app, "chat-back:fx-dm-unconst"), "the existing chat with the member is shown")
+    }
+
+    /// Tester report, 2026-11-17: back from a chat opened in the archived list went to
+    /// the chat list.
+    func testBackFromAnArchivedChatLandsOnArchivedChats() {
+        let app = launch()
+        let row = element(app, "home-row:fx-dm-unconst")
+        if row.waitForExistence(timeout: 5) {
+            row.swipeLeft()
+            let archive = app.buttons["Archive"].firstMatch
+            XCTAssertTrue(archive.waitForExistence(timeout: settle), "the row offers Archive")
+            tap(archive)
+        }
+        let footer = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Archived chats'")).firstMatch
+        if !footer.waitForExistence(timeout: 3) { app.swipeUp() }
+        XCTAssertTrue(footer.waitForExistence(timeout: settle), "Home lists Archived chats")
+        tap(footer)
+        let page = element(app, "archived-chats")
+        XCTAssertTrue(page.waitForExistence(timeout: settle), "the archived list opened")
+        let archived = app.staticTexts["Unconst"].firstMatch
+        XCTAssertTrue(archived.waitForExistence(timeout: settle), "the archived chat is listed")
+        tap(archived)
+        let back = element(app, "chat-back:fx-dm-unconst")
+        XCTAssertTrue(back.waitForExistence(timeout: settle), "the archived chat opened")
+        tap(back)
+        assertGone(back)
+        XCTAssertTrue(page.waitForExistence(timeout: settle), "back lands on the archived list")
+        XCTAssertFalse(app.buttons["home-new"].exists, "not on the chat list")
+
+        // Leave the fixture as it was for the next test.
+        archived.swipeLeft()
+        let unarchive = app.buttons["Unarchive"].firstMatch
+        if unarchive.waitForExistence(timeout: 5) { tap(unarchive) }
+    }
 }

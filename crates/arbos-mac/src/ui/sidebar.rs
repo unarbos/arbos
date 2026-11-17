@@ -1293,7 +1293,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                     .text_center()
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
-                    .child("Nothing hidden."),
+                    .child("No archived chats"),
             );
         }
     }

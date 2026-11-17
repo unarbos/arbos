@@ -20,11 +20,11 @@ enum LibraryList {
     /// The thumbnail / type tile (the kit's 36 pt leading) and its corners.
     static let thumb: CGFloat = PaneKit.avatar
     static let thumbRadius: CGFloat = 8
-    /// The bitmap a row's thumbnail keeps: 36 pt at 3x, with room for a 4:1 picture to
-    /// fill the tile. The full picture, decoded on the main thread and scaled down on
-    /// every frame, is what made this list jerkier to swipe out of than Members (tester
-    /// report, 2026-11-16).
-    static let thumbPixels = CGSize(width: 432, height: 432)
+    /// The longer side of the bitmap a row's thumbnail keeps: 36 pt at 3x, with room for
+    /// a 4:1 picture to fill the tile. The full picture, decoded on the main thread and
+    /// scaled down on every frame, is what this list did and Members does not (tester
+    /// report, 2026-11-16: "a lot jerkier to swipe out of").
+    static let thumbPixel: CGFloat = 432
     /// The link tile in the long-press preview's picture frame (the 36 pt globe it replaces, as a tile).
     static let previewTile: CGFloat = 72
     /// The preview card: width, picture height, the sender's picture.
@@ -266,28 +266,26 @@ struct LibraryRow: View {
     }
 
     var body: some View {
-        // Not a Button, as the transcript's file and link cards: a Button counts a back swipe
-        // that starts on the row as a tap when the finger lifts, and the picture opened
-        // under the pop (tester report, 2026-11-15).
-        Group {
-            HStack(spacing: PaneKit.gap) {
-                LibraryThumb(item: item, origin: origin)
-                Text(item.kind == .link ? (item.url.map(LibraryList.bareURL) ?? item.title) : item.title)
-                    .font(theme.font(Theme.body, weight: .medium))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 8)
-                Text(LibraryList.relTime(item.at, now: Int64(Date().timeIntervalSince1970 * 1000)))
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.muted)
-                    .monospacedDigit()
-            }
-            .padding(.horizontal, PaneKit.inset)
-            .padding(.vertical, 6)
-            .frame(minHeight: PaneKit.rowHeight)
-            .contentShape(Rectangle())
+        // Not a Button, as the transcript's file and link cards (#3034): a tap gesture fails
+        // once the finger moves, so a back swipe that starts on the row opens nothing
+        // (tester report, 2026-11-15: the picture opened under the pop).
+        HStack(spacing: PaneKit.gap) {
+            LibraryThumb(item: item, origin: origin)
+            Text(item.kind == .link ? (item.url.map(LibraryList.bareURL) ?? item.title) : item.title)
+                .font(theme.font(Theme.body, weight: .medium))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Text(LibraryList.relTime(item.at, now: Int64(Date().timeIntervalSince1970 * 1000)))
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.muted)
+                .monospacedDigit()
         }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 6)
+        .frame(minHeight: PaneKit.rowHeight)
+        .contentShape(Rectangle())
         .onTapGesture { if origin.allowsPrivate(model) { open() } }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -330,7 +328,7 @@ struct LibraryThumb: View {
             switch item.kind {
             case .media:
                 if let media = item.media, media.kind == .image {
-                    BlobImage(item: media, origin: origin, maxPixels: LibraryList.thumbPixels)
+                    BlobImage(item: media, origin: origin, maxPixel: LibraryList.thumbPixel)
                 } else {
                     Image(systemName: "play.fill").font(theme.font(13, weight: .semibold)).foregroundStyle(theme.muted)
                 }

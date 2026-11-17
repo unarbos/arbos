@@ -1270,6 +1270,13 @@ struct HiddenChatsView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
+        // Page id on a zero-size marker, as New Message: on the container it would take
+        // the rows out of the XCTest tree.
+        .background {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("archived-chats")
+        }
     }
 
 

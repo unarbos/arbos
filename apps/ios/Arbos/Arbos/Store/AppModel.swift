@@ -2339,7 +2339,8 @@ final class AppModel: ObservableObject {
             }
             let failure = UserError.classify("load your chats", error)
             // The raw detail is for whoever reads the log; the line under Home shows the sentence.
-            NSLog("registry: reload failed: \(failure.raw.isEmpty ? failure.sentence : failure.raw)")
+            // As an argument, never the format: the raw words can be the relay's body.
+            NSLog("registry: reload failed: %@", failure.raw.isEmpty ? failure.sentence : failure.raw)
             registryError = failure
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error

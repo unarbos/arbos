@@ -1250,9 +1250,9 @@ struct BlobImage: View {
     @Environment(\.theme) private var theme
     let item: MediaItem
     var origin: MediaOrigin? = nil
-    /// A thumbnail: decode off the main actor to a bitmap no larger than this
-    /// (`ChatImageCache.decode`). nil keeps the full picture.
-    var maxPixels: CGSize? = nil
+    /// A thumbnail: decode off the main actor to a bitmap whose longer side is this many
+    /// pixels (`thumbnail`). nil keeps the full picture.
+    var maxPixel: CGFloat? = nil
     @State private var capturedOrigin: MediaOrigin?
     @State private var image: UIImage?
     @State private var failed = false
@@ -1277,16 +1277,29 @@ struct BlobImage: View {
         guard origin.allowsReading(item, model) else { return }
         let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
         guard origin.allowsReading(item, model) else { return }
-        if let (data, _) = bytes, let maxPixels {
-            let small = await ChatImageCache.decode(data, maxPixels: maxPixels)
+        if let (data, _) = bytes, let maxPixel {
+            let small = await Task.detached(priority: .userInitiated) { Self.thumbnail(data, maxPixel: maxPixel) }.value
             guard origin.allowsReading(item, model) else { return }
-            image = small?.stillFrame ?? small?.image
-            failed = image == nil
+            image = small
+            failed = small == nil
         } else if let (data, _) = bytes, let img = UIImage(data: data) {
             image = img
         } else {
             failed = true
         }
+    }
+}
+
+extension BlobImage {
+    /// The first frame only, scaled as it is read: an animated GIF costs one small frame,
+    /// and a large photo is never decoded at full size. nil when the bytes are not a picture.
+    nonisolated static func thumbnail(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: maxPixel] as [CFString: Any] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let frame = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        return UIImage(cgImage: frame)
     }
 }
 

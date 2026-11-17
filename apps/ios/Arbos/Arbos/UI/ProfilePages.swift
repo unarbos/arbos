@@ -1092,12 +1092,13 @@ struct UserProfileView: View {
         let work = model.accountWork()
         return PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
             guard model.acceptsAccountWork(work) else { return }
+            // Dismiss only inside a sheet, here and on the rows below: on the stack an open
+            // replaces the path, this page with it, and a dismiss that lands after it pops
+            // the chat that just opened.
             if let dm {
-                dismiss()
+                if profileHost == .sheet { dismiss() }
                 model.open(peopleChat: dm)
             } else {
-                // Dismiss only inside a sheet: on the stack `openDM` has replaced the path, and
-                // a dismiss after it popped the DM it had just opened.
                 Task { guard model.acceptsAccountWork(work) else { return }; if await model.openDM(handle: peerHandle) != nil, profileHost == .sheet { guard model.acceptsAccountWork(work) else { return }; dismiss() } }
             }
         }
@@ -1128,7 +1129,7 @@ struct UserProfileView: View {
         // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
-                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(peopleChat: g) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; if profileHost == .sheet { dismiss() }; model.open(peopleChat: g) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
                         title: g.title,
@@ -1141,7 +1142,7 @@ struct UserProfileView: View {
         }
         rows += sharedProjects.map { p in
             AnyView(
-                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(project: p) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; if profileHost == .sheet { dismiss() }; model.open(project: p) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar))),
                         title: p.name,
@@ -1395,6 +1396,9 @@ struct GroupProfileView: View {
                 groupSubpage(page)
                     .backSwipeToPop()
             }
+            // A path change can take the sub-page away with a profile still pushed from it;
+            // left set, that profile came back on the next tap on Members.
+            .onChange(of: subpage) { _, page in if page == nil { subpageProfile = nil } }
             .navigationDestination(isPresented: $showAdd) {
                 addMembersPage
                     .backSwipeToPop()
@@ -2370,6 +2374,8 @@ struct ServerProfileView: View {
                 serverSubpage(page)
                     .backSwipeToPop()
             }
+            // As on the group page: no profile outlives the sub-page it was pushed from.
+            .onChange(of: subpage) { _, page in if page == nil { subpageProfile = nil } }
             .navigationDestination(isPresented: $showNewChannel) {
                 NewChannelPage(serverId: serverId)
                     .environmentObject(model)

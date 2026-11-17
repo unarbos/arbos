@@ -88,24 +88,4 @@ final class HomeNavPushTests: XCTestCase {
         model.openFromArchived { model.path = [.archived, server] }
         XCTAssertEqual(model.path, [.archived, server], "the list is never put under itself")
     }
-
-    /// A person picked on New Message opens their DM and nothing pops it (tester report,
-    /// 2026-11-15: "it gives me a black screen"). Opening replaces the path, the page
-    /// with it; a `dismiss()` after that popped the DM that had just opened.
-    func testAPersonPickedOnNewMessageLandsInTheirDM() async throws {
-        let model = AppModel()
-        model.showNewMessage()
-        let dm = await model.openDM(handle: "alex-rivera")
-        XCTAssertEqual(model.path, [.chat(chatId: try XCTUnwrap(dm).id, projectId: peopleSlot)])
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // ArbosTests
-            .deletingLastPathComponent() // Arbos
-            .appendingPathComponent("Arbos/UI/PeopleSheets.swift")
-        let source = try String(contentsOf: url, encoding: .utf8)
-        let start = try XCTUnwrap(source.range(of: "struct NewChatSheet: View {"))
-        let end = try XCTUnwrap(source.range(of: "struct ServerPickRow: View {"))
-        let page = source[start.lowerBound..<end.lowerBound]
-        XCTAssertFalse(page.contains("dismiss()\n") || page.contains("dismiss() }"),
-                       "New Message never dismisses after an open: the open already left the page")
-    }
 }
