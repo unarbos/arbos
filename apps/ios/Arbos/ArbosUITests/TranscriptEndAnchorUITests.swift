@@ -116,6 +116,44 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         assertAtTheEnd(app, "keyboard up")
     }
 
+    /// The container shrinking under a reader who has scrolled up must leave them where they
+    /// are (tester report, 2026-11-14: "I'd prefer it just stays where you were. Would make it
+    /// easier to type a reply to someone while re-reading someone's message").
+    ///
+    /// The other half of the case above, and the two differ only in where the reader was when
+    /// the keyboard came up. Focusing the composer used to send everyone to the newest row,
+    /// so the row asserted on here left the screen.
+    func testTheKeyboardComingUpInHistoryLeavesTheReaderWhereTheyAre() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_NO_STORE": "1",
+                                 "ARBOS_OPEN_PEOPLE": "fx-group-launch"]
+        app.launch()
+        XCTAssertTrue(app.textViews["composer-field"].waitForExistence(timeout: appear),
+                      "the fixture group is open")
+        let window = app.windows.firstMatch
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)))
+        // The drag's own deceleration, so the row is read at rest.
+        Thread.sleep(forTimeInterval: 2)
+
+        // A row in the upper part of the screen: under the header, and above where the
+        // keyboard and the composer will be.
+        guard let row = bubbles(app).first(where: { $0.frame.minY > 120 && $0.frame.minY < 420 }) else {
+            return XCTFail("a row is on screen in the upper half after scrolling up")
+        }
+        let id = row.identifier
+        let before = row.frame
+
+        raiseKeyboard(app)
+        // The keyboard's rise and anything the transcript would do in answer to it.
+        Thread.sleep(forTimeInterval: 1.5)
+
+        let after = app.descendants(matching: .any)[id].firstMatch
+        XCTAssertTrue(after.exists, "the row the reader was on is still drawn")
+        XCTAssertEqual(after.frame.minY, before.minY, accuracy: 2,
+                       "and it has not moved: the reader keeps their place when the keyboard opens")
+    }
+
     /// The container *growing* under a reader at the end must also keep them at the end.
     ///
     /// This is the direction #2920 changes, and the reason it is a separate case from the one

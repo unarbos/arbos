@@ -2742,7 +2742,11 @@ struct ChatSession: View {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
-                guard focused else { return }
+                // A reader up in history keeps their place when the keyboard opens, so they
+                // can type a reply while re-reading (tester report, 2026-11-14); the send is
+                // what takes them to the newest row.
+                guard focused, TranscriptScrollLatch.keyboardFollowsEnd(pinned: pinnedToBottom,
+                                                                       away: awayFromBottom) else { return }
                 jumpBackTo = nil
                 pinnedToBottom = true
                 readerHeld = false
@@ -5074,6 +5078,14 @@ enum TranscriptScrollLatch {
     static func resizedUnderTheFinger(userDriven: Bool,
                                       oldContainer: CGFloat, newContainer: CGFloat) -> Bool {
         userDriven && abs(newContainer - oldContainer) > 0.5
+    }
+
+    /// The keyboard opening takes the transcript to its newest row only for a reader who is
+    /// already following the end (within `awayThreshold` of it). One who has scrolled up keeps
+    /// the offset they chose: the rows at the top of the screen stay where they are and the
+    /// keyboard covers the lower ones.
+    static func keyboardFollowsEnd(pinned: Bool, away: Bool) -> Bool {
+        pinned && !away
     }
 
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,

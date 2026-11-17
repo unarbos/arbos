@@ -111,6 +111,24 @@ final class TranscriptScrollLatchTests: XCTestCase {
                        .reread(away: true))
     }
 
+    /// The keyboard opening (tester report, 2026-11-14: "I'd prefer it just stays where you
+    /// were"). At the end it still carries the reader to the newest row, which is #3051; up
+    /// in history it leaves them where they are.
+    func testTheKeyboardOpeningOnlyFollowsTheEndForAReaderWhoIsThere() {
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(pinned: true, away: false),
+                      "at the end: stay on the newest message")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(pinned: false, away: true),
+                       "scrolled up: keep the place")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(pinned: false, away: false),
+                       "taken to a quoted message near the end: not following, so not moved")
+        // The resize that follows must agree with that answer in both cases.
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 364, pinned: true), .stick)
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 900 + 301, pinned: false),
+                       .reread(away: true), "the reader in history is still in history")
+    }
+
     /// A sample where nothing moved must not disturb the latch — the reporter fires on every
     /// scroll sample, so "read it again" has to mean "when something moved it".
     func testASampleWithNothingMovingLeavesTheAnswerAlone() {
