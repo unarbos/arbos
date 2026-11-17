@@ -178,10 +178,10 @@ final class NativeReactionTests: XCTestCase {
         model.applyMatrixTimeline(roomId: "!r", rows: timeline("{}"))
         XCTAssertFalse(mine(), "once settled, the homeserver's rows are the truth again")
 
-        // An event that never comes back does not pin the row for good.
-        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, sent: true, at: 1_000)]
+        // A tap that has waited behind a send for ten minutes is given up; the rows win.
+        var held = [AppModel.HeldReaction(messageId: "m1", emoji: "👍", on: true, sent: false, at: 1_000)]
         var rows = [row("m1")]
-        AppModel.holdReactions(&rows, held: &held, me: me, now: 61_001)
+        AppModel.holdReactions(&rows, held: &held, me: me, now: 1_001 + AppModel.waitingTapMs)
         XCTAssertTrue(rows[0].reactions.isEmpty)
         XCTAssertTrue(held.isEmpty)
     }
@@ -242,6 +242,7 @@ final class NativeReactionTests: XCTestCase {
 
     private final class Homeserver: @unchecked Sendable {
         var calls: [Bool] = []
+        var keys: [String] = []
         var answer: Result<Bool, Error> = .success(true)
         var hangs = false
     }
@@ -254,8 +255,9 @@ final class NativeReactionTests: XCTestCase {
         model.matrixSnapshot = MatrixSnapshot(spaces: [], channels: [], people: [MatrixPeopleRow(
             roomId: "!r", chatId: "dm1", kind: "dm", encrypted: true, unread: 0, mentions: 0,
             lastText: "", lastSender: "", lastSenderName: "", lastTs: 0)])
-        model.nativeReact = { _, _, _, on in
+        model.nativeReact = { _, _, key, on in
             homeserver.calls.append(on)
+            homeserver.keys.append(key)
             if homeserver.hangs { try await Task.sleep(for: .seconds(30)) }
             return try homeserver.answer.get()
         }
@@ -354,6 +356,39 @@ final class NativeReactionTests: XCTestCase {
         XCTAssertNil(model.heldReactions["dm1"])
     }
 
+    /// The Mac's 👍🏽 again: tap the chip off (the client answers Ok and sends nothing), tap it
+    /// on again inside the grace, and a third time later. The entry has no timer left by
+    /// then; the third tap is sent as a send of its own, and with no echo for that one
+    /// either the chip comes back. It used to stay off with nothing sent, for good.
+    @MainActor func testATapOnAnEntryWhoseEchoNeverCameIsSentAnew() async throws {
+        let homeserver = Homeserver()
+        let (model, me) = try nativeModel(homeserver)
+        model.reactionEchoGrace = .milliseconds(30)
+        timeline(model, #"{"👍🏽":{"\#(me)":true}}"#)
+
+        model.toggleReaction(chatId: "dm1", messageId: "m1", emoji: "👍")
+        model.toggleReaction(chatId: "dm1", messageId: "m1", emoji: "👍")
+        XCTAssertTrue(mine(model, me, "👍"), "the second tap shows it on again")
+        await until("the grace ran out with the second tap waiting") { model.heldReactions["dm1"]?.first?.overdue == true }
+        XCTAssertEqual(homeserver.calls, [false])
+
+        model.toggleReaction(chatId: "dm1", messageId: "m1", emoji: "👍")
+        XCTAssertFalse(mine(model, me, "👍"), "off with the third tap")
+        await until("the third tap was sent") { homeserver.calls == [false, false] }
+        await until("and with no echo the row goes back to the homeserver's") { mine(model, me, "👍") }
+        XCTAssertNil(model.heldReactions["dm1"])
+    }
+
+    /// `toggleReaction` is where the written key is made: a toned pick reaches the row and
+    /// the homeserver as the untoned pick does.
+    @MainActor func testATonedPickReachesTheRowAndTheHomeserverUnderTheUntonedKey() async throws {
+        let homeserver = Homeserver()
+        let (model, me) = try nativeModel(homeserver)
+        model.toggleReaction(chatId: "dm1", messageId: "m1", emoji: "✌🏽")
+        XCTAssertTrue(mine(model, me, "✌️"))
+        await until("sent") { homeserver.keys == ["✌️"] }
+    }
+
     /// What comes back late for one send does not act on a later tap's entry, and an expiry
     /// does not lose a tap that is waiting behind the send.
     @MainActor func testALateAnswerLeavesANewerEntryAloneAndAWaitingTapIsKept() throws {
@@ -394,6 +429,7 @@ final class NativeReactionTests: XCTestCase {
         XCTAssertEqual(MessageReaction.writeKey("👍🏽"), "👍", "an emoji-default base takes no U+FE0F")
         XCTAssertEqual(MessageReaction.writeKey("❤️"), "❤️")
         XCTAssertEqual(Array(MessageReaction.writeKey("✌").unicodeScalars).count, 1, "a bare key is toggled as it is stored")
+        XCTAssertEqual(Array(MessageReaction.writeKey("\u{270C}\u{FE0F}\u{1F3FD}").unicodeScalars).map(\.value), [0x270C, 0xFE0F], "no second U+FE0F")
 
         let doc = CoreChatDoc(key: "react-tone")
         try doc.insertUserMessage(id: "m1", text: "hi", deviceId: "dev", author: .init(sender: "user:ken"))

@@ -818,13 +818,15 @@ struct MessageReaction: Equatable, Hashable {
     /// everyone else's `✌️`: two chips that look the same (tester report, 2026-11-16,
     /// "double reaction"). Only a stripped tone is replaced: a bare key already stored is
     /// toggled as it is, and nothing is merged on the read side.
+    /// Ceiling: sequences of several people with different tones (handshake, couples) are
+    /// stripped as before, which is not always the spelling of the untoned pick.
     static func writeKey(_ emoji: String) -> String {
         var out = String.UnicodeScalarView()
         var before: Unicode.Scalar?
         for scalar in emoji.unicodeScalars {
             if !skinToneScalars.contains(scalar.value) {
                 out.append(scalar)
-            } else if let before, !before.properties.isEmojiPresentation {
+            } else if let before, before != "\u{FE0F}", !before.properties.isEmojiPresentation {
                 out.append("\u{FE0F}")
             }
             before = scalar

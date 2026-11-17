@@ -1297,7 +1297,8 @@ extension AppModel {
     /// Flip my reaction on a native chat's row. The row changes at once and the homeserver's
     /// event confirms it (`holdReactions`); a send that fails puts the row back.
     func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
-        guard reactionsAlive() != nil, let me = myUserId else { return }
+        guard reactionsAlive() != nil, let me = myUserId,
+              channelRows[chatId]?.contains(where: { $0.id == messageId }) == true else { return }
         // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
         // Ceiling: one another app put on with a skin tone is not taken back from here; the
         // client finds nothing under this key and the row goes back (`reactionEchoGrace`).
@@ -1370,6 +1371,9 @@ extension AppModel {
         /// The send this entry is waiting on. A failure or an expiry names its send, so one
         /// that comes late leaves a newer entry for the same emoji alone.
         var send = UUID()
+        /// No echo came for `send` while a tap was waiting behind it: nothing is timing this
+        /// entry any more (`expireReaction`).
+        var overdue = false
     }
 
     /// Show my reaction flipped on a native chat's row before the homeserver has it, and
@@ -1386,7 +1390,13 @@ extension AppModel {
         channelRows[chatId] = rows
         if let h = heldReactions[chatId]?.firstIndex(where: { $0.messageId == messageId && $0.emoji == emoji }) {
             heldReactions[chatId]?[h].on = on
-            return nil
+            // Back to what was sent, and that send's echo never came: nothing would send
+            // this tap or take the row back, so it goes out as a send of its own.
+            guard on == heldReactions[chatId]?[h].sent, heldReactions[chatId]?[h].overdue == true else { return nil }
+            heldReactions[chatId]?[h].send = UUID()
+            heldReactions[chatId]?[h].at = nowMs()
+            heldReactions[chatId]?[h].overdue = false
+            return heldReactions[chatId]?[h]
         }
         let held = HeldReaction(messageId: messageId, emoji: emoji, on: on, sent: on, at: nowMs())
         heldReactions[chatId, default: []].append(held)
@@ -1407,22 +1417,30 @@ extension AppModel {
 
     /// No echo came for the send: the row goes back as for a refused one. An entry that was
     /// tapped again meanwhile stays, since its row already shows what the homeserver has and
-    /// the echo, if it does come, is what lets the last tap go out (`holdReactions`).
+    /// the echo, if it does come, is what lets the last tap go out (`holdReactions`). It is
+    /// marked, so a tap that brings it back to what was sent is sent anew (`holdReaction`).
     func expireReaction(chatId: Id, send: UUID, me: String) {
-        guard heldReactions[chatId]?.contains(where: { $0.send == send && $0.on == $0.sent }) == true else { return }
+        guard let h = heldReactions[chatId]?.firstIndex(where: { $0.send == send }) else { return }
+        guard heldReactions[chatId]?[h].on == heldReactions[chatId]?[h].sent else {
+            heldReactions[chatId]?[h].overdue = true
+            return
+        }
         dropReaction(chatId: chatId, send: send, me: me)
     }
 
+    /// How long an entry with a tap waiting behind its send is kept for a late echo (ms).
+    /// Every other entry expires through its own send (`reactionEchoGrace`, `reactionSendLimit`).
+    static let waitingTapMs: Int64 = 600_000
+
     /// Lay my held reactions over rows fresh from the homeserver, and return the ones to send
     /// next: confirmed, but tapped again meanwhile. One the rows agree with and that is what
-    /// was last tapped is forgotten; so is one whose row is gone, or that is older than a
-    /// minute (the event went missing: the homeserver's rows win, as for a pending send). One
-    /// with a tap waiting behind it is kept ten minutes, so a slow echo still lets it out.
+    /// was last tapped is forgotten; so is one whose row is gone, or one that has had a tap
+    /// waiting behind it for `waitingTapMs`.
     @discardableResult
     static func holdReactions(_ rows: inout [Message], held: inout [HeldReaction], me: String, now: Int64) -> [HeldReaction] {
         var next: [HeldReaction] = []
         held = held.compactMap { h in
-            guard h.at > now - (h.on == h.sent ? 60_000 : 600_000),
+            guard h.on == h.sent || h.at > now - waitingTapMs,
                   let i = rows.firstIndex(where: { $0.id == h.messageId }) else { return nil }
             var h = h
             let has = rows[i].reactions.contains { $0.emoji == h.emoji && $0.senders.contains(me) }
@@ -1431,6 +1449,7 @@ extension AppModel {
                 h.sent = h.on
                 h.at = now
                 h.send = UUID()
+                h.overdue = false
                 next.append(h)
             }
             if has != h.on { rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: h.emoji, sender: me) }
