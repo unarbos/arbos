@@ -2002,6 +2002,11 @@ struct ChatSession: View {
                             }
                         }
                         #endif
+                    case "reveal-old":
+                        // Rig: a quote-tap reveal of a message older than the row window, so
+                        // the window slides onto it (tester report, 2026-11-17).
+                        if let old = visibleRows.dropLast(Self.windowInitial + Self.windowStep)
+                            .last(where: { $0.role != .system }) { revealQuoted(old.messageId) }
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "media", "media-forward", "media-file":
@@ -2662,7 +2667,7 @@ struct ChatSession: View {
                     }
                 }
             )
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom, held: $readerHeld) {
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom, held: $readerHeld, probe: scrollProbe) {
                 // Streaming / new-row growth while pinned: re-stick without animation so
                 // each delta glides with layout instead of fighting a scroll animation.
                 proxy.scrollTo("bottom", anchor: .bottom)
@@ -2742,11 +2747,24 @@ struct ChatSession: View {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
+                guard focused else { return }
                 // A reader up in history keeps their place when the keyboard opens, so they
                 // can type a reply while re-reading (tester report, 2026-11-14); the send is
-                // what takes them to the newest row.
-                guard focused, TranscriptScrollLatch.keyboardFollowsEnd(pinned: pinnedToBottom,
-                                                                       away: awayFromBottom) else { return }
+                // what takes them to the newest row. The latch is set to match either way, so
+                // the resize that follows treats them as what they were just measured to be.
+                guard TranscriptScrollLatch.keyboardFollowsEnd(distance: scrollProbe.fromEnd) else {
+                    pinnedToBottom = false
+                    awayFromBottom = true
+                    // A flick toward the end that is still coasting can arrive in the moment
+                    // before the keyboard does. The resize then puts the offset back under
+                    // the keyboard, with the flick's own last sample saying "at the end":
+                    // take them there, as a reader who had arrived a moment sooner would be.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
+                        guard composerFocused, !awayFromBottom else { return }
+                        withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    }
+                    return
+                }
                 jumpBackTo = nil
                 pinnedToBottom = true
                 readerHeld = false
@@ -4819,6 +4837,9 @@ private final class ScrollProbe {
     /// Scroll samples seen, so a reveal can say whether the transcript moved after its
     /// correction rather than leaving that to be read out of an absence of trace lines.
     var samples = 0
+    /// How far the transcript is from its end, as `AwayFromBottomReporter` last sampled it.
+    /// `nil` before the first sample, and always below iOS 18, where nothing samples it.
+    var fromEnd: CGFloat?
 }
 
 /// The row a reveal is correcting onto. Its own type rather than a bare row id because both
@@ -5081,11 +5102,21 @@ enum TranscriptScrollLatch {
     }
 
     /// The keyboard opening takes the transcript to its newest row only for a reader who is
-    /// already following the end (within `awayThreshold` of it). One who has scrolled up keeps
-    /// the offset they chose: the rows at the top of the screen stay where they are and the
-    /// keyboard covers the lower ones.
-    static func keyboardFollowsEnd(pinned: Bool, away: Bool) -> Bool {
-        pinned && !away
+    /// at the end (within `awayThreshold` of it). One who has scrolled up keeps the offset
+    /// they chose: the rows at the top of the screen stay where they are and the keyboard
+    /// covers the lower ones.
+    ///
+    /// Asked of the distance last measured and not of `pinned` / `away`. Those are only
+    /// re-read on the reader's own scrolling and on a resize, so a scroll made by code (the
+    /// chevron or a send while a flick is still coasting, a reveal) can leave them describing
+    /// where the reader was — and a reader left "away" on the newest row would have the
+    /// keyboard rise over it. With nothing measured (below iOS 18) the one bottom anchor
+    /// carries everyone to the end whatever is decided here, so the answer is to follow.
+    ///
+    /// The threshold stays the latch's: inside it the rows being read are the last ones, and
+    /// following is what keeps them above the keyboard rather than under it.
+    static func keyboardFollowsEnd(distance: CGFloat?) -> Bool {
+        distance.map { !away(distance: $0) } ?? true
     }
 
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
@@ -5108,11 +5139,12 @@ private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     @Binding var held: Bool
+    let probe: ScrollProbe
     var onStick: () -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, held: $held, onStick: onStick))
+            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, held: $held, probe: probe, onStick: onStick))
         } else {
             content
         }
@@ -5124,6 +5156,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     @Binding var held: Bool
+    let probe: ScrollProbe
     var onStick: () -> Void
     /// The finger (or its deceleration) is moving the scroll view right now.
     @State private var userDriven = false
@@ -5171,6 +5204,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                 )
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
+                probe.fromEnd = new.distance
                 #if DEBUG
                 PerfDriveProbe.lastScrollGeometry = Date()
                 if SendTrace.recent {
