@@ -1541,6 +1541,16 @@ struct ChatSession: View {
                         }
                     )
                     .onAppear { PerfSignpost.endAfterCommit(.messageMenu) }
+                } else if let row = actionsRow {
+                    // The held row publishes no frame: deleted elsewhere, or pushed out of the
+                    // lazy stack by a reply streaming in under it. No overlay is drawn, so
+                    // nothing on screen could close the menu, and the transcript stays
+                    // unscrollable and disabled. The wait covers the pass in which the menu
+                    // opens and the row's frame has not arrived yet.
+                    Color.clear.task(id: row.id) {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        if !Task.isCancelled { closeActions() }
+                    }
                 }
             }
             .ignoresSafeArea()
@@ -1766,11 +1776,6 @@ struct ChatSession: View {
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
-        // The held message left the transcript (deleted elsewhere): no row publishes a frame,
-        // so no overlay is drawn and nothing on screen could close it.
-        .onChange(of: actionsRow.map { held in rows.contains { $0.id == held.id } }) { _, present in
-            if present == false { closeActions() }
-        }
     }
 
     /// Message / membership / catch-up onChange hooks.

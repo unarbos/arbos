@@ -121,6 +121,21 @@ final class HoldMenuUITests: XCTestCase {
         XCTAssertTrue(profile.waitForExistence(timeout: settle), "a tap on the name still opens it")
     }
 
+    /// The hold that opened the menu slides to a menu row and lifts on it (#3038, #3041):
+    /// the touch outlives the transcript being disabled under it. Lifting on Reply starts a reply.
+    func testAHoldSlidesToAMenuRow() {
+        let app = group()
+        let bubble = app.descendants(matching: .any)["bubble:g1m"]
+        reveal(bubble, in: app)
+        // The menu opens 8 pt under the bubble: Copy, then Reply, 44 pt each.
+        let reply = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 100, dy: bubble.frame.maxY + 8 + 44 + 22))
+        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.8, thenDragTo: reply, withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].firstMatch.waitForExistence(timeout: settle),
+                      "lifting on Reply started a reply")
+        XCTAssertFalse(menu(app).exists, "the choice closed the menu")
+    }
+
     /// Mira's second line continues her run and has no name in the transcript; lifted, it does.
     func testALiftedBubbleCarriesItsSendersName() {
         let app = group()
