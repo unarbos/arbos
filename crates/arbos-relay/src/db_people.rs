@@ -1094,6 +1094,21 @@ impl Db {
         })
     }
 
+    /// One live (not revoked) invite of this group, by id.
+    pub fn live_group_invite(&self, chat_id: &str, invite_id: &str) -> Result<Option<GroupInvite>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM people_chat_invites WHERE chat_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+                    Self::GROUP_INVITE_COLS
+                ),
+                params![chat_id, invite_id],
+                Self::group_invite_from_row,
+            )
+            .optional()
+        })
+    }
+
     pub fn group_invite_by_code(&self, code: &str) -> Result<Option<GroupInvite>> {
         self.with(|c| {
             c.query_row(
