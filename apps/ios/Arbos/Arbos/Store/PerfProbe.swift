@@ -100,7 +100,7 @@ enum PerfSignpost {
 
     /// Which branch of `ChatSession.refreshRows()` ran: `full` walks every message in the chat.
     enum RowsPath: String {
-        case unchanged, tail, append, full
+        case unchanged, tail, reaction, append, full
     }
 
     struct RowsMark {

@@ -386,6 +386,37 @@ enum Transcript {
         }
     }
 
+    /// Rows that can carry a message's reaction chips: prose and media.
+    static func bearsReactions(_ kind: RowKind) -> Bool {
+        switch kind {
+        case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+        default: return false
+        }
+    }
+
+    /// The one message of `list` that differs from `was`, when all that differs is its
+    /// reactions; nil for any other edit. `list` and `was` hold the same ids.
+    static func reactionOnlyEdit(_ list: [Message], was: [Id: Message]) -> Message? {
+        var edited: Message?
+        for m in list where was[m.id] != m {
+            guard edited == nil, var old = was[m.id] else { return nil }
+            old.reactions = m.reactions
+            guard old == m else { return nil }
+            edited = m
+        }
+        return edited
+    }
+
+    /// Put `message`'s reactions on its rows as `rows(_:)` would, leaving every other row as
+    /// it is. A reaction used to rebuild the whole transcript before its chip could show.
+    static func restampReactions(_ rows: inout [Row], for message: Message) {
+        let own = rows.indices.filter { rows[$0].messageId == message.id }
+        let bearer = message.reactions.isEmpty ? nil : own.last { bearsReactions(rows[$0].kind) }
+        for i in own where rows[i].reactions != (i == bearer ? message.reactions : []) {
+            rows[i].reactions = i == bearer ? message.reactions : []
+        }
+    }
+
     /// id → message, built once per rebuild; replies and the chat's row lookups use it
     /// instead of scanning the transcript per row.
     static func index(_ messages: [Message]) -> [Id: Message] {
@@ -857,13 +888,7 @@ enum Transcript {
             if runStart, let ix = chunk.lastIndex(where: { Self.bearsAvatar($0.kind) }) {
                 chunk[ix].showsAvatar = true
             }
-            if !message.reactions.isEmpty,
-               let ix = chunk.lastIndex(where: {
-                   switch $0.kind {
-                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
-                   default: return false
-                   }
-               }) {
+            if !message.reactions.isEmpty, let ix = chunk.lastIndex(where: { bearsReactions($0.kind) }) {
                 chunk[ix].reactions = message.reactions
             }
             // Reply count on the first prose/media row so the badge sits on the message's top bubble.
@@ -1634,6 +1659,7 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+                    .transition(.reactionPop)
                 if showReactionSenders {
                     ForEach(row.reactions, id: \.emoji) { reaction in
                         reactionSenders(reaction)
@@ -2113,8 +2139,10 @@ struct RowView: View, Equatable {
                         )
                 )
                 .contentShape(Capsule(style: .continuous))
+                .transition(.reactionPop)
                 .onTapGesture {
                     guard account.accepts(model) else { return }
+                    ChatGestures.chipTap = (row.messageId, ProcessInfo.processInfo.systemUptime)
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 }
                 // High-priority so the row's bubble long-press (capsule + menu)

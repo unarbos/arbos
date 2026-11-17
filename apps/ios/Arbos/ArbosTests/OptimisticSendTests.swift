@@ -167,3 +167,57 @@ final class OptimisticReactionTests: XCTestCase {
         XCTAssertEqual(chip.senders, [me], "the re-read keeps my reaction; it does not drop the paint")
     }
 }
+
+/// A reaction restamps the rows of its one message instead of rebuilding the transcript, and
+/// the result is what the rebuild gives (tester report, 2026-11-16: the double-tap heart "is
+/// just not smooth").
+final class ReactionRowTests: XCTestCase {
+    @MainActor func testAReactionRestampsItsMessageAsAFullRebuildWould() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let chatId = "fx-group-launch"
+        let me = try XCTUnwrap(model.myUserId)
+        func build(_ list: [Message]) -> [Row] {
+            Transcript.rows(list, projectId: "\(peopleSlot):\(chatId)", me: me, people: true, multiParty: true)
+        }
+        let before = model.messages(of: chatId)
+        XCTAssertGreaterThan(before.count, 1)
+        for i in before.indices {
+            // On, a second emoji, then both off again: each step against the rebuild.
+            var list = before
+            var rows = build(list)
+            for emoji in ["❤️", "🔥", "❤️", "🔥"] {
+                let was = Transcript.index(list)
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                let edited = try XCTUnwrap(Transcript.reactionOnlyEdit(list, was: was), "message \(i) \(emoji)")
+                XCTAssertEqual(edited.id, list[i].id)
+                Transcript.restampReactions(&rows, for: edited)
+                XCTAssertEqual(rows, build(list), "message \(i) after \(emoji)")
+            }
+        }
+
+        // Anything but a reaction on one message is not this path.
+        let was = Transcript.index(before)
+        XCTAssertNil(Transcript.reactionOnlyEdit(before, was: was), "nothing changed")
+        var two = before
+        two[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        two[1].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        XCTAssertNil(Transcript.reactionOnlyEdit(two, was: was), "two messages changed")
+        var other = before
+        other[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        other[0].createdAt += 1
+        XCTAssertNil(Transcript.reactionOnlyEdit(other, was: was), "more than its reactions changed")
+    }
+
+    /// Two quick taps on a chip are the chip's (on, then off again), not a heart for the
+    /// message; a chip of another message does not stand in the way (tester report,
+    /// 2026-11-16, "double reaction").
+    func testADoubleTapWithATapOnThatMessagesChipInItIsNotAHeart() {
+        defer { ChatGestures.chipTap = nil }
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m1", now: 100))
+        ChatGestures.chipTap = ("m1", 100)
+        XCTAssertTrue(ChatGestures.doubleTapOnChip(of: "m1", now: 100.3))
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m2", now: 100.3), "another message's double-tap is a heart")
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m1", now: 101), "a later double-tap on the bubble is")
+    }
+}
