@@ -1224,6 +1224,8 @@ struct GroupProfileView: View {
     @State private var inviteSingleUse = false
     /// Id of the link whose Copy was just tapped: the tick belongs to that row alone.
     @State private var inviteCopied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var inviteCopyTick: Task<Void, Never>?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -1625,10 +1627,11 @@ struct GroupProfileView: View {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     inviteCopied = inv.id
-                                    Task { @MainActor in
+                                    inviteCopyTick?.cancel()
+                                    inviteCopyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work), inviteCopied == inv.id else { return }
+                                        guard model.acceptsAccountWork(work) else { return }
                                         inviteCopied = nil
                                     }
                                 } label: {
@@ -2275,6 +2278,8 @@ struct ServerProfileView: View {
     @State private var confirmDelete = false
     /// Id of the invite link whose Copy was just tapped: the tick belongs to that row alone.
     @State private var copied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var copyTick: Task<Void, Never>?
     @State private var loadedMembers = false
     @State private var showAddMembers = false
     /// Settings › Invite links › New link options (owner).
@@ -2480,10 +2485,11 @@ struct ServerProfileView: View {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     copied = inv.id
-                                    Task { @MainActor in
+                                    copyTick?.cancel()
+                                    copyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work), copied == inv.id else { return }
+                                        guard model.acceptsAccountWork(work) else { return }
                                         copied = nil
                                     }
                                 } label: {

@@ -3675,6 +3675,7 @@ fn group_invite_json(state: &AppState, i: &GroupInvite) -> Value {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GroupInviteBody {
     /// Expire after seven days.
     #[serde(default)]
@@ -3762,13 +3763,25 @@ pub async fn group_invites_revoke(
         Ok(u) => u,
         Err(r) => return *r,
     };
+    // A lookup that fails answers like a link that is not there (fail closed), and says so in
+    // the log, so a broken table does not read as "link already gone".
     let cm = match load_chat(&state, &id) {
         Ok(cm) if cm.chat.kind == "group" && my_role(&cm, &me).is_some() => cm,
-        _ => return missing(),
+        Ok(_) => return missing(),
+        Err(r) => {
+            if r.status().is_server_error() {
+                tracing::warn!(chat = %id, "group invite revoke: chat lookup failed");
+            }
+            return missing();
+        }
     };
-    let invites = state.db.invites_of_group(&id).unwrap_or_default();
-    let Some(inv) = invites.iter().find(|i| i.id == iid) else {
-        return missing();
+    let inv = match state.db.live_group_invite(&id, &iid) {
+        Ok(Some(inv)) => inv,
+        Ok(None) => return missing(),
+        Err(e) => {
+            tracing::warn!(chat = %id, error = %e, "group invite revoke: invite lookup failed");
+            return missing();
+        }
     };
     if inv.created_by != me && !can_manage_members(&cm, &me) {
         return api_error(
@@ -8215,10 +8228,11 @@ mod group_invite_revoke_tests {
 
         // A plain member cannot revoke someone else's link; a non-member learns nothing.
         let theirs = link(&maker);
-        assert_eq!(
-            revoke(&state, &plain_dev, &chat, &theirs).await.0,
-            StatusCode::FORBIDDEN
-        );
+        let refused = revoke(&state, &plain_dev, &chat, &theirs).await;
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(&refused.1).unwrap();
+        assert_eq!(body["error"]["type"], "forbidden", "{body}");
+        assert!(body.to_string().contains("can remove it"), "{body}");
         assert_eq!(revoke(&state, &outsider_dev, &chat, &theirs).await, unknown);
         assert_eq!(
             revoke(&state, &outsider_dev, "no-chat", &theirs).await,
@@ -8234,6 +8248,45 @@ mod group_invite_revoke_tests {
         assert!(!live(&theirs));
         assert_eq!(revoke(&state, &maker_dev, &chat, &theirs).await, unknown);
 
+        // A link of another group is not there, whoever asks; it stays live in its own group.
+        let other = group(&state, &[&owner]);
+        let elsewhere = GroupInvite {
+            id: ulid(),
+            chat_id: other.clone(),
+            code: invite_code(),
+            created_by: owner.clone(),
+            created_at: now_ms(),
+            expires_at: None,
+            uses_left: None,
+            revoked_at: None,
+        };
+        state.db.insert_group_invite(&elsewhere).unwrap();
+        assert_eq!(
+            revoke(&state, &owner_dev, &chat, &elsewhere.id).await,
+            unknown
+        );
+        assert!(state
+            .db
+            .live_group_invite(&other, &elsewhere.id)
+            .unwrap()
+            .is_some());
+
+        // A maker who has left the group is outside it; an admin still revokes their link.
+        let left_behind = link(&maker);
+        assert!(state
+            .db
+            .remove_member(&chat, &format!("user:{maker}"), false)
+            .unwrap());
+        assert_eq!(
+            revoke(&state, &maker_dev, &chat, &left_behind).await,
+            unknown
+        );
+        assert!(live(&left_behind));
+        assert_eq!(
+            revoke(&state, &admin_dev, &chat, &left_behind).await.0,
+            StatusCode::NO_CONTENT
+        );
+
         // An admin and the owner revoke another member's link.
         for dev in [&admin_dev, &owner_dev] {
             let theirs = link(&plain);
@@ -8243,5 +8296,15 @@ mod group_invite_revoke_tests {
             );
             assert!(!live(&theirs));
         }
+    }
+
+    /// Create takes `expires` and `max_uses` and nothing else: a body naming who made the
+    /// link is refused, not quietly ignored.
+    #[test]
+    fn create_refuses_a_body_with_unknown_fields() {
+        let ok = json!({ "expires": true, "max_uses": 1 });
+        assert!(serde_json::from_value::<GroupInviteBody>(ok).is_ok());
+        let extra = json!({ "expires": true, "created_by": "someone" });
+        assert!(serde_json::from_value::<GroupInviteBody>(extra).is_err());
     }
 }
