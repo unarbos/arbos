@@ -269,7 +269,7 @@ pub struct ComposerInput {
     /// changed (`caret_moved`, noticed at paint through `caret_seen`), then on and off every
     /// [`CARET_BLINK_MS`]. A paint that has a caret to show sets `caret_live`, and the ticker
     /// only redraws a field that set it, so a field without focus costs one idle wake.
-    caret_seen: Cell<(usize, usize)>,
+    caret_seen: Cell<(usize, usize, bool)>,
     caret_moved: Cell<Instant>,
     caret_live: Cell<bool>,
     _caret_ticker: gpui::Task<()>,
@@ -345,7 +345,7 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             caret_downstream: false,
-            caret_seen: Cell::new((usize::MAX, 0)),
+            caret_seen: Cell::new((usize::MAX, 0, false)),
             caret_moved: Cell::new(Instant::now()),
             caret_live: Cell::new(false),
             _caret_ticker: cx.spawn(async move |this, cx| loop {
@@ -2277,14 +2277,17 @@ impl Element for InputElement {
         let mut selections = Vec::new();
         if content.is_empty() || selected_range.is_empty() {
             let input = self.input.read(cx);
-            let seen = (cursor, content.len());
+            // Live only in the key window, as AppKit's caret is: a background window neither
+            // shows a caret nor wakes the ticker. Gaining focus counts as a move, so it starts solid.
+            let live = input.focus_handle.is_focused(window) && window.is_window_active();
+            let seen = (cursor, content.len(), live);
             if input.caret_seen.replace(seen) != seen {
                 input.caret_moved.set(Instant::now());
             }
-            if input.focus_handle.is_focused(window) {
+            if live {
                 input.caret_live.set(true);
             }
-            let lit = caret_lit(input.caret_moved.get().elapsed());
+            let lit = live && caret_lit(input.caret_moved.get().elapsed());
             if let Some(pos) = cursor_pos.filter(|_| lit) {
                 cursor_quad = Some(fill(
                     Bounds::new(
@@ -3281,7 +3284,10 @@ impl Composer {
                                 .text_size(px(TEXT_BODY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
-                                .truncate()
+                                // The middle gives: the version and extension are what differ.
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
                                 .child(staged.file_name()),
                         )
                         .child(

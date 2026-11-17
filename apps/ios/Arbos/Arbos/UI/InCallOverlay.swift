@@ -18,7 +18,8 @@ struct InCallOverlay: View {
     var inline = false
 
     @State private var pipOffset: CGSize = .zero
-    @State private var pipDrag: CGSize = .zero
+    /// Gesture state: a cancelled drag lets the tile go too, on the spring the snap uses.
+    @GestureState(resetTransaction: Transaction(animation: .spring(duration: 0.35))) private var pipDrag: CGSize = .zero
     @GestureState private var pillDrag: CGFloat = 0
 
     private var isVideo: Bool { calls.call?.kind == .video }
@@ -220,7 +221,7 @@ struct InCallOverlay: View {
         .position(x: home.x + pipOffset.width + pipDrag.width, y: home.y + pipOffset.height + pipDrag.height)
         .gesture(
             DragGesture(minimumDistance: 6)
-                .onChanged { v in pipDrag = v.translation }
+                .updating($pipDrag) { v, drag, _ in drag = v.translation }
                 .onEnded { v in
                     // Snap to the nearest corner, kept inside the safe area.
                     let x = home.x + pipOffset.width + v.predictedEndTranslation.width
@@ -231,7 +232,6 @@ struct InCallOverlay: View {
                     let targetY = top ? pipSize.height / 2 + 60 : size.height - pipSize.height / 2 - 96
                     withAnimation(.spring(duration: 0.35)) {
                         pipOffset = CGSize(width: targetX - home.x, height: targetY - home.y)
-                        pipDrag = .zero
                     }
                 }
         )

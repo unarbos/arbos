@@ -55,8 +55,11 @@ fn ago(ms: Option<i64>) -> String {
         format!("{} min ago", d / 60)
     } else if d < 86_400 {
         format!("{} h ago", d / 3600)
-    } else {
+    } else if d < 7 * 86_400 {
         format!("{} d ago", d / 86_400)
+    } else {
+        // Past a week a count of days stops helping ("412 d ago"): the date instead.
+        crate::model::short_date(ms)
     }
 }
 

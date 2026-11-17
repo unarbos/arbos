@@ -245,6 +245,25 @@ jobs:
           ')"
           echo "ARBOS_SIM_NAME=$name" >> "$GITHUB_ENV"
           echo "simulator for the test lane: $name"
+      # xcodebuild boots the simulator itself, and then starts the first test while the device is
+      # still settling: the suite's first case (AgentAccessLinkUITests) took 40 to 120 s to launch
+      # against 18 s for the next one, and it is the case that failed on launch, on a UI query
+      # timing out, or on a tap that did nothing (runs 43375425003, 43331625871, 43382302811).
+      # So boot it here and wait until it has finished. The newest iOS that has the device is
+      # the one a `name=` destination resolves to.
+      - name: Boot the simulator before the tests
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available --json | python3 -c '
+          import json, os, re, sys
+          def version(runtime):
+              return [int(n) for n in re.findall(r"[0-9]+", runtime.rsplit(".", 1)[-1])]
+          found = [(version(runtime), d["udid"])
+                   for runtime, devices in json.load(sys.stdin)["devices"].items() if "iOS" in runtime
+                   for d in devices if d["name"] == os.environ["ARBOS_SIM_NAME"]]
+          print(max(found)[1])
+          ')"
+          xcrun simctl bootstatus "$udid" -b
       - name: fastlane test
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm

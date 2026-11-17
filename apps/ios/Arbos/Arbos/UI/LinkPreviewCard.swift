@@ -197,7 +197,7 @@ struct LinkPreviewCard: View {
     }
 
     private var initials: String {
-        preview.title.split(separator: " ").prefix(2).compactMap { $0.first }.map { String($0).uppercased() }.joined()
+        AvatarPalette.initials(name: preview.title, handle: nil)
     }
 
     private var footer: some View {

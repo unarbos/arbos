@@ -3706,7 +3706,7 @@ struct ChatSession: View {
         HStack(spacing: 8) {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
             Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .lineLimit(1).fixedSize()
+                .lineLimit(1)
             if let ref = quotedImageRef(r) {
                 ReplyThumb(account: account, projectId: projectId, blobRef: ref)
             }
@@ -3733,7 +3733,7 @@ struct ChatSession: View {
         HStack(spacing: 8) {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
             Text(r.label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .lineLimit(1).fixedSize()
+                .lineLimit(1)
             Text(Quote.firstWords(Quote.oneLine(r.text), maxChars: Theme.replyPreviewChars))
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
                 .lineLimit(1).truncationMode(.tail)
@@ -5043,7 +5043,7 @@ enum TranscriptScrollLatch {
 
     /// What a sample the reader did not cause means for the latch.
     enum Settled: Equatable {
-        /// Content grew under a reader held at the end: follow it down.
+        /// Content grew, or the container moved, under a reader held at the end: follow it down.
         case stick
         /// Something moved the end relative to the reader: read where they are again.
         case reread(away: Bool)
@@ -5079,8 +5079,12 @@ enum TranscriptScrollLatch {
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
                         distance: CGFloat, pinned: Bool) -> Settled {
         if grew { return pinned ? .stick : .reread(away: true) }
-        if abs(newContainer - oldContainer) > 0.5 { return .reread(away: away(distance: distance)) }
-        return .hold
+        guard abs(newContainer - oldContainer) > 0.5 else { return .hold }
+        // A reader following the end keeps following it. The keyboard rising arrives as a
+        // sample with the container already a keyboard shorter and the offset not yet moved,
+        // so its distance says "a keyboard away" about a reader who never left — reading that
+        // unpinned them on every keyboard open, and nothing after it kept the end in view.
+        return pinned ? .stick : .reread(away: away(distance: distance))
     }
 }
 
@@ -5609,33 +5613,34 @@ private struct ComposerField<Leading: View>: View {
     }
 
     var body: some View {
-        Group {
+        // One tree for both arrangements, so the text view keeps its identity when the
+        // controls change rows. As two branches the field was torn down and made again at
+        // the wrap and at the send that empties it: the keyboard lost its first responder
+        // mid-word, and what came back was a new keyboard on the letters plane.
+        //
+        // Grok's wrapped composer: the text runs the full width, and the controls sit on
+        // their own row beneath it, bottom-aligned.
+        VStack(alignment: .leading, spacing: Theme.composerStackGap) {
+            if stacked, !pending.isEmpty {
+                ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
+                                      onOpen: onOpenPending, onRemove: onRemovePending)
+            }
+            HStack(spacing: 8) {
+                if !stacked { leadingSlot }
+                // Full width in both rows when stacked: the text is no longer sharing the
+                // line with the controls, and the trailing cluster needs the whole width to
+                // be pushed to the right edge.
+                middle
+                    .frame(maxWidth: stacked ? .infinity : nil, alignment: .leading)
+                if !stacked { trailingCluster }
+            }
             if stacked {
-                // Grok's wrapped composer: the text runs the full width, and the
-                // controls sit on their own row beneath it, bottom-aligned.
-                VStack(alignment: .leading, spacing: Theme.composerStackGap) {
-                    if !pending.isEmpty {
-                        ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
-                                              onOpen: onOpenPending, onRemove: onRemovePending)
-                    }
-                    // Full width in both rows: the text is no longer sharing the line with
-                    // the controls, and the trailing cluster needs the whole width to be
-                    // pushed to the right edge.
-                    middle
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 8) {
-                        leadingSlot
-                        Spacer(minLength: 0)
-                        trailingCluster
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            } else {
                 HStack(spacing: 8) {
                     leadingSlot
-                    middle
+                    Spacer(minLength: 0)
                     trailingCluster
                 }
+                .frame(maxWidth: .infinity)
             }
         }
         // Latched here rather than recomputed in `stacked`, so the arrangement is remembered

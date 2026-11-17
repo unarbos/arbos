@@ -36,15 +36,17 @@ struct SignInView: View {
         ZStack {
             ForEach(Array(Self.scatter.enumerated()), id: \.offset) { i, spot in
                 // The lower three stand where the relay field and the sign-in note open, and
-                // step aside for either: each leaves by the screen edge it is nearest, one
-                // after the other, and comes back the same way. Under Reduce Motion they fade.
+                // step aside for either: each leaves by the screen edge it is nearest, all at
+                // once and a little faster, and they come back one after the other with the gaps
+                // closing up. Under Reduce Motion they fade.
                 let aside = spot.y > 0.5 && crowded
                 InitialsAvatar(initials: spot.letter, colorIndex: spot.color, size: 64)
                     .position(x: size.width * spot.x, y: size.height * spot.y)
                     .offset(aside && !reduceMotion ? Self.exit(spot, in: size) : .zero)
                     .opacity(aside && reduceMotion ? 0 : 1)
                     .animation(reduceMotion ? .easeOut(duration: 0.2)
-                               : .spring(response: 0.42, dampingFraction: 0.84).delay(Double(i - 2) * 0.04),
+                               : .spring(response: aside ? 0.34 : 0.42, dampingFraction: 0.84)
+                                   .delay(aside ? 0 : [0, 0.05, 0.08][max(0, i - 2)]),
                                value: crowded)
             }
         }

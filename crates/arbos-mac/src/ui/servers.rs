@@ -169,16 +169,18 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
     } else {
         action
     };
-    let right = glass::primary_button("server-sheet-go", label, &theme)
-        .h(px(34.0))
-        // Off: no pressed step (the hover dim is the button's own, set once).
-        .when(!can_go, |el| el.opacity(0.45).active(|s| s.opacity(0.88)))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            if !can_go {
-                return;
-            }
-            this.submit_server_input(window, cx);
-        }));
+    let right = if can_go {
+        glass::primary_button
+    } else {
+        glass::primary_button_off
+    }("server-sheet-go", label, &theme)
+    .h(px(34.0))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        if !can_go {
+            return;
+        }
+        this.submit_server_input(window, cx);
+    }));
     let header = glass::sheet_header(title, Some(left), Some(right), &theme);
     glass::sheet(420.0, &theme, header, body).on_mouse_down(
         gpui::MouseButton::Left,

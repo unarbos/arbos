@@ -148,8 +148,10 @@ pub fn list(
                 Theme::with_alpha(theme.text, 0.08)
             })
             .when(!has, |el| el.opacity(0.35))
-            .hover(|s| s.opacity(0.85))
-            .active(|s| s.opacity(0.7))
+            // No sample, nothing to play: no hover or press step either.
+            .when(has, |el| {
+                el.hover(|s| s.opacity(0.85)).active(|s| s.opacity(0.7))
+            })
             .child(sf_symbols::glyph(
                 if playing { "stop.fill" } else { "play.fill" },
                 13.0,
