@@ -3747,26 +3747,39 @@ pub async fn group_invites_create(
     (StatusCode::CREATED, Json(group_invite_json(&state, &inv))).into_response()
 }
 
-/// `DELETE /chats/{id}/invites/{iid}` — any human member revokes a link.
+/// `DELETE /chats/{id}/invites/{iid}` — the member who made the link, or the group's owner or
+/// an admin, revokes it. Anyone outside the group gets the answer for a link that is not
+/// there, so the route says nothing about a group to people who are not in it.
+///
+/// Why: until 2026-11-17 any member could revoke any link (tester report, 2026-11-16).
 pub async fn group_invites_revoke(
     State(state): State<AppState>,
     principal: Principal,
     Path((id, iid)): Path<(String, String)>,
 ) -> Response {
-    let (_me, cm) = match member_chat(&state, &principal, &id) {
-        Ok(v) => v,
+    let missing = || api_error(StatusCode::NOT_FOUND, "not_found", "no such invite");
+    let me = match user_of(&principal) {
+        Ok(u) => u,
         Err(r) => return *r,
     };
-    if cm.chat.kind != "group" {
+    let cm = match load_chat(&state, &id) {
+        Ok(cm) if cm.chat.kind == "group" && my_role(&cm, &me).is_some() => cm,
+        _ => return missing(),
+    };
+    let invites = state.db.invites_of_group(&id).unwrap_or_default();
+    let Some(inv) = invites.iter().find(|i| i.id == iid) else {
+        return missing();
+    };
+    if inv.created_by != me && !can_manage_members(&cm, &me) {
         return api_error(
-            StatusCode::BAD_REQUEST,
-            "not_group",
-            "invite links are for group chats",
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only the person who made this link, or the group's owner and admins, can remove it.",
         );
     }
     match state.db.revoke_group_invite(&id, &iid) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such invite"),
+        Ok(false) => missing(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }
@@ -8125,5 +8138,110 @@ mod box_app_control_tests {
             lines.iter().any(|l| l.contains("removed")),
             "remove notice: {lines:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod group_invite_revoke_tests {
+    //! Who may revoke a group invite link: its maker, the owner, an admin. Nobody else; and
+    //! someone outside the group hears exactly what an unknown link id hears.
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+
+    use super::tests_support::{group, person};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn revoke(
+        state: &AppState,
+        dev: &Principal,
+        chat: &str,
+        iid: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let r = group_invites_revoke(
+            State(state.clone()),
+            dev.clone(),
+            Path((chat.to_owned(), iid.to_owned())),
+        )
+        .await;
+        let status = r.status();
+        (
+            status,
+            to_bytes(r.into_body(), 1 << 16).await.unwrap().to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn only_the_maker_the_owner_or_an_admin_revokes_a_link() {
+        let state = test_state(AuthMode::Github);
+        let (owner, owner_dev) = person(&state, 11);
+        let (admin, admin_dev) = person(&state, 12);
+        let (maker, maker_dev) = person(&state, 13);
+        let (plain, plain_dev) = person(&state, 14);
+        let (_outsider, outsider_dev) = person(&state, 15);
+        let chat = group(&state, &[&owner, &admin, &maker, &plain]);
+        for (u, role) in [(&admin, "admin"), (&maker, "member"), (&plain, "member")] {
+            // The helper seats everyone as owner; re-adding sets the role.
+            state
+                .db
+                .add_member(&chat, &format!("user:{u}"), role, &owner, &json!({}))
+                .unwrap();
+        }
+        let link = |by: &str| {
+            let inv = GroupInvite {
+                id: ulid(),
+                chat_id: chat.clone(),
+                code: invite_code(),
+                created_by: by.to_owned(),
+                created_at: now_ms(),
+                expires_at: None,
+                uses_left: None,
+                revoked_at: None,
+            };
+            state.db.insert_group_invite(&inv).unwrap();
+            inv.id
+        };
+        let live = |iid: &str| {
+            let all = state.db.invites_of_group(&chat).unwrap();
+            all.iter().any(|i| i.id == iid)
+        };
+
+        // An unknown link id: the answer everyone outside the group must also get.
+        let unknown = revoke(&state, &owner_dev, &chat, "nope").await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+
+        // A plain member cannot revoke someone else's link; a non-member learns nothing.
+        let theirs = link(&maker);
+        assert_eq!(
+            revoke(&state, &plain_dev, &chat, &theirs).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(revoke(&state, &outsider_dev, &chat, &theirs).await, unknown);
+        assert_eq!(
+            revoke(&state, &outsider_dev, "no-chat", &theirs).await,
+            unknown
+        );
+        assert!(live(&theirs));
+
+        // Its maker revokes it; a second try is an unknown link.
+        assert_eq!(
+            revoke(&state, &maker_dev, &chat, &theirs).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!live(&theirs));
+        assert_eq!(revoke(&state, &maker_dev, &chat, &theirs).await, unknown);
+
+        // An admin and the owner revoke another member's link.
+        for dev in [&admin_dev, &owner_dev] {
+            let theirs = link(&plain);
+            assert_eq!(
+                revoke(&state, dev, &chat, &theirs).await.0,
+                StatusCode::NO_CONTENT
+            );
+            assert!(!live(&theirs));
+        }
     }
 }

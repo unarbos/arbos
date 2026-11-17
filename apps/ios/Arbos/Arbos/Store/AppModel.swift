@@ -4644,6 +4644,15 @@ final class AppModel: ObservableObject {
 
     /// Group profile › Invite links › list.
     func groupInvites(_ chatId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ServerInviteLink] {
+        #if DEBUG || ARBOS_FIXTURE
+        // Rig: the fixture group lists two links, mine and Mira's (copy tick, who may revoke).
+        if isFixture {
+            return [("fx-inv-mine", "fx-me"), ("fx-inv-mira", "fx-u3")].map { id, by in
+                ServerInviteLink(id: id, code: id, url: "https://arbos.life/g/\(id)", createdAt: 0, expiresAt: nil,
+                                 usesLeft: nil, usable: true, createdBy: by)
+            }
+        }
+        #endif
         if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
         guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
         let api = work.api
