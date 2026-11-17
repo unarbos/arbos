@@ -115,7 +115,9 @@ class FeedbackFixture(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.cfg = SimpleNamespace(state_dir=self.root, github_repo="fixture/fixture", tester_max_wait_min=30,
-                                   rust_gate_ssh="fixture-never-used", relay_url="", relay_admin_token="")
+                                   rust_gate_ssh="fixture-never-used", relay_url="", relay_admin_token="",
+                                   deferred=[], topics=[], min_interval_s=0, max_per_day=120,
+                                   internal_max_per_day=40, tester_max_per_day=20, internal=set())
         self.loop = poller.Loop.__new__(poller.Loop)
         self.loop.cfg = self.cfg
         self.loop.store = poller.Store(self.cfg)
@@ -155,6 +157,73 @@ class FeedbackFixture(unittest.TestCase):
 
         self.loop.store.save_state = interrupted
         return save
+
+
+class FastLaneHandoffTests(FeedbackFixture):
+    def test_filed_issue_waits_for_bb_fast_lane_without_agent_side_effects(self):
+        self.item(status="queued", target="ios", issue=0, issue_url="", screen="ok: synthetic",
+                  deferred_reason="synthetic admission limit")
+        self.loop.gh.heads["feedback/" + FID] = None
+        (self.loop.store.item_dir(FID) / "screenshot-1.png").write_bytes(b"synthetic screenshot")
+        opened = []
+        self.loop.gh.create_issue = lambda title, body, labels: opened.append((title, body, labels)) or {
+            "number": 42, "html_url": "https://example.invalid/issue/42"}
+        self.loop.gh.upload_asset = lambda path, name, mime: "https://example.invalid/" + name
+        self.loop.screen_intent = lambda info, tier: ("ok", "synthetic")
+        with patch.object(poller, "http_json", side_effect=AssertionError("agent API called")):
+            self.loop.launch(FID, self.loop.store.state(FID))
+
+        saved = self.loop.store.state(FID)
+        self.assertEqual(saved["status"], "handed_off")
+        self.assertEqual(saved["handed_off_to"], "bb fast lane")
+        self.assertTrue(saved["track_commit"])
+        self.assertNotIn("error", saved)
+        self.assertNotIn("deferred_reason", saved)
+        self.assertEqual(len(opened), 1)
+        self.assertIn("![screenshot 1](https://example.invalid/", opened[0][1])
+        self.assertIn("**Comment:** button alignment", opened[0][1])
+        self.assertIn(f"`{FID}`", opened[0][1])
+        self.assertTrue(all("Could not start the Cursor agent" not in comment for _, comment in self.loop.gh.comments))
+        self.assertFalse(any(len(args) == 3 and "needs-human" in args[1] for args in self.loop.gh.labels))
+        self.assertFalse((self.loop.store.item_dir(FID) / "prompt.md").exists())
+        self.assertEqual(self.loop.store.launches_today(), 1, "issue admission still respects the existing rate limit accounting")
+
+    def test_existing_queued_issue_is_not_filed_again(self):
+        self.item(status="queued", target="ios", screen="ok: synthetic")
+        with patch.object(poller, "http_json", side_effect=AssertionError("agent API called")):
+            self.loop.launch(FID, self.loop.store.state(FID))
+        saved = self.loop.store.state(FID)
+        self.assertEqual(saved["status"], "handed_off")
+        self.assertEqual(saved["issue"], 1)
+        self.assertEqual(saved["handed_off_to"], "bb fast lane")
+
+    def test_legacy_running_item_hands_off_without_agent_api_or_failure(self):
+        self.item(status="running", agent_id="legacy-agent", run_id="legacy-run",
+                  agent_url="https://example.invalid/legacy-agent", launched=WHEN)
+        with patch.object(poller, "http_json", side_effect=AssertionError("agent API called")):
+            self.loop.advance(FID, self.loop.store.state(FID))
+        saved = self.loop.store.state(FID)
+        self.assertEqual(saved["status"], "handed_off")
+        self.assertEqual(saved["handed_off_to"], "bb fast lane")
+        self.assertNotEqual(saved["status"], "failed")
+        self.assertFalse(any(len(args) == 3 and "needs-human" in args[1] for args in self.loop.gh.labels))
+
+    def test_red_gate_uses_issue_not_a_new_agent_run(self):
+        self.item(handed_off_to="bb fast lane", expects_rust=False, expects_ios=False)
+        with patch.object(poller, "http_json", side_effect=AssertionError("agent API called")):
+            self.loop.gate_followup(FID, self.loop.store.state(FID), "rust", "synthetic compiler diagnostic")
+        saved = self.loop.store.state(FID)
+        self.assertEqual(saved["status"], "handed_off")
+        self.assertEqual(saved["gated_head"], HEAD)
+        self.assertIn("synthetic compiler diagnostic", self.loop.gh.comments[-1][1])
+        self.assertNotIn("error", saved)
+
+    def test_cursor_config_and_endpoint_are_absent(self):
+        with patch.dict(poller.os.environ, {}, clear=True):
+            cfg = poller.Config.from_env()
+        self.assertFalse(hasattr(cfg, "cursor_api_key"))
+        self.assertFalse(hasattr(poller, "Cursor"))
+        self.assertFalse(hasattr(poller, "CURSOR_API"))
 
 
 class MergeAdmissionTests(FeedbackFixture):
