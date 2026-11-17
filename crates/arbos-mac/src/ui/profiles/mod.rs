@@ -99,7 +99,6 @@ pub(super) fn pushed_frame(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let covered = shell.state.read(cx).media_viewer.is_some();
     if shell.state.read(cx).profile_stack.is_empty() {
         return pane_frame(
             SHEET_WIDTH,
@@ -109,7 +108,6 @@ pub(super) fn pushed_frame(
             right,
             share,
             scroll,
-            covered,
             theme,
             cx,
         );
@@ -125,7 +123,6 @@ pub(super) fn pushed_frame(
         right,
         share,
         scroll,
-        covered,
         theme,
         cx,
     )
@@ -147,19 +144,6 @@ pub(crate) fn top_bar() -> Div {
         .gap(px(CONTROL_GAP))
         .px(px(PANE_DISC_INSET))
         .debug_selector(|| "profile-top-bar".into())
-}
-
-/// The top bar's right end (Done, share, close). Under the media viewer
-/// (`covered`) it keeps its place and draws nothing: the discs showed through
-/// the viewer's backdrop right behind the viewer's own × (tester, 2026-11-16:
-/// "the two X to close panel / pic view overlap / are both visible").
-pub(crate) fn top_bar_controls(covered: bool) -> Div {
-    div()
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap(px(CONTROL_GAP))
-        .when(covered, |el| el.invisible())
 }
 
 /// The share disc of a page that has something to share (an agent, a group:
@@ -227,7 +211,6 @@ pub(crate) fn pane_frame(
     right: Option<Stateful<Div>>,
     share: Option<HeroClick>,
     scroll: Option<&ScrollHandle>,
-    covered: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
@@ -254,12 +237,7 @@ pub(crate) fn pane_frame(
     } else {
         header = header.child(div().flex_1());
     }
-    let header = header.child(
-        top_bar_controls(covered)
-            .children(right)
-            .children(share)
-            .child(close),
-    );
+    let header = header.children(right).children(share).child(close);
     let has_pinned = pinned.is_some();
     // The chat's own surface on both sides of the join (Grok's pane is the
     // window, `#121212` either side), with Grok's hairline on the edge: one
@@ -359,7 +337,7 @@ pub(crate) fn run_by_link(label: &str, alpha: f32, theme: &Theme) -> Stateful<Di
         .id("run-by-link")
         .debug_selector(|| "run-by-link".into())
         .px(px(mention::PILL_PAD_X + 4.0))
-        .py(px(2.0))
+        .py(px(mention::PILL_PAD_Y + 1.0))
         .rounded(px(mention::PILL_RADIUS))
         .max_w(px(SHEET_WIDTH - 64.0))
         .truncate()
@@ -931,10 +909,7 @@ mod chrome_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::pane::{first_spacer, Section, FIRST_TITLE_PULL};
-    use super::{
-        close_disc, kit, share_disc, top_bar, top_bar_controls, HERO_TOP, PANE_DISC_INSET,
-        SHEET_WIDTH,
-    };
+    use super::{close_disc, kit, share_disc, top_bar, HERO_TOP, PANE_DISC_INSET, SHEET_WIDTH};
     use crate::ui::theme::{
         AppearancePref, Surface, Theme, CONTROL, CONTROL_GAP, CONTROL_LINE, HEADER_HEIGHT,
     };
@@ -1039,7 +1014,7 @@ mod chrome_tests {
         assert_eq!(first_spacer(None), 18.0);
     }
 
-    struct Bar(bool);
+    struct Bar;
 
     impl gpui::Render for Bar {
         fn render(
@@ -1055,11 +1030,10 @@ mod chrome_tests {
                 .flex()
                 .flex_col()
                 .child(
-                    top_bar().child(div().flex_1()).child(
-                        top_bar_controls(self.0)
-                            .child(share)
-                            .child(close_disc(&theme)),
-                    ),
+                    top_bar()
+                        .child(div().flex_1())
+                        .child(share)
+                        .child(close_disc(&theme)),
                 )
         }
     }
@@ -1070,7 +1044,7 @@ mod chrome_tests {
     #[gpui::test]
     fn the_share_and_close_discs_land_on_groks_pixels(cx: &mut TestAppContext) {
         set_theme(cx, AppearancePref::Dark);
-        let (_view, vcx) = cx.add_window_view(|_, _| Bar(false));
+        let (_view, vcx) = cx.add_window_view(|_, _| Bar);
         vcx.run_until_parked();
         let bar = vcx.debug_bounds("profile-top-bar").expect("bar");
         let share = vcx.debug_bounds("profile-share").expect("share");
@@ -1092,18 +1066,6 @@ mod chrome_tests {
             grok::DISC_GAP,
             "share → close"
         );
-    }
-
-    /// Under the media viewer the pane's discs are not painted — the
-    /// viewer's × is the only close control on screen.
-    #[gpui::test]
-    fn the_discs_are_not_drawn_under_the_media_viewer(cx: &mut TestAppContext) {
-        set_theme(cx, AppearancePref::Dark);
-        let (_view, vcx) = cx.add_window_view(|_, _| Bar(true));
-        vcx.run_until_parked();
-        assert!(vcx.debug_bounds("profile-top-bar").is_some());
-        assert!(vcx.debug_bounds("profile-close").is_none());
-        assert!(vcx.debug_bounds("profile-share").is_none());
     }
 
     struct Cards;

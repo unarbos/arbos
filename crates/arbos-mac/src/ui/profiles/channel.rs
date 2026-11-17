@@ -199,38 +199,17 @@ fn toggle_row(
     .into_any_element()
 }
 
-fn privacy_label(restricted: bool) -> &'static str {
-    if restricted {
-        "Everyone in the server can read this channel. Only admins can post."
-    } else {
-        "Everyone in the server can read and post in this channel."
-    }
-}
+/// Privacy is who can see the channel — always the whole server; who may post
+/// is the Posting row / "Admins only post". The value is short enough for the
+/// row's value slot (tester, 2026-11-15: "what is meant by privacy … text is
+/// cut off" — "Everyone in the server reads · admins post" ended in an
+/// ellipsis); [`PRIVACY_NOTE`] under the card says what the setting means.
+const PRIVACY: &str = "Everyone in the server";
+const PRIVACY_NOTE: &str =
+    "Privacy is who can see this channel: every member of the server can read it.";
 
-/// Privacy as a sentence under its label, wrapping (tester, 2026-11-15: "what
-/// is meant by privacy … text is cut off" — it was a one-line value at the
-/// row's right end, cut to an ellipsis at the pane's width).
-fn privacy_row(id: &'static str, restricted: bool, theme: &Theme) -> AnyElement {
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .justify_center()
-        .gap(px(1.0))
-        .min_h(px(kit::ROW_MIN_H))
-        .px(px(kit::INSET))
-        .py(px(6.0))
-        .text_size(px(TEXT_BODY))
-        .text_color(theme.text)
-        .child("Privacy")
-        .child(
-            div()
-                .debug_selector(|| "channel-privacy-text".into())
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.label_muted())
-                .child(privacy_label(restricted)),
-        )
-        .into_any_element()
+fn privacy_row(id: &'static str, theme: &Theme) -> Stateful<Div> {
+    kit::value_row(id, "Privacy", PRIVACY, theme)
 }
 
 /// Profile: what the channel is, who is in it, how it is set up — read-only, plus mute.
@@ -272,7 +251,7 @@ fn profile_tab(
         }))
         .into_any_element(),
     );
-    about.push(privacy_row("channel-privacy", restricted, theme));
+    about.push(privacy_row("channel-privacy", theme).into_any_element());
     about.push(
         kit::value_row(
             "channel-posting",
@@ -289,6 +268,7 @@ fn profile_tab(
     let cid = channel.id.clone();
     vec![
         Section::Card(about),
+        Section::Footnote(PRIVACY_NOTE.into()),
         Section::Card(vec![server_row(server, shell, theme, cx)]),
         Section::Card(vec![toggle_row(
             "channel-mute",
@@ -421,7 +401,7 @@ fn settings_tab(
         },
         cx,
     ));
-    behaviour.push(privacy_row("channel-set-privacy", restricted, theme));
+    behaviour.push(privacy_row("channel-set-privacy", theme).into_any_element());
     if can_admin {
         let (sid, cid) = (server.id.clone(), channel.id.clone());
         behaviour.push(toggle_row(
@@ -457,6 +437,7 @@ fn settings_tab(
     let mut out = vec![
         Section::Card(identity),
         Section::Card(behaviour),
+        Section::Footnote(PRIVACY_NOTE.into()),
         Section::Card(vec![server_row(server, shell, theme, cx)]),
     ];
     if can_admin {
@@ -588,28 +569,53 @@ fn danger_footer(
 mod tests {
     use super::*;
 
-    struct Privacy;
+    /// The Privacy row in a card at the pane's width, a row under it, and the
+    /// value alone on one line for its natural width.
+    struct PrivacyCard;
 
-    impl gpui::Render for Privacy {
+    impl gpui::Render for PrivacyCard {
         fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             div()
-                .w(px(200.0))
-                .text_size(px(TEXT_SMALL))
-                .child(div().debug_selector(|| "one-line".into()).child("Privacy"))
-                .child(privacy_row("channel-privacy", true, &theme))
+                .w(px(super::super::SHEET_WIDTH))
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(
+                    kit::card(&theme)
+                        .w_full()
+                        .debug_selector(|| "card".into())
+                        .child(
+                            privacy_row("channel-privacy", &theme).debug_selector(|| "row".into()),
+                        )
+                        .child(div().h(px(kit::ROW_MIN_H))),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "value".into())
+                        .whitespace_nowrap()
+                        .text_size(px(TEXT_SMALL))
+                        .child(PRIVACY),
+                )
         }
     }
 
-    /// The Privacy sentence wraps inside the pane instead of ending in an ellipsis.
+    /// Tester (Nov 15): the Privacy value was cut to an ellipsis. It fits its
+    /// slot (60 % of the row) whole, and the row keeps the card's divider.
     #[gpui::test]
-    fn the_privacy_sentence_wraps_instead_of_being_cut(cx: &mut gpui::TestAppContext) {
+    fn the_privacy_value_fits_its_row_and_the_divider_stays(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte)));
-        let (_view, vcx) = cx.add_window_view(|_, _| Privacy);
+        let (_view, vcx) = cx.add_window_view(|_, _| PrivacyCard);
         vcx.run_until_parked();
-        let line = vcx.debug_bounds("one-line").unwrap().size.height;
-        let text = vcx.debug_bounds("channel-privacy-text").unwrap();
-        assert!(text.size.height >= line * 2.0, "wrapped: {text:?}");
-        assert!(text.size.width <= px(200.0 - kit::INSET * 2.0), "{text:?}");
+        let card = vcx.debug_bounds("card").expect("card");
+        let row = vcx.debug_bounds("row").expect("row");
+        let value = vcx.debug_bounds("value").expect("value");
+        let slot = (row.size.width - px(kit::INSET * 2.0)) * 0.6;
+        assert!(value.size.width <= slot, "{value:?} in {slot:?}");
+        let divider = vcx.debug_bounds(kit::DIVIDER_SELECTOR).expect("divider");
+        assert_eq!(divider.top(), row.bottom());
+        assert_eq!(divider.left() - card.left(), px(kit::DIVIDER_INSET));
+        assert_eq!(card.right() - divider.right(), px(kit::DIVIDER_INSET));
+        assert!(divider.bottom() < card.bottom(), "inside the card");
     }
 }

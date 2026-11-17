@@ -2233,13 +2233,13 @@ impl Element for InputElement {
             };
             let a = point(ax, ay);
             let mut rects = Vec::with_capacity(fragments.len());
-            for ((x0, x1, top), &(left, right)) in fragments.into_iter().zip(&mut pads) {
+            for ((x0, x1, top), &pad) in fragments.into_iter().zip(&mut pads) {
                 let pill = Bounds::new(
                     point(
-                        bounds.left() + x0 - left,
+                        bounds.left() + x0 - pad,
                         bounds.top() + top - dy - px(mention::PILL_PAD_Y),
                     ),
-                    size(x1 - x0 + left + right, lh + px(mention::PILL_PAD_Y * 2.0)),
+                    size(x1 - x0 + pad * 2.0, lh + px(mention::PILL_PAD_Y * 2.0)),
                 );
                 rects.push(pill);
                 pills.push(
@@ -5786,6 +5786,32 @@ mod mention_token_tests {
                 .any(|r| r.left() > bounds.left() + px(mention::PILL_PAD_X))),
             "a mid-row chip too"
         );
+    }
+
+    /// Tester (Nov 14): mention pills drew into each other. Chips one space
+    /// apart on a row keep `PILL_GAP` between their pills.
+    #[gpui::test]
+    fn chips_one_space_apart_keep_a_gap(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        for _ in 0..3 {
+            cx.simulate_input("@s");
+            cx.update(|_, cx| {
+                input.update(cx, |i, cx| {
+                    i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+                })
+            });
+            cx.run_until_parked();
+        }
+        let rects: Vec<Bounds<Pixels>> = cx.update(|_, cx| {
+            let l = input.read(cx).layout.as_ref().unwrap();
+            l.chips.iter().flat_map(|(_, r)| r.clone()).collect()
+        });
+        assert_eq!(rects.len(), 3, "three chips on one row: {rects:?}");
+        for pair in rects.windows(2) {
+            assert_eq!(pair[0].top(), pair[1].top());
+            let gap = f32::from(pair[1].left() - pair[0].right());
+            assert!(gap >= mention::PILL_GAP - 0.01, "{gap} between {pair:?}");
+        }
     }
 
     #[gpui::test]

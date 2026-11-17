@@ -1586,7 +1586,6 @@ impl Shell {
                 None,
                 None,
                 Some(&self.settings_scroll),
-                self.state.read(cx).media_viewer.is_some(),
                 &theme,
                 cx,
             );

@@ -32,8 +32,11 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 actions!(media_viewer, [Prev, Next, CopyItem]);
 
-/// Backdrop over the window.
-const BACKDROP: f32 = 0.88;
+/// Backdrop over the window: solid black. At 88 % the shell's own controls
+/// showed through — the right pane's × right behind the viewer's, the
+/// sidebar's discs behind the caption (tester, 2026-11-16: "the two X to
+/// close panel / pic view overlap / are both visible").
+const BACKDROP: f32 = 1.0;
 /// The round controls (×, chevrons): mock-mac 36 pt.
 pub const CONTROL: f32 = 36.0;
 /// Download / Forward pills: 34 pt tall, 13 pt medium text.
@@ -776,6 +779,46 @@ mod tests {
     fn when_label_names_today() {
         let now = crate::model::now_ms();
         assert!(when_label(now).starts_with("Today at "));
+    }
+
+    /// Tester (Nov 16): "the two X to close panel / pic view overlap / are
+    /// both visible". With a pane open under the viewer, the viewer covers
+    /// the whole window with a solid backdrop — nothing of the shell shows
+    /// through — and the spot where the pane's × sits answers as the viewer:
+    /// the click closes the picture and leaves the pane open.
+    #[gpui::test]
+    fn the_viewer_covers_the_pane_and_its_close_control(cx: &mut gpui::TestAppContext) {
+        use crate::app::ProfilePage;
+        use crate::ui::blocked::render_tests::{centre, mount, settle};
+        let (_rt, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.selected_project = Some("g1".into());
+            s.open_profile(
+                ProfilePage::Group {
+                    space_id: "g1".into(),
+                },
+                cx,
+            );
+        });
+        settle(&state, &shell, vcx);
+        let pane_close = vcx.debug_bounds("profile-close").expect("the pane's ×");
+        state.update(vcx, |s, cx| {
+            s.open_picture_viewer("Sam Rivera", "https://example.test/sam.png", cx)
+        });
+        settle(&state, &shell, vcx);
+
+        let viewer = vcx.debug_bounds("media-viewer").expect("the viewer");
+        let window = vcx.update(|window, _| window.viewport_size());
+        assert_eq!(viewer.size, window, "the viewer covers the window");
+        assert_eq!(BACKDROP, 1.0, "and nothing under it shows through");
+        assert!(vcx.debug_bounds("media-viewer-close").is_some());
+
+        vcx.simulate_click(centre(pane_close), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        state.read_with(&*vcx, |s, _| {
+            assert!(s.media_viewer.is_none(), "the click went to the viewer");
+            assert!(s.profile.is_some(), "the pane under it did not close");
+        });
     }
 
     #[test]

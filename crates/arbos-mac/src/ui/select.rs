@@ -1081,7 +1081,21 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        self.styled.request_layout(None, inspector_id, window, cx)
+        if self.chips.len() < 2 {
+            return self.styled.request_layout(None, inspector_id, window, cx);
+        }
+        // Two chips may land one under the other, and a pill is taller than
+        // its line: the text is set looser so their pills never meet. Known
+        // ceiling: a one-line text with two chips is that much taller too —
+        // whether it wraps is not known before layout.
+        let line_height = window.line_height() + mention::stacked_leading();
+        let looser = gpui::TextStyleRefinement {
+            line_height: Some(line_height.into()),
+            ..Default::default()
+        };
+        window.with_text_style(Some(looser), |window| {
+            self.styled.request_layout(None, inspector_id, window, cx)
+        })
     }
 
     fn prepaint(
@@ -1150,6 +1164,12 @@ impl Element for SelectableText {
             fading |= still;
             paint_chip_pill(
                 layout.line_height(),
+                // The looser line of `request_layout` is not the pill's.
+                if chips.len() < 2 {
+                    px(0.0)
+                } else {
+                    mention::stacked_leading()
+                },
                 fragments,
                 &mut pads,
                 mention::pill_color(chip.accent, alpha),
@@ -1382,17 +1402,18 @@ fn chip_at<'a>(
 /// and below. Painted before the text.
 fn paint_chip_pill<'a>(
     line_h: Pixels,
+    leading: Pixels,
     fragments: &[(Pixels, Pixels, Pixels)],
-    pads: &mut impl Iterator<Item = &'a (Pixels, Pixels)>,
+    pads: &mut impl Iterator<Item = &'a Pixels>,
     color: Hsla,
     window: &mut Window,
 ) {
-    for (&(start, end, top), &(left, right)) in fragments.iter().zip(pads) {
+    for (&(start, end, top), &pad) in fragments.iter().zip(pads) {
         let bounds = Bounds::new(
-            point(start - left, top - px(mention::PILL_PAD_Y)),
+            point(start - pad, top + leading / 2.0 - px(mention::PILL_PAD_Y)),
             size(
-                end - start + left + right,
-                line_h + px(mention::PILL_PAD_Y * 2.0),
+                end - start + pad * 2.0,
+                line_h - leading + px(mention::PILL_PAD_Y * 2.0),
             ),
         );
         #[cfg(test)]
@@ -1400,7 +1421,7 @@ fn paint_chip_pill<'a>(
             p.borrow_mut().push(PaintedChip::Pill {
                 bounds,
                 text: (start, end),
-                line: (top, line_h),
+                line: (top + leading / 2.0, line_h - leading),
             })
         });
         window.paint_quad(gpui::quad(
@@ -2499,6 +2520,80 @@ mod tests {
                 disc.size.height <= px(mention::PICTURE),
                 "the disc is at most the picture size"
             );
+        }
+    }
+
+    /// The pills a bubble line paints for `text` (one copy of each; every
+    /// frame paints again).
+    fn painted_pills(cx: &mut gpui::TestAppContext, text: &str) -> Vec<Bounds<Pixels>> {
+        use std::cell::RefCell;
+        let mentions = chip_table(&Rc::new(RefCell::new(Vec::new())));
+        let text: SharedString = mentions.display(text).into();
+        PAINTED_CHIPS.with(|p| p.borrow_mut().clear());
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipLine {
+            selection: cx.new(TextSelection::new),
+            mentions,
+            text,
+        });
+        vcx.run_until_parked();
+        let mut pills: Vec<Bounds<Pixels>> = Vec::new();
+        for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
+            if let PaintedChip::Pill { bounds, .. } = p {
+                if !pills.contains(&bounds) {
+                    pills.push(bounds);
+                }
+            }
+        }
+        pills
+    }
+
+    /// The clear space between two pills: across when they share a line,
+    /// down when one is under the other; `None` when neither axis separates
+    /// them by a line or a column (they are nowhere near each other).
+    fn clear_space(a: &Bounds<Pixels>, b: &Bounds<Pixels>) -> (f32, f32) {
+        let across = f32::from(a.left().max(b.left()) - a.right().min(b.right()));
+        let down = f32::from(a.top().max(b.top()) - a.bottom().min(b.bottom()));
+        (across, down)
+    }
+
+    /// Tester (Nov 14): "these blue '@ mentions' clip into each other". Two
+    /// chips one space apart, two with only a comma between them, and a run
+    /// of chips that wraps so chips sit one under the other: no two pills
+    /// intersect, and every pair keeps `PILL_GAP` across or down.
+    #[gpui::test]
+    fn neighbouring_chips_never_touch(cx: &mut gpui::TestAppContext) {
+        let gap = mention::PILL_GAP - 0.01;
+        let wrapped = "@comms @here ".repeat(14);
+        for (text, lines) in [
+            ("@comms @here", 1),
+            ("@comms,@here", 1),
+            (wrapped.as_str(), 2),
+        ] {
+            let pills = painted_pills(cx, text);
+            assert!(pills.len() >= 2, "{text:?}: {pills:#?}");
+            let mut tops: Vec<f32> = pills.iter().map(|p| f32::from(p.top())).collect();
+            tops.dedup();
+            assert!(tops.len() >= lines, "{text:?} wraps: {tops:?}");
+            let mut stacked = false;
+            for (i, a) in pills.iter().enumerate() {
+                for b in &pills[i + 1..] {
+                    assert!(!a.intersects(b), "{text:?}: {a:?} meets {b:?}");
+                    let (across, down) = clear_space(a, b);
+                    assert!(
+                        across >= gap || down >= gap,
+                        "{text:?}: {a:?} and {b:?} are {across} / {down} apart"
+                    );
+                    stacked |= across < 0.0;
+                }
+            }
+            assert_eq!(stacked, lines > 1, "{text:?}: a chip under a chip");
+            // The pill is the chip's full height: the line box and its reach.
+            for p in &pills {
+                assert_eq!(
+                    f32::from(p.size.height),
+                    crate::ui::theme::CHAT_LINE_HEIGHT + 2.0 * mention::PILL_PAD_Y
+                );
+            }
         }
     }
 
