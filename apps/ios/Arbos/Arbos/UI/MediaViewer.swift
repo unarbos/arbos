@@ -1250,6 +1250,9 @@ struct BlobImage: View {
     @Environment(\.theme) private var theme
     let item: MediaItem
     var origin: MediaOrigin? = nil
+    /// A thumbnail: decode off the main actor to a bitmap no larger than this
+    /// (`ChatImageCache.decode`). nil keeps the full picture.
+    var maxPixels: CGSize? = nil
     @State private var capturedOrigin: MediaOrigin?
     @State private var image: UIImage?
     @State private var failed = false
@@ -1274,7 +1277,12 @@ struct BlobImage: View {
         guard origin.allowsReading(item, model) else { return }
         let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
         guard origin.allowsReading(item, model) else { return }
-        if let (data, _) = bytes, let img = UIImage(data: data) {
+        if let (data, _) = bytes, let maxPixels {
+            let small = await ChatImageCache.decode(data, maxPixels: maxPixels)
+            guard origin.allowsReading(item, model) else { return }
+            image = small?.stillFrame ?? small?.image
+            failed = image == nil
+        } else if let (data, _) = bytes, let img = UIImage(data: data) {
             image = img
         } else {
             failed = true

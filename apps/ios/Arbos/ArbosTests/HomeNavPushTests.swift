@@ -70,4 +70,42 @@ final class HomeNavPushTests: XCTestCase {
         XCTAssertTrue(source.contains(".backSwipeToPop()"),
                       "pushed panes keep the interactive edge swipe")
     }
+
+    /// Back from a chat opened in Archived chats returns to that list, not to Home
+    /// (tester report, 2026-11-17): the list is a route, and it stays under what opens.
+    func testAChatOpenedFromArchivedKeepsTheListUnderIt() {
+        let model = AppModel()
+        model.showArchived()
+        model.showArchived()
+        XCTAssertEqual(model.path, [.archived], "a second tap must not stack a duplicate")
+        let chat = AppModel.Route.chat(chatId: "fx-dm", projectId: peopleSlot)
+        // Every `open(…)` replaces the path, as this does.
+        model.openFromArchived { model.path = [chat] }
+        XCTAssertEqual(model.path, [.archived, chat])
+        model.path.removeLast()
+        XCTAssertEqual(model.path, [.archived], "back lands on the archived list")
+        let server = AppModel.Route.server(serverId: "s1")
+        model.openFromArchived { model.path = [.archived, server] }
+        XCTAssertEqual(model.path, [.archived, server], "the list is never put under itself")
+    }
+
+    /// A person picked on New Message opens their DM and nothing pops it (tester report,
+    /// 2026-11-15: "it gives me a black screen"). Opening replaces the path, the page
+    /// with it; a `dismiss()` after that popped the DM that had just opened.
+    func testAPersonPickedOnNewMessageLandsInTheirDM() async throws {
+        let model = AppModel()
+        model.showNewMessage()
+        let dm = await model.openDM(handle: "alex-rivera")
+        XCTAssertEqual(model.path, [.chat(chatId: try XCTUnwrap(dm).id, projectId: peopleSlot)])
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // ArbosTests
+            .deletingLastPathComponent() // Arbos
+            .appendingPathComponent("Arbos/UI/PeopleSheets.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "struct NewChatSheet: View {"))
+        let end = try XCTUnwrap(source.range(of: "struct ServerPickRow: View {"))
+        let page = source[start.lowerBound..<end.lowerBound]
+        XCTAssertFalse(page.contains("dismiss()\n") || page.contains("dismiss() }"),
+                       "New Message never dismisses after an open: the open already left the page")
+    }
 }

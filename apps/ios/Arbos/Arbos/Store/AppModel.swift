@@ -482,6 +482,11 @@ final class AppModel: ObservableObject {
         /// Home's "+" — New Message (Jacob, 2026-11-10: the compose panel pushes in from
         /// the right like a chat and Settings, instead of rising as a bottom sheet).
         case newMessage
+        /// The Archived chats list behind Home's footer. A route, not a page presented
+        /// beside the path: opening a chat changes the path, which drops every page
+        /// presented outside it, and back from that chat went to Home (tester report,
+        /// 2026-11-17).
+        case archived
     }
 
     // MARK: Servers (D88)
@@ -2332,7 +2337,10 @@ final class AppModel: ObservableObject {
                 pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = UserError.classify("load your chats", error)
+            let failure = UserError.classify("load your chats", error)
+            // The raw detail is for whoever reads the log; the line under Home shows the sentence.
+            NSLog("registry: reload failed: \(failure.raw.isEmpty ? failure.sentence : failure.raw)")
+            registryError = failure
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -5322,6 +5330,19 @@ final class AppModel: ObservableObject {
     func showNewMessage() {
         if case .newMessage? = path.last { return }
         path.append(.newMessage)
+    }
+
+    /// Open the Archived chats list from Home's footer.
+    func showArchived() {
+        if case .archived? = path.last { return }
+        path.append(.archived)
+    }
+
+    /// Open a row of the Archived chats list. Opening replaces the path; the list goes
+    /// back under whatever opened, so back returns to it.
+    func openFromArchived(_ open: () -> Void) {
+        open()
+        if path.first != .archived { path.insert(.archived, at: 0) }
     }
 
     /// Leave the New Message push (and any Create screen stacked on it) for Home.

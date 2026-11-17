@@ -34,6 +34,15 @@ extension EnvironmentValues {
     }
 }
 
+extension ProfileHost {
+    /// Does a profile opened from a pushed sub-page (a group's or a server's Members) push
+    /// from that sub-page, not onto the model's path? On the stack, yes: the sub-page is
+    /// presented outside the path, a path push drops every such page, and back from the
+    /// profile then skipped the members list (tester report, 2026-11-17). A sheet keeps
+    /// its own stack.
+    func pushesFromSubpage(_ onSubpage: Bool) -> Bool { self == .stack && onSubpage }
+}
+
 enum ProfileToggle {
     /// What a tap on `tapped` does while `showing` is up: `nil` dismisses the
     /// sheet (the same subject again), anything else is the page to present.

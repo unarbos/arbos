@@ -1272,7 +1272,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .mb(px(4.0))
                 .text_size(px(TEXT_TINY))
                 .text_color(theme.text_muted)
-                .child("Hidden chats")
+                .child("Archived chats")
                 .child(
                     div()
                         .id("sidebar-hidden-back")
@@ -1349,7 +1349,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .text_color(theme.text_muted)
                 .cursor_pointer()
                 .map(|el| highlight::row(el, false, Shape::Own, &theme))
-                .child(format!("Hidden chats · {hidden_count}"))
+                .child(format!("Archived chats · {hidden_count}"))
                 .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {

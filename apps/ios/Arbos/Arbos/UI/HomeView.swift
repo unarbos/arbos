@@ -22,8 +22,6 @@ struct HomeView: View {
     /// Own-agent Share sheet from the home long-press menu.
     /// Own-agent delete confirmation from the home long-press / swipe menu.
     /// People chat delete confirmation from the home long-press / swipe menu.
-    /// "Hidden chats N ›" footer → the list of archived agents and people chats.
-    @State private var showHidden = false
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
@@ -121,10 +119,9 @@ struct HomeView: View {
                     // ([feedback iphone-compose-nav-push-2026-11-10]).
                     NewChatSheet()
                         .backSwipeToPop()
+                case .archived:
+                    HiddenChatsView()
                 }
-            }
-            .navigationDestination(isPresented: $showHidden) {
-                HiddenChatsView().environmentObject(model).environment(\.theme, theme)
             }
             .navigationDestination(isPresented: $showGoals) {
                 GoalsPage().environmentObject(model).environment(\.theme, theme)
@@ -171,7 +168,7 @@ struct HomeView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; model.showNewMessage() }
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; showHidden = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; model.showArchived() }
             }
             if DebugHooks.show == "settings", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { guard model.acceptsAccountWork(work) else { return }; model.showOwnProfile() }
@@ -716,9 +713,9 @@ struct HomeView: View {
     /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
     private var hiddenFooter: some View {
         let work = model.accountWork()
-        return Button { guard model.acceptsAccountWork(work) else { return }; showHidden = true } label: {
+        return Button { guard model.acceptsAccountWork(work) else { return }; model.showArchived() } label: {
             HStack(spacing: 8) {
-                Text("Hidden chats")
+                Text("Archived chats")
                     .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                 Text("\(hiddenCount)")
@@ -734,7 +731,7 @@ struct HomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Hidden chats, \(hiddenCount)")
+        .accessibilityLabel("Archived chats, \(hiddenCount)")
     }
 
     /// Account circle (→ Settings) left, the + circle right. Search lives in the bottom
@@ -769,9 +766,10 @@ struct HomeView: View {
                     if offlineHint {
                         // The reload's own reason when there is one: with rows on screen the
                         // list's error note never shows, and "Offline" alone hid a failing
-                        // reload on a phone that was online (2026-11-13). The raw detail while
-                        // this is a beta: it is what whoever reads the report needs.
-                        Text(model.registryError.map { $0.raw.isEmpty ? $0.sentence : $0.raw } ?? "Offline · showing saved chats")
+                        // reload on a phone that was online (2026-11-13). The sentence, not the
+                        // raw detail: testers read "CancellationError" here all day
+                        // (2026-11-16); the raw detail goes to the log where it is set.
+                        Text(model.registryError?.sentence ?? "Offline · showing saved chats")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .lineLimit(2)
@@ -1151,7 +1149,7 @@ struct HiddenChatsView: View {
                     .listRowBackground(Color.clear)
                     .accessibilityHidden(true)
                 if hidden.isEmpty {
-                    Text("No hidden chats")
+                    Text("No archived chats")
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity)
@@ -1163,7 +1161,7 @@ struct HiddenChatsView: View {
                 ForEach(hidden) { row in
                     switch row {
                     case .project(let project):
-                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(project: project) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.openFromArchived { model.open(project: project) } } label: {
                             AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
                                      streaming: model.isStreaming(project: project.id), unread: false)
                         }
@@ -1194,7 +1192,7 @@ struct HiddenChatsView: View {
                             }
                         }
                     case .people(let chat):
-                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(peopleChat: chat) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.openFromArchived { model.open(peopleChat: chat) } } label: {
                             PeopleRow(chat: chat, preview: HomeView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
                         }
@@ -1221,7 +1219,7 @@ struct HiddenChatsView: View {
                             }
                         }
                     case .server(let server):
-                        Button { guard model.acceptsAccountWork(work) else { return }; model.open(server: server) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; model.openFromArchived { model.open(server: server) } } label: {
                             ServerRow(server: server, preview: model.serverPreview(server), time: "", unread: false)
                         }
                         .buttonStyle(.borderless)
@@ -1259,7 +1257,7 @@ struct HiddenChatsView: View {
                 .buttonStyle(.plain)
                 Spacer()
                 GlassPill {
-                    Text("Hidden chats")
+                    Text("Archived chats")
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, Controls.textInset)
