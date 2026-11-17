@@ -3268,9 +3268,11 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
             return false
-        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+        // A poll is a message like any other: it is replied to, and its author deletes it
+        // (tester report, 2026-11-14). Edit stays off (`canEditMessage`).
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image, .poll:
             return messageById[row.messageId] != nil
         }
     }
@@ -3380,7 +3382,8 @@ struct ChatSession: View {
     /// Own user text the long-press menu may offer Edit for.
     private func canEditMessage(_ row: Row) -> Bool {
         guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
-        guard isOwnMessage(m) else { return false }
+        // A poll is not editable; its text is only the poll in plain words.
+        guard isOwnMessage(m), !m.parts.contains(where: { $0.pollValue != nil }) else { return false }
         return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -4790,6 +4793,8 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
+                                        // Two quick taps on a poll are two votes, not a heart.
+                                        if case .poll = row.kind { return }
                                         guard account.accepts(model) else { return }
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },

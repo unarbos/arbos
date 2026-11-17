@@ -159,15 +159,21 @@ final class CoreChatDoc {
     /// A poll message (`docs/polls.md`); its text part is the poll in plain words. Does not
     /// commit. Throws when the fields are not a poll within bounds.
     func insertPollMessage(
-        id: Id, question: String, options: [String], multiple: Bool, deviceId: String,
-        author: Author?, mentions: [String] = []
+        id: Id, question: String, options: [String], multiple: Bool, showVoters: Bool = false,
+        closesInMs: Int64? = nil, deviceId: String, author: Author?, mentions: [String] = []
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: [], mentions: mentions, replyTo: nil,
             sender: author?.sender, senderHandle: author?.handle, senderName: author?.name, senderAvatar: author?.avatar,
             forwardedFrom: nil, replyRef: nil)
         try doc.insertPollMessage(id: id, question: question, options: options, multiple: multiple,
-                                  deviceId: deviceId, opts: opts)
+                                  showVoters: showVoters, closesInMs: closesInMs, deviceId: deviceId, opts: opts)
+    }
+
+    /// The author closes their poll, now: later votes do not count. Does not commit. Throws
+    /// when `sender` did not post it or it is not a poll that can be closed.
+    func closePoll(messageId: Id, sender: String) throws {
+        try doc.closePoll(messageId: messageId, sender: sender)
     }
 
     /// `sender`'s vote on a poll, replacing any earlier one; empty retracts. Does not commit.

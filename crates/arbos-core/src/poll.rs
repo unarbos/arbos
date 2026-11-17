@@ -12,6 +12,17 @@ pub const LABEL_MAX: usize = 100;
 pub const OPTIONS_MIN: usize = 2;
 pub const OPTIONS_MAX: usize = 10;
 const OPTION_ID_MAX: usize = 8;
+/// The latest time a poll field may name, in ms since the epoch (2100-01-01): the sanity bound
+/// on `closesAt`, a manual close and a vote's time.
+pub const TIME_MAX: i64 = 4_102_444_800_000;
+/// The longest a composer lets a poll run: one week.
+pub const DURATION_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// A time stored on a poll row (`closesAt`, the manual close, a vote's time): an integer in
+/// `1..=TIME_MAX`. Anything else is not a time.
+pub fn time(value: &Value) -> Option<i64> {
+    value.as_i64().filter(|t| (1..=TIME_MAX).contains(t))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +38,18 @@ pub struct Poll {
     pub options: Vec<PollOption>,
     /// How many options one person may hold: `1`, or `options.len()` for "multiple answers".
     pub max: usize,
+    /// "Show who voted", chosen by the author and fixed with the poll. `None` is a poll from
+    /// before this field: its votes carry no time, so it cannot be closed, and its voters
+    /// are not shown.
+    #[serde(
+        rename = "showVoters",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub show_voters: Option<bool>,
+    /// When the poll closes by itself, in ms since the epoch; `None` runs until closed by hand.
+    #[serde(rename = "closesAt", default, skip_serializing_if = "Option::is_none")]
+    pub closes_at: Option<i64>,
 }
 
 /// `1..=max` characters once trimmed.
@@ -37,7 +60,13 @@ fn sized(s: &str, max: usize) -> bool {
 impl Poll {
     /// A poll from what a composer collected, or `None` when it is out of bounds. Blank option
     /// rows are dropped; ids are the option's place in the list.
-    pub fn new(question: &str, labels: &[String], multiple: bool) -> Option<Self> {
+    pub fn new(
+        question: &str,
+        labels: &[String],
+        multiple: bool,
+        show_voters: bool,
+        closes_at: Option<i64>,
+    ) -> Option<Self> {
         let options: Vec<PollOption> = labels
             .iter()
             .map(|l| l.trim())
@@ -52,6 +81,8 @@ impl Poll {
             question: question.trim().to_owned(),
             max: if multiple { options.len() } else { 1 },
             options,
+            show_voters: Some(show_voters),
+            closes_at,
         };
         poll.is_valid().then_some(poll)
     }
@@ -72,11 +103,31 @@ impl Poll {
         sized(&self.question, QUESTION_MAX)
             && (OPTIONS_MIN..=OPTIONS_MAX).contains(&self.options.len())
             && (1..=self.options.len()).contains(&self.max)
+            && self.closes_at.is_none_or(|t| (1..=TIME_MAX).contains(&t))
             && self.options.iter().enumerate().all(|(i, o)| {
                 id_ok(&o.id)
                     && sized(&o.label, LABEL_MAX)
                     && self.options[..i].iter().all(|p| p.id != o.id)
             })
+    }
+
+    /// Votes on this poll carry their time and it can be closed: every poll written since
+    /// `showVoters` exists. An older one has neither.
+    pub fn timed(&self) -> bool {
+        self.show_voters.is_some()
+    }
+
+    /// The time after which a vote does not count: the earlier of `closesAt` and the author's
+    /// manual close (`closed`, the row's [`crate::doc::POLL_CLOSED_FIELD`]). `None` is open.
+    /// An untimed poll never closes.
+    pub fn deadline(&self, closed: Option<&Value>) -> Option<i64> {
+        if !self.timed() {
+            return None;
+        }
+        [self.closes_at, closed.and_then(time)]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// One person's vote as stored: a list of known option ids, no repeats, at most `max`.
@@ -116,6 +167,8 @@ mod tests {
             "  Where do we meet? ",
             &[" Lisbon ".into(), "".into(), "Berlin".into()],
             false,
+            false,
+            None,
         )
         .unwrap();
         assert_eq!(poll.question, "Where do we meet?");
@@ -131,14 +184,31 @@ mod tests {
             poll.fallback_text(),
             "Poll: Where do we meet?\n1. Lisbon\n2. Berlin"
         );
-        assert_eq!(Poll::new("Q", &labels(3), true).unwrap().max, 3);
+        assert_eq!(
+            Poll::new("Q", &labels(3), true, false, None).unwrap().max,
+            3
+        );
 
-        assert!(Poll::new(" ", &labels(2), false).is_none());
-        assert!(Poll::new(&"q".repeat(QUESTION_MAX + 1), &labels(2), false).is_none());
-        assert!(Poll::new("Q", &labels(1), false).is_none());
-        assert!(Poll::new("Q", &labels(OPTIONS_MAX + 1), false).is_none());
-        assert!(Poll::new("Q", &["a".repeat(LABEL_MAX + 1), "b".into()], false).is_none());
-        assert!(Poll::new("Q", &labels(OPTIONS_MAX), false).is_some());
+        assert!(Poll::new(" ", &labels(2), false, false, None).is_none());
+        assert!(Poll::new(
+            &"q".repeat(QUESTION_MAX + 1),
+            &labels(2),
+            false,
+            false,
+            None
+        )
+        .is_none());
+        assert!(Poll::new("Q", &labels(1), false, false, None).is_none());
+        assert!(Poll::new("Q", &labels(OPTIONS_MAX + 1), false, false, None).is_none());
+        assert!(Poll::new(
+            "Q",
+            &["a".repeat(LABEL_MAX + 1), "b".into()],
+            false,
+            false,
+            None
+        )
+        .is_none());
+        assert!(Poll::new("Q", &labels(OPTIONS_MAX), false, false, None).is_some());
     }
 
     #[test]
@@ -182,9 +252,55 @@ mod tests {
         );
     }
 
+    /// A poll stored before `showVoters` and `closesAt` existed still reads, as an untimed
+    /// poll that never closes; the new fields are typed and bounded like the old ones.
+    #[test]
+    fn the_new_fields_are_optional_typed_and_bounded() {
+        let old = json!({ "question": "Q", "max": 1,
+            "options": [{ "id": "a", "label": "A" }, { "id": "b", "label": "B" }] });
+        let poll = Poll::parse(&old).unwrap();
+        assert_eq!((poll.show_voters, poll.closes_at), (None, None));
+        assert!(!poll.timed());
+        assert_eq!(poll.deadline(Some(&json!(5))), None, "it cannot be closed");
+        assert_eq!(
+            serde_json::to_value(&poll).unwrap(),
+            old,
+            "and is rewritten as it was"
+        );
+
+        let with = |key: &str, value: Value| {
+            let mut v = old.clone();
+            v[key] = value;
+            Poll::parse(&v)
+        };
+        let poll = with("showVoters", json!(true)).unwrap();
+        assert_eq!(poll.show_voters, Some(true));
+        assert!(
+            with("showVoters", json!("yes")).is_none(),
+            "a typed boolean"
+        );
+        assert!(with("showVoters", json!(1)).is_none());
+        assert!(with("closesAt", json!(1_800_000_000_000i64)).is_some());
+        assert!(with("closesAt", json!(0)).is_none(), "not a time");
+        assert!(with("closesAt", json!(-5)).is_none());
+        assert!(with("closesAt", json!(TIME_MAX + 1)).is_none());
+        assert!(with("closesAt", json!("soon")).is_none());
+        assert!(with("closesAt", json!(1.5)).is_none());
+
+        // The deadline is the earlier of the two closes; a close that is not a time is none.
+        let timed = Poll::new("Q", &labels(2), false, false, Some(100)).unwrap();
+        assert_eq!(timed.deadline(None), Some(100));
+        assert_eq!(timed.deadline(Some(&json!(40))), Some(40));
+        assert_eq!(timed.deadline(Some(&json!(400))), Some(100));
+        assert_eq!(timed.deadline(Some(&json!("now"))), Some(100));
+        let open = Poll::new("Q", &labels(2), false, true, None).unwrap();
+        assert_eq!(open.deadline(None), None);
+        assert_eq!(open.deadline(Some(&json!(7))), Some(7));
+    }
+
     #[test]
     fn a_vote_names_known_options_once_and_at_most_max() {
-        let poll = Poll::new("Q", &labels(3), false).unwrap();
+        let poll = Poll::new("Q", &labels(3), false, false, None).unwrap();
         assert_eq!(poll.selections(&json!(["2"])), Some(vec!["2".to_owned()]));
         assert_eq!(poll.selections(&json!([])), Some(vec![]), "a retraction");
         assert!(poll.selections(&json!(["1", "2"])).is_none(), "over max");
@@ -192,7 +308,7 @@ mod tests {
         assert!(poll.selections(&json!("1")).is_none(), "not a list");
         assert!(poll.selections(&json!([1])).is_none(), "not strings");
 
-        let many = Poll::new("Q", &labels(3), true).unwrap();
+        let many = Poll::new("Q", &labels(3), true, false, None).unwrap();
         assert!(many.selections(&json!(["1", "3"])).is_some());
         assert!(many.selections(&json!(["1", "1"])).is_none(), "a repeat");
     }

@@ -100,6 +100,55 @@ final class PollTests: XCTestCase {
         XCTAssertNotNil(pollText(question: "Q", options: Array(repeating: "A", count: SendPollSheet.optionsMax), multiple: true))
     }
 
+    /// The new choices ride on the part: who voted is shown only where the author said so, a
+    /// close by hand or by time closes the card, and only a poll posted with them can be closed.
+    func testVisibilityAndClosingAreReadFromThePart() throws {
+        let doc = CoreChatDoc(key: "poll-options")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: true, closesInMs: 3_600_000, deviceId: "dev",
+                                  author: .init(sender: "user:ana", name: "Ana"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ben", selections: ["1"])
+        doc.commit()
+        var poll = try XCTUnwrap(poll(doc))
+        let now = nowMs()
+        XCTAssertEqual(poll.showVoters, true)
+        XCTAssertTrue(poll.closable)
+        let closesAt = try XCTUnwrap(poll.closesAt)
+        XCTAssertTrue((now + 3_590_000...now + 3_610_000).contains(closesAt))
+        XCTAssertFalse(poll.closed(now: now))
+        XCTAssertTrue(poll.closed(now: closesAt), "its own time closes it")
+        XCTAssertEqual(poll.foot(by: "Ana", now: closesAt - 2 * 3_600_000 - 1),
+                       "Ana's poll · 1 voted · pick one · names shown · closes in 2 h")
+
+        // Only its author closes it; then the core takes no vote, change or retraction.
+        XCTAssertThrowsError(try doc.closePoll(messageId: "p1", sender: "user:ben"))
+        try doc.closePoll(messageId: "p1", sender: "user:ana")
+        doc.commit()
+        poll = try XCTUnwrap(self.poll(doc))
+        XCTAssertNotNil(poll.closedAt)
+        XCTAssertTrue(poll.closed(now: now))
+        XCTAssertEqual(poll.foot(by: nil, now: now), "Your poll · 1 voted · closed · names shown")
+        XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:cat", selections: ["2"]))
+        XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:ben", selections: []))
+        XCTAssertEqual(try XCTUnwrap(self.poll(doc)).votes, ["1": ["user:ben"]])
+
+        // A part from before the choices existed: counts only, never closed, not closable.
+        let old = Poll(question: "Q", options: [ChoiceOption(id: "1", label: "A"), ChoiceOption(id: "2", label: "B")],
+                       max: 1, votes: [:])
+        XCTAssertNil(old.showVoters)
+        XCTAssertFalse(old.closable)
+        XCTAssertFalse(old.closed(now: .max))
+    }
+
+    /// A reply quotes a poll by its question: the strip above the composer and the header in
+    /// the reply's bubble both read "Poll: <question>", not the list of options.
+    func testAReplyQuotesAPollByItsQuestion() throws {
+        let doc = try doc("poll-quote")
+        let message = try XCTUnwrap(doc.readAll().first)
+        XCTAssertEqual(Quote.line(of: message, maxChars: 160), "Poll: Where?")
+        XCTAssertEqual(Quote.forReply("p1", in: [message]).text, "Poll: Where?")
+    }
+
     func testThePollRowIsTheCardAndNotATextBubble() throws {
         let doc = try doc("poll-row")
         let rows = Transcript.rows(doc.readAll(), projectId: "people:c1", me: "user:ben", people: true, multiParty: true)

@@ -1754,6 +1754,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .transact(|d| d.set_poll_vote(&message_id, &me, &selections));
             }
         }
+        ClientCommand::ClosePoll {
+            chat_id,
+            message_id,
+        } => {
+            let me = format!("user:{ME_ID}");
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc.core.transact(|d| d.close_poll(&message_id, &me));
+            }
+        }
         ClientCommand::DeleteMessage {
             chat_id,
             message_id,

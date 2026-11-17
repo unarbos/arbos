@@ -138,6 +138,11 @@ struct Quote: Equatable, Hashable {
     /// The message flattened to one line (`oneLine`) and cut to `maxChars`; an attachment-only
     /// message names its file, an empty one says "Message".
     static func line(of message: Message, maxChars: Int) -> String {
+        // A poll is quoted by its question, not by the list of options its text part spells
+        // out (tester report, 2026-11-14).
+        if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+            return firstWords("Poll: \(poll.question)", maxChars: maxChars)
+        }
         var line = oneLine(message.plainText)
         if line.isEmpty {
             for part in message.parts {
@@ -1544,6 +1549,8 @@ struct RowView: View, Equatable {
 
     /// Chip long-press: which emoji's sender list is open under the chips.
     @State private var selectedReactionEmoji: String? = nil
+    /// The poll option whose voters are listed under the card (a tap on its count).
+    @State private var pollVotersOption: String? = nil
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
@@ -1958,20 +1965,15 @@ struct RowView: View, Equatable {
                 }
             }
         case .poll(let poll, let by):
-            // The question card's row: after the avatar lane, the cap width of an incoming bubble.
-            let lane = Theme.memberLane(composerInset: composerInset)
-            HStack(spacing: 0) {
-                Color.clear.frame(width: lane, height: 1)
-                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
-                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
-                             multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: true,
-                             onPick: { id in
-                                 guard let me = model.myUserId else { return }
-                                 model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
-                             },
-                             foot: poll.foot(by: by))
-                    .frame(maxWidth: maxBubble - lane, alignment: .leading)
-                Spacer(minLength: 0)
+            // A poll with a time still to run redraws by itself, so the card closes and its
+            // "closes in" line moves without waiting for the row to change: every 30 s, on a
+            // beat that lands on the closing time itself.
+            if let closesAt = poll.closesAt, !poll.closed(now: nowMs()) {
+                TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(closesAt % 30_000) / 1000), by: 30)) { _ in
+                    pollCard(poll, by: by)
+                }
+            } else {
+                pollCard(poll, by: by)
             }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
@@ -2156,6 +2158,49 @@ struct RowView: View, Equatable {
         }
         .padding(.leading, reactionLeading)
         .accessibilityLabel("\(reaction.emoji) from \(names)")
+    }
+
+    /// A poll (`docs/polls.md`): the question card's row — after the avatar lane, the cap
+    /// width of an incoming bubble. Open, a tap on a row votes; closed, it shows its final
+    /// counts and takes no tap. Where its author chose "Show who voted", a tap on a count
+    /// lists that option's voters under the card, as a held reaction chip does.
+    private func pollCard(_ poll: Poll, by: String?) -> some View {
+        let lane = Theme.memberLane(composerInset: composerInset)
+        let closed = poll.closed(now: nowMs())
+        let namesFor = poll.showVoters == true ? poll.options.first { $0.id == pollVotersOption } : nil
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 0) {
+                Color.clear.frame(width: lane, height: 1)
+                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
+                             multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
+                             onPick: { id in
+                                 // A hold that opened the message menu is not a vote.
+                                 guard let me = model.myUserId, !ChatGestures.heldIntoMenu,
+                                       !poll.closed(now: nowMs()) else { return }
+                                 model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                             },
+                             foot: poll.foot(by: by),
+                             onHint: poll.showVoters == true ? { id in
+                                 pollVotersOption = pollVotersOption == id ? nil : id
+                             } : nil,
+                             onClosePoll: by == nil && poll.closable && !closed ? {
+                                 model.closePoll(chatId: chatId, messageId: row.messageId)
+                             } : nil)
+                    .frame(maxWidth: maxBubble - lane, alignment: .leading)
+                Spacer(minLength: 0)
+            }
+            if let option = namesFor {
+                let names = (poll.votes[option.id] ?? []).map(reactionSenderLabel).joined(separator: ", ")
+                Text("\(option.label): \(names.isEmpty ? "no votes" : names)")
+                    .font(theme.font(12))
+                    .foregroundStyle(theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, lane)
+                    .accessibilityIdentifier("poll-voters")
+            }
+        }
     }
 
     /// Display name for a reaction sender id (`user:…` / `agent:…`).

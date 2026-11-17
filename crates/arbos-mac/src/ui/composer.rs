@@ -7259,6 +7259,22 @@ mod overlay_tests {
             c.fill_poll_for_test("Where?", &["Lisbon", "Berlin"], cx)
         });
         settle(&state, &shell, vcx);
+        // The two switches under the options: who voted is hidden and there is no time
+        // limit until the author says otherwise.
+        let switches = |vcx: &mut gpui::VisualTestContext| {
+            composer.read_with(&*vcx, |c, _| {
+                let draft = c.poll.as_ref().expect("the form is open");
+                (draft.show_voters, draft.duration)
+            })
+        };
+        assert_eq!(switches(vcx), (false, 0));
+        for selector in ["composer-poll-show-voters", "composer-poll-duration"] {
+            let row = vcx.debug_bounds(selector).expect(selector).center();
+            vcx.simulate_click(row, none);
+            settle(&state, &shell, vcx);
+        }
+        assert_eq!(switches(vcx), (true, 1), "shown, and closing in an hour");
+
         let send = vcx.debug_bounds("composer-poll-send").unwrap().center();
         vcx.simulate_click(send, none);
         settle(&state, &shell, vcx);

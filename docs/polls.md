@@ -296,7 +296,58 @@ and builds without polls.
 A row arriving whole that the relay already attested (a heal of lost history) carries its votes
 as they are, as it carries its sender.
 
-**Not built:** closing a poll (a Loro doc has no server order to say which votes came after the
-close, and a refused push is re-sent forever by an honest device, so the relay cannot refuse a
-late vote), server channels, native Matrix people chats, the agent tools, names of voters on
-iPhone, deleting a poll from iPhone.
+**Not built:** server channels, native Matrix people chats, the agent tools. Closing, voter
+names on iPhone and deleting from iPhone came later: section 11.
+
+## 11. Replies, visibility, closing (2026-11-17)
+
+Asked for by a tester on 2026-11-14: reply to a poll, choose whether who voted is shown, remove
+a poll, an optional duration. Closing by hand was already planned.
+
+**Stored shape, added.** All optional, so a poll stored before them still reads:
+
+- `poll.showVoters: bool`, written by every build since. It is "Show who voted", fixed with
+  the poll like the question. Its presence also marks a *timed* poll: one whose votes carry a
+  time and which can be closed. A poll without it is counts-only and never closes.
+- `poll.closesAt: ms`, when the poll closes by itself; absent runs until closed by hand. An
+  integer in `1..=TIME_MAX` (2100-01-01). The composers offer 1 hour, 1 day, 1 week.
+- `"voteAt|<sender>": ms` on the message, written with each vote on a timed poll: the voter's
+  device clock at the moment of the vote.
+- `pollClosed: ms` on the message: the author's manual close, by the author's device clock.
+
+**The close rule** lives in `project_poll`, the one reducer every reader uses. On a timed poll a
+vote counts when it has a time and that time is not after the deadline, the earlier of
+`closesAt` and `pollClosed`. It reads only the row, never the reader's clock, so every reader
+of the same row shows the same count. The writers (`set_poll_vote`, `close_poll`) refuse once
+their own clock is past the deadline, and `close_poll` refuses anyone but the row's `sender`.
+
+**Relay.** `pollClosed` is the author's to write, by the relay's record of who posted the row
+(`not_yours` otherwise), must be a time and cannot be taken off (`bad_poll`). `voteAt|<x>` is
+x's to write, like the vote, and a vote on a timed poll must carry one (`bad_vote`). The relay
+does **not** refuse a vote pushed after the close: section 10's reason stands, an honest device
+may be delivering a vote cast before it, and a refused push is re-sent forever.
+
+**What clock is trusted, and its limits.** The voter's device clock for a vote, the author's
+for a close; `closesAt` is absolute. Nothing checks them against a server clock, because a
+Loro doc has none. So: a device whose clock runs behind can vote a little after the close and
+be counted; a modified client can backdate its own vote (not anyone else's) to before the
+close. One vote per person is one key, so a vote *changed* after the close is not counted at
+all — the earlier choice is gone from the key. Only the voter can do that to their own vote,
+and an honest build refuses the write; the window is a device that has not yet received a
+manual close. Votes are not anonymous in storage: each is a field named after its voter, which
+every member's device and the relay hold. "Show who voted" off means the apps do not display
+the names, nothing stronger.
+
+**Older builds** read a poll through the strict validator, which rejects the new `showVoters`
+field, so a poll posted by a new build is plain text to them ("Poll: question / 1. … / 2. …"):
+readable, not votable, and nothing they write can alter it. This is deliberate. A build that
+does not know about closing would otherwise keep offering votes on a closed poll and would
+show voter names on hover (Mac) for a poll whose author hid them. The relay has to run this
+change before the apps do: a relay without it refuses the new shape as `bad_poll`.
+
+**Replies and removal.** A poll row takes the ordinary message menu: Reply (the quote reads
+"Poll: <question>"), Delete for its author and the chat's moderators, no Edit.
+
+**Not built:** editing a poll. The poll field is written once and the relay refuses a rewrite
+(`poll_fixed`); allowing it while there are no votes needs a rule for a vote and an edit
+written apart and merged later.

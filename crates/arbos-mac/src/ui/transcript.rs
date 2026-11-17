@@ -529,6 +529,14 @@ pub fn first_words(line: &str, max_chars: usize) -> String {
 /// The message flattened to one line ([`one_line`]) and cut to `max_chars`;
 /// an attachment-only message names its file, an empty one says "Message".
 pub fn message_line(message: &Message, max_chars: usize) -> String {
+    // A poll is quoted by its question, not by the list of options its text part spells out
+    // (tester report, 2026-11-14).
+    if let Some(question) = message.parts.iter().find_map(|p| match p {
+        Part::Poll { question, .. } => Some(question),
+        _ => None,
+    }) {
+        return first_words(&format!("Poll: {question}"), max_chars);
+    }
     let line = one_line(&message.plain_text());
     let line = if line.is_empty() {
         match message.parts.iter().find_map(|p| match p {
@@ -748,6 +756,13 @@ pub enum RowKind {
         multiple: bool,
         /// Whose poll, when it is not mine.
         by: Option<String>,
+        /// "Show who voted": the author's choice, fixed with the poll. Off shows counts only.
+        show_voters: bool,
+        /// It can be closed (every poll posted since closing exists).
+        timed: bool,
+        /// When it closes by itself (ms), and when its author closed it by hand.
+        closes_at: Option<i64>,
+        closed_at: Option<i64>,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
@@ -3589,7 +3604,15 @@ impl Transcript {
                 options,
                 multiple,
                 by,
+                show_voters,
+                timed,
+                closes_at,
+                closed_at,
             } => {
+                // Closed by hand or by its time. Drawn from this Mac's clock; the counts are
+                // the reducer's, which goes by each vote's own time.
+                let now = arbos_core::ids::now_ms();
+                let closed = closed_at.is_some() || closes_at.is_some_and(|t| now >= t);
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let look = CardLook::of(&theme);
@@ -3616,17 +3639,22 @@ impl Transcript {
                     let (state, chat, message_id) =
                         (self.state.clone(), chat_id.clone(), row.message_id.clone());
                     let selector: SharedString = format!("poll-option#{id}").into();
+                    let state_of_row = match (on, closed) {
+                        (true, _) => RowState::Chosen,
+                        (false, false) => RowState::Open,
+                        (false, true) => RowState::Faded,
+                    };
                     list = list.child(
                         option_row(
                             format!("{}#{id}", row.id),
                             Some(letter(ix)),
                             label,
-                            if on { RowState::Chosen } else { RowState::Open },
+                            state_of_row,
                             ix > 0,
                             &look,
                         )
                         .debug_selector(move || selector.to_string())
-                        .cursor_pointer()
+                        .when(!closed, |el| el.cursor_pointer())
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -3634,21 +3662,34 @@ impl Transcript {
                                 .text_color(theme.text_muted)
                                 .child(voters.len().to_string()),
                         )
-                        // Who voted for it, behind a hover — the reaction chip's tip.
-                        .when(!voters.is_empty(), |el| {
+                        // Who voted for it, behind a hover — the reaction chip's tip — and
+                        // only where the author chose "Show who voted".
+                        .when(show_voters && !voters.is_empty(), |el| {
                             el.tooltip(move |_, cx| {
                                 cx.new(|_| ReactionSendersTip(names.clone())).into()
                             })
                         })
-                        .on_click(move |_, _, cx| {
-                            let (chat, message_id, next) =
-                                (chat.clone(), message_id.clone(), next.clone());
-                            state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                        .when(!closed, |el| {
+                            el.on_click(move |_, _, cx| {
+                                let (chat, message_id, next) =
+                                    (chat.clone(), message_id.clone(), next.clone());
+                                state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                            })
                         }),
                     );
                 }
-                let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
-                let rule = if multiple { "pick any" } else { "pick one" };
+                let mine_to_close = by.is_none() && timed && !closed;
+                let foot = poll_foot(
+                    by.as_deref(),
+                    voted,
+                    multiple,
+                    show_voters,
+                    closed,
+                    closes_at.map(|t| t - now),
+                );
+                let (state, chat, message_id) =
+                    (self.state.clone(), chat_id.clone(), row.message_id.clone());
+                let close_id = SharedString::from(format!("{}-close", row.id));
                 let card = card_frame(format!("{}-card", row.id), &look.palette)
                     .debug_selector(|| "poll-card".into())
                     .child(card_header("", &question, None, &look.palette, &theme))
@@ -3656,9 +3697,35 @@ impl Transcript {
                     .child(
                         div()
                             .px(px(1.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
                             .text_size(px(TEXT_SMALL))
                             .text_color(look.palette.badge_ink)
-                            .child(format!("{whose} · {voted} voted · {rule}")),
+                            .child(div().min_w_0().child(foot))
+                            // The author's close: quiet text on the foot's line, no confirm
+                            // step (the card says "closed" at once).
+                            .when(mine_to_close, |el| {
+                                el.child(
+                                    div()
+                                        .id(close_id)
+                                        .debug_selector(|| "poll-close".into())
+                                        .flex_shrink_0()
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .hover(|s| s.opacity(0.7))
+                                        .child("Close poll")
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let (chat, message_id) =
+                                                (chat.clone(), message_id.clone());
+                                            state.update(cx, |s, cx| {
+                                                s.close_poll(chat, message_id, cx)
+                                            });
+                                        }),
+                                )
+                            }),
                     );
                 // Right-click is the message menu, as on a bubble: its author deletes it there.
                 let card = self.menu_target(card, &row.message_id, cx);
@@ -3940,6 +4007,38 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
     } else {
         assistant_slot(bubble)
     }
+}
+
+/// The line under a poll's options: "Ana's poll · 3 voted · pick one · names shown · closes
+/// in 2 h", or "… · closed" once it is. `left_ms` is the time to its own close, when it has one.
+fn poll_foot(
+    by: Option<&str>,
+    voted: usize,
+    multiple: bool,
+    show_voters: bool,
+    closed: bool,
+    left_ms: Option<i64>,
+) -> String {
+    let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
+    let rule = match (closed, multiple) {
+        (true, _) => "closed",
+        (false, true) => "pick any",
+        (false, false) => "pick one",
+    };
+    let mut foot = format!("{whose} · {voted} voted · {rule}");
+    if show_voters {
+        foot.push_str(" · names shown");
+    }
+    if let Some(left) = left_ms.filter(|_| !closed) {
+        let minutes = (left / 60_000).max(1);
+        let left = match minutes {
+            m if m >= 2 * 24 * 60 => format!("{} days", m / (24 * 60)),
+            m if m >= 60 => format!("{} h", m / 60),
+            m => format!("{m} min"),
+        };
+        foot.push_str(&format!(" · closes in {left}"));
+    }
+    foot
 }
 
 /// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
@@ -4869,8 +4968,15 @@ pub fn build_rows_with_cache(
                         options,
                         max,
                         votes,
+                        show_voters,
+                        closes_at,
+                        closed_at,
                         ..
                     } => Some(RowKind::Poll {
+                        show_voters: *show_voters == Some(true),
+                        timed: show_voters.is_some(),
+                        closes_at: *closes_at,
+                        closed_at: *closed_at,
                         question: question.clone(),
                         options: options
                             .iter()
@@ -12098,7 +12204,14 @@ mod poll_rows_tests {
     #[test]
     fn a_poll_is_one_card_row_with_its_votes_and_no_text_bubble() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
         let from = |user: &str| UserMessageOpts {
             sender: Some(format!("user:{user}")),
             sender_name: Some("Ana".into()),
@@ -12140,10 +12253,25 @@ mod poll_rows_tests {
             options,
             multiple,
             by,
+            show_voters,
+            timed,
+            closes_at,
+            closed_at,
         } = &rows[1].kind
         else {
             panic!("the poll row is a poll card");
         };
+        assert!(
+            *show_voters && *timed,
+            "the author's choice rides on the row"
+        );
+        assert_eq!(
+            (*closes_at, *closed_at),
+            (None, None),
+            "open, no time limit"
+        );
+        // A reply quotes the poll by its question, not by its list of options.
+        assert_eq!(quote_text(&messages[0]), "Poll: Where?");
         assert_eq!(question, "Where?");
         assert_eq!(by.as_deref(), Some("Ana"));
         assert!(!multiple);
@@ -12166,7 +12294,14 @@ mod poll_rows_tests {
     #[test]
     fn a_build_without_polls_reads_the_row_as_its_plain_text() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         doc.transact(|d| {
             d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
                 .unwrap();
@@ -12178,6 +12313,30 @@ mod poll_rows_tests {
         let message: Message = serde_json::from_value(row).expect("the row still reads");
         assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
         assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
+    #[test]
+    fn the_foot_says_whose_poll_how_many_voted_and_whether_it_is_open() {
+        assert_eq!(
+            poll_foot(None, 0, false, false, false, None),
+            "Your poll · 0 voted · pick one"
+        );
+        assert_eq!(
+            poll_foot(Some("Ana"), 3, true, true, false, Some(2 * 3_600_000 + 5)),
+            "Ana's poll · 3 voted · pick any · names shown · closes in 2 h"
+        );
+        assert_eq!(
+            poll_foot(None, 1, false, false, false, Some(30_000)),
+            "Your poll · 1 voted · pick one · closes in 1 min"
+        );
+        assert_eq!(
+            poll_foot(None, 1, false, false, false, Some(7 * 24 * 3_600_000)),
+            "Your poll · 1 voted · pick one · closes in 7 days"
+        );
+        assert_eq!(
+            poll_foot(Some("Ana"), 3, true, false, true, Some(-5)),
+            "Ana's poll · 3 voted · closed"
+        );
     }
 
     #[test]

@@ -32,8 +32,10 @@
 //! clocks, which frontier they descend from — it can also shape at will. The relay's own
 //! record of what it was told is the only part of the picture the pusher did not write.
 
-use arbos_core::doc::{MessageChanges, POLL_FIELD, POLL_VOTE_PREFIX};
-use arbos_core::poll::Poll;
+use arbos_core::doc::{
+    MessageChanges, POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+};
+use arbos_core::poll::{self, Poll};
 
 use crate::auth::Principal;
 use crate::moderation;
@@ -337,6 +339,16 @@ pub fn check_push(
 /// - A vote is the field `vote|<voter>`, and the voter has to be a name this socket may write
 ///   under and a member of the chat. The name in the key is never taken on trust.
 /// - One vote per person is the storage itself: one key each, last write wins.
+/// - A vote's time (`voteAt|<voter>`) is the voter's to write like the vote, and a vote on a
+///   timed poll has to carry one.
+/// - The manual close (`pollClosed`) is the author's alone to write, is a time, and is never
+///   taken back off.
+///
+/// What is *not* refused is a vote that arrives after the poll closed. A device that voted
+/// offline before the close pushes it afterwards, and a refused push is re-sent forever, so
+/// refusing by the relay's clock would strand an honest device. Late votes are stored and
+/// every reader's reducer leaves them out (`arbos_core::doc::project_poll`), by the vote's
+/// own time — which is the voter's device clock, so a modified client can backdate one.
 ///
 /// The one allowance is the one the insert arms make: a row arriving whole that the relay has
 /// already attested is history a heal carries, and it carries the votes on it. A device cannot
@@ -389,13 +401,48 @@ fn check_polls(
             written
         };
         for key in votes {
-            let Some(voter) = key.strip_prefix(POLL_VOTE_PREFIX) else {
+            if key == POLL_CLOSED_FIELD {
+                if fields.get(key).and_then(poll::time).is_none() {
+                    return refuse(
+                        "bad_poll",
+                        format!("the close on {id} is not a time, or was taken off"),
+                    );
+                }
+                // The relay's record of who posted the row; the name on the row only where
+                // the record does not reach.
+                let author = state
+                    .db
+                    .message_author(chat_id, id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        let row = changes.ids_after.iter().find(|(i, _)| i == id);
+                        row.and_then(|(_, sender)| sender.clone())
+                    });
+                if !attested && !author.is_some_and(|a| me.owns(state, &a)) {
+                    return refuse(
+                        "not_yours",
+                        format!("the poll on {id} is its author's to close"),
+                    );
+                }
+                continue;
+            }
+            let (voter, valid) = if let Some(voter) = key.strip_prefix(POLL_VOTE_PREFIX) {
+                let timed = !poll.timed()
+                    || fields
+                        .get(format!("{POLL_VOTE_AT_PREFIX}{voter}"))
+                        .and_then(poll::time)
+                        .is_some();
+                let allowed = fields
+                    .get(key)
+                    .is_some_and(|v| poll.selections(v).is_some());
+                (voter, allowed && timed)
+            } else if let Some(voter) = key.strip_prefix(POLL_VOTE_AT_PREFIX) {
+                (voter, fields.get(key).and_then(poll::time).is_some())
+            } else {
                 continue;
             };
-            if !fields
-                .get(key)
-                .is_some_and(|v| poll.selections(v).is_some())
-            {
+            if !valid {
                 return refuse(
                     "bad_vote",
                     format!("the vote on {id} is not a choice that poll allows"),
@@ -1079,7 +1126,14 @@ mod tests {
     }
 
     fn poll() -> Poll {
-        Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap()
+        Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            None,
+        )
+        .unwrap()
     }
 
     fn as_user(user: &str) -> UserMessageOpts {
@@ -1148,7 +1202,16 @@ mod tests {
         let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
         let good = serde_json::to_value(poll()).unwrap();
         type Edit = fn(&mut serde_json::Value);
-        let cases: [(&str, Edit); 5] = [
+        let cases: [(&str, Edit); 8] = [
+            ("a visibility flag that is not a boolean", |p| {
+                p["showVoters"] = json!("yes")
+            }),
+            ("a closing time that is not a time", |p| {
+                p["closesAt"] = json!("tomorrow")
+            }),
+            ("a closing time out of range", |p| {
+                p["closesAt"] = json!(arbos_core::poll::TIME_MAX + 1)
+            }),
             ("an unknown field", |p| p["anonymous"] = json!(true)),
             ("one option", |p| {
                 p["options"].as_array_mut().unwrap().truncate(1)
@@ -1232,6 +1295,12 @@ mod tests {
         let state = test_state(AuthMode::Github);
         let (mut room, chat, alice, _bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
         let alices = format!("{POLL_VOTE_PREFIX}user:{alice}");
+        // Her vote's time is already on the row, so what is judged below is the vote.
+        room.set(
+            "p1",
+            &format!("{POLL_VOTE_AT_PREFIX}user:{alice}"),
+            json!(5),
+        );
 
         let c = room.set("p1", &alices, json!(["2"]));
         assert_eq!(
@@ -1333,6 +1402,80 @@ mod tests {
             )),
             Some("bad_poll")
         );
+    }
+
+    /// A vote on a timed poll carries its time, and the time is the voter's field like the
+    /// vote is: nobody moves someone else's vote to the far side of a close.
+    #[test]
+    fn a_votes_time_is_required_and_is_the_voters_to_write() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let check = |c: &MessageChanges, who: &Principal| {
+            code(&check_push(&state, who, PEOPLE_PROJECT, &chat, false, c))
+        };
+        let c = room.set("p1", &format!("{POLL_VOTE_PREFIX}user:{bob}"), json!(["1"]));
+        assert_eq!(check(&c, &bob_dev), Some("bad_vote"), "a vote with no time");
+
+        let c = room.push(|d| {
+            d.set_poll_vote("p1", &format!("user:{alice}"), &["1".to_owned()])
+                .unwrap()
+        });
+        assert_eq!(check(&c, &alice_dev), None);
+        let alices = format!("{POLL_VOTE_AT_PREFIX}user:{alice}");
+        let c = room.set("p1", &alices, json!(1));
+        assert_eq!(
+            check(&c, &bob_dev),
+            Some("not_yours"),
+            "Bob backdating Alice"
+        );
+        for bad in [json!("yesterday"), json!(0), json!(-1), json!(1.5)] {
+            let c = room.set("p1", &alices, bad.clone());
+            assert_eq!(check(&c, &alice_dev), Some("bad_vote"), "{bad}");
+        }
+    }
+
+    /// Closing is the author's alone, by the relay's record of who posted the poll; the
+    /// close is a time and stays on. A vote pushed after it is not refused — the reducer
+    /// leaves it out — because an honest device may be delivering a vote cast before.
+    #[test]
+    fn only_the_author_closes_a_poll() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let check = |c: &MessageChanges, who: &Principal, heal: bool| {
+            code(&check_push(&state, who, PEOPLE_PROJECT, &chat, heal, c))
+        };
+        let c = room.set("p1", POLL_CLOSED_FIELD, json!(1_800_000_000_000i64));
+        assert_eq!(check(&c, &bob_dev, false), Some("not_yours"));
+        assert_eq!(check(&c, &bob_dev, true), Some("not_yours"), "a heal claim");
+        assert_eq!(check(&c, &alice_dev, false), None);
+
+        for bad in [json!("now"), json!(true), json!(0), json!(null)] {
+            let c = room.set("p1", POLL_CLOSED_FIELD, bad.clone());
+            assert_eq!(check(&c, &alice_dev, false), Some("bad_poll"), "{bad}");
+        }
+        let c = room.push(|d| {
+            d.find_message("p1")
+                .unwrap()
+                .delete(POLL_CLOSED_FIELD)
+                .unwrap();
+        });
+        assert_eq!(check(&c, &alice_dev, false), Some("bad_poll"), "reopening");
+
+        // Closed for real, through the writer; Bob's vote written before he heard arrives.
+        let mut bobs = ChatDoc::new(Some(2), false);
+        bobs.import(&room.doc.snapshot()).unwrap();
+        room.push(|d| d.close_poll("p1", &format!("user:{alice}")).unwrap());
+        bobs.transact(|d| {
+            d.set_poll_vote("p1", &format!("user:{bob}"), &["1".to_owned()])
+                .unwrap()
+        });
+        let update = bobs.snapshot();
+        let before = room.doc.frontiers();
+        room.doc.import(&update).unwrap();
+        let c = room
+            .doc
+            .messages_changed(&before, &room.doc.frontiers(), &room.ids);
+        assert_eq!(check(&c, &bob_dev, false), None, "stored, and not counted");
     }
 
     #[test]

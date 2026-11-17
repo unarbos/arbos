@@ -4252,7 +4252,9 @@ final class AppModel: ObservableObject {
         do {
             if let poll {
                 try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
-                                          multiple: poll.multiple, deviceId: deviceId, author: author, mentions: mentions)
+                                          multiple: poll.multiple, showVoters: poll.showVoters,
+                                          closesInMs: poll.closesInMs, deviceId: deviceId, author: author,
+                                          mentions: mentions)
             } else {
                 try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                           author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
@@ -6087,6 +6089,15 @@ final class AppModel: ObservableObject {
 
     /// My vote on a poll: `selections` replaces whatever I held; empty retracts it.
     func votePoll(chatId: Id, messageId: Id, selections: [String]) {
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture, docs[chatId] == nil, let me = myUserId {
+            fixturePoll(chatId: chatId, messageId: messageId) { poll in
+                poll.votes = poll.votes.mapValues { $0.filter { $0 != me } }
+                for id in selections { poll.votes[id, default: []].append(me) }
+            }
+            return
+        }
+        #endif
         guard let me = myUserId, let doc = docs[chatId] else { return }
         do {
             try doc.setPollVote(messageId: messageId, sender: me, selections: selections)
@@ -6094,6 +6105,37 @@ final class AppModel: ObservableObject {
             Haptics.pick()
         } catch {
             fail("cast your vote", error)
+        }
+    }
+
+    #if DEBUG || ARBOS_FIXTURE
+    /// The fixture has no chat doc: a vote or a close rewrites the row's poll part in place.
+    private func fixturePoll(chatId: Id, messageId: Id, _ change: (inout Poll) -> Void) {
+        guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }),
+              let p = list[i].parts.firstIndex(where: { $0.pollValue != nil }),
+              case .poll(let id, var poll) = list[i].parts[p] else { return }
+        change(&poll)
+        list[i].parts[p] = .poll(id: id, poll: poll)
+        messages[chatId] = list
+        Haptics.pick()
+    }
+    #endif
+
+    /// Close my own poll, now: it keeps its counts and takes no more votes.
+    func closePoll(chatId: Id, messageId: Id) {
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture, docs[chatId] == nil {
+            fixturePoll(chatId: chatId, messageId: messageId) { $0.closedAt = nowMs() }
+            return
+        }
+        #endif
+        guard let me = myUserId, let doc = docs[chatId] else { return }
+        do {
+            try doc.closePoll(messageId: messageId, sender: me)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail("close the poll", error)
         }
     }
 

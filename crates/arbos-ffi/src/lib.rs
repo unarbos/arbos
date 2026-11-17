@@ -277,7 +277,7 @@ pub struct DecodedFrame {
 /// are not a poll within bounds — the composer's one validity check (`docs/polls.md`).
 #[uniffi::export]
 pub fn poll_text(question: String, options: Vec<String>, multiple: bool) -> Option<String> {
-    Poll::new(&question, &options, multiple).map(|p| p.fallback_text())
+    Poll::new(&question, &options, multiple, false, None).map(|p| p.fallback_text())
 }
 
 /// Encode one binary room frame. `header_json` must be a JSON object.
@@ -872,17 +872,26 @@ impl ChatDoc {
     }
 
     /// Append a poll message (`docs/polls.md`): its text part is the poll in plain words.
-    /// Does not commit. Errors when the fields are not a poll within bounds.
+    /// `show_voters` is "Show who voted"; `closes_in_ms` is how long the poll runs from now
+    /// (at most a week), `None` until its author closes it. Does not commit. Errors when the
+    /// fields are not a poll within bounds.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_poll_message(
         &self,
         id: String,
         question: String,
         options: Vec<String>,
         multiple: bool,
+        show_voters: bool,
+        closes_in_ms: Option<i64>,
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
-        let poll = Poll::new(&question, &options, multiple)
+        if closes_in_ms.is_some_and(|d| !(1..=arbos_core::poll::DURATION_MAX_MS).contains(&d)) {
+            return Err(write_err("not a poll within bounds"));
+        }
+        let closes_at = closes_in_ms.map(|d| arbos_core::ids::now_ms() + d);
+        let poll = Poll::new(&question, &options, multiple, show_voters, closes_at)
             .ok_or_else(|| write_err("not a poll within bounds"))?;
         self.lock_doc()
             .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
@@ -898,6 +907,14 @@ impl ChatDoc {
     ) -> Result<(), FfiError> {
         self.lock_doc()
             .set_poll_vote(&message_id, &sender, &selections)
+            .map_err(write_err)
+    }
+
+    /// The author closes their poll, now: later votes do not count. Does not commit. Errors
+    /// when `sender` did not post it or it is not a poll that can be closed.
+    pub fn close_poll(&self, message_id: String, sender: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .close_poll(&message_id, &sender)
             .map_err(write_err)
     }
 
@@ -1266,15 +1283,33 @@ mod tests {
                 " ".into(),
                 options.clone(),
                 false,
+                false,
+                None,
                 "dev".into(),
                 opts.clone()
             )
             .is_err());
+        assert!(
+            doc.insert_poll_message(
+                "p0".into(),
+                "Where?".into(),
+                options.clone(),
+                false,
+                false,
+                Some(arbos_core::poll::DURATION_MAX_MS + 1),
+                "dev".into(),
+                opts.clone()
+            )
+            .is_err(),
+            "longer than a week"
+        );
         doc.insert_poll_message(
             "p1".into(),
             "Where?".into(),
             options,
             false,
+            true,
+            Some(3_600_000),
             "dev".into(),
             opts,
         )
@@ -1289,6 +1324,18 @@ mod tests {
         doc.commit();
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
         assert_eq!(row["parts"][1]["kind"], "poll");
+        assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
+        assert_eq!(row["parts"][1]["showVoters"], true);
+        assert!(row["parts"][1]["closesAt"].as_i64().unwrap() > arbos_core::ids::now_ms());
+
+        // Only its author closes it, and then it takes no vote.
+        assert!(doc.close_poll("p1".into(), "user:b".into()).is_err());
+        doc.close_poll("p1".into(), "user:a".into()).unwrap();
+        assert!(doc
+            .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into()])
+            .is_err());
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert!(row["parts"][1]["closedAt"].as_i64().is_some());
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
     }
 

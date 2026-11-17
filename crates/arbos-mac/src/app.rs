@@ -7459,16 +7459,23 @@ impl AppState {
     }
 
     /// Post a poll in a people chat (`docs/polls.md`). False when it is out of bounds —
-    /// no question, fewer than two options — and nothing was sent.
+    /// no question, fewer than two options — and nothing was sent. `show_voters` is "Show
+    /// who voted"; `closes_in_ms` is how long it runs from now, `None` until I close it.
+    #[allow(clippy::too_many_arguments)] // one call site, the form; the fields are the poll's
     pub fn send_poll(
         &mut self,
         chat_id: Id,
         question: &str,
         options: &[String],
         multiple: bool,
+        show_voters: bool,
+        closes_in_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(poll) = arbos_core::poll::Poll::new(question, options, multiple) else {
+        let closes_at = closes_in_ms.map(|d| arbos_core::ids::now_ms() + d);
+        let Some(poll) =
+            arbos_core::poll::Poll::new(question, options, multiple, show_voters, closes_at)
+        else {
             return false;
         };
         self.command(ClientCommand::SendPoll {
@@ -7492,6 +7499,15 @@ impl AppState {
             chat_id,
             message_id,
             selections,
+        });
+        cx.notify();
+    }
+
+    /// Close my own poll, now: it keeps its counts and takes no more votes.
+    pub fn close_poll(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::ClosePoll {
+            chat_id,
+            message_id,
         });
         cx.notify();
     }

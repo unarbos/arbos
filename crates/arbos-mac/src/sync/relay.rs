@@ -8260,6 +8260,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             };
         }
+        ClientCommand::ClosePoll {
+            chat_id,
+            message_id,
+        } => {
+            let me = format!("user:{}", shared.me_id());
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
+                if let Err(e) = doc.core.transact(|d| d.close_poll(&message_id, &me)) {
+                    eprintln!("relay: poll close: {e:#}");
+                }
+            };
+        }
         ClientCommand::SendMedia {
             chat_id,
             message_id,

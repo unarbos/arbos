@@ -690,8 +690,22 @@ struct Poll: Equatable {
     var max: Int
     /// Option id → the senders (`user:<id>`) who hold it.
     var votes: [String: [String]]
+    /// "Show who voted", the author's choice, fixed with the poll. nil on a poll from before
+    /// the choice existed: counts only, and it cannot be closed.
+    var showVoters: Bool? = nil
+    /// When it closes by itself, and when its author closed it by hand (ms since the epoch).
+    var closesAt: Int64? = nil
+    var closedAt: Int64? = nil
 
     var multiple: Bool { max > 1 }
+    /// Its author can close it (every poll posted since closing exists).
+    var closable: Bool { showVoters != nil }
+
+    /// Closed by hand or by its time, by this phone's clock. The counts are the core
+    /// reducer's, which goes by each vote's own time (`arbos_core::doc::project_poll`).
+    func closed(now: Int64) -> Bool {
+        closedAt != nil || closesAt.map { now >= $0 } == true
+    }
     var voters: Int { Set(votes.values.joined()).count }
 
     /// The option ids `sender` holds, in the poll's order.
@@ -708,9 +722,20 @@ struct Poll: Equatable {
         return multiple ? mine + [id] : [id]
     }
 
-    /// The card's foot: "Ana's poll · 3 voted · pick one".
-    func foot(by name: String?) -> String {
-        "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · \(multiple ? "pick any" : "pick one")"
+    /// The card's foot: "Ana's poll · 3 voted · pick one · names shown · closes in 2 h", or
+    /// "… · closed" once it is.
+    func foot(by name: String?, now: Int64 = nowMs()) -> String {
+        let isClosed = closed(now: now)
+        var foot = "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · "
+            + (isClosed ? "closed" : multiple ? "pick any" : "pick one")
+        if showVoters == true { foot += " · names shown" }
+        if let closesAt, !isClosed {
+            let minutes = Swift.max(1, (closesAt - now) / 60_000)
+            let left = minutes >= 2 * 24 * 60 ? "\(minutes / (24 * 60)) days"
+                : minutes >= 60 ? "\(minutes / 60) h" : "\(minutes) min"
+            foot += " · closes in \(left)"
+        }
+        return foot
     }
 }
 
@@ -719,6 +744,10 @@ struct PollDraft: Equatable {
     var question: String
     var options: [String]
     var multiple: Bool
+    /// "Show who voted". Off: the card shows counts only.
+    var showVoters = false
+    /// How long it runs from the send, nil until its author closes it.
+    var closesInMs: Int64? = nil
 }
 
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
@@ -1720,7 +1749,10 @@ enum DocJSON {
             guard let question = str(pm["question"]), options.count >= 2 else { return .unknown(id: id) }
             let votes = (pm["votes"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
             return .poll(id: id, poll: Poll(question: question, options: options,
-                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes))
+                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes,
+                                            showVoters: pm["showVoters"] as? Bool,
+                                            closesAt: (pm["closesAt"] as? NSNumber)?.int64Value,
+                                            closedAt: (pm["closedAt"] as? NSNumber)?.int64Value))
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))

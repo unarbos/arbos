@@ -1819,6 +1819,15 @@ pub enum Part {
         max: usize,
         #[serde(default)]
         votes: std::collections::BTreeMap<String, Vec<String>>,
+        /// "Show who voted", fixed with the poll. `None` on a poll from before the flag,
+        /// which cannot be closed either.
+        #[serde(default)]
+        show_voters: Option<bool>,
+        /// When it closes by itself (ms), and when its author closed it by hand.
+        #[serde(default)]
+        closes_at: Option<i64>,
+        #[serde(default)]
+        closed_at: Option<i64>,
     },
     #[serde(other)]
     Unknown,

@@ -1,5 +1,6 @@
 //! The composer's poll form (`docs/polls.md`): `+` → "Poll" opens this card above the field, in
-//! a people chat. A question, two to ten options, one switch for multiple answers, Send.
+//! a people chat. A question, two to ten options, a switch for multiple answers, a switch for
+//! showing who voted, how long it runs, Send.
 //!
 //! The bounds are `arbos_core::poll`'s, the same ones the relay checks a pushed poll against:
 //! Send stays faded until [`Poll::new`] would accept what the fields hold.
@@ -17,11 +18,24 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL};
 
 const WIDTH: f32 = 320.0;
 const FIELD_H: f32 = 30.0;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+/// How long a poll runs: the row's label and the time from now, `None` until its author
+/// closes it. A click on the row steps to the next.
+const DURATIONS: [(&str, Option<i64>); 4] = [
+    ("No time limit", None),
+    ("Closes in 1 hour", Some(HOUR_MS)),
+    ("Closes in 1 day", Some(24 * HOUR_MS)),
+    ("Closes in 1 week", Some(7 * 24 * HOUR_MS)),
+];
 
 pub struct PollDraft {
     question: Entity<ComposerInput>,
     options: Vec<Entity<ComposerInput>>,
     multiple: bool,
+    /// "Show who voted". Off: the card shows counts only.
+    pub(super) show_voters: bool,
+    /// Index into [`DURATIONS`].
+    pub(super) duration: usize,
 }
 
 impl Composer {
@@ -64,6 +78,8 @@ impl Composer {
             question,
             options,
             multiple: false,
+            show_voters: false,
+            duration: 0,
         });
         cx.notify();
     }
@@ -96,18 +112,31 @@ impl Composer {
             .iter()
             .map(|o| o.read(cx).text().to_owned())
             .collect();
-        Poll::new(&question, &options, draft.multiple).map(|_| (question, options, draft.multiple))
+        Poll::new(&question, &options, draft.multiple, false, None)
+            .map(|_| (question, options, draft.multiple))
     }
 
     fn send_poll(&mut self, cx: &mut Context<Self>) {
         let Some((question, options, multiple)) = self.drafted_poll(cx) else {
             return;
         };
+        let (show_voters, closes_in) = self
+            .poll
+            .as_ref()
+            .map_or((false, None), |d| (d.show_voters, DURATIONS[d.duration].1));
         let Some(chat) = self.state.read(cx).active_chat_id() else {
             return;
         };
         let sent = self.state.update(cx, |s, cx| {
-            s.send_poll(chat, &question, &options, multiple, cx)
+            s.send_poll(
+                chat,
+                &question,
+                &options,
+                multiple,
+                show_voters,
+                closes_in,
+                cx,
+            )
         });
         if sent {
             self.close_poll(cx);
@@ -165,19 +194,24 @@ impl Composer {
                         .child(label),
                 )
         };
-        // The switch: a box, ticked when several answers are allowed.
-        let tick_box = div()
-            .size(px(14.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.field_border)
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(draft.multiple, |el| {
-                el.bg(theme.primary)
-                    .child(sf_symbols::glyph("checkmark", 9.0, theme.on_primary))
-            });
+        // A switch: a box, ticked when on.
+        let tick_box = |on: bool| {
+            div()
+                .size(px(14.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.field_border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |el| {
+                    el.bg(theme.primary).child(sf_symbols::glyph(
+                        "checkmark",
+                        9.0,
+                        theme.on_primary,
+                    ))
+                })
+        };
         let ready = self.drafted_poll(cx).is_some();
         let header = div()
             .flex()
@@ -260,14 +294,45 @@ impl Composer {
                 )
             })
             .child(
-                quiet_row("poll-multiple", tick_box, "Allow multiple answers").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(draft) = this.poll.as_mut() {
-                            draft.multiple = !draft.multiple;
-                        }
-                        cx.notify();
-                    }),
-                ),
+                quiet_row(
+                    "poll-multiple",
+                    tick_box(draft.multiple),
+                    "Allow multiple answers",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(draft) = this.poll.as_mut() {
+                        draft.multiple = !draft.multiple;
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                quiet_row(
+                    "poll-show-voters",
+                    tick_box(draft.show_voters),
+                    "Show who voted",
+                )
+                .debug_selector(|| "composer-poll-show-voters".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(draft) = this.poll.as_mut() {
+                        draft.show_voters = !draft.show_voters;
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                quiet_row(
+                    "poll-duration",
+                    sf_symbols::glyph("clock", 14.0, theme.text_muted),
+                    DURATIONS[draft.duration].0,
+                )
+                .debug_selector(|| "composer-poll-duration".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(draft) = this.poll.as_mut() {
+                        draft.duration = (draft.duration + 1) % DURATIONS.len();
+                    }
+                    cx.notify();
+                })),
             )
             .child(
                 glass::primary_button("poll-send", "Send poll", &theme)

@@ -894,6 +894,11 @@ pub enum ClientCommand {
         message_id: Id,
         selections: Vec<String>,
     },
+    /// Close my own poll, now: votes written after this do not count.
+    ClosePoll {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// Guide: inject `text` into the agent's currently running turn (`steer` command).
     /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
     Steer {
