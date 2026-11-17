@@ -82,6 +82,8 @@ mod restart_lifetime;
 mod room_health;
 mod rooms;
 mod routines;
+#[cfg(test)]
+mod secret_handoff_purge_tests;
 mod secrets;
 mod settings_audit;
 mod shell_grants;
