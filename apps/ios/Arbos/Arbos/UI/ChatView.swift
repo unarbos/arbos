@@ -421,6 +421,8 @@ struct ChatSession: View {
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
     /// Driven by the transcript's swipe recognizer (`TranscriptSwipeHost`).
     @State private var timeReveal: CGFloat = 0
+    /// Swipe to reply: the one row a left drag is pulling, and how far (`ReplySwipe.offset`).
+    @State private var replyDrag: (row: Id, offset: CGFloat)?
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -2498,6 +2500,16 @@ struct ChatSession: View {
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        case .replyChanged(let rowId, let dx):
+            let offset = NestedHorizontalScroll.claiming ? 0 : ReplySwipe.offset(dx: dx)
+            withTransaction(still) { replyDrag = (rowId, offset) }
+        case .replyEnded(let rowId, let reply):
+            // No overshoot under Reduce Motion.
+            withAnimation(UIAccessibility.isReduceMotionEnabled ? .easeOut(duration: 0.2) : .spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = nil }
+            // The menu's Reply, for the rows the menu offers it on.
+            if reply, !NestedHorizontalScroll.claiming, let row = rows.first(where: { $0.id == rowId }), isMessageRow(row) {
+                beginReply(to: row)
+            }
         case .back:
             BackSwipe.dismissKeyboard()
             dismiss()
@@ -4747,6 +4759,7 @@ extension ChatSession {
             let reply = isMessageRow(row)
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
+                    replyDrag: replyDrag?.row == row.id ? replyDrag?.offset ?? 0 : 0,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,

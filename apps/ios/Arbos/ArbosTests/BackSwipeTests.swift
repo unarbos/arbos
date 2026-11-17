@@ -3,7 +3,8 @@ import XCTest
 
 /// Horizontal gesture rules on the chat screens (Jacob, 2026-10-28: the system's
 /// interactive edge pop is the one owner of the edge; a swipe right anywhere else is an
-/// animated "back"; there is no swipe-to-reply). The edge rule itself is UIKit's — these
+/// animated "back"; there is no swipe-right-to-reply — reply is a swipe LEFT on a bubble,
+/// tester reports 2026-11-13). The edge rule itself is UIKit's — these
 /// pin what our own recognizer leaves alone and what it claims.
 final class BackSwipeTests: XCTestCase {
     private let far = CGPoint(x: 200, y: 400)
@@ -44,6 +45,45 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertFalse(BackSwipe.fullScreenPops(translation: CGSize(width: 90, height: 85), velocity: CGSize(width: 900, height: 0)), "not horizontal enough")
         XCTAssertFalse(BackSwipe.fullScreenPops(translation: CGSize(width: -120, height: 0), velocity: .zero), "left")
         XCTAssertFalse(BackSwipe.fullScreenPops(translation: CGSize(width: 90, height: 10), velocity: CGSize(width: 100, height: 400)), "short and faster vertically: a scroll that wandered")
+    }
+
+    // MARK: Swipe left on a bubble is reply
+
+    func testOnlyAClearLeftPanThatStartedOnABubbleIsAReply() {
+        XCTAssertTrue(ReplySwipe.claims(translation: CGSize(width: -12, height: 0), start: far, onBubble: true))
+        XCTAssertTrue(ReplySwipe.claims(translation: CGSize(width: -10, height: 8), start: far, onBubble: true), "mostly left")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -30, height: 0), start: far, onBubble: false), "off a bubble: the time peek")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: 30, height: 0), start: far, onBubble: true), "right is back, on a bubble too")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -9, height: 9), start: far, onBubble: true), "diagonal: the scroll's")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -3, height: -30), start: far, onBubble: true), "scroll up")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -3, height: 30), start: far, onBubble: true), "scroll down")
+        XCTAssertFalse(ReplySwipe.claims(translation: CGSize(width: -30, height: 0), start: CGPoint(x: 10, y: 400), onBubble: true), "the edge zone is the system's")
+        // The full-screen back still claims a right pan from the same point, whatever is under it.
+        XCTAssertEqual(BackSwipe.fullScreenLock(translation: CGSize(width: 30, height: 0), start: far, composerTop: nil), .claimed)
+    }
+
+    func testAReplySwipeRepliesAtTheThresholdAndResistsPastIt() {
+        let t = ReplySwipe.threshold
+        XCTAssertFalse(ReplySwipe.replies(dx: -(t - 1)), "let go short: springs back")
+        XCTAssertTrue(ReplySwipe.replies(dx: -t))
+        XCTAssertFalse(ReplySwipe.replies(dx: 200), "never to the right")
+        XCTAssertEqual(ReplySwipe.offset(dx: 20), 0, "the row never moves right")
+        XCTAssertEqual(ReplySwipe.offset(dx: -30), 30, "1:1 under the threshold")
+        XCTAssertEqual(ReplySwipe.offset(dx: -(t + 50)), t + 10, "a fifth of the excess")
+        XCTAssertEqual(ReplySwipe.offset(dx: -1000), t + 24, "and at most 24 pt of it")
+    }
+
+    /// "On a bubble" is the bubble's own frame: a marker view in the window under the point.
+    func testTheBubbleUnderAPointIsFoundByItsMarker() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let marker = ReplySwipeBubble.Marker(frame: CGRect(x: 200, y: 300, width: 180, height: 60))
+        marker.row = "row-a"
+        window.addSubview(marker)
+        ReplySwipe.bubbles.add(marker)
+        XCTAssertEqual(ReplySwipe.row(at: CGPoint(x: 250, y: 320), in: window), "row-a")
+        XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 100, y: 320), in: window), "the empty side of the row")
+        XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 250, y: 380), in: window), "the gap under it")
+        XCTAssertNil(ReplySwipe.row(at: CGPoint(x: 250, y: 320), in: UIWindow()), "another window's bubble")
     }
 
     /// The finger that held a picture into the message menu lifts as a tap; that tap must not

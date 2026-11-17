@@ -1524,6 +1524,8 @@ struct RowView: View, Equatable {
     var people: Bool = false
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
+    /// How far this row is pulled left by a reply swipe (`ReplySwipe.offset`); 0 at rest.
+    var replyDrag: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// A tap on a "Messaged ◉ X" hand-off notice: open the destination chat.
@@ -1567,6 +1569,7 @@ struct RowView: View, Equatable {
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
+            && lhs.replyDrag == rhs.replyDrag
             && lhs.highlighted == rhs.highlighted
             && lhs.searchHit == rhs.searchHit
             && lhs.mentions.stamp == rhs.mentions.stamp
@@ -1668,6 +1671,20 @@ struct RowView: View, Equatable {
                     .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
+            }
+        }
+        // Swipe to reply (tester reports, 2026-11-13): drag a bubble left → the row follows
+        // and the arrow comes into the space it leaves, full ink once a release would reply.
+        .offset(x: -replyDrag)
+        .overlay(alignment: .trailing) {
+            if replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(replyDrag >= ReplySwipe.threshold ? theme.text : theme.muted)
+                    .frame(width: replyDrag)
+                    .opacity(Double(min(1, replyDrag / (ReplySwipe.threshold * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
         }
         .accessibilityElement(children: .contain)
@@ -2072,6 +2089,11 @@ struct RowView: View, Equatable {
     /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]).
     @ViewBuilder
     private func replyCountBadge(userBubble: Bool) -> some View {
+        // This overlay spans exactly the bubble, on every kind of bubble: swipe to reply
+        // reads the bubble's frame from here (`ReplySwipeBubble`; tester reports, 2026-11-13).
+        if isMessage {
+            ReplySwipeBubble(row: row.id).allowsHitTesting(false).accessibilityHidden(true)
+        }
         if row.replyCount > 0 {
             Text("\(row.replyCount)")
                 .font(theme.font(11, weight: .semibold))

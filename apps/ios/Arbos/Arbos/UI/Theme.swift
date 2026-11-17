@@ -16,6 +16,8 @@ enum Haptics {
 
     /// Message sent, dictation finished.
     static func send() { light.impactOccurred() }
+    /// A reply swipe reached its threshold (`ReplySwipe`).
+    static func replyArmed() { light.impactOccurred() }
     /// Hold-to-talk started.
     static func recordStart() { medium.impactOccurred() }
     /// Card option picked, chip toggled.

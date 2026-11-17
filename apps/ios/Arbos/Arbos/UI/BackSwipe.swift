@@ -19,8 +19,14 @@
 //    anything but a clear rightward pan.
 // 3. A swipe to the left on the transcript peeks the message times (iMessage); the same
 //    recognizer class, on the scroll view, declines every rightward or vertical pan.
+// 4. A swipe to the left that starts ON a message bubble is reply (`ReplySwipe`; tester
+//    reports 2026-11-13, poll 2026-11-14): the row follows the finger, and a release past
+//    the threshold arms the composer's reply as the menu's Reply does. Off a bubble —
+//    gutters, empty space, between rows — a left swipe is still the time peek.
 //
-// There is no swipe-to-reply. Reply stays on long-press and in the actions menu.
+// There is no swipe-RIGHT-to-reply: that one was removed on 2026-10-28 and stays removed,
+// a rightward swipe is "back" on a bubble as everywhere else. Reply is also on long-press
+// and in the actions menu.
 //
 // A drag that starts on something tappable — a sender's avatar above all — is the swipe, not
 // the tap: both back recognizers declare themselves simultaneous with the presses and taps
@@ -187,6 +193,64 @@ enum ChatGestures {
         #else
         return true
         #endif
+    }
+}
+
+/// Swipe-to-reply, as data (unit-tested in `BackSwipeTests`): a LEFT drag that starts on a
+/// message bubble (tester reports, 2026-11-13; poll 2026-11-14). Left, not right: a swipe
+/// right is "back" everywhere on a chat screen, bubbles included.
+enum ReplySwipe {
+    /// Pull at which a release replies; the haptic marks it.
+    static let threshold: CGFloat = 56
+
+    /// Is a drag decided at `BackSwipe.lockDistance` a reply swipe? Only a clear pan to the
+    /// left (the transcript's 1.15× rule, so a vertical pan is the scroll's) that started on
+    /// a bubble and outside the edge zone (`start` in the window).
+    static func claims(translation: CGSize, start: CGPoint, onBubble: Bool) -> Bool {
+        let dx = translation.width
+        return onBubble && !BackSwipe.startsAtEdge(start) && dx < 0 && abs(dx) > abs(translation.height) * 1.15
+    }
+
+    /// How far the row sits left of rest for a drag of `dx` (negative = left): 1:1 up to
+    /// the threshold, then a fifth of the excess, at most 24 pt more — the time peek's feel.
+    static func offset(dx: CGFloat) -> CGFloat {
+        let raw = max(0, -dx)
+        return raw <= threshold ? raw : threshold + min(24, (raw - threshold) * 0.2)
+    }
+
+    /// Does letting go at `dx` reply?
+    static func replies(dx: CGFloat) -> Bool { -dx >= threshold }
+
+    /// The bubbles on screen, by their marker views (`ReplySwipeBubble`): the bubble's own
+    /// frame, so the empty side of a row and the gaps between rows are not "on a bubble".
+    /// A registry of live views and not a SwiftUI gesture on the row: every press gesture
+    /// tried there took the vertical pan from the scroll view (simulator, 2026-11-17).
+    static let bubbles = NSHashTable<ReplySwipeBubble.Marker>.weakObjects()
+
+    /// The message row whose bubble is under `point` (window coordinates), if any.
+    static func row(at point: CGPoint, in window: UIWindow?) -> Id? {
+        guard let window else { return nil }
+        return bubbles.allObjects.first { $0.window === window && $0.bounds.contains($0.convert(point, from: nil)) }?.row
+    }
+}
+
+/// Marks one message bubble's frame for `ReplySwipe.row(at:in:)`. Draws nothing and takes
+/// no touches.
+struct ReplySwipeBubble: UIViewRepresentable {
+    let row: Id
+
+    func makeUIView(context: Context) -> Marker {
+        let v = Marker()
+        v.isUserInteractionEnabled = false
+        v.row = row
+        ReplySwipe.bubbles.add(v)
+        return v
+    }
+
+    func updateUIView(_ uiView: Marker, context: Context) { uiView.row = row }
+
+    final class Marker: UIView {
+        var row: Id = ""
     }
 }
 
@@ -764,12 +828,17 @@ enum TranscriptSwipeEvent {
     /// The time peek follows the finger: `dx` is the translation (negative = left).
     case timeChanged(dx: CGFloat)
     case timeEnded
+    /// A left drag that began on message row `row` follows the finger (`ReplySwipe`).
+    case replyChanged(row: Id, dx: CGFloat)
+    /// It was let go — past the threshold (`reply`) or not — or taken away.
+    case replyEnded(row: Id, reply: Bool)
     /// A clear swipe right on the transcript, away from the edge, ended far enough: back.
     case back
 }
 
 /// One recognizer on the transcript's `UIScrollView` for the two horizontal swipes inside
-/// it — swipe left anywhere on the transcript peeks the message times, swipe right (away
+/// it — swipe left on a bubble is reply, swipe left anywhere else on the transcript peeks
+/// the message times, swipe right (away
 /// from the edge zone, which is the system pop's) is "back" — instead of SwiftUI drags.
 /// Sits as the `.background` of the ScrollView's content. It is on the scroll view itself,
 /// beside the scroll pan, so the two decide on equal footing; a recognizer on an ancestor
@@ -824,8 +893,12 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         var onScrollPanBegan: () -> Void
         private weak var scroll: UIScrollView?
         private var recognizer: DirectionalSwipeRecognizer?
-        private enum Mode { case time, back }
+        private enum Mode { case time, back, reply(Id) }
         private var mode: Mode?
+        /// The message row whose bubble the tracked finger came down on (`ReplySwipe.row`).
+        private var touchedRow: Id?
+        /// The threshold haptic, once per drag.
+        private var replyMarked = false
         private let backPop = BackSwipePlayer()
 
         init(timePeek: Bool, backSwipe: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
@@ -844,8 +917,9 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             guard timePeek || backSwipe else { return }
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
             gr.delegate = self
-            gr.shouldStart = { [weak scroll] touch, start in
+            gr.shouldStart = { [weak self, weak scroll] touch, start in
                 guard let scroll else { return false }
+                self?.touchedRow = ReplySwipe.row(at: touch.location(in: nil), in: scroll.window)
                 // The edge zone is the system pop's from touch-down.
                 if BackSwipe.startsAtEdge(scroll.convert(start, to: nil)) { return false }
                 // A markdown table scrolling sideways is its own scroll view's pan.
@@ -856,8 +930,14 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 }
                 return true
             }
-            gr.decide = { [weak self] _, translation in
-                guard let self else { return .declined }
+            gr.decide = { [weak self, weak scroll] start, translation in
+                guard let self, let scroll else { return .declined }
+                // A left drag that began on a bubble is reply; off a bubble it is the peek.
+                if let row = self.touchedRow, ReplySwipe.claims(translation: translation, start: scroll.convert(start, to: nil), onBubble: true) {
+                    self.mode = .reply(row)
+                    self.replyMarked = false
+                    return .claimed
+                }
                 let dx = translation.width, dy = translation.height
                 guard abs(dx) > abs(dy) * 1.15 else { return .declined }
                 if dx < 0 {
@@ -884,6 +964,19 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 onEvent(.timeChanged(dx: gr.translation.width))
             case (.time, .ended), (.time, .cancelled), (.time, .failed):
                 onEvent(.timeEnded)
+                self.mode = nil
+            case (.reply(let row), .began), (.reply(let row), .changed):
+                let dx = gr.translation.width
+                if !replyMarked, ReplySwipe.replies(dx: dx) {
+                    replyMarked = true
+                    Haptics.replyArmed()
+                }
+                onEvent(.replyChanged(row: row, dx: dx))
+            case (.reply(let row), .ended):
+                onEvent(.replyEnded(row: row, reply: ReplySwipe.replies(dx: gr.translation.width)))
+                self.mode = nil
+            case (.reply(let row), .cancelled), (.reply(let row), .failed):
+                onEvent(.replyEnded(row: row, reply: false))
                 self.mode = nil
             case (.back, _):
                 // The screen follows the finger from the first sample; `onEvent(.back)` is

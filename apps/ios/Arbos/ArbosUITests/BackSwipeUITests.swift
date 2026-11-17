@@ -2,8 +2,8 @@ import XCTest
 
 /// Back gestures on every chat screen (Jacob, 2026-10-28: the system's interactive edge pop,
 /// finger-tracking and cancellable, is the one owner of the edge; a swipe right anywhere
-/// else is an animated "back"; there is no swipe-to-reply — Reply stays on long-press and in
-/// the actions menu). Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay,
+/// else is an animated "back"; there is no swipe-right-to-reply — Reply is on long-press, in
+/// the actions menu, and a swipe LEFT on a bubble, tester reports 2026-11-13). Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay,
 /// deterministic screens.
 ///
 /// Screens are told apart by their back chevron: `chat-back:<chatId>` on a chat,
@@ -273,6 +273,96 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
         assertHome(app)
+    }
+
+    // MARK: A swipe left on a bubble replies; off a bubble it is the time peek
+
+    /// My newest bubble on screen (the bubble itself, not its full-width row) and the row it is in.
+    private func ownBubble(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let own = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'own-bubble-'"))
+        XCTAssertTrue(own.firstMatch.waitForExistence(timeout: settle), "the transcript shows a bubble of mine", file: file, line: line)
+        settleTranscript(app)
+        let window = app.windows.firstMatch.frame
+        let visible = own.allElementsBoundByIndex.filter { $0.isHittable && $0.frame.maxY < window.maxY - 120 && $0.frame.minY > 120 }
+        XCTAssertFalse(visible.isEmpty, "a bubble of mine is hittable", file: file, line: line)
+        return visible.last!
+    }
+
+    /// Drag left from the middle of a bubble, past the threshold: the composer quotes it and
+    /// takes focus, and the chat stays.
+    func testSwipeLeftOnABubbleReplies() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        let back = chatBack(app, "fx-comms-main")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
+        let start = ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -120, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle), "the composer quotes the message")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer took focus")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// The same on someone else's bubble in a group.
+    func testSwipeLeftOnAnotherPersonsBubbleReplies() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])
+        let back = chatBack(app, "fx-group-launch")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
+        settleTranscript(app)
+        // 100 pt in from the row's leading edge: past the avatar lane, on the bubble.
+        let start = lastBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 100, dy: 0))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -80, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle), "the composer quotes the message")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// Let go short of the threshold: nothing happens.
+    func testAShortSwipeLeftOnABubbleStartsNoReply() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        let back = chatBack(app, "fx-comms-main")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
+        let start = ownBubble(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -30, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// The same drag from the empty side of my bubble's row is the time peek: no reply.
+    func testSwipeLeftBesideABubbleStartsNoReply() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        let back = chatBack(app, "fx-comms-main")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
+        let bubble = ownBubble(app)
+        let window = app.windows.firstMatch.frame
+        // Mid-way between the screen's centre and the bubble's leading edge, clear of both.
+        let x = (window.midX + bubble.frame.minX) / 2
+        XCTAssertGreaterThan(bubble.frame.minX - x, 24, "the row has an empty side to start on")
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: bubble.frame.midY))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -120, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// A vertical drag that starts on a bubble still scrolls the transcript.
+    func testVerticalDragOnABubbleStillScrolls() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
+        XCTAssertTrue(chatBack(app, "fx-group-launch").waitForExistence(timeout: appear), "the Launch week group opened")
+        settleTranscript(app)
+        let window = app.windows.firstMatch.frame
+        let bubble = app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex.last {
+            $0.isHittable && $0.frame.midY > window.height * 0.3 && $0.frame.midY < window.height * 0.5
+        }
+        XCTAssertNotNil(bubble, "a bubble sits in the upper middle of the screen to drag on")
+        // Found again by its id afterwards: a query by position would name another row.
+        let id = bubble!.identifier
+        let before = bubble!.frame.midY
+        let start = bubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -6, dy: 200)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
+        XCTAssertGreaterThan(app.descendants(matching: .any)[id].firstMatch.frame.midY - before, 50, "the transcript followed the finger down")
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
     }
 
     /// Reply is still reachable: long-press a bubble → the actions menu shows Reply.
