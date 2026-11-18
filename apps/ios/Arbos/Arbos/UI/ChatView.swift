@@ -327,6 +327,8 @@ struct ChatSession: View {
     @State private var photoItem: PhotosPickerItem?
     /// The staged attachment open in the crop / trim editor.
     @State private var editingPending: PendingEdit?
+    /// An Edit tap is being opened (the video is being written out for the trimmer).
+    @State private var openingEdit = false
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
@@ -3820,15 +3822,13 @@ struct ChatSession: View {
         }
         .quickLookPreview($pendingPreviewURL)
         .fullScreenCover(item: $editingPending) { edit in
-            AttachmentEditor(edit: edit) { edited in
+            AttachmentEditor(edit: edit) { outcome in
                 guard account.accepts(model) else { return }
-                if let edited {
-                    if ComposerAttachment.fits(edited) {
-                        pending = ComposerAttachment.replacing(edit.id, with: edited, in: pending)
-                    } else {
-                        model.setSendError(chatId, UserError(verb: "use the edited file", class: .upload(.tooLarge),
-                                                             raw: "edited attachment is \(edited.data.count) bytes"))
-                    }
+                switch outcome {
+                case .cancelled: break
+                case .edited(let edited): pending = ComposerAttachment.replacing(edit.id, with: edited, in: pending)
+                case .failed(let why):
+                    model.setSendError(chatId, UserError(verb: "use the edited file", class: why, raw: "edit of \(edit.original.mime)"))
                 }
                 editingPending = nil
             }
@@ -3837,9 +3837,13 @@ struct ChatSession: View {
 
     /// The chip's Edit: open the crop screen or the trimmer, or say why this one cannot be edited.
     private func editPending(_ a: AppModel.PendingAttachment) {
-        guard account.accepts(model), editingPending == nil else { return }
+        // One open at a time: a second tap while the first is still writing its copy of the
+        // video would open a second editor over it and strand the first one's file.
+        guard account.accepts(model), editingPending == nil, !openingEdit else { return }
+        openingEdit = true
         Task {
             let opened = await PendingEdit.open(a)
+            openingEdit = false
             guard account.accepts(model), pending.contains(where: { $0.id == a.id }) else {
                 if case .edit(let edit) = opened { edit.close() }
                 return
