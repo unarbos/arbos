@@ -1,5 +1,5 @@
 [Unit]
-Description=Arbos feedback loop: TestFlight screenshot feedback -> Cursor agent -> main -> TestFlight (one tick)
+Description=Arbos feedback loop: TestFlight screenshot feedback -> bb fast lane -> main -> TestFlight (one tick)
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=!/etc/arbos/feedback.disabled
