@@ -162,19 +162,13 @@ pub fn check_push(
     claims_heal: bool,
     changes: &MessageChanges,
 ) -> PushCheck {
-    // Bytes the relay could not read tell it nothing about what the update does — but refusing
-    // them is not available either. `rooms.rs` has always stored and forwarded opaque rows, so
-    // a payload that is not a Loro update the relay's version can apply is within the contract,
-    // and a loro format skew between a client and the relay would otherwise become a total
-    // push outage rather than a missed check.
-    //
-    // So unreadable bytes keep their old route — stored, forwarded — and lose only what this
-    // check could have granted them: no heal exemption, so they are gated like any new
-    // message, and no authorship recorded, so they attest nothing.
+    // A diff the relay could not read says nothing about what the update does, so there is
+    // nothing to allow. `rooms.rs` discards the room's doc with the refusal and rebuilds it
+    // for the next push, which is also what puts a mirror that fell out of step right.
     if changes.unreadable {
-        return PushCheck::Allow {
-            carries_new_message: true,
-            attributed: Vec::new(),
+        return PushCheck::Refuse {
+            code: "unreadable",
+            detail: "this push cannot be applied as it stands".to_owned(),
         };
     }
     if changes.removed.is_empty() && changes.inserted.is_empty() && changes.rewritten.is_empty() {
@@ -193,12 +187,20 @@ pub fn check_push(
             attributed: Vec::new(),
         };
     };
-    let author_of = |id: &str| state.db.message_author(chat_id, id).ok().flatten();
+    // A record that cannot be read is not an empty one: the push is refused and sent again.
+    let author_of = |id: &str| state.db.message_author(chat_id, id);
+    let no_record = || PushCheck::Refuse {
+        code: "unavailable",
+        detail: "the record of who wrote what could not be read; send this again".to_owned(),
+    };
     // Resolved once, and only when something actually needs it: it reads the chat's roster.
     let moderates = || moderation::moderates(state, principal, project_id, chat_id);
 
     for (id, was) in &changes.removed {
-        let mine = author_of(id).is_some_and(|a| me.owns(state, &a));
+        let Ok(author) = author_of(id) else {
+            return no_record();
+        };
+        let mine = author.is_some_and(|a| me.owns(state, &a));
         if !mine && !me.wrote_unattributed(was.as_deref()) && !moderates() {
             return PushCheck::Refuse {
                 code: "not_yours",
@@ -266,7 +268,10 @@ pub fn check_push(
                 attributed.push((id.clone(), who));
             }
         };
-        match (author_of(id).as_deref(), sender.as_deref()) {
+        let Ok(author) = author_of(id) else {
+            return no_record();
+        };
+        match (author.as_deref(), sender.as_deref()) {
             // History the relay attested to you: your own old rows, which is most of what a
             // device heals a room with.
             (Some(a), _) if me.owns(state, a) => {}
@@ -1005,31 +1010,24 @@ mod tests {
         );
     }
 
-    /// Bytes the relay cannot read are gated, not refused. `rooms.rs` stores and forwards
-    /// opaque rows by contract — the room socket's own tests push `row-1` as a payload — so
-    /// refusing an unimportable update would break that contract, and a loro format skew
-    /// between a client and the relay would read as a total push outage. What such a push
-    /// loses is only what this check could have granted: the heal exemption and a record.
+    /// A diff the relay could not read is refused: nothing is known about what the push
+    /// does, so nothing about it can be allowed.
     #[test]
-    fn an_unreadable_diff_is_gated_rather_than_refused() {
+    fn an_unreadable_diff_is_refused() {
         let state = test_state(AuthMode::Github);
         let (chat, _alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
 
         let mut c = changes();
         c.unreadable = true;
         for claims_heal in [false, true] {
-            let PushCheck::Allow {
-                carries_new_message,
-                attributed,
-            } = check_push(&state, &bob_dev, PEOPLE_PROJECT, &chat, claims_heal, &c)
-            else {
-                panic!("opaque bytes are within the room socket's contract");
-            };
-            assert!(
-                carries_new_message,
-                "a push the relay cannot read does not get the heal exemption"
-            );
-            assert!(attributed.is_empty(), "nothing readable, nothing attested");
+            assert!(refused(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                claims_heal,
+                &c
+            )));
         }
     }
 
@@ -1433,35 +1431,49 @@ mod tests {
         let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(state);
         let mut room = Room::new();
         room.push(|d| {
+            d.append_user_message("m_bob", "hi", "dev", &as_user(&bob))
+                .unwrap();
             d.append_user_message("m_alice", "hello", "dev", &as_user(&alice))
                 .unwrap()
         });
         (room, chat, bob, alice_dev, bob_dev)
     }
 
-    /// Write or remove the `id` of `m_alice`, after `also` wrote other fields on it.
+    /// Write `new_id` over the `id` of `m_alice` (`None` removes it), after `also` wrote
+    /// other fields on it.
     fn write_id(
         room: &mut Room,
-        new_id: Option<&str>,
+        new_id: Option<serde_json::Value>,
         also: impl FnOnce(&ChatDoc),
     ) -> MessageChanges {
         room.push(|d| {
             also(d);
-            let m = d.find_message("m_alice").expect("the message is there");
             match new_id {
-                Some(id) => m.insert("id", id).unwrap(),
-                None => m.delete("id").unwrap(),
+                Some(id) => d.set_message_fields("m_alice", &[("id", id)]),
+                None => d.find_message("m_alice").unwrap().delete("id").unwrap(),
             }
         })
+    }
+
+    /// What `id` may not be made into: another id, one the chat already holds, the empty
+    /// string, something that is not a string, or nothing.
+    fn id_writes() -> [Option<serde_json::Value>; 5] {
+        [
+            Some(json!("m_other")),
+            Some(json!("m_bob")),
+            Some(json!("")),
+            Some(json!(7)),
+            None,
+        ]
     }
 
     /// Every field a push writes on an existing message is judged.
     #[test]
     fn every_field_written_on_an_existing_message_is_judged() {
-        for new_id in [Some("m_other"), None] {
+        for new_id in id_writes() {
             let state = test_state(AuthMode::Github);
             let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
-            let c = write_id(&mut room, new_id, |d| {
+            let c = write_id(&mut room, new_id.clone(), |d| {
                 d.set_message_fields("m_alice", &[("sender", json!(format!("user:{bob}")))])
             });
             assert_eq!(
@@ -1562,10 +1574,10 @@ mod tests {
     /// author either, since every record the relay keeps about a message is keyed on it.
     #[test]
     fn a_messages_id_is_not_writable() {
-        for new_id in [Some("m_other"), None] {
+        for new_id in id_writes() {
             let state = test_state(AuthMode::Github);
             let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);
-            let c = write_id(&mut room, new_id, |_| ());
+            let c = write_id(&mut room, new_id.clone(), |_| ());
             for (who, dev) in [("a member", &bob_dev), ("the author", &alice_dev)] {
                 assert_eq!(
                     code(&check_push(&state, dev, PEOPLE_PROJECT, &chat, false, &c)),
@@ -1574,5 +1586,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Taking a row out and putting one in at the same place is a removal and an insert,
+    /// each judged as such, whatever id and name the new row carries.
+    #[test]
+    fn a_row_put_where_another_was_removed_is_a_removal_and_an_insert() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let author = state.db.message_author(&chat, "m_alice").unwrap().unwrap();
+        let c = room.push(|d| {
+            d.delete_message("m_alice").unwrap();
+            d.append_user_message(
+                "m_alice",
+                "other words",
+                "dev",
+                &UserMessageOpts {
+                    sender: Some(author.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        assert_eq!(c.removed.len(), 1);
+        assert_eq!(c.inserted.len(), 1);
+        assert!(c.rewritten.is_empty());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("not_yours")
+        );
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some(false),
+            "the author replacing her own row"
+        );
     }
 }

@@ -114,19 +114,16 @@ struct PendingRoomPush<'a> {
     room: &'a crate::state::Room,
     room_name: &'a str,
     cached: crate::state::RoomDocCache,
-    changes: arbos_core::doc::MessageChanges,
-    /// The import held some of the push back, so `changes` is not all of what it does.
-    held_back: bool,
+    /// What the push does to the messages, or the code it is refused with when that cannot
+    /// be known.
+    changes: Result<arbos_core::doc::MessageChanges, &'static str>,
     _admission: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl PendingRoomPush<'_> {
     /// Consuming publication is legal only after a successful nonduplicate append.
     fn commit(self, state: &AppState) -> anyhow::Result<()> {
-        if !self.changes.unreadable {
-            publish_room_doc(state, self.room, self.room_name, self.cached, |_| ())?;
-        }
-        Ok(())
+        publish_room_doc(state, self.room, self.room_name, self.cached, |_| ())
     }
 }
 
@@ -179,45 +176,66 @@ async fn push_message_changes<'a>(
         room,
         room_name,
         cached,
-        held_back: changes.is_none(),
-        // Never an empty diff: a caller that forgets `held_back` reads "nothing is known".
-        changes: changes.unwrap_or(arbos_core::doc::MessageChanges {
-            unreadable: true,
-            ..Default::default()
-        }),
+        changes,
         _admission: admission,
     })
 }
 
+/// The code a push is refused with when the room cannot apply all of it.
+const INCOMPLETE: &str = "incomplete";
+/// The code a push is refused with when the relay cannot read what it does.
+const UNREADABLE: &str = "unreadable";
+
 /// [`push_message_changes`] over a cache already in step with the room's stored rows.
-/// `None` when the import did not apply all of `payload`: there is then no diff to judge.
+///
+/// A push is judged by the diff its import produces, so the import has to be the payload: all
+/// of its changes and no others. Anything else has no diff to judge and is an `Err` with the
+/// code to refuse it with.
 fn diff_pushed_row(
     cached: &mut crate::state::RoomDocCache,
     payload: &[u8],
-) -> Option<arbos_core::doc::MessageChanges> {
+) -> Result<arbos_core::doc::MessageChanges, &'static str> {
     let before = cached.doc.frontiers();
-    match cached.doc.import(payload) {
-        Ok(status) if status.pending.is_none() => {}
-        // Not applied in full, so the diff below would not be all of what the push does.
-        Ok(_) => return None,
-        // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
-        // before, so this is not a rejection of malformed input — it is "nothing is known
-        // about what this does", which the caller fails closed on.
-        Err(_) => {
-            return Some(arbos_core::doc::MessageChanges {
-                unreadable: true,
-                ..Default::default()
-            })
-        }
+    match cached.doc.import_exactly(payload) {
+        Ok(true) => {}
+        Ok(false) => return Err(INCOMPLETE),
+        Err(_) => return Err(UNREADABLE),
     }
     let changes =
         cached
             .doc
             .messages_changed(&before, &cached.doc.frontiers(), &cached.message_ids);
-    if !changes.unreadable {
-        cached.message_ids = changes.ids_after.clone();
+    if changes.unreadable {
+        return Err(UNREADABLE);
     }
-    Some(changes)
+    cached.message_ids = changes.ids_after.clone();
+    Ok(changes)
+}
+
+/// The answer to a push the room cannot apply in full.
+///
+/// In a people chat the gates answer first, with the codes a client stays connected on: a
+/// device that is refused there keeps its batches and sends them again in order, and every
+/// batch after the first builds on the one before it. Otherwise the code is one no client
+/// special-cases, so a device redials, and on the new connection its heal carries what the
+/// room lacked together with this batch.
+fn incomplete_frame(
+    state: &AppState,
+    principal: &Principal,
+    room_name: &str,
+    batch_id: &str,
+) -> Message {
+    room_name
+        .strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+        .and_then(|chat_id| people::room_push_refusal(state, principal, chat_id))
+        .map(|r| push_refused_frame(&r, batch_id))
+        .unwrap_or_else(|| {
+            room_push_refused_frame(
+                INCOMPLETE,
+                "this push builds on changes the room does not hold",
+                batch_id,
+            )
+        })
 }
 
 /// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
@@ -786,19 +804,24 @@ async fn handle_frame(
             }
             // Covered pushes are duplicates: ops the room already holds (often a reconnect
             // resending refused heals as ordinary pushes). ACK with dup, skip gates and store.
-            if !p.heal {
-                if let Ok(vv) = room_oplog_vv(state, room, room_name).await {
-                    if arbos_core::doc::update_covered_by(&f.payload, &vv) {
-                        let seq = state.db.room_state(room_name).map(|s| s.head).unwrap_or(0);
-                        drop(admission);
-                        sink.send(frame(
-                            FrameType::Ack,
-                            json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
-                            Bytes::new(),
-                        ))
+            if let Ok(vv) = room_oplog_vv(state, room, room_name).await {
+                if !p.heal && arbos_core::doc::update_covered_by(&f.payload, &vv) {
+                    let seq = state.db.room_state(room_name).map(|s| s.head).unwrap_or(0);
+                    drop(admission);
+                    sink.send(frame(
+                        FrameType::Ack,
+                        json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
+                        Bytes::new(),
+                    ))
+                    .await?;
+                    return Ok(());
+                }
+                // Known from the bytes alone, so the room's doc is left as it is.
+                if arbos_core::doc::update_skips_ahead(&f.payload, &vv) {
+                    drop(admission);
+                    sink.send(incomplete_frame(state, principal, room_name, &p.batch_id))
                         .await?;
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
             }
             // What this row does to the chat's messages. Until now the arm checked size,
@@ -812,31 +835,23 @@ async fn handle_frame(
                 .unwrap_or(room_name);
             let pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
-            if pending.held_back {
-                // Refused for every principal, before anything is stored or gated. The code
-                // is one no client special-cases, so a device redials, and on the new
-                // connection its heal carries what the room lacked together with this batch.
-                drop(pending);
-                tracing::warn!(
-                    %room_name, %device, batch_id = %p.batch_id,
-                    "room push refused: not applied in full"
-                );
-                sink.send(room_push_refused_frame(
-                    "incomplete",
-                    "this push builds on changes the room does not hold",
-                    &p.batch_id,
-                ))
-                .await?;
-                return Ok(());
-            }
-            let (carries_new_message, attributed) = match crate::push_guard::check_push(
-                state,
-                principal,
-                project_id,
-                chat_of_room,
-                p.heal,
-                &pending.changes,
-            ) {
+            // A push that cannot be judged is refused like one that was judged and refused,
+            // for every principal.
+            let check = match &pending.changes {
+                Ok(changes) => crate::push_guard::check_push(
+                    state,
+                    principal,
+                    project_id,
+                    chat_of_room,
+                    p.heal,
+                    changes,
+                ),
+                Err(code) => crate::push_guard::PushCheck::Refuse {
+                    code,
+                    detail: "this push cannot be applied as it stands".to_owned(),
+                },
+            };
+            let (carries_new_message, attributed) = match check {
                 crate::push_guard::PushCheck::Allow {
                     carries_new_message,
                     attributed,
@@ -847,8 +862,12 @@ async fn handle_frame(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
                     );
-                    sink.send(room_push_refused_frame(code, &detail, &p.batch_id))
-                        .await?;
+                    let refusal = if code == INCOMPLETE {
+                        incomplete_frame(state, principal, room_name, &p.batch_id)
+                    } else {
+                        room_push_refused_frame(code, &detail, &p.batch_id)
+                    };
+                    sink.send(refusal).await?;
                     return Ok(());
                 }
             };
@@ -1608,11 +1627,19 @@ mod ordering_tests {
             // A few rows exist before the reader arrives; the rest race its catch-up.
             let head_before_reader = 3 + (it as i64 % 5);
             let (reader_go_tx, reader_go) = tokio::sync::oneshot::channel::<()>();
+            let doc = arbos_core::doc::ChatDoc::new(Some(5), false);
+            let payloads: Vec<Vec<u8>> = (1..=ROWS)
+                .map(|n| {
+                    let mark = doc.oplog_vv();
+                    doc.init_meta("c", "p", n);
+                    doc.export_updates_since(&mark)
+                })
+                .collect();
             let writer = tokio::spawn(async move {
                 let mut pushed = 0i64;
                 let mut reader_go = Some(reader_go_tx);
-                fn push_frame(n: i64) -> TMsg {
-                    let payload = format!("row-{n}").into_bytes();
+                let push_frame = |n: i64| {
+                    let payload = payloads[n as usize - 1].clone();
                     TMsg::Binary(
                         Frame::new(
                             FrameType::Push,
@@ -1621,7 +1648,7 @@ mod ordering_tests {
                         )
                         .encode(),
                     )
-                }
+                };
                 // Push one row, wait for its ack, push the next (keeps the stream realistic).
                 while let Some(Ok(m)) = wstream.next().await {
                     let Some(f) = decode(m) else { continue };
@@ -1755,12 +1782,15 @@ mod ordering_tests {
                 .filter(|(_, k, _)| k == crate::boxes::PROJECT_DOC_OPEN_PUSH)
                 .count()
         };
+        let row = arbos_core::doc::ChatDoc::new(Some(5), false);
         for (n, expect) in [(1, 1), (2, 0)] {
+            let mark = row.oplog_vv();
+            row.init_meta("c", "p", n);
             sink.send(TMsg::Binary(
                 Frame::new(
                     FrameType::Push,
                     json!({ "batchId": format!("b{n}") }),
-                    bytes::Bytes::from_static(b"row"),
+                    bytes::Bytes::from(row.export_updates_since(&mark)),
                 )
                 .encode(),
             ))
@@ -3027,7 +3057,9 @@ mod covered_push_tests {
         let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
         let mut gone = ChatDoc::new(Some(8), false);
         gone.import(&bob_doc.snapshot()).unwrap();
+        let base = gone.oplog_vv();
         gone.set_message_fields("m-bob", &[("seen", json!(true))]);
+        let awaited = gone.export_updates_since(&base);
         let mark = gone.oplog_vv();
         gone.set_message_fields("m-bob", &[("seen", json!(false))]);
         state
@@ -3042,16 +3074,181 @@ mod covered_push_tests {
             .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
             .unwrap();
         let batch = alice_doc.export_updates_since(&mark);
-        let frames = push_after_catchup(
+        let addr = serve(state.clone()).await;
+        let push = |id: &str, bytes: Vec<u8>| {
+            let (room, token) = (room.clone(), alice_token.clone());
+            let id = id.to_owned();
+            async move {
+                push_after_catchup(addr, &room, &token, "dev:alice", &[(id, bytes)])
+                    .await
+                    .remove(0)
+            }
+        };
+        let f = push("a1", batch).await;
+        assert_eq!(f.ty, FrameType::Ack, "header={}", f.header);
+        assert_eq!(f.header["dup"], false);
+
+        // A push is its own changes and no others. The one the held row waits for would
+        // bring the held row in with it, so by itself it is refused and nothing is stored.
+        let head = state.db.room_state(&room).unwrap().head;
+        let f = push("awaited", awaited).await;
+        assert_eq!(f.ty, FrameType::Error, "header={}", f.header);
+        assert_eq!(f.header["code"], "incomplete");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+
+        // Carried in one push, both are that push's own changes and are judged as such.
+        let f = push("both", gone.export_updates_since(&base)).await;
+        assert_eq!(f.ty, FrameType::Ack, "header={}", f.header);
+        assert_eq!(f.header["dup"], false);
+    }
+
+    /// Whoever pushes it and however it is flagged, a push that is not applied in full is
+    /// not stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_heal_that_is_not_fully_applied_is_not_stored() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        let mut unseen = ChatDoc::new(Some(8), false);
+        unseen.import(&bob_doc.snapshot()).unwrap();
+        unseen.set_message_fields("m-bob", &[("seen", json!(true))]);
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&unseen.snapshot()).unwrap();
+        let mark = alice_doc.oplog_vv();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let frames = push_after_catchup_with_heal(
             serve(state.clone()).await,
             &room,
             &alice_token,
             "dev:alice",
-            &[("a1".into(), batch)],
+            &[("heal-1".into(), alice_doc.export_updates_since(&mark))],
+            true,
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "incomplete");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+    }
+
+    /// A whole snapshot is a payload like any other: applied in full, judged, stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_pushed_as_a_row_is_judged_and_stored() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap".into(), alice_doc.snapshot())],
         )
         .await;
         assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
         assert_eq!(frames[0].header["dup"], false);
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m-alice"]);
+
+        // And refused like any other when what it does is not the pusher's to do.
+        alice_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap-2".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_yours");
+    }
+
+    /// A sender the people gates refuse keeps their batches and sends them again in order,
+    /// and each batch builds on the one before. Every one of them gets the gate's answer,
+    /// the one a client stays connected on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_senders_later_batches_get_the_gates_answer_too() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &alice);
+        state.db.block(&bob, &alice).unwrap();
+
+        let doc = ChatDoc::new(Some(5), false);
+        let mut batches = Vec::new();
+        for id in ["m1", "m2", "m3"] {
+            let mark = doc.oplog_vv();
+            doc.append_user_message(id, "hi", "dev:alice", &UserMessageOpts::default())
+                .unwrap();
+            batches.push((id.to_owned(), doc.export_updates_since(&mark)));
+        }
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &token,
+            "dev:alice",
+            &batches,
+        )
+        .await;
+        for (f, (id, _)) in frames.iter().zip(&batches) {
+            assert_eq!(f.ty, FrameType::Error);
+            assert_eq!(f.header["code"], "not_available", "header={}", f.header);
+            assert_eq!(f.header["batchId"], *id);
+        }
+        assert_eq!(state.db.room_state(&room).unwrap().head, 0);
+    }
+
+    /// A batch that starts beyond what the room holds for its own peer is refused from its
+    /// bytes alone: the room's doc is neither touched nor rebuilt for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_batch_that_skips_ahead_is_refused_without_touching_the_rooms_doc() {
+        let state = test_state(AuthMode::Github);
+        let (name, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let room = state.room(&name).await;
+        let _keep_cache = room.tx.subscribe();
+        super::room_version_vector(&state, &room, &name)
+            .await
+            .unwrap();
+
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        alice_doc
+            .append_user_message("m1", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let mark = alice_doc.oplog_vv();
+        alice_doc
+            .append_user_message("m2", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &name,
+            &alice_token,
+            "dev:alice",
+            &[("b2".into(), alice_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error);
+        assert_eq!(frames[0].header["code"], "incomplete");
+        assert!(room.doc_cache.lock().unwrap().is_some());
     }
 
     /// A batch id the room already stored is a dup before the gates (no rate event).
@@ -4412,6 +4609,37 @@ mod jam_recovery_tests {
                 }
             }
         }
+    }
+
+    /// A box is held to the same rule as a device: a push that is not applied in full is
+    /// not stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_box_push_that_is_not_fully_applied_is_not_stored() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Held");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = box_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+
+        let unseen = ChatDoc::new(Some(7), false);
+        unseen.init_meta("c", "p", 1);
+        let mut doc = ChatDoc::new(Some(9), false);
+        doc.import(&unseen.snapshot()).unwrap();
+        let mark = doc.oplog_vv();
+        doc.start_assistant_message("m_reply", "", "box:test");
+        let f = push(
+            addr,
+            &room,
+            &token,
+            &ulid(),
+            doc.export_updates_since(&mark),
+        )
+        .await;
+        assert_eq!(f.ty, FrameType::Error, "header={}", f.header);
+        assert_eq!(f.header["code"], "incomplete");
+        assert_eq!(state.db.room_state(&room).unwrap().head, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

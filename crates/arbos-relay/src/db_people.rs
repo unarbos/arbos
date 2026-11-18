@@ -1197,7 +1197,6 @@ impl Db {
     }
 
     /// How many events of this kind the user has in the window (no insert).
-    #[cfg(test)]
     pub fn rate_count(&self, user_id: &str, kind: &str, window_ms: i64) -> Result<i64> {
         let now = now_ms();
         self.with(|c| {
