@@ -2204,29 +2204,39 @@ impl Element for InputElement {
         let mut pills = Vec::new();
         let mut pictures = Vec::new();
         let mut chip_hits = Vec::new();
-        for ((t, mention), alpha) in tokens.iter().zip(token_mentions).zip(pill_alphas) {
-            let (Some(a), Some(b)) = (
-                position_for_index(&lines, t.range.start, bounds.size.width, text_center),
-                position_for_index(&lines, t.range.end, bounds.size.width, text_center),
-            ) else {
+        let token_fragments: Vec<Vec<(Pixels, Pixels, Pixels)>> = tokens
+            .iter()
+            .map(|t| {
+                let (Some(a), Some(b)) = (
+                    position_for_index(&lines, t.range.start, bounds.size.width, text_center),
+                    position_for_index(&lines, t.range.end, bounds.size.width, text_center),
+                ) else {
+                    return Vec::new();
+                };
+                if a.y == b.y {
+                    vec![(a.x, b.x, a.y)]
+                } else {
+                    vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
+                }
+            })
+            .collect();
+        let token_pills = mention::pills(&token_fragments.concat(), lh);
+        let mut token_pills = token_pills.iter();
+        for (((t, mention), alpha), fragments) in tokens
+            .iter()
+            .zip(token_mentions)
+            .zip(pill_alphas)
+            .zip(token_fragments)
+        {
+            let Some(&(ax, _, ay)) = fragments.first() else {
                 continue;
             };
-            let fragments: Vec<(Pixels, Pixels, Pixels)> = if a.y == b.y {
-                vec![(a.x, b.x, a.y)]
-            } else {
-                vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
-            };
+            let a = point(ax, ay);
             let mut rects = Vec::with_capacity(fragments.len());
-            for (x0, x1, top) in fragments {
+            for pill in (&mut token_pills).take(fragments.len()) {
                 let pill = Bounds::new(
-                    point(
-                        bounds.left() + x0 - px(mention::PILL_PAD_X),
-                        bounds.top() + top - dy - px(mention::PILL_PAD_Y),
-                    ),
-                    size(
-                        x1 - x0 + px(mention::PILL_PAD_X * 2.0),
-                        lh + px(mention::PILL_PAD_Y * 2.0),
-                    ),
+                    point(bounds.left(), bounds.top() - dy) + pill.origin,
+                    pill.size,
                 );
                 rects.push(pill);
                 pills.push(
@@ -5773,6 +5783,33 @@ mod mention_token_tests {
                 .any(|r| r.left() > bounds.left() + px(mention::PILL_PAD_X))),
             "a mid-row chip too"
         );
+    }
+
+    /// Tester (Nov 14): mention pills drew into each other. Chips one space
+    /// apart on a row keep clear space between their pills (`mention::pills`,
+    /// the same placement a sent bubble uses).
+    #[gpui::test]
+    fn chips_one_space_apart_keep_a_gap(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        for _ in 0..3 {
+            cx.simulate_input("@s");
+            cx.update(|_, cx| {
+                input.update(cx, |i, cx| {
+                    i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+                })
+            });
+            cx.run_until_parked();
+        }
+        let rects: Vec<Bounds<Pixels>> = cx.update(|_, cx| {
+            let l = input.read(cx).layout.as_ref().unwrap();
+            l.chips.iter().flat_map(|(_, r)| r.clone()).collect()
+        });
+        assert_eq!(rects.len(), 3, "three chips on one row: {rects:?}");
+        for pair in rects.windows(2) {
+            assert_eq!(pair[0].top(), pair[1].top());
+            let gap = f32::from(pair[1].left() - pair[0].right());
+            assert!(gap >= 1.0, "{gap} between {pair:?}");
+        }
     }
 
     #[gpui::test]

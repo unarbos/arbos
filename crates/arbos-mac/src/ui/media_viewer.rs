@@ -32,8 +32,11 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 actions!(media_viewer, [Prev, Next, CopyItem]);
 
-/// Backdrop over the window.
-const BACKDROP: f32 = 0.88;
+/// Backdrop over the window: solid black. At 88 % the shell's own controls
+/// showed through — the right pane's × right behind the viewer's, the
+/// sidebar's discs behind the caption (tester, 2026-11-16: "the two X to
+/// close panel / pic view overlap / are both visible").
+const BACKDROP: f32 = 1.0;
 /// The round controls (×, chevrons): mock-mac 36 pt.
 pub const CONTROL: f32 = 36.0;
 /// Download / Forward pills: 34 pt tall, 13 pt medium text.
@@ -614,7 +617,7 @@ fn forward_picker(
         .mx(px(12.0))
         .px(px(10.0))
         .rounded(px(8.0))
-        // glass-lint: allow (the viewer lays its own black 88 % matte over the whole window
+        // glass-lint: allow (the viewer lays its own solid black matte over the whole window
         // (BACKDROP), so this field sits on the matte and never on the window's glass)
         .bg(theme.surface_2)
         .cursor_text()
@@ -716,7 +719,7 @@ fn forward_picker(
         .w(px(PICKER_WIDTH))
         .h(px(PICKER_HEIGHT))
         .rounded(px(14.0))
-        // glass-lint: allow (the forward picker opens on the viewer's black 88 % matte, not on
+        // glass-lint: allow (the forward picker opens on the viewer's solid black matte, not on
         // the window's glass)
         .bg(theme.surface_1)
         .border_1()
