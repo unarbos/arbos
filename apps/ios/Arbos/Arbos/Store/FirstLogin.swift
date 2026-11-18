@@ -213,8 +213,10 @@ extension AppModel {
         let elapsed = now.timeIntervalSince(fl.startedAt)
 
         // The account already has agents: this was never a first login.
+        // [feedback iphone-first-login-recovery-2026-11-18] Home counts too: after sign-out and
+        // sign-in a returning account may have no other agent, and must not be sent to provisioning.
         if fl.registrySeen, fl.projectId == nil, !fl.creating,
-           projects.contains(where: { !$0.shared && $0.name != FirstLogin.agentName }) {
+           projects.contains(where: { !$0.shared }) {
             NSLog("first login: account already has agents (\(projects.map(\.name))) — not a first login")
             endFirstLogin()
             return
