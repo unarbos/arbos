@@ -1222,9 +1222,10 @@ struct GroupProfileView: View {
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
-    @State private var inviteCopied = false
-    /// True while minting an invite link before opening the system share sheet.
-    @State private var sharingInvite = false
+    /// Id of the link whose Copy was just tapped: the tick belongs to that row alone.
+    @State private var inviteCopied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var inviteCopyTick: Task<Void, Never>?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -1625,45 +1626,53 @@ struct GroupProfileView: View {
                                 Button {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
-                                    inviteCopied = true
-                                    Task { @MainActor in
+                                    inviteCopied = inv.id
+                                    inviteCopyTick?.cancel()
+                                    inviteCopyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        inviteCopied = false
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
+                                        inviteCopied = nil
                                     }
                                 } label: {
-                                    Image(systemName: inviteCopied ? "checkmark" : "doc.on.doc")
+                                    Image(systemName: inviteCopied == inv.id ? "checkmark" : "doc.on.doc")
                                         .font(theme.font(15)).foregroundStyle(theme.muted)
                                         .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Copy link")
-                                if let url = URL(string: inv.url) {
-                                    ShareLink(item: url) {
-                                        Image(systemName: "square.and.arrow.up")
-                                            .font(theme.font(15)).foregroundStyle(theme.muted)
-                                            .frame(width: 30, height: 44).contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            Button {
-                                guard model.acceptsAccountWork(work) else { return }
-                                Task {
+                                // The link as a `String`, not a `URL`: Telegram's share extension
+                                // drops a bare URL activity item, so the chat gets an empty message.
+                                Button {
                                     guard model.acceptsAccountWork(work) else { return }
-                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        groupInvites.removeAll { $0.id == inv.id }
-                                    }
+                                    presentShareSheet(items: [inv.url])
+                                } label: {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(theme.font(15)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
-                            } label: {
-                                Image(systemName: "xmark.circle")
-                                    .font(theme.font(17)).foregroundStyle(theme.muted)
-                                    .frame(width: 30, height: 44).contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Share link")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Revoke link")
+                            // Only where the relay would allow it: my own link, or I manage the group.
+                            if inv.revocable(by: model.user?.id, managesGroup: canManageMembers) {
+                                Button {
+                                    guard model.acceptsAccountWork(work) else { return }
+                                    Task {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
+                                            guard model.acceptsAccountWork(work) else { return }
+                                            groupInvites.removeAll { $0.id == inv.id }
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                        .font(theme.font(17)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Revoke link")
+                            }
                         }))
                 .opacity(inv.usable ? 1 : 0.55)
             ))
@@ -1692,7 +1701,7 @@ struct GroupProfileView: View {
         ]
     }
 
-    /// Members sub-page: Add members, Share invite link (people groups), then
+    /// Members sub-page: Add members, then
     /// every person (name, @handle) and agent as kit rows. Banned people
     /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.
     private var membersSections: [PaneSection] {
@@ -1724,22 +1733,6 @@ struct GroupProfileView: View {
                         .accessibilityLabel("Description: \(desc)")
                 ))
             }
-        }
-        // People groups only (not a shared project): one-tap share of the invite link.
-        if project == nil, people?.kind == "group" {
-            list.append(AnyView(Button {
-                guard model.acceptsAccountWork(work) else { return }
-                guard let work, model.acceptsAccountWork(work) else { return }
-                shareGroupInvite(work: work)
-            } label: {
-                PaneRow(
-                    leading: .glyph("square.and.arrow.up"),
-                    title: sharingInvite ? "Preparing link…" : "Share invite link"
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(sharingInvite)
-            .accessibilityLabel("Share invite link")))
         }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
@@ -1789,31 +1782,6 @@ struct GroupProfileView: View {
                     guard model.acceptsAccountWork(work) else { return }
                     model.unbanMember(chatId: chatId, userId: r.person.id)
                 } label: { Label("Unban", systemImage: "hand.raised.slash") }
-            }
-        }
-    }
-
-    /// Reuse a usable invite URL, or mint one, then open the system share sheet.
-    /// Pass the link as a `String`, not a `URL`: Telegram's share extension drops a
-    /// bare URL activity item, so the recipient's chat gets an empty message.
-    private func shareGroupInvite(work: AccountWork) {
-        guard model.acceptsAccountWork(work), !sharingInvite else { return }
-        sharingInvite = true
-        Task {
-            guard model.acceptsAccountWork(work) else { return }
-            defer { if model.accountLifetime.accepts(work.owner) { sharingInvite = false } }
-            if let existing = groupInvites.first(where: { $0.usable }),
-               URL(string: existing.url) != nil {
-                presentShareSheet(items: [existing.url])
-                return
-            }
-            let created = await model.createGroupInvite(
-                chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work.owner
-            )
-            guard model.acceptsAccountWork(work) else { return }
-            if let inv = created {
-                groupInvites.insert(inv, at: 0)
-                if URL(string: inv.url) != nil { presentShareSheet(items: [inv.url]) }
             }
         }
     }
@@ -2308,7 +2276,10 @@ struct ServerProfileView: View {
     @State private var banningMember: ServerMember?
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    @State private var copied = false
+    /// Id of the invite link whose Copy was just tapped: the tick belongs to that row alone.
+    @State private var copied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var copyTick: Task<Void, Never>?
     @State private var loadedMembers = false
     @State private var showAddMembers = false
     /// Settings › Invite links › New link options (owner).
@@ -2513,15 +2484,16 @@ struct ServerProfileView: View {
                                 Button {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
-                                    copied = true
-                                    Task { @MainActor in
+                                    copied = inv.id
+                                    copyTick?.cancel()
+                                    copyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        copied = false
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
+                                        copied = nil
                                     }
                                 } label: {
-                                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                    Image(systemName: copied == inv.id ? "checkmark" : "doc.on.doc")
                                         .font(theme.font(15)).foregroundStyle(theme.muted)
                                         .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
