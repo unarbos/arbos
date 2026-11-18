@@ -170,6 +170,17 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         }
     }
 
+    /// The first drawn row accepted by `fits` whose identifier no other drawn row shares. A
+    /// message drawn as two rows (a picture and its caption) gives both the same identifier,
+    /// and a lookup by it can return one of them before the keyboard moves and the other
+    /// after, which reads as the row having jumped by the distance between them.
+    private func uniqueRow(_ app: XCUIApplication, where fits: (CGRect) -> Bool) -> XCUIElement? {
+        let rows = bubbles(app)
+        if let any = rows.first { _ = restingFrame(any) }
+        let ids = rows.map(\.identifier)
+        return rows.first { row in fits(row.frame) && ids.filter { $0 == row.identifier }.count == 1 }
+    }
+
     private func chevron(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)["chat-scroll-to-bottom"].firstMatch
     }
@@ -200,28 +211,30 @@ final class TranscriptEndAnchorUITests: XCTestCase {
     /// the keyboard came up. Focusing the composer used to send everyone to the newest row,
     /// so the row asserted on here left the screen.
     func testTheKeyboardComingUpInHistoryLeavesTheReaderWhereTheyAre() {
-        let app = openLaunchWeek()
+        let app = openLongLaunchWeekWithRig()
         let window = app.windows.firstMatch
-        drag(app, by: 0.5)
+        drag(app, by: 0.5, times: 6)
 
-        // A row that starts under the header and above the middle of the window, so it is
-        // clear of where the composer and the keyboard will be.
+        // A row under the header and above the middle of the window, so it is clear of where
+        // the composer and the keyboard will be.
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch.frame
-        let rows = bubbles(app)
-        // The drag's own deceleration: once one row is at rest they all are.
-        if let any = rows.first { _ = restingFrame(any) }
-        guard let row = rows.first(where: { $0.frame.minY > header.maxY && $0.frame.minY < window.frame.midY }) else {
-            return XCTFail("a row starts in the upper half of the screen after scrolling up")
+        guard let row = uniqueRow(app, where: { $0.minY > header.maxY && $0.maxY < window.frame.midY }) else {
+            return XCTFail("a row sits in the upper half of the screen after scrolling up")
         }
         let id = row.identifier
         let before = row.frame
 
         raiseKeyboard(app)
-
         let after = app.descendants(matching: .any)[id].firstMatch
         XCTAssertTrue(after.exists, "the row the reader was on is still drawn")
         XCTAssertEqual(restingFrame(after).minY, before.minY, accuracy: 2,
                        "and it has not moved: the reader keeps their place when the keyboard opens")
+
+        // And when it goes again: a tap on the transcript's edge, beside the rows.
+        window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: window.frame.maxX - 4, dy: header.maxY + 30)).tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "the keyboard is down")
+        XCTAssertEqual(restingFrame(after).minY, before.minY, accuracy: 2, "nor when the keyboard closes")
     }
 
     /// The fixture's own last message, after all the padded history.
@@ -383,15 +396,12 @@ final class TranscriptEndAnchorUITests: XCTestCase {
 
     /// And up in history, they are still where they were.
     func testClosingTheHoldMenuInHistoryGivesTheKeyboardBackWhereTheReaderWas() {
-        // The padded history: text rows short enough for one to sit whole above the keyboard.
         let app = openLongLaunchWeekWithRig()
-        drag(app, by: 0.5, times: 3)
+        drag(app, by: 0.5, times: 6)
         raiseKeyboard(app)
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch.frame
         let top = composerTop(app)
-        let rows = bubbles(app)
-        if let any = rows.first { _ = restingFrame(any) }
-        guard let row = rows.first(where: { $0.frame.minY > header.maxY && $0.frame.maxY < top }) else {
+        guard let row = uniqueRow(app, where: { $0.minY > header.maxY && $0.maxY < top }) else {
             return XCTFail("a row sits between the header and the composer with the keyboard up")
         }
         let id = row.identifier
@@ -400,13 +410,8 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         openAndCloseTheHoldMenu(on: row, in: app)
         let after = app.descendants(matching: .any)[id].firstMatch
         XCTAssertTrue(after.exists, "the row the reader was on is still drawn")
-        // Not sent to the end, which is thousands of points away, and that is all this can
-        // hold the transcript to. The scroll offset does not change through any of it (logged),
-        // but with no size-change anchor for a reader in history the lazy stack re-lays the
-        // rows above when the container changes, and in about one run in three the rows on
-        // screen come back 177 pt higher.
-        XCTAssertEqual(restingFrame(after).minY, before.minY, accuracy: app.windows.firstMatch.frame.height / 2,
-                       "the reader is on the same rows when the menu gives the keyboard back")
+        XCTAssertEqual(restingFrame(after).minY, before.minY, accuracy: 2,
+                       "the reader is where they were when the menu gives the keyboard back")
         XCTAssertTrue(chevron(app).exists, "and still in history")
     }
 
