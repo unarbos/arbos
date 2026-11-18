@@ -1,0 +1,17 @@
+# One receiver for everything: the Discord webhook whose URL is ALERT_WEBHOOK_URL in the env file
+# (docker-compose.yml writes it to /tmp/webhook-url). For a non-Discord endpoint that takes
+# Alertmanager's own JSON, replace discord_configs with `webhook_configs: [{url_file: ..., send_resolved: true}]`.
+route:
+  receiver: webhook
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: webhook
+    discord_configs:
+      - webhook_url_file: /tmp/webhook-url
+        send_resolved: true
+        title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+        message: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'

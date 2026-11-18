@@ -1,0 +1,126 @@
+# promtool test rules rules_test.yml   (check.sh runs it)
+rule_files:
+  - rules.yml
+  - subnet-rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # Every source series carries the labels that identify a box, a user or the host. Whatever the
+  # subnet rules produce from them must come out with a name and nothing else: this list is the
+  # complete expected output, so a rule that lets a label through (or a new rule not listed) fails.
+  - name: subnet aggregates carry no labels
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x20
+      - series: 'probe_success{job="public-https", instance="https://relay.arbos.life/healthz"}'
+        values: 1x20
+      - series: 'container_last_seen{name="arbos-box-u_alice", id="/docker/aaa", image="arbos-agent:1", instance="host-1"}'
+        values: 1x20
+      - series: 'container_last_seen{name="arbos-box-u_bob", id="/docker/bbb", image="arbos-agent:1", instance="host-1"}'
+        values: 1x20
+      - series: 'container_last_seen{name="postgres", id="/docker/ccc", instance="host-1"}'
+        values: 1x20
+      - series: 'arbos_boxes{state="asleep", instance="host-1"}'
+        values: 3x20
+      - series: 'arbos_boxes_waitlisted{instance="host-1"}'
+        values: 0x20
+      - series: 'arbos_boxes_max{instance="host-1"}'
+        values: 100x20
+      - series: 'arbos_box_starts_total{result="ok", instance="host-1"}'
+        values: 0+27x20
+      - series: 'arbos_box_starts_total{result="error", instance="host-1"}'
+        values: 0+3x20
+      - series: 'arbos_agent_turns_started_total{box="u_alice"}'
+        values: 0+60x20
+      - series: 'arbos_agent_turns_finished_total{box="u_alice", result="ok"}'
+        values: 0+54x20
+      - series: 'arbos_agent_turns_finished_total{box="u_bob", result="failed"}'
+        values: 0+6x20
+      - series: 'arbos_agent_turns_active{box="u_alice"}'
+        values: 2x20
+      - series: 'arbos_agent_queue_depth{box="u_bob"}'
+        values: 5x20
+      - series: 'arbos_agent_turn_duration_seconds_bucket{box="u_alice", le="10"}'
+        values: 0+30x20
+      - series: 'arbos_agent_turn_duration_seconds_bucket{box="u_alice", le="+Inf"}'
+        values: 0+30x20
+      - series: 'arbos_model_requests_total{provider="openrouter", result="ok", instance="host-1"}'
+        values: 0+90x20
+      - series: 'arbos_model_requests_total{provider="openrouter", result="error", instance="host-1"}'
+        values: 0+10x20
+      - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
+        values: 0+15x20
+      - series: 'node_cpu_seconds_total{mode="user", cpu="0", instance="host-1"}'
+        values: 0+15x20
+      - series: 'node_memory_MemAvailable_bytes{instance="host-1"}'
+        values: 25x20
+      - series: 'node_memory_MemTotal_bytes{instance="host-1"}'
+        values: 100x20
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", device="/dev/sda1", instance="host-1"}'
+        values: 27x20
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", device="/dev/sda1", instance="host-1"}'
+        values: 100x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:.+"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:relay_up", value: 1 }
+          - { labels: "subnet:public_up", value: 1 }
+          - { labels: "subnet:boxes_running", value: 2 }
+          - { labels: "subnet:boxes_asleep", value: 3 }
+          - { labels: "subnet:boxes_waitlisted", value: 0 }
+          - { labels: "subnet:boxes_max", value: 100 }
+          - { labels: "subnet:box_starts:rate5m", value: 1 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0.1 }
+          - { labels: "subnet:turns_started:rate5m", value: 2 }
+          - { labels: "subnet:turns_finished:rate5m", value: 2 }
+          - { labels: "subnet:turns_failed:rate5m", value: 0.2 }
+          - { labels: "subnet:turns_active", value: 2 }
+          - { labels: "subnet:queue_depth", value: 5 }
+          - { labels: "subnet:turn_duration_seconds:p50", value: 5 }
+          - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
+          - { labels: "subnet:model_error_ratio", value: 0.1 }
+          - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
+          - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
+          - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
+
+  - name: relay down, low disk, and a target that never answered
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x4 0x20
+      - series: 'up{job="relay", instance="127.0.0.1:7700"}' # /metrics not served yet: must stay quiet
+        values: 0x30
+      - series: 'up{job="node", instance="127.0.0.1:9100"}' # was up, went down: must fire
+        values: 1x4 0x20
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/"}'
+        values: 14x30
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/"}'
+        values: 100x30
+      - series: 'node_vmstat_oom_kill'
+        values: 0x10 1x20
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RelayDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RelayDown
+        exp_alerts:
+          - exp_labels: { job: relay-health, instance: "http://127.0.0.1:7700/healthz" }
+            exp_annotations: { summary: The relay does not answer /healthz on the host. }
+      - eval_time: 8m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels: { job: node, instance: "127.0.0.1:9100" }
+            exp_annotations: { summary: Prometheus cannot scrape node. }
+      - eval_time: 8m
+        alertname: DiskFreeLow
+        exp_alerts:
+          - exp_labels: { fstype: ext4, mountpoint: / }
+            exp_annotations: { summary: "/ has 14% free." }
+      - eval_time: 6m
+        alertname: BoxOOMKilled
+        exp_alerts:
+          - exp_annotations: { summary: "The kernel OOM-killed 1 processes in the last 10 minutes (Boxes dashboard → OOM kills)." }

@@ -1,0 +1,56 @@
+# Local run on a laptop (README "Run it locally"):
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# Production uses host networking and loopback addresses. Docker Desktop has no usable host network,
+# so here every service joins the network namespace of one container (fake-relay) instead: the same
+# 127.0.0.1 addresses and the same config files work unchanged. Only Grafana is published, on
+# http://127.0.0.1:3300 (admin / the password in local/local.env).
+x-pod: &pod
+  network_mode: service:fake-relay
+  restart: "no"
+
+x-box: &box
+  image: busybox:1.37
+  restart: "no"
+  mem_limit: 64m
+  pids_limit: 64
+  cpus: 0.2
+
+services:
+  # The relay stand-in, and the owner of the shared network namespace.
+  fake-relay:
+    image: busybox:1.37
+    container_name: arbos-obs-fake-relay
+    command: ["/bin/sh", "/fake-relay.sh"]
+    volumes:
+      - ./local/fake-relay.sh:/fake-relay.sh:ro
+    ports:
+      - 127.0.0.1:3300:3300
+
+  prometheus: *pod
+  prometheus-subnet: *pod
+  alertmanager: *pod
+  cadvisor: *pod
+  node-exporter:
+    <<: *pod
+    volumes: !override
+      - /:/host:ro # Docker Desktop's root is not a shared mount, so no rslave here
+  blackbox: *pod
+  grafana:
+    <<: *pod
+    environment:
+      GF_SERVER_HTTP_ADDR: 0.0.0.0 # published through fake-relay's port mapping
+      GF_SECURITY_COOKIE_SECURE: "false" # plain http on localhost
+
+  # Three "boxes" for the container panels: one busy, one holding memory and doing network and disk IO, one near its pids limit.
+  box-1:
+    <<: *box
+    container_name: arbos-box-test_1
+    command: ["sh", "-c", "while :; do :; done"]
+  box-2:
+    <<: *box
+    container_name: arbos-box-test_2
+    command: ["sh", "-c", "dd if=/dev/zero of=/dev/shm/fill bs=1M count=40; while :; do wget -qO /dev/null http://example.com; dd if=/dev/zero of=/tmp/io bs=1M count=4 conv=fsync 2>/dev/null; sleep 2; done"]
+  box-3:
+    <<: *box
+    container_name: arbos-box-test_3
+    command: ["sh", "-c", "for i in $$(seq 55); do sleep 86400 & done; wait"]

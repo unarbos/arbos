@@ -1,0 +1,171 @@
+# Monitoring for the Arbos relay host: Prometheus, Alertmanager, Grafana, cAdvisor, node_exporter,
+# blackbox_exporter, and a second small Prometheus that holds only the label-free `subnet:*`
+# aggregates behind the shareable Subnet view. README.md in this folder is the runbook.
+#
+# host networking, like LiveKit and Synapse: Prometheus scrapes the relay on 127.0.0.1:7700 and the
+# exporters on loopback. Every listener binds 127.0.0.1; nothing is reachable from outside. Grafana
+# (127.0.0.1:3300) is the only piece published, through the :443 Caddy (Caddyfile.grafana).
+#
+# Secrets come from OBS_ENV_FILE (default /etc/arbos/observability.env, see .env.example) and
+# OBS_SECRETS_DIR (default /etc/arbos/observability); neither is in the repo.
+name: arbos-obs
+
+x-common: &common
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v3.13.5
+    container_name: arbos-obs-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=127.0.0.1:9090
+      - --storage.tsdb.path=/prometheus
+      # Whichever limit is hit first wins. The host disk is at 73%: 15 GB is the most this may take.
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=15GB
+    environment:
+      GOMEMLIMIT: 1500MiB
+    mem_limit: 2g
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - ${OBS_SECRETS_DIR:-/etc/arbos/observability}:/etc/secrets:ro
+      - prometheus-data:/prometheus
+
+  # Federates only `subnet:*` recording rules from the Prometheus above. The Subnet view's Grafana
+  # organisation has this as its only datasource, so no query a viewer there can write returns a
+  # box, user, container or host name: the data is not in this instance.
+  prometheus-subnet:
+    <<: *common
+    image: prom/prometheus:v3.13.5
+    container_name: arbos-obs-prometheus-subnet
+    command:
+      - --config.file=/etc/prometheus/subnet.yml
+      - --web.listen-address=127.0.0.1:9091
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=1GB
+    mem_limit: 256m
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-subnet-data:/prometheus
+
+  alertmanager:
+    <<: *common
+    image: prom/alertmanager:v0.34.2
+    container_name: arbos-obs-alertmanager
+    env_file: ${OBS_ENV_FILE:-/etc/arbos/observability.env}
+    # Alertmanager does not expand environment variables in its config; it reads the webhook URL
+    # from a file, so the URL from the env file is written to one before it starts.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        umask 077
+        printf %s "$$ALERT_WEBHOOK_URL" > /tmp/webhook-url
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml \
+          --storage.path=/alertmanager --web.listen-address=127.0.0.1:9093 --cluster.listen-address=
+    mem_limit: 128m
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+
+  grafana:
+    <<: *common
+    image: grafana/grafana:13.2.6
+    container_name: arbos-obs-grafana
+    env_file: ${OBS_ENV_FILE:-/etc/arbos/observability.env}
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: 3300
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_PUBLIC_DASHBOARDS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet.json
+    mem_limit: 1g
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  # Reads the host's cgroups, so it sees gVisor (runsc) boxes from outside the sandbox: what the box
+  # costs the host, not what processes inside it do (README "What cAdvisor sees under gVisor").
+  cadvisor:
+    <<: *common
+    image: ghcr.io/google/cadvisor:v0.60.6
+    container_name: arbos-obs-cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg # OOM kills are read from the kernel log
+    command:
+      - --listen_ip=127.0.0.1
+      - --port=9180
+      # Docker containers, plus the systemd service cgroups (relay RSS/CPU/restarts without /metrics).
+      - --docker_only=true
+      - --raw_cgroup_prefix_whitelist=/system.slice
+      - --housekeeping_interval=30s
+      - --store_container_labels=false
+      - --disable_metrics=app,cpuLoad,perf_event,percpu,sched,tcp,udp,advtcp,hugetlb,referenced_memory,cpu_topology,resctrl,memory_numa,cpuset,disk
+    mem_limit: 1g
+    cpus: 2
+    healthcheck: # the image's own check asks port 8080
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:9180/healthz"]
+      interval: 30s
+      timeout: 5s
+    volumes:
+      - /:/rootfs:ro
+      - /run:/run:ro # docker.sock and containerd.sock: container names and images
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+
+  # node_exporter rather than the Netdata already on the host: see README "Decisions".
+  node-exporter:
+    <<: *common
+    image: prom/node-exporter:v1.12.1
+    container_name: arbos-obs-node-exporter
+    pid: host
+    command:
+      - --web.listen-address=127.0.0.1:9100
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/containers/.+)($$|/)
+      - --collector.netdev.device-exclude=^(veth.*|br-.*|docker.*|lo)$$
+      - --no-collector.wifi
+      - --no-collector.arp
+    mem_limit: 128m
+    volumes:
+      - /:/host:ro,rslave
+
+  blackbox:
+    <<: *common
+    image: prom/blackbox-exporter:v0.29.1
+    container_name: arbos-obs-blackbox
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+      - --web.listen-address=127.0.0.1:9115
+    mem_limit: 64m
+    volumes:
+      - ./blackbox:/etc/blackbox:ro
+
+volumes:
+  prometheus-data:
+  prometheus-subnet-data:
+  alertmanager-data:
+  grafana-data:

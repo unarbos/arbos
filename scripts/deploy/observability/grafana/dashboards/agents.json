@@ -1,0 +1,1059 @@
+{
+ "uid": "arbos-agents",
+ "title": "Agents",
+ "tags": [
+  "arbos"
+ ],
+ "editable": false,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "refresh": "30s",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "graphTooltip": 1,
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Turns started / min",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 1,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_agent_turns_started_total[5m]))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns finished / min",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 2,
+   "gridPos": {
+    "x": 3,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns failed",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 2,
+        "color": "orange"
+       },
+       {
+        "value": 10,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 3,
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * sum(rate(arbos_agent_turns_finished_total{result=\"failed\"}[5m])) / sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turn duration p95",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 4,
+   "gridPos": {
+    "x": 9,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns running",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 5,
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agent_turns_active)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Queue depth",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 20,
+        "color": "orange"
+       },
+       {
+        "value": 100,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 6,
+   "gridPos": {
+    "x": 15,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agent_queue_depth)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Crashes (1h)",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 7,
+   "gridPos": {
+    "x": 18,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(increase(arbos_agent_worker_crashes_total[1h]))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Model errors",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 2,
+        "color": "orange"
+       },
+       {
+        "value": 10,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 8,
+   "gridPos": {
+    "x": 21,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * sum(rate(arbos_model_requests_total{result=\"error\"}[5m])) / sum(rate(arbos_model_requests_total[5m]))",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Turns per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_agent_turns_started_total[5m]))",
+     "legendFormat": "started",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum by (result) (rate(arbos_agent_turns_finished_total[5m]))",
+     "legendFormat": "finished {{result}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Turn duration",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 10,
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "legendFormat": "p50",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "legendFormat": "p95",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "legendFormat": "p99",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue and running turns",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 11,
+   "gridPos": {
+    "x": 0,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agent_queue_depth)",
+     "legendFormat": "queued",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agent_turns_active)",
+     "legendFormat": "running",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agent_workers)",
+     "legendFormat": "workers",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Worker crashes per hour",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 12,
+   "gridPos": {
+    "x": 12,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(increase(arbos_agent_worker_crashes_total[1h]))",
+     "legendFormat": "crashes",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Model requests per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 13,
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum by (provider, result) (rate(arbos_model_requests_total[5m]))",
+     "legendFormat": "{{provider}} {{result}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Model request duration",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 14,
+   "gridPos": {
+    "x": 12,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_model_request_duration_seconds_bucket[5m])))",
+     "legendFormat": "p50",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_model_request_duration_seconds_bucket[5m])))",
+     "legendFormat": "p95",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Failure rates",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 15,
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * sum(rate(arbos_agent_turns_finished_total{result=\"failed\"}[5m])) / sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "legendFormat": "turns failed",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * sum(rate(arbos_model_requests_total{result=\"error\"}[5m])) / sum(rate(arbos_model_requests_total[5m]))",
+     "legendFormat": "model errors",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Relay HTTP requests per second",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 16,
+   "gridPos": {
+    "x": 12,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (class) (rate(arbos_relay_http_requests_total[5m]))",
+     "legendFormat": "{{class}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  }
+ ],
+ "links": [
+  {
+   "type": "dashboards",
+   "tags": [
+    "arbos"
+   ],
+   "title": "Arbos",
+   "asDropdown": false,
+   "includeVars": false,
+   "keepTime": true
+  }
+ ]
+}

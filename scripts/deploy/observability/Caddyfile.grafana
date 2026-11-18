@@ -1,0 +1,20 @@
+# Caddy vhost for Grafana (copied to /etc/arbos/sites.d/grafana.caddy, which scripts/deploy/Caddyfile
+# imports; README.md has the steps). The name must be a DNS-only A record to this server: port 80
+# belongs to another Caddy here, so the certificate comes from the TLS-ALPN challenge on 443.
+#
+# Grafana does the login (anonymous access is off); Caddy only terminates TLS. Nothing else of the
+# monitoring stack is proxied: Prometheus, Alertmanager and the exporters stay on loopback.
+@GRAFANA_HOST@ {
+	import acme_alpn_only
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		X-Robots-Tag "noindex, nofollow"
+	}
+	# Grafana's own Prometheus metrics endpoint is not for the internet.
+	respond /metrics 404
+	reverse_proxy 127.0.0.1:3300
+}
