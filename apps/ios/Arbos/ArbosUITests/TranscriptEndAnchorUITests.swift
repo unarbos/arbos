@@ -1,4 +1,5 @@
 import XCTest
+import notify
 
 /// What `.defaultScrollAnchor(.bottom)` buys us, pinned before anyone changes it.
 ///
@@ -117,8 +118,9 @@ final class TranscriptEndAnchorUITests: XCTestCase {
     }
 
     /// An element's frame once it has held still across two reads, so a row is measured where
-    /// it came to rest and not where a scroll or the keyboard was carrying it.
-    private func restingFrame(_ element: XCUIElement) -> CGRect {
+    /// it came to rest and not where a scroll or the keyboard was carrying it. A row that
+    /// never comes to rest is a failure, not a frame.
+    private func restingFrame(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) -> CGRect {
         var last = element.frame
         for _ in 0..<20 {
             usleep(300_000)
@@ -126,6 +128,7 @@ final class TranscriptEndAnchorUITests: XCTestCase {
             if now == last { return now }
             last = now
         }
+        XCTFail("\(element.identifier) never came to rest; last seen at \(last)", file: file, line: line)
         return last
     }
 
@@ -139,6 +142,60 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         return app
     }
 
+    /// The chat's rig (`ARBOS_SHOW=rig-notify`), asked for something by Darwin notification.
+    /// A tap would wait for the transcript to stop moving first; this does not, which is the
+    /// point: the cases below are about what happens while it is still moving.
+    ///
+    /// A gesture call itself returns only once the scroll it started has stopped, so what is
+    /// meant to land inside a scroll is armed first and fired by the app (`keyboard-on-coast`,
+    /// `hop-keyboard`).
+    private func rig(_ name: String) {
+        notify_post("arbos.rig.\(name)")
+    }
+
+    /// The long fixture with the rig listening. The rig is armed `ARBOS_SHOW_DELAY_MS` after
+    /// the chat appears, so wait that out before anything is asked of it.
+    private func openLongLaunchWeekWithRig() -> XCUIApplication {
+        let app = openLaunchWeek(["ARBOS_FIXTURE_LONG_ROWS": "420", "ARBOS_SHOW": "rig-notify",
+                                  "ARBOS_TRACE_REVEAL": "1"])
+        XCTAssertTrue(app.descendants(matching: .any)["reveal-probe"].firstMatch.waitForExistence(timeout: appear),
+                      "the chat is up with its rig")
+        sleep(2)
+        return app
+    }
+
+    /// Drag the transcript by a fraction of the window: positive `by` goes up into history.
+    private func drag(_ app: XCUIApplication, by: CGFloat, times: Int = 1) {
+        let window = app.windows.firstMatch
+        let from: CGFloat = by > 0 ? 0.3 : 0.45
+        for _ in 0..<times {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: from))
+                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: from + by)))
+        }
+    }
+
+    private func chevron(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["chat-scroll-to-bottom"].firstMatch
+    }
+
+    private func waitForKeyboard(_ app: XCUIApplication) {
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 30), "the keyboard is up")
+    }
+
+    /// The message the rig's reveal landed on, once its corrections have stopped
+    /// (`reveal-probe` reads `<message id> passes=… arrived=…`).
+    private func revealedRow(_ app: XCUIApplication) -> XCUIElement {
+        let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
+        let landed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "arrived="),
+                                               object: probe)
+        XCTAssertEqual(XCTWaiter().wait(for: [landed], timeout: appear), .completed,
+                       "the rig's reveal has landed — probe \(String(describing: probe.value))")
+        let id = String((probe.value as? String ?? "").prefix { $0 != " " })
+        let row = app.descendants(matching: .any)["bubble:\(id)"].firstMatch
+        XCTAssertTrue(row.exists, "the revealed message \(id) is drawn")
+        return row
+    }
+
     /// The container shrinking under a reader who has scrolled up must leave them where they
     /// are (tester report, 2026-11-14: "I'd prefer it just stays where you were. Would make it
     /// easier to type a reply to someone while re-reading someone's message").
@@ -149,8 +206,7 @@ final class TranscriptEndAnchorUITests: XCTestCase {
     func testTheKeyboardComingUpInHistoryLeavesTheReaderWhereTheyAre() {
         let app = openLaunchWeek()
         let window = app.windows.firstMatch
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-            .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)))
+        drag(app, by: 0.5)
 
         // A row that starts under the header and above the middle of the window, so it is
         // clear of where the composer and the keyboard will be.
@@ -179,38 +235,88 @@ final class TranscriptEndAnchorUITests: XCTestCase {
     /// which is the reply-to-what-I-am-reading case again, and scrolling down with the
     /// keyboard up must still arrive at the real newest message.
     ///
-    /// Before, the reader was thrown fifteen rows down to the end of the slid window (the
-    /// first assertion). The second half is a guard and did hold before: the window comes
-    /// back as soon as the reader scrolls to its end.
+    /// The window is grown first, by reading back through history and returning with the
+    /// chevron, because that is the reveal that slides it without the content growing
+    /// (tester report, 2026-11-17: "my keyboard just got stuck like this and I can't scroll
+    /// down any further").
     func testAfterARevealTheKeyboardKeepsThePlaceAndTheNewestRowCanStillBeReached() {
-        let app = openLaunchWeek(["ARBOS_FIXTURE_LONG_ROWS": "420", "ARBOS_SHOW": "reveal-old",
-                                  "ARBOS_TRACE_REVEAL": "1"])
-        // `<message id> passes=… arrived=…` once the reveal's corrections have stopped.
-        let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
-        let landed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "arrived="),
-                                               object: probe)
-        XCTAssertEqual(XCTWaiter().wait(for: [landed], timeout: appear), .completed,
-                       "the rig's reveal has landed — probe \(String(describing: probe.value))")
-        let id = String((probe.value as? String ?? "").prefix { $0 != " " })
-        let revealed = app.descendants(matching: .any)["bubble:\(id)"].firstMatch
-        XCTAssertTrue(revealed.exists, "the revealed message \(id) is drawn")
+        let app = openLongLaunchWeekWithRig()
+        drag(app, by: 0.55, times: 18)
+        let down = chevron(app)
+        XCTAssertTrue(down.waitForExistence(timeout: 15), "up in history, the chevron shows")
+        down.tap()
+        assertAtTheEnd(app, "back at the end by the chevron")
+
+        rig("reveal-old")
+        let revealed = revealedRow(app)
         let before = restingFrame(revealed)
 
         raiseKeyboard(app)
-        XCTAssertEqual(restingFrame(revealed).minY, before.minY, accuracy: 2,
+        XCTAssertTrue(revealed.exists, "the message the reader was taken to is still drawn")
+        // A few points, not two: the rows above re-wrap at the keyboard's narrower side inset.
+        XCTAssertEqual(restingFrame(revealed).minY, before.minY, accuracy: 12,
                        "the reader stays on the message they were taken to when the keyboard opens")
 
         // The fixture's own last message, after all the padded history.
         let newest = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "1,284 signups"))
             .firstMatch
-        let window = app.windows.firstMatch
         for _ in 0..<15 where !(newest.exists && newest.frame.maxY <= composerTop(app) + 1) {
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
-                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)))
+            drag(app, by: -0.33)
         }
         XCTAssertTrue(newest.exists, "scrolling down with the keyboard up reaches the newest message")
         assertAtTheEnd(app, "scrolled back down with the keyboard up")
+    }
+
+    /// A reveal that lands on the end (the message before the newest: there is nowhere
+    /// further to centre it) leaves the reader unpinned, since a reveal always does, on the
+    /// newest row. The keyboard opening there is the #3051 case, whatever the latch says:
+    /// the newest row stays above the composer and the reader is following again.
+    func testAfterARevealThatLandsOnTheEndTheKeyboardFollowsTheEnd() {
+        let app = openLongLaunchWeekWithRig()
+        rig("reveal-near")
+        _ = restingFrame(revealedRow(app))
+
+        raiseKeyboard(app)
+        assertAtTheEnd(app, "keyboard up after a reveal at the end")
+        XCTAssertFalse(chevron(app).exists, "and the reader is following the end, so no chevron")
+    }
+
+    /// The chevron's hop to the end is animated, and part way through it the transcript is
+    /// measurably still in history. The composer focused during the hop must go where the
+    /// hop is going: read as "scrolled up", the keyboard rose over the newest rows and left
+    /// the reader unpinned on them. The rig runs the chevron's own action and focuses the
+    /// composer a tenth of a second into its 0.3 s hop.
+    func testTheKeyboardOpeningDuringTheChevronsHopFollowsItToTheEnd() {
+        let app = openLongLaunchWeekWithRig()
+        drag(app, by: 0.55, times: 3)
+        XCTAssertTrue(chevron(app).waitForExistence(timeout: 15), "up in history, the chevron shows")
+        rig("hop-keyboard")
+
+        waitForKeyboard(app)
+        assertAtTheEnd(app, "the keyboard came up during the hop")
+        XCTAssertFalse(chevron(app).exists, "and the reader is following the end, so no chevron")
+    }
+
+    /// The composer focused as a flick toward the end starts to coast (the rig does it the
+    /// moment the finger lifts). Where the flick has got to when the keyboard's resize arrives
+    /// is a matter of timing, so this asserts what must hold wherever that is: a reader the
+    /// transcript says is at the end (no chevron) has the newest row above the composer, not
+    /// under the keyboard.
+    func testTheKeyboardOpeningDuringAFlickTowardTheEndNeverHidesTheNewestRowsUnseen() {
+        let app = openLongLaunchWeekWithRig()
+        drag(app, by: 0.4)
+        let window = app.windows.firstMatch
+        rig("keyboard-on-coast")
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.03, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)),
+                   withVelocity: 1500, thenHoldForDuration: 0)
+
+        waitForKeyboard(app)
+        if let any = bubbles(app).last { _ = restingFrame(any) }
+        if !chevron(app).exists {
+            assertAtTheEnd(app, "no chevron, so the transcript says the reader is at the end")
+        }
     }
 
     /// The container *growing* under a reader at the end must also keep them at the end.
