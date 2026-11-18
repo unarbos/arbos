@@ -978,6 +978,7 @@ struct UserProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.profileHost) private var profileHost
     let person: ProfilePerson
     @State private var tab = "Links"
     @State private var sharedProjects: [Project] = []
@@ -1091,11 +1092,14 @@ struct UserProfileView: View {
         let work = model.accountWork()
         return PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
             guard model.acceptsAccountWork(work) else { return }
+            // Dismiss only inside a sheet, here and on the rows below: on the stack an open
+            // replaces the path, this page with it, and a dismiss that lands after it pops
+            // the chat that just opened.
             if let dm {
-                dismiss()
+                if profileHost == .sheet { dismiss() }
                 model.open(peopleChat: dm)
             } else {
-                Task { guard model.acceptsAccountWork(work) else { return }; if await model.openDM(handle: peerHandle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() } }
+                Task { guard model.acceptsAccountWork(work) else { return }; if await model.openDM(handle: peerHandle) != nil, profileHost == .sheet { guard model.acceptsAccountWork(work) else { return }; dismiss() } }
             }
         }
     }
@@ -1125,7 +1129,7 @@ struct UserProfileView: View {
         // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
-                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(peopleChat: g) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; if profileHost == .sheet { dismiss() }; model.open(peopleChat: g) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
                         title: g.title,
@@ -1138,7 +1142,7 @@ struct UserProfileView: View {
         }
         rows += sharedProjects.map { p in
             AnyView(
-                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(project: p) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; if profileHost == .sheet { dismiss() }; model.open(project: p) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar))),
                         title: p.name,
@@ -1205,6 +1209,19 @@ struct GroupProfileView: View {
     @State private var showAdd = false
     @State private var showEdit = false
     @State private var subpage: Subpage? = nil
+    /// A profile opened from a pushed sub-page (`ProfileHost.pushesFromSubpage`).
+    @State private var subpageProfile: ProfileTarget?
+
+    /// Open a member's page: from Members on the stack it pushes from the sub-page, so
+    /// back returns to the list; everywhere else it goes through the model.
+    private func openProfile(_ target: ProfileTarget) {
+        if profileHost.pushesFromSubpage(subpage != nil) {
+            subpageProfile = target
+        } else {
+            model.showProfile(target, in: profileHost)
+        }
+    }
+
     /// Rig only: avatar picker tab when Edit opens straight onto the picker.
     @State private var avatarTab: AvatarPickerTab = .bot
     @State private var openAvatarOnEdit = false
@@ -1222,9 +1239,10 @@ struct GroupProfileView: View {
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
-    @State private var inviteCopied = false
-    /// True while minting an invite link before opening the system share sheet.
-    @State private var sharingInvite = false
+    /// Id of the link whose Copy was just tapped: the tick belongs to that row alone.
+    @State private var inviteCopied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var inviteCopyTick: Task<Void, Never>?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -1379,6 +1397,9 @@ struct GroupProfileView: View {
                 groupSubpage(page)
                     .backSwipeToPop()
             }
+            // A path change can take the sub-page away with a profile still pushed from it;
+            // left set, that profile came back on the next tap on Members.
+            .onChange(of: subpage) { _, page in if page == nil { subpageProfile = nil } }
             .navigationDestination(isPresented: $showAdd) {
                 addMembersPage
                     .backSwipeToPop()
@@ -1465,7 +1486,8 @@ struct GroupProfileView: View {
                         ),
                         tabs: [],
                         selected: .constant(""),
-                        body: subpageSections(page)
+                        body: subpageSections(page),
+                        eager: page == .members
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -1473,6 +1495,10 @@ struct GroupProfileView: View {
             ProfileTopBar(screen: .groupPage) { EmptyView() }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(item: $subpageProfile) { target in
+            ProfilePage(target: target)
+                .backSwipeToPop()
+        }
         .accessibilityIdentifier("group-subpage-\(page.rawValue)")
     }
 
@@ -1625,45 +1651,53 @@ struct GroupProfileView: View {
                                 Button {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
-                                    inviteCopied = true
-                                    Task { @MainActor in
+                                    inviteCopied = inv.id
+                                    inviteCopyTick?.cancel()
+                                    inviteCopyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        inviteCopied = false
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
+                                        inviteCopied = nil
                                     }
                                 } label: {
-                                    Image(systemName: inviteCopied ? "checkmark" : "doc.on.doc")
+                                    Image(systemName: inviteCopied == inv.id ? "checkmark" : "doc.on.doc")
                                         .font(theme.font(15)).foregroundStyle(theme.muted)
                                         .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Copy link")
-                                if let url = URL(string: inv.url) {
-                                    ShareLink(item: url) {
-                                        Image(systemName: "square.and.arrow.up")
-                                            .font(theme.font(15)).foregroundStyle(theme.muted)
-                                            .frame(width: 30, height: 44).contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            Button {
-                                guard model.acceptsAccountWork(work) else { return }
-                                Task {
+                                // The link as a `String`, not a `URL`: Telegram's share extension
+                                // drops a bare URL activity item, so the chat gets an empty message.
+                                Button {
                                     guard model.acceptsAccountWork(work) else { return }
-                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        groupInvites.removeAll { $0.id == inv.id }
-                                    }
+                                    presentShareSheet(items: [inv.url])
+                                } label: {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(theme.font(15)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
-                            } label: {
-                                Image(systemName: "xmark.circle")
-                                    .font(theme.font(17)).foregroundStyle(theme.muted)
-                                    .frame(width: 30, height: 44).contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Share link")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Revoke link")
+                            // Only where the relay would allow it: my own link, or I manage the group.
+                            if inv.revocable(by: model.user?.id, managesGroup: canManageMembers) {
+                                Button {
+                                    guard model.acceptsAccountWork(work) else { return }
+                                    Task {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
+                                            guard model.acceptsAccountWork(work) else { return }
+                                            groupInvites.removeAll { $0.id == inv.id }
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                        .font(theme.font(17)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Revoke link")
+                            }
                         }))
                 .opacity(inv.usable ? 1 : 0.55)
             ))
@@ -1692,7 +1726,7 @@ struct GroupProfileView: View {
         ]
     }
 
-    /// Members sub-page: Add members, Share invite link (people groups), then
+    /// Members sub-page: Add members, then
     /// every person (name, @handle) and agent as kit rows. Banned people
     /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.
     private var membersSections: [PaneSection] {
@@ -1725,22 +1759,6 @@ struct GroupProfileView: View {
                 ))
             }
         }
-        // People groups only (not a shared project): one-tap share of the invite link.
-        if project == nil, people?.kind == "group" {
-            list.append(AnyView(Button {
-                guard model.acceptsAccountWork(work) else { return }
-                guard let work, model.acceptsAccountWork(work) else { return }
-                shareGroupInvite(work: work)
-            } label: {
-                PaneRow(
-                    leading: .glyph("square.and.arrow.up"),
-                    title: sharingInvite ? "Preparing link…" : "Share invite link"
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(sharingInvite)
-            .accessibilityLabel("Share invite link")))
-        }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
         if !bannedRows.isEmpty {
@@ -1768,7 +1786,7 @@ struct GroupProfileView: View {
         ) : nil
         return Button {
             guard model.acceptsAccountWork(work) else { return }
-            model.showProfile(.user(r.person), in: profileHost)
+            openProfile(.user(r.person))
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))),
@@ -1781,7 +1799,7 @@ struct GroupProfileView: View {
         .contextMenu {
             Button {
                 guard model.acceptsAccountWork(work) else { return }
-                model.showProfile(.user(r.person), in: profileHost)
+                openProfile(.user(r.person))
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if iCanMuteBan {
                 Divider()
@@ -1789,31 +1807,6 @@ struct GroupProfileView: View {
                     guard model.acceptsAccountWork(work) else { return }
                     model.unbanMember(chatId: chatId, userId: r.person.id)
                 } label: { Label("Unban", systemImage: "hand.raised.slash") }
-            }
-        }
-    }
-
-    /// Reuse a usable invite URL, or mint one, then open the system share sheet.
-    /// Pass the link as a `String`, not a `URL`: Telegram's share extension drops a
-    /// bare URL activity item, so the recipient's chat gets an empty message.
-    private func shareGroupInvite(work: AccountWork) {
-        guard model.acceptsAccountWork(work), !sharingInvite else { return }
-        sharingInvite = true
-        Task {
-            guard model.acceptsAccountWork(work) else { return }
-            defer { if model.accountLifetime.accepts(work.owner) { sharingInvite = false } }
-            if let existing = groupInvites.first(where: { $0.usable }),
-               URL(string: existing.url) != nil {
-                presentShareSheet(items: [existing.url])
-                return
-            }
-            let created = await model.createGroupInvite(
-                chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work.owner
-            )
-            guard model.acceptsAccountWork(work) else { return }
-            if let inv = created {
-                groupInvites.insert(inv, at: 0)
-                if URL(string: inv.url) != nil { presentShareSheet(items: [inv.url]) }
             }
         }
     }
@@ -1934,9 +1927,9 @@ struct GroupProfileView: View {
         return Button {
             guard model.acceptsAccountWork(work) else { return }
             if let a = r.agent {
-                model.showProfile(.agent(projectId: a.id), in: profileHost)
+                openProfile(.agent(projectId: a.id))
             } else if isMe {
-                model.showProfile(.user(r.person), in: profileHost)
+                openProfile(.user(r.person))
             } else {
                 // Offer Send private message alongside View profile (#1455).
                 memberActions = r.person
@@ -1950,6 +1943,8 @@ struct GroupProfileView: View {
             )
         }
         .buttonStyle(.borderless)
+        // Send private message dismisses only inside a sheet: on the stack `openDM` has
+        // replaced the path, and a dismiss after it popped the DM it had just opened.
         // Long-press: View profile, Send private message, Mute (with duration) /
         // Unmute, owner admin rights, Remove, Ban.
         .contextMenu {
@@ -1959,13 +1954,13 @@ struct GroupProfileView: View {
                     let handle = r.person.handle
                     Task {
                         guard model.acceptsAccountWork(work) else { return }
-                        if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
+                        if await model.openDM(handle: handle) != nil, profileHost == .sheet { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                     }
                 } label: { Label("Send private message", systemImage: "bubble.left") }
             }
             Button {
                 guard model.acceptsAccountWork(work) else { return }
-                if let a = r.agent { model.showProfile(.agent(projectId: a.id), in: profileHost) } else { model.showProfile(.user(r.person), in: profileHost) }
+                if let a = r.agent { openProfile(.agent(projectId: a.id)) } else { openProfile(.user(r.person)) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if showManage {
                 Divider()
@@ -2048,12 +2043,12 @@ struct GroupProfileView: View {
                 memberActions = nil
                 Task {
                     guard model.acceptsAccountWork(work) else { return }
-                    if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
+                    if await model.openDM(handle: handle) != nil, profileHost == .sheet { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                 }
             }
             Button("View profile") {
                 guard model.acceptsAccountWork(work) else { return }
-                model.showProfile(.user(r.person), in: profileHost)
+                openProfile(.user(r.person))
                 memberActions = nil
             }
             Button("Cancel", role: .cancel) { guard model.acceptsAccountWork(work) else { return }; memberActions = nil }
@@ -2298,6 +2293,19 @@ struct ServerProfileView: View {
 
     @State private var showEdit = false
     @State private var subpage: Subpage? = nil
+    /// A profile opened from a pushed sub-page (`ProfileHost.pushesFromSubpage`).
+    @State private var subpageProfile: ProfileTarget?
+
+    /// Open a member's page: from Members on the stack it pushes from the sub-page, so
+    /// back returns to the list; everywhere else it goes through the model.
+    private func openProfile(_ target: ProfileTarget) {
+        if profileHost.pushesFromSubpage(subpage != nil) {
+            subpageProfile = target
+        } else {
+            model.showProfile(target, in: profileHost)
+        }
+    }
+
     @State private var openAvatarOnEdit = false
     @State private var avatarTab: AvatarPickerTab = .bot
     @State private var showNewChannel = false
@@ -2308,7 +2316,10 @@ struct ServerProfileView: View {
     @State private var banningMember: ServerMember?
     @State private var confirmLeave = false
     @State private var confirmDelete = false
-    @State private var copied = false
+    /// Id of the invite link whose Copy was just tapped: the tick belongs to that row alone.
+    @State private var copied: String?
+    /// The timer that clears the tick; a second Copy cancels it so the tick lasts its full time.
+    @State private var copyTick: Task<Void, Never>?
     @State private var loadedMembers = false
     @State private var showAddMembers = false
     /// Settings › Invite links › New link options (owner).
@@ -2334,6 +2345,8 @@ struct ServerProfileView: View {
                 serverSubpage(page)
                     .backSwipeToPop()
             }
+            // As on the group page: no profile outlives the sub-page it was pushed from.
+            .onChange(of: subpage) { _, page in if page == nil { subpageProfile = nil } }
             .navigationDestination(isPresented: $showNewChannel) {
                 NewChannelPage(serverId: serverId)
                     .environmentObject(model)
@@ -2435,7 +2448,8 @@ struct ServerProfileView: View {
                             ),
                             tabs: [],
                             selected: .constant(""),
-                            body: subpageSections(page, server)
+                            body: subpageSections(page, server),
+                            eager: page == .members
                         )
                     }
                     Color.clear.frame(height: 40)
@@ -2444,6 +2458,10 @@ struct ServerProfileView: View {
             ProfileTopBar(screen: .serverPage) { EmptyView() }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(item: $subpageProfile) { target in
+            ProfilePage(target: target)
+                .backSwipeToPop()
+        }
         .accessibilityIdentifier("server-subpage-\(page.rawValue)")
     }
 
@@ -2513,15 +2531,16 @@ struct ServerProfileView: View {
                                 Button {
                                     guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
-                                    copied = true
-                                    Task { @MainActor in
+                                    copied = inv.id
+                                    copyTick?.cancel()
+                                    copyTick = Task { @MainActor in
                                         guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
-                                        guard model.acceptsAccountWork(work) else { return }
-                                        copied = false
+                                        guard !Task.isCancelled, model.acceptsAccountWork(work) else { return }
+                                        copied = nil
                                     }
                                 } label: {
-                                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                    Image(systemName: copied == inv.id ? "checkmark" : "doc.on.doc")
                                         .font(theme.font(15)).foregroundStyle(theme.muted)
                                         .frame(width: 30, height: 44).contentShape(Rectangle())
                                 }
@@ -2793,7 +2812,7 @@ struct ServerProfileView: View {
                                    lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex)
         return Button {
             guard model.acceptsAccountWork(work) else { return }
-            model.showProfile(.user(person), in: profileHost)
+            openProfile(.user(person))
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: PaneKit.avatar, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))),
@@ -3326,6 +3345,11 @@ struct ProfilePane: View {
     let sections: [PaneSection]
     /// Pinned after the body: Block user, Leave group, Sign out…
     var footer: [PaneSection] = []
+    /// Lay every section out at once. A lazy stack guesses the height of the sections it
+    /// has not built from the ones it has, and a members card is one section hundreds of
+    /// rows tall above a few short ones: the guess was several cards too long, and the
+    /// scroll indicator jumped as the short sections arrived (tester report, 2026-11-16).
+    var eager = false
 
     /// What `body` lays out for `tabs` tabs with `footerSections` pinned parts:
     /// hero first, then the pill (2+ tabs), then the options, then the footer.
@@ -3337,12 +3361,13 @@ struct ProfilePane: View {
         return out
     }
 
-    init(hero: PaneHero, tabs: [String], selected: Binding<String>, body: [PaneSection], footer: [PaneSection] = []) {
+    init(hero: PaneHero, tabs: [String], selected: Binding<String>, body: [PaneSection], footer: [PaneSection] = [], eager: Bool = false) {
         self.hero = hero
         self.tabs = tabs
         self._selected = selected
         self.sections = body
         self.footer = footer
+        self.eager = eager
     }
 
     /// How far the content fades out under the pinned hero + tabs (the chat
@@ -3356,10 +3381,10 @@ struct ProfilePane: View {
         // header); the sections scroll beneath and fade out at the join.
         LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
             Section {
-                ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
-                if !footer.isEmpty {
-                    Color.clear.frame(height: 1)
-                    ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
+                if eager {
+                    VStack(spacing: 18) { rows }
+                } else {
+                    rows
                 }
             } header: {
                 VStack(spacing: 18) {
@@ -3392,6 +3417,15 @@ struct ProfilePane: View {
                     .padding(.top, -200)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var rows: some View {
+        ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
+        if !footer.isEmpty {
+            Color.clear.frame(height: 1)
+            ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
         }
     }
 

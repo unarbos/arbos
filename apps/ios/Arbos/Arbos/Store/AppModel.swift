@@ -486,6 +486,11 @@ final class AppModel: ObservableObject {
         /// Home's "+" — New Message (Jacob, 2026-11-10: the compose panel pushes in from
         /// the right like a chat and Settings, instead of rising as a bottom sheet).
         case newMessage
+        /// The Archived chats list behind Home's footer. A route, not a page presented
+        /// beside the path: opening a chat changes the path, which drops every page
+        /// presented outside it, and back from that chat went to Home (tester report,
+        /// 2026-11-17).
+        case archived
     }
 
     // MARK: Servers (D88)
@@ -2336,7 +2341,11 @@ final class AppModel: ObservableObject {
                 pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = UserError.classify("load your chats", error)
+            let failure = UserError.classify("load your chats", error)
+            // The raw detail is for whoever reads the log; the line under Home shows the sentence.
+            // As an argument, never the format: the raw words can be the relay's body.
+            NSLog("registry: reload failed: %@", failure.raw.isEmpty ? failure.sentence : failure.raw)
+            registryError = failure
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -4221,7 +4230,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -4650,6 +4659,15 @@ final class AppModel: ObservableObject {
 
     /// Group profile › Invite links › list.
     func groupInvites(_ chatId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ServerInviteLink] {
+        #if DEBUG || ARBOS_FIXTURE
+        // Rig: the fixture group lists two links, mine and Mira's (copy tick, who may revoke).
+        if isFixture {
+            return [("fx-inv-mine", "fx-me"), ("fx-inv-mira", "fx-u3")].map { id, by in
+                ServerInviteLink(id: id, code: id, url: "https://arbos.life/g/\(id)", createdAt: 0, expiresAt: nil,
+                                 usesLeft: nil, usable: true, createdBy: by)
+            }
+        }
+        #endif
         if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
         guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
         let api = work.api
@@ -5328,6 +5346,19 @@ final class AppModel: ObservableObject {
     func showNewMessage() {
         if case .newMessage? = path.last { return }
         path.append(.newMessage)
+    }
+
+    /// Open the Archived chats list from Home's footer.
+    func showArchived() {
+        if case .archived? = path.last { return }
+        path.append(.archived)
+    }
+
+    /// Open a row of the Archived chats list. Opening replaces the path; the list goes
+    /// back under whatever opened, so back returns to it.
+    func openFromArchived(_ open: () -> Void) {
+        open()
+        if path.first != .archived { path.insert(.archived, at: 0) }
     }
 
     /// Leave the New Message push (and any Create screen stacked on it) for Home.
@@ -6567,7 +6598,7 @@ final class AppModel: ObservableObject {
         guard let work = accountWork() else { return }
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -6697,13 +6728,21 @@ final class AppModel: ObservableObject {
 
     /// Keep two bodies in flight; preserve key/row/error order independently of
     /// completion order. The caller owns account admission and the final commit.
-    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI) async -> [AttachmentUpload]? {
+    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI,
+                                   owner: WorkLifetime.Ticket) async -> [AttachmentUpload]? {
         guard !Task.isCancelled else { return nil }
         let plans = attachments.map { input in
             let key = Self.blobKey(for: input.name)
             let row = Attachment(name: input.name, mime: input.mime, blobRef: key,
                                  kind: Self.attachmentKind(mime: input.mime, name: input.name))
             return (input: input, key: key, row: row)
+        }
+        // A video sent from here has its poster made from the bytes in hand (tester report,
+        // 2026-11-17); the upload itself is unchanged.
+        for plan in plans {
+            if let poster = VideoThumb.key(owner: owner, slot: slot, kind: MediaAlbum.kind(of: plan.row) ?? .file, blobRef: plan.key) {
+                VideoThumb.remember(plan.input.data, name: plan.input.name, for: poster)
+            }
         }
         return await withTaskGroup(of: (Int, AttachmentUpload).self) { group in
             var results = [AttachmentUpload?](repeating: nil, count: plans.count)

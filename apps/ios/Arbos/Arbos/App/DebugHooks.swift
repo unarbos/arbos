@@ -69,6 +69,8 @@ enum DebugHooks {
     static var fixtureComposerAttachments: Int {
         max(0, value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT").flatMap { Int($0) } ?? 0)
     }
+    /// `ARBOS_FIXTURE_COMPOSER_ATTACHMENT=video`: open with the fixture clip staged instead.
+    static var fixtureComposerVideo: Bool { value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT") == "video" }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.

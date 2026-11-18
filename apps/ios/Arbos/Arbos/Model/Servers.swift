@@ -60,6 +60,15 @@ struct ServerInviteLink: Identifiable, Equatable {
     var expiresAt: Int64?
     var usesLeft: Int?
     var usable: Bool
+    /// Who made the link (group invite links carry it; server invites are the owner's).
+    var createdBy: String? = nil
+
+    /// May this person revoke the link? Its maker, or whoever manages the group (owner, admin).
+    /// The relay decides (`DELETE /chats/{id}/invites/{iid}`); this only hides a control it
+    /// would refuse (tester report, 2026-11-16).
+    func revocable(by userId: String?, managesGroup: Bool) -> Bool {
+        managesGroup || (createdBy != nil && createdBy == userId)
+    }
 
     static func parse(_ raw: Any) -> ServerInviteLink? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String, let code = d["code"] as? String else { return nil }
@@ -68,7 +77,8 @@ struct ServerInviteLink: Identifiable, Equatable {
             createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
             expiresAt: (d["expires_at"] as? NSNumber)?.int64Value,
             usesLeft: (d["uses_left"] as? NSNumber)?.intValue,
-            usable: (d["usable"] as? NSNumber)?.boolValue ?? true
+            usable: (d["usable"] as? NSNumber)?.boolValue ?? true,
+            createdBy: d["created_by"] as? String
         )
     }
 

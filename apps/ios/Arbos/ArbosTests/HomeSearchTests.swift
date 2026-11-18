@@ -408,8 +408,8 @@ final class HiddenChatOpenTests: XCTestCase {
         XCTAssertEqual(model.path, [.chat(chatId: "a1-main", projectId: "a1")])
         model.open(peopleChat: try XCTUnwrap(model.peopleChat("dm1")))
         XCTAssertEqual(model.path.count, 1)
-        XCTAssertTrue(model.isArchived("a1"), "the agent stays in Hidden chats")
-        XCTAssertTrue(model.isArchived(peopleChatId: "dm1"), "the DM stays in Hidden chats")
+        XCTAssertTrue(model.isArchived("a1"), "the agent stays in Archived chats")
+        XCTAssertTrue(model.isArchived(peopleChatId: "dm1"), "the DM stays in Archived chats")
         XCTAssertNotNil(model.peopleChat("dm1")?.archivedAt)
     }
 

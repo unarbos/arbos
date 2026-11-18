@@ -102,6 +102,16 @@ final class ProfileToggleTests: XCTestCase {
         XCTAssertEqual(model.profilePath, [])
     }
 
+    /// A member's page opened from Members pushes from that sub-page on the stack, so back
+    /// returns to the list (tester report, 2026-11-17); the overview and a sheet go
+    /// through the model as before.
+    func testAProfileFromASubpagePushesFromItOnTheStackOnly() {
+        XCTAssertTrue(ProfileHost.stack.pushesFromSubpage(true))
+        XCTAssertFalse(ProfileHost.stack.pushesFromSubpage(false))
+        XCTAssertFalse(ProfileHost.sheet.pushesFromSubpage(true))
+        XCTAssertFalse(ProfileHost.sheet.pushesFromSubpage(false))
+    }
+
     // MARK: - Every chat target goes through the one action
 
     private var sourceRoot: URL {

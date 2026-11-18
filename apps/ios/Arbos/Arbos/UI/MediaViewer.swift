@@ -196,6 +196,14 @@ enum MediaOrigin {
     case publicPicture(ObjectIdentifier, WorkLifetime.State)
     case unavailable
 
+    /// The account the viewer was opened under, where there is one.
+    var owner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let owner), .fixture(let owner): return owner
+        case .publicPicture, .unavailable: return nil
+        }
+    }
+
     @MainActor
     init(_ model: AppModel, account: ChatAccountContext? = nil) {
         guard !Task.isCancelled else { self = .unavailable; return }
@@ -1019,6 +1027,11 @@ private struct VideoPage: View {
             failed = true
             return
         }
+        // The bytes are here to be played: the transcript row gets its poster from them.
+        if let owner = origin.owner,
+           let key = VideoThumb.key(owner: owner, slot: item.slot, kind: item.kind, blobRef: item.blobRef) {
+            VideoThumb.remember(data, name: item.name, for: key)
+        }
         player = AVPlayer(url: file)
     }
 }
@@ -1250,6 +1263,9 @@ struct BlobImage: View {
     @Environment(\.theme) private var theme
     let item: MediaItem
     var origin: MediaOrigin? = nil
+    /// A thumbnail: decode off the main actor to a bitmap whose longer side is this many
+    /// pixels (`thumbnail`). nil keeps the full picture.
+    var maxPixel: CGFloat? = nil
     @State private var capturedOrigin: MediaOrigin?
     @State private var image: UIImage?
     @State private var failed = false
@@ -1274,11 +1290,29 @@ struct BlobImage: View {
         guard origin.allowsReading(item, model) else { return }
         let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
         guard origin.allowsReading(item, model) else { return }
-        if let (data, _) = bytes, let img = UIImage(data: data) {
+        if let (data, _) = bytes, let maxPixel {
+            let small = await Task.detached(priority: .userInitiated) { Self.thumbnail(data, maxPixel: maxPixel) }.value
+            guard origin.allowsReading(item, model) else { return }
+            image = small
+            failed = small == nil
+        } else if let (data, _) = bytes, let img = UIImage(data: data) {
             image = img
         } else {
             failed = true
         }
+    }
+}
+
+extension BlobImage {
+    /// The first frame only, scaled as it is read: an animated GIF costs one small frame,
+    /// and a large photo is never decoded at full size. nil when the bytes are not a picture.
+    nonisolated static func thumbnail(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: maxPixel] as [CFString: Any] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let frame = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        return UIImage(cgImage: frame)
     }
 }
 
@@ -1300,9 +1334,47 @@ enum FixtureMedia {
         case .file:
             return (pdf(title: item.name), "application/pdf")
         case .video:
-            return nil
+            return clip.map { ($0, "video/mp4") }
         }
     }
+
+    /// A two-second 320 × 180 H.264 clip, written once: fixture videos have a frame to make a
+    /// poster from, and the poster test has a real file to read. Every wait is bounded (`nil`
+    /// rather than a hang if the encoder never answers); callers read it off the main thread.
+    static let clip: Data? = {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-clip-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (w, h) = (320, 180)
+        guard let writer = try? AVAssetWriter(outputURL: file, fileType: .mp4) else { return nil }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h])
+        writer.add(input)
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<4 {
+            var buffer: CVPixelBuffer?
+            guard let pool = adaptor.pixelBufferPool,
+                  CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            // Opaque orange in BGRA, so the poster is plainly a picture and not an empty tile.
+            memset_pattern4(CVPixelBufferGetBaseAddress(buffer), [0x20, 0x90, 0xF0, 0xFF] as [UInt8],
+                            CVPixelBufferGetDataSize(buffer))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            var waited = 0
+            while !input.isReadyForMoreMediaData, waited < 10_000 { usleep(1_000); waited += 1 }
+            guard input.isReadyForMoreMediaData else { return nil }
+            adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 2))
+        }
+        input.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(value: 2, timescale: 1))
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        guard done.wait(timeout: .now() + 30) == .success else { return nil }
+        return writer.status == .completed ? try? Data(contentsOf: file) : nil
+    }()
 
     private static func png(seed: String) -> Data? {
         var h: UInt32 = 0x811c_9dc5

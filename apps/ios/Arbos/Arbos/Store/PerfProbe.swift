@@ -172,7 +172,7 @@ enum PerfSignpost {
         path.last(where: { (route: AppModel.Route) -> Bool in
             switch route {
             case .chat, .server: return true
-            case .profile, .ownProfile, .newMessage: return false
+            case .profile, .ownProfile, .newMessage, .archived: return false
             }
         })
     }
@@ -183,7 +183,7 @@ enum PerfSignpost {
         case .server: return nil
         // Never reached: `measuredTop` reads through a profile / compose push. Spelled
         // out so a new route cannot silently join the "not a chat" branch.
-        case .profile, .ownProfile, .newMessage: return nil
+        case .profile, .ownProfile, .newMessage, .archived: return nil
         }
     }
 

@@ -220,7 +220,7 @@ struct RootView: View {
         guard model.isPaired else { return }
         let screen: String
         switch model.path.last {
-        case .none: screen = "home"
+        case .none, .archived?: screen = "home"
         case .profile?: screen = "profile"
         case .ownProfile?: screen = "settings"
         case .newMessage?: screen = "new-message"
