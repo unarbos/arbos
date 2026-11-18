@@ -365,8 +365,9 @@ fn poll_fields(m: &LoroMap) -> Value {
 ///
 /// The part carries `counts` (option id → how many hold it), `voters` (how many people voted)
 /// and `deadline` when it has one. `votes` (option id → senders) names everyone only where the
-/// author chose "Show who voted"; otherwise it holds `viewer`'s own vote and nobody else's, so
-/// no caller above this function has the other names to show. They are still in the document.
+/// author chose "Show who voted". Otherwise it holds `viewer`'s own vote and nobody else's, and
+/// the other voters' `vote|…` and `voteAt|…` fields are taken off the row as well, so nothing
+/// this function returns carries another voter's id. They are still in the document.
 pub fn project_poll(json: &mut Value, viewer: Option<&str>) {
     let Some(obj) = json.as_object_mut() else {
         return;
@@ -413,27 +414,17 @@ pub fn project_poll(json: &mut Value, viewer: Option<&str>) {
     if let Some(deadline) = deadline {
         part["deadline"] = Value::from(deadline);
     }
+    if !shown {
+        obj.retain(|key, _| {
+            let voter = key
+                .strip_prefix(POLL_VOTE_PREFIX)
+                .or_else(|| key.strip_prefix(POLL_VOTE_AT_PREFIX));
+            voter.is_none_or(|voter| viewer == Some(voter))
+        });
+    }
     if let Some(Value::Array(parts)) = obj.get_mut("parts") {
         parts.push(part);
     }
-}
-
-/// Who is reading this process's chat docs (`user:<id>`), for [`project_poll`]: the one
-/// person whose own vote a poll that hides its voters still hands over. Unset — the relay, a
-/// box — hands over nobody's.
-///
-/// Process-wide: each app shows one signed-in person at a time. A per-doc viewer if a process
-/// ever reads docs for two people at once.
-static VIEWER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-pub fn set_viewer(sender: Option<String>) {
-    *VIEWER.write().unwrap_or_else(|e| e.into_inner()) = sender;
-}
-
-/// [`project_poll`] for [`set_viewer`]'s reader.
-pub fn project_poll_for_viewer(json: &mut Value) {
-    let viewer = VIEWER.read().unwrap_or_else(|e| e.into_inner());
-    project_poll(json, viewer.as_deref());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,26 +975,32 @@ impl ChatDoc {
     /// `read_rows_json`, fixture writer, and fixture tests so those
     /// projections cannot drift apart.
     pub fn projected_rows(&self) -> Vec<Value> {
+        self.projected_rows_for(None)
+    }
+
+    /// [`Self::projected_rows`] as `viewer` (`user:<id>`) reads them: a poll that hides its
+    /// voters hands over that reader's own vote and nobody else's ([`project_poll`]).
+    pub fn projected_rows_for(&self, viewer: Option<&str>) -> Vec<Value> {
         let list = self.messages_list();
         (0..list.len())
-            .filter_map(|i| Self::projected_row_in(&list, i))
+            .filter_map(|i| Self::projected_row_in(&list, i, viewer))
             .collect()
     }
 
     /// One projected message row by list index: the only row that is read and
     /// converted. Reading a long transcript one row at a time stays linear.
-    pub fn projected_row(&self, index: usize) -> Option<Value> {
-        Self::projected_row_in(&self.messages_list(), index)
+    pub fn projected_row(&self, index: usize, viewer: Option<&str>) -> Option<Value> {
+        Self::projected_row_in(&self.messages_list(), index, viewer)
     }
 
-    fn projected_row_in(list: &LoroList, index: usize) -> Option<Value> {
+    fn projected_row_in(list: &LoroList, index: usize, viewer: Option<&str>) -> Option<Value> {
         let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(index) else {
             return None;
         };
         let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
         project_hidden_parts(&mut json);
         project_reactions(&mut json);
-        project_poll_for_viewer(&mut json);
+        project_poll(&mut json, viewer);
         Some(json)
     }
 
@@ -2948,15 +2945,40 @@ mod message_change_tests {
     #[test]
     fn voter_names_are_projected_only_when_the_poll_shows_them() {
         let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
-        let part = |show: bool, viewer: Option<&str>| {
+        let row = |show: bool, viewer: Option<&str>| {
             let poll = Poll::new("Where?", &labels, true, show, None).unwrap();
-            let mut row = json!({ "poll": poll, "parts": [],
+            let mut row = json!({ "poll": poll, "parts": [], "sender": "user:zoe",
                 "vote|user:ana": ["1", "2"], "voteAt|user:ana": 5,
                 "vote|user:ben": ["2"], "voteAt|user:ben": 6,
                 "vote|user:cat": [], "voteAt|user:cat": 7 });
             project_poll(&mut row, viewer);
-            row["parts"][0].clone()
+            row
         };
+        let part = |show: bool, viewer: Option<&str>| row(show, viewer)["parts"][0].clone();
+        // The whole row a caller receives, not only its poll part: the stored vote fields of
+        // the other voters are taken off it too.
+        for viewer in [None, Some("user:zed"), Some("user:ben")] {
+            let whole = row(false, viewer).to_string();
+            assert!(
+                !whole.contains("user:ana") && !whole.contains("user:cat"),
+                "{whole}"
+            );
+            assert_eq!(
+                whole.contains("user:ben"),
+                viewer == Some("user:ben"),
+                "{whole}"
+            );
+        }
+        let mine = row(false, Some("user:ben"));
+        assert_eq!(
+            mine["vote|user:ben"],
+            json!(["2"]),
+            "the reader's own fields stay"
+        );
+        assert!(
+            row(true, None).to_string().contains("vote|user:ana"),
+            "shown: as stored"
+        );
         let shown = part(true, None);
         assert_eq!(
             shown["votes"],

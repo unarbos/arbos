@@ -295,30 +295,6 @@ extension AppModel {
         commsWords.senderHandle = "comms"
         commsWords.senderName = "Comms"
         messages["fx-group-launch", default: []].append(contentsOf: [commsPicture, commsWords])
-        if DebugHooks.fixturePoll {
-            let options = [ChoiceOption(id: "1", label: "Lisbon"), ChoiceOption(id: "2", label: "Berlin")]
-            func pollRow(_ id: String, sender: String, handle: String, name: String, poll: Poll, at: Int64) -> Message {
-                Message(id: id, chatId: "fx-group-launch", role: .user, sender: sender, status: .done, turn: nil, decision: nil,
-                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: nil,
-                        pending: false,
-                        parts: [.text(id: "\(id)t", text: "Poll: \(poll.question)\n1. Lisbon\n2. Berlin"), .poll(id: "poll", poll: poll)],
-                        hiddenCount: 0, senderHandle: handle, senderName: name)
-            }
-            messages["fx-group-launch", default: []].append(contentsOf: [
-                pollRow("gp1", sender: "user:fx-u3", handle: "mira-k", name: "Mira Kaplan",
-                        // Voters hidden: the part names my own vote and nobody else's.
-                        poll: Poll(question: "Where was the last offsite?", options: options, max: 1,
-                                   votes: ["1": ["user:fx-me"]], counts: ["1": 2, "2": 1], voters: 3,
-                                   showVoters: false, deadline: now - 20 * 60_000),
-                        at: now - 30 * 60_000),
-                pollRow("gp2", sender: "user:fx-me", handle: "jacob", name: "Jacob Steeves",
-                        poll: Poll(question: "Where do we meet?", options: options, max: 1,
-                                   votes: ["1": ["user:fx-u3"], "2": ["user:fx-u4"]],
-                                   counts: ["1": 1, "2": 1], voters: 2,
-                                   showVoters: true, deadline: now + 86_400_000),
-                        at: now - 10 * 60_000),
-            ])
-        }
         // #1592 rig: a question to someone else's agent and its first bubble — the shape of
         // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
         if DebugHooks.fixtureForeignAgent {

@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS message_authors (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS deleted_messages (
+  chat_id TEXT NOT NULL, message_id TEXT NOT NULL, deleted_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+);
 "#;
 
 /// Keep the event log a month deep; unread counts older than that are noise.
@@ -243,6 +247,30 @@ impl Db {
                 params![chat_id, message_id, sender, now_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    /// A message was deleted from this chat for everyone, by a push the guard let through or
+    /// by the relay's own delete route. Kept so `push_guard` can tell a deleted message pushed
+    /// back from a lost one being healed: the author record alone reads the same for both.
+    pub fn note_message_deleted(&self, chat_id: &str, message_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO deleted_messages(chat_id, message_id, deleted_at)
+                 VALUES (?1, ?2, ?3)",
+                params![chat_id, message_id, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn message_deleted(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM deleted_messages WHERE chat_id = ?1 AND message_id = ?2)",
+                params![chat_id, message_id],
+                |r| r.get(0),
+            )
         })
     }
 

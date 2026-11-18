@@ -44,8 +44,8 @@ final class PollTests: XCTestCase {
         return doc
     }
 
-    private func poll(_ doc: CoreChatDoc) -> Poll? {
-        doc.readAll().first?.parts.lazy.compactMap(\.pollValue).first
+    private func poll(_ doc: CoreChatDoc, as viewer: String? = nil) -> Poll? {
+        doc.readAll(as: viewer).first?.parts.lazy.compactMap(\.pollValue).first
     }
 
     func testAPollIsReadAsItsPartAndItsPlainText() throws {
@@ -150,19 +150,20 @@ final class PollTests: XCTestCase {
         try doc.setPollVote(messageId: "p1", sender: "user:ana", selections: ["2"])
         try doc.setPollVote(messageId: "p1", sender: "user:me", selections: ["2"])
         doc.commit()
-        setPollViewer(sender: "user:me")
-        defer { setPollViewer(sender: nil) }
-        let mine = try XCTUnwrap(poll(doc))
+        let mine = try XCTUnwrap(poll(doc, as: "user:me"))
         XCTAssertEqual(mine.counts, ["2": 2])
         XCTAssertEqual(mine.voters, 2)
         XCTAssertEqual(mine.votes, ["2": ["user:me"]], "my own vote, so the card can mark it")
         XCTAssertEqual(mine.picked(by: "user:me"), ["2"])
         XCTAssertEqual(mine.foot(by: "Zoe"), "Zoe's poll · 2 voted · pick one")
 
-        setPollViewer(sender: nil)
         let nobody = try XCTUnwrap(poll(doc))
         XCTAssertEqual(nobody.votes, [:], "no names at all without a reader")
         XCTAssertEqual(nobody.counts, ["2": 2])
+        // The row itself, as it crosses the FFI: Ana's stored vote fields are not on it.
+        let row = try XCTUnwrap(doc.rawRow(0, as: "user:me"))
+        XCTAssertFalse(row.contains("user:ana"), row)
+        XCTAssertTrue(row.contains("vote|user:me"), "my own fields stay: \(row)")
     }
 
     /// A reply quotes a poll by its question: the strip above the composer and the header in

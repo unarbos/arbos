@@ -148,8 +148,6 @@ impl SyncSource for FixtureSource {
         mut commands: mpsc::UnboundedReceiver<ClientCommand>,
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
-            // A poll that hides its voters hands the reader their own vote only.
-            arbos_core::doc::set_viewer(Some(format!("user:{ME_ID}")));
             let (doc_tx, mut doc_rx) = mpsc::unbounded_channel();
             let shared = Arc::new(Shared {
                 docs: Arc::new(Mutex::new(HashMap::new())),
@@ -242,7 +240,7 @@ impl SyncSource for FixtureSource {
                 for (chat_id, doc) in docs.iter() {
                     let _ = events.send(SyncEvent::ChatSnapshot {
                         chat_id: chat_id.clone(),
-                        messages: doc.read_all(),
+                        messages: doc.read_all_as(Some(ME_SENDER)),
                     });
                 }
             }
@@ -1158,12 +1156,12 @@ fn forward_doc_change(shared: &Arc<Shared>, changed: DocChanged) {
     if changed.touched.list_changed {
         let _ = shared.events.send(SyncEvent::ChatSnapshot {
             chat_id: changed.chat_id.clone(),
-            messages: doc.read_all(),
+            messages: doc.read_all_as(Some(ME_SENDER)),
         });
         return;
     }
     for ix in changed.touched.messages {
-        if let Some(message) = doc.read_message(ix) {
+        if let Some(message) = doc.read_message_as(ix, Some(ME_SENDER)) {
             let _ = shared.events.send(SyncEvent::MessageUpsert {
                 chat_id: changed.chat_id.clone(),
                 message: Box::new(message),
@@ -6836,6 +6834,8 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
 // ---------------------------------------------------------------------------
 
 pub const ME_ID: &str = "gh_1";
+/// [`ME_ID`] as a doc sender: who reads the fixture's transcripts.
+const ME_SENDER: &str = "user:gh_1";
 pub const ME_HANDLE: &str = "jacob";
 const SAM_ID: &str = "gh_456";
 pub const DM_SAM: &str = "01J9DMSAM00000000000000000";

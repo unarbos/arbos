@@ -68,9 +68,19 @@ final class CoreChatDoc {
 
     // MARK: Reading
 
-    func readMessage(_ ix: Int) -> Message? {
+    /// One projected row as the core hands it over, unparsed (tests assert on what crosses).
+    func rawRow(_ ix: Int, as viewer: String? = nil) -> String? {
+        doc.readMessageJson(index: UInt64(ix), viewer: viewer)
+    }
+
+    /// `viewer` is who is reading (`user:<id>`): a poll that hides its voters hands over that
+    /// reader's own vote and no other voter's id. Every read that feeds a transcript names
+    /// the reader; a read for anything else does not need one.
+    func readMessage(_ ix: Int) -> Message? { readMessage(ix, as: nil) }
+
+    func readMessage(_ ix: Int, as viewer: String?) -> Message? {
         guard ix >= 0, ix < count,
-              let raw = doc.readMessageJson(index: UInt64(ix)),
+              let raw = doc.readMessageJson(index: UInt64(ix), viewer: viewer),
               let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data)
         else { return nil }
@@ -80,8 +90,8 @@ final class CoreChatDoc {
     /// The whole transcript in one FFI call and one JSON parse. Reading row by
     /// row crossed the FFI `count` times; a long group chat paid for that on every
     /// snapshot (2026-10-23, long-chat-perf).
-    func readAll() -> [Message] {
-        Self.decodeRows(doc.readRowsJson(), count: count, chatId: key, row: readMessage)
+    func readAll(as viewer: String? = nil) -> [Message] {
+        Self.decodeRows(doc.readRowsJson(viewer: viewer), count: count, chatId: key) { readMessage($0, as: viewer) }
     }
 
     /// One unreadable row must not blank the chat ([feedback arbonites-blank-chat-ios-2026-10-28]):

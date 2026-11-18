@@ -119,6 +119,28 @@ struct PendingRoomPush<'a> {
 }
 
 impl PendingRoomPush<'_> {
+    /// The relay's own writes in answer to this push (`push_guard::corrections`), applied to
+    /// the speculative doc and returned as the update to store right behind the push. Still
+    /// under the admission lock: the next push on any socket is diffed against the corrected
+    /// doc. An error here fails the push — nothing is stored and the device sends it again —
+    /// because a push stored without its correction would become the state the relay defends.
+    fn correct(&mut self, state: &AppState, chat_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let now = arbos_core::ids::now_ms();
+        let fixes = crate::push_guard::corrections(state, chat_id, &self.changes, now)?;
+        if fixes.is_empty() {
+            return Ok(None);
+        }
+        let doc = &self.cached.doc;
+        let base = doc.oplog_vv();
+        doc.transact(|doc| fixes.iter().try_for_each(|fix| fix.apply(doc)))?;
+        let bytes = doc.export_updates_since(&base);
+        anyhow::ensure!(!bytes.is_empty(), "a correction wrote nothing");
+        self.cached
+            .message_ids
+            .retain(|(id, _)| !fixes.iter().any(|fix| fix.delete && fix.message_id == *id));
+        Ok(Some(bytes))
+    }
+
     /// Consuming publication is legal only after a successful nonduplicate append.
     fn commit(self, state: &AppState) -> anyhow::Result<()> {
         if !self.changes.unreadable {
@@ -268,7 +290,7 @@ pub async fn room_tail_rows(
         let list = doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| doc.projected_row(i))
+            .filter_map(|i| doc.projected_row(i, None))
             .collect::<Vec<_>>()
     };
     {
@@ -797,16 +819,8 @@ async fn handle_frame(
                 .rsplit_once('/')
                 .map(|(_, c)| c)
                 .unwrap_or(room_name);
-            let pending =
+            let mut pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
-            // What the relay will write back onto a poll once the push is stored: its own
-            // clock on a vote or a close that does not agree with it (`poll_corrections`).
-            let poll_fixes = crate::push_guard::poll_corrections(
-                state,
-                chat_of_room,
-                &pending.changes,
-                arbos_core::ids::now_ms(),
-            );
             let (carries_new_message, attributed) = match crate::push_guard::check_push(
                 state,
                 principal,
@@ -855,9 +869,26 @@ async fn handle_frame(
                     }
                 }
             }
-            let (seq, dup) = state
-                .db
-                .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            // The push and the relay's answer to it are one write: stored together or not at
+            // all, before the admission lock is released.
+            let correction = pending.correct(state, chat_of_room)?;
+            let correction_id = arbos_core::ids::ulid();
+            let (seq, dup, correction_seq) = state.db.append_row_with(
+                room_name,
+                device,
+                &p.batch_id,
+                &f.payload,
+                correction
+                    .as_deref()
+                    .map(|bytes| (crate::notices::RELAY_DEVICE, correction_id.as_str(), bytes)),
+            )?;
+            // A message this push took out is remembered as deleted, so it cannot be pushed
+            // back under the same id (`push_guard::corrections`).
+            if !dup {
+                for (message_id, _) in &pending.changes.removed {
+                    state.db.note_message_deleted(chat_of_room, message_id)?;
+                }
+            }
             // Whose message each new row carries, recorded from the socket that pushed it and
             // before anyone can read the row. The announce routes write this record too, but
             // they take the message id from a request body and are gated only on membership —
@@ -894,23 +925,20 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
-                // After the row, as a row of the relay's own: every device, the pusher's
-                // included, receives the correction and reduces the same poll.
-                for fix in poll_fixes {
-                    let fields: Vec<(&str, serde_json::Value)> = fix
-                        .fields
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), value.clone()))
-                        .collect();
-                    let project = (project_id != people::PEOPLE_PROJECT).then_some(project_id);
-                    let written = crate::notices::write_doc(state, project, chat_of_room, |doc| {
-                        doc.set_message_fields(&fix.message_id, &fields);
-                        Ok(())
-                    })
-                    .await;
-                    if let Err(e) = written {
-                        tracing::warn!(%room_name, message_id = %fix.message_id, error = %e, "poll correction not written");
-                    }
+                // Right behind it, the relay's own row: every device, the pusher's included,
+                // receives the correction and reduces the same poll.
+                if let (Some(seq), Some(bytes)) = (correction_seq, correction) {
+                    let row = Frame::new(
+                        FrameType::Row,
+                        json!({ "seq": seq, "device": crate::notices::RELAY_DEVICE, "batchId": correction_id }),
+                        Bytes::from(bytes),
+                    )
+                    .encode();
+                    let _ = room.tx.send(RoomBroadcast {
+                        from_conn: 0,
+                        bytes: row,
+                        seq,
+                    });
                 }
                 if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
@@ -2817,20 +2845,25 @@ mod covered_push_tests {
         );
     }
 
-    /// A vote changed after the poll closed, through the socket: the push is acknowledged —
-    /// a refusal would be re-sent on every reconnect and cut the device off the chat — and
-    /// the relay then writes the earlier vote back, so the room's poll keeps the count it
-    /// closed with (`push_guard::poll_corrections`, `docs/polls.md` §11).
+    /// Late poll writes through the socket, two pushes back to back on one connection: each
+    /// is acknowledged — a refusal would be re-sent on every reconnect and cut the device off
+    /// the chat — and each is stored with the relay's correction right behind it, so the
+    /// second push is judged against the corrected row and never against the first one's
+    /// value (`push_guard::corrections`, `docs/polls.md` §11).
+    ///
+    /// Bob changes his vote and then retracts it after the close: without the correction
+    /// between them the retraction's "what it was" would be the changed vote. Alice moves her
+    /// close forward twice: the second move would otherwise defend the first.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_vote_pushed_after_the_close_is_acked_and_then_put_back() {
+    async fn late_poll_writes_are_acked_and_corrected_before_the_next_push() {
         use arbos_core::doc::{POLL_CLOSED_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX};
         let state = test_state(AuthMode::Github);
         let (alice, _) = person(&state, 1);
         let (bob, _) = person(&state, 2);
         let chat = dm(&state, &alice, &bob);
         let room = format!("people/{chat}");
-        let token = device_token(&state, &bob);
         let now = arbos_core::ids::now_ms();
+        let (closed, year) = (now - 300_000, 365 * 24 * 3_600_000);
         let (vote, at) = (
             format!("{POLL_VOTE_PREFIX}user:{bob}"),
             format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
@@ -2861,7 +2894,7 @@ mod covered_push_tests {
             &[
                 (&vote, json!(["1"])),
                 (&at, json!(now - 600_000)),
-                (POLL_CLOSED_FIELD, json!(now - 300_000)),
+                (POLL_CLOSED_FIELD, json!(closed)),
             ],
         );
         state
@@ -2877,38 +2910,98 @@ mod covered_push_tests {
             .db
             .record_message_author(&chat, "p1", &format!("user:{alice}"))
             .unwrap();
-        let counts = || {
+        let poll = || {
             let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
                 .unwrap()
                 .expect("the room's doc");
-            doc.projected_rows()[0]["parts"][1]["counts"].clone()
+            doc.projected_rows()[0]["parts"][1].clone()
         };
-        assert_eq!(counts(), json!({ "1": 1 }));
+        assert_eq!(poll()["counts"], json!({ "1": 1 }));
 
-        // Bob's device changes his choice and leaves the old time on it.
-        let bobs = ChatDoc::from_snapshot(Some(8), false, &writer.snapshot()).unwrap();
-        let before = bobs.oplog_vv();
-        bobs.set_message_fields("p1", &[(&vote, json!(["2"]))]);
-        let late = vec![("late-vote".to_owned(), bobs.export_updates_since(&before))];
-        let head_before = state.db.room_state(&room).unwrap().head;
-
+        // Each write is made on a replica of what the relay holds at that moment, as a
+        // device that has received the relay's last correction would make it.
         let addr = serve(state.clone()).await;
-        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &late).await;
-        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
-
-        // The pushed row, then the relay's own.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        while state.db.room_state(&room).unwrap().head < head_before + 2 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the relay wrote its correction"
+        let writes: [(&str, &str, &str, serde_json::Value); 4] = [
+            (&bob, "dev:bob", &vote, json!(["2"])),
+            (&bob, "dev:bob", &vote, json!([])),
+            (&alice, "dev:alice2", POLL_CLOSED_FIELD, json!(now + year)),
+            (
+                &alice,
+                "dev:alice2",
+                POLL_CLOSED_FIELD,
+                json!(now + 2 * year),
+            ),
+        ];
+        for (n, (who, device, key, value)) in writes.into_iter().enumerate() {
+            let held = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            let replica =
+                ChatDoc::from_snapshot(Some(20 + n as u64), false, &held.snapshot()).unwrap();
+            let before = replica.oplog_vv();
+            replica.set_message_fields("p1", &[(key, value.clone())]);
+            let batch = vec![(format!("late-{n}"), replica.export_updates_since(&before))];
+            let head = state.db.room_state(&room).unwrap().head;
+            let token = device_token(&state, who);
+            let frames = push_after_catchup(addr, &room, &token, device, &batch).await;
+            assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+            assert_eq!(
+                state.db.room_state(&room).unwrap().head,
+                head + 2,
+                "{key}={value}: the push is stored with the relay's row right behind it"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(poll()["counts"], json!({ "1": 1 }), "{key}={value}");
+            assert_eq!(poll()["deadline"], closed, "{key}={value}");
         }
-        assert_eq!(
-            counts(),
-            json!({ "1": 1 }),
-            "the count the poll closed with"
+
+        // Alice deletes her poll. Bob pushes it back under the same id, open again and with
+        // a vote in her name: acknowledged, and taken out again in the same step.
+        let held = |peer: u64| {
+            let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            ChatDoc::from_snapshot(Some(peer), false, &doc.snapshot()).unwrap()
+        };
+        let replica = held(30);
+        let before = replica.oplog_vv();
+        replica.transact(|d| d.delete_message("p1").unwrap());
+        let delete = vec![("delete".to_owned(), replica.export_updates_since(&before))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice2", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "p1").unwrap());
+
+        let replica = held(31);
+        let before = replica.oplog_vv();
+        let forged = arbos_core::poll::Poll::new(
+            "Where?",
+            &["Lisbon".to_owned(), "Berlin".to_owned()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        replica.transact(|d| {
+            d.append_poll_message("p1", &forged, "dev:bob", &opts)
+                .unwrap();
+            d.set_message_fields(
+                "p1",
+                &[
+                    (&format!("{POLL_VOTE_PREFIX}user:{alice}"), json!(["2"])),
+                    (&format!("{POLL_VOTE_AT_PREFIX}user:{alice}"), json!(now)),
+                ],
+            );
+        });
+        let back = vec![("back".to_owned(), replica.export_updates_since(&before))];
+        let token = device_token(&state, &bob);
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &back).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+            .unwrap()
+            .expect("the room's doc");
+        assert!(
+            doc.projected_rows().is_empty(),
+            "the deleted poll is not back"
         );
     }
 

@@ -321,7 +321,8 @@ and both apps (the iPhone over the FFI) call that one function; the apps read th
 the projected part.
 
 **What the reducer enforces** (`project_poll`, on every device and on the relay's readers). On a
-timed poll a vote counts when it has a time and the poll was not closed at that time. It reads
+timed poll a vote counts when it has a time and the poll was not closed at that time (a vote
+in the very millisecond of the close is not before it). It reads
 only the row, never the reader's clock, so every reader of the same row shows the same count,
 whatever order a close and a vote were merged in. It is the tie-breaker, not a guard: it
 believes the times on the row.
@@ -335,31 +336,39 @@ retraction once the device's own clock is past the deadline; a close only by the
 - Refused outright, because no honest device pushes them: a close by anyone but the poll's
   author, by the relay's record of who posted the row (`not_yours`); a close that is not a
   time, or its removal (`bad_poll`); a vote or a vote time under someone else's name
-  (`not_yours`); a vote on a timed poll with no time (`bad_vote`).
-- Corrected after the push is stored (`poll_corrections`), by a row the relay writes itself
-  and every device receives:
+  (`not_yours`); a vote on a timed poll with no time (`bad_vote`); a new poll that closes
+  more than a week and a day from now (`bad_poll`). There is no bound the other way: a poll
+  composed offline may arrive after its time ran out, and is then a closed poll.
+- Corrected (`push_guard::corrections`) by a row the relay writes itself:
+  - every changed vote on an open poll gets `voteAt|x` = the relay's time, and every first
+    `pollClosed` is set to the relay's time. No device time is kept, so the count depends on
+    one clock: a phone running ahead and a Mac running behind are both counted right;
   - a `pollClosed` written over an earlier one is set back: a close is final;
-  - a first `pollClosed` further than two minutes behind the relay's clock, or ahead of it, is
-    set to the relay's time, so it cannot be dated back over votes or forward to stay open;
   - once the deadline has passed by the relay's clock, a changed `vote|x` or `voteAt|x` is set
     back to what it was (a first vote becomes an empty one): no vote, change, retraction or
     backdated time after the close;
-  - while the poll is open, a `voteAt|x` more than two minutes from the relay's clock, or a
-    vote changed without a new time, is set to the relay's time.
+  - a message inserted under an id the relay saw deleted is taken out again, whoever pushes
+    it. The relay keeps a record of deleted message ids (`deleted_messages`) for this.
 
   These are corrections and not refusals because honest devices produce every one of them: a
   vote cast offline or in the second the author closed, a phone whose clock is off, a close
-  from the author's second device. The client re-sends a refused push on every reconnect and
-  nothing queued behind it can go, so a refusal would cut that device off the chat for good.
-  The cost of correcting: for the moment between the push and the correction the row holds
-  the pusher's values, and if the relay stops in that moment the correction is not written.
-- A poll row arriving whole that the relay attested before is a heal of lost history. Its
-  votes, their times and its close are taken as they come, without the ownership check and
-  without correction: a device restoring someone else's closed poll has to carry the close
-  and the times, and stamping them with today's time would void the finished count. So
-  someone who can delete a poll (its author, a moderator) can delete it and push it back
-  under the same id with a count of their own making. Closing that needs a relay-side
-  record of each poll's votes.
+  from the author's second device, a stale device healing a room. The client re-sends a
+  refused push on every reconnect and nothing queued behind it can go, so a refusal would cut
+  that device off the chat for good.
+
+  **A correction is part of the push.** It is computed and applied to the room's doc under
+  the room's admission lock, and stored with the push in one database transaction
+  (`Db::append_row_with`), before the lock is released and before the push is acknowledged.
+  The next push, on any socket, is judged against the corrected row; no reader of the room's
+  rows sees the push without its correction. If a correction cannot be computed or stored,
+  the push is not stored either: the socket errors and the device sends it again. A device
+  still shows its own uncorrected value until the relay's row reaches it.
+- A poll row arriving whole that the relay recorded before **and nobody deleted** is a heal of
+  history the relay lost. Its votes, their times and its close are taken as they come: a
+  device restoring someone else's finished poll has to carry them, and stamping them with
+  today's time would void the count. Forging one needs the relay to have lost the row, which
+  no client can cause. Pushing a *deleted* poll back with votes of one's own making is the
+  case above: it is removed again.
 
 **What nothing enforces.** Under end-to-end encryption the relay reads no poll field, so none
 of the relay rules exist: times are then the writers' device clocks and a modified client can
@@ -367,10 +376,15 @@ backdate its own vote or rewrite its own close, with only the reducer's rule lef
 not anonymous in storage in any mode: each is a field named after its voter, held by every
 member's device and by the relay.
 
-**Voter visibility.** When `showVoters` is not true, `project_poll` hands the layer above it
-the counts (`counts`, `voters`) and the reader's own vote, and no other sender id; the apps
-have no names to draw. The reader is whoever the process signed in (`set_viewer`); the relay
-and the boxes set none and get no names. The ids are still in the document.
+**Voter visibility.** When `showVoters` is not true, `project_poll` gives the layer above it
+the counts (`counts`, `voters`) and the reader's own vote. It takes the other voters out of
+the poll part *and* takes their stored `vote|…` and `voteAt|…` fields off the projected row,
+so nothing it returns carries another voter's id. The reader is passed in by the caller
+(`projected_rows_for`, the FFI's `viewer` argument, the Mac's `read_all_as`); the relay's
+readers pass none. Of those, the agent export and read routes and the Matrix history mirror
+emit a row's text and its attachment, error, question and approval parts, never the poll
+part or a vote field. The ids are still in the document itself, which every member's device
+and the relay hold.
 
 **Older builds** read a poll through the strict validator, which rejects the new `showVoters`
 field, so a poll posted by a new build is plain text to them ("Poll: question / 1. … / 2. …"):

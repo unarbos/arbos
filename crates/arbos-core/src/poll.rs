@@ -18,6 +18,10 @@ pub const TIME_MAX: i64 = 4_102_444_800_000;
 /// The longest a poll may be posted to run: one week.
 pub const DURATION_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// How far past [`DURATION_MAX_MS`] from now a new poll's `closesAt` may sit: a day of clock
+/// difference between the device that composed it and whoever checks it.
+pub const CLOSES_AT_ALLOWANCE_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Whether a poll is closed at `now`: the one rule, for the writers, the relay and both apps.
 /// `deadline` is [`Poll::deadline`] (the `deadline` of the projected part); `None` never closes.
 pub fn closed(deadline: Option<i64>, now: i64) -> bool {
@@ -163,6 +167,15 @@ impl Poll {
     /// `showVoters` exists. An older one has neither.
     pub fn timed(&self) -> bool {
         self.show_voters.is_some()
+    }
+
+    /// Whether a poll first seen at `now` closes later than any composer could have set: more
+    /// than [`DURATION_MAX_MS`] plus [`CLOSES_AT_ALLOWANCE_MS`] ahead. There is no bound the
+    /// other way: a poll composed offline may reach the relay after its time ran out, and it
+    /// is then simply a closed poll.
+    pub fn closes_too_late(&self, now: i64) -> bool {
+        self.closes_at
+            .is_some_and(|t| t > now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS)
     }
 
     /// The time after which a vote does not count: the earlier of `closesAt` and the author's
@@ -370,6 +383,15 @@ mod tests {
         assert!(Poll::new("Q", &labels(2), false, false, Some(DURATION_MAX_MS + 1)).is_none());
         assert!(Poll::new("Q", &labels(2), false, false, Some(0)).is_none());
         assert!(Poll::new("Q", &labels(2), false, false, Some(-1)).is_none());
+        // Whoever first sees a poll bounds its closing time the same way, a day of clock
+        // difference allowed; a poll already past its time is only a closed poll.
+        assert!(!hour.closes_too_late(now));
+        assert!(!hour.closes_too_late(now + 2 * 3_600_000));
+        let far = Poll {
+            closes_at: Some(now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + 1),
+            ..hour.clone()
+        };
+        assert!(far.closes_too_late(now) && Poll::parse(&json!(far)).is_some());
     }
 
     #[test]

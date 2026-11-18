@@ -257,6 +257,10 @@ pub async fn delete_message(
     .await
     {
         Ok(seq) => {
+            // Remembered, so the row cannot be pushed back under the same id (`push_guard`).
+            if let Err(e) = state.db.note_message_deleted(&chat_id, &message_id) {
+                tracing::warn!(chat = %chat_id, message = %message_id, error = %e, "deletion not recorded");
+            }
             tracing::info!(chat = %chat_id, message = %message_id, me = %a.me, sender = %a.sender, seq, "message deleted");
             StatusCode::NO_CONTENT.into_response()
         }

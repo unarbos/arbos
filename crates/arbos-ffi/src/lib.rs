@@ -300,13 +300,6 @@ pub fn poll_foot(
     arbos_core::poll::foot(by.as_deref(), voted, multiple, show_voters, closed, left_ms)
 }
 
-/// Who is signed in on this device (`user:<id>`), so a poll that hides its voters still
-/// hands this app the reader's own vote and nobody else's (`arbos_core::doc::set_viewer`).
-#[uniffi::export]
-pub fn set_poll_viewer(sender: Option<String>) {
-    arbos_core::doc::set_viewer(sender);
-}
-
 /// Encode one binary room frame. `header_json` must be a JSON object.
 #[uniffi::export]
 pub fn encode_frame(
@@ -800,8 +793,11 @@ impl ChatDoc {
 
     /// Message rows as a JSON array, with `project_hidden_parts` and
     /// `project_reactions` already applied.
-    pub fn read_rows_json(&self) -> String {
-        let rows = self.lock_doc().projected_rows();
+    ///
+    /// `viewer` is who is reading (`user:<id>`): a poll that hides its voters hands over
+    /// that reader's own vote and no other voter's id (`arbos_core::doc::project_poll`).
+    pub fn read_rows_json(&self, viewer: Option<String>) -> String {
+        let rows = self.lock_doc().projected_rows_for(viewer.as_deref());
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
     }
 
@@ -812,8 +808,10 @@ impl ChatDoc {
 
     /// One projected message row (`project_hidden_parts` + `project_reactions`),
     /// same shape as an element of [`Self::read_rows_json`].
-    pub fn read_message_json(&self, index: u64) -> Option<String> {
-        let row = self.lock_doc().projected_row(index as usize)?;
+    pub fn read_message_json(&self, index: u64, viewer: Option<String>) -> Option<String> {
+        let row = self
+            .lock_doc()
+            .projected_row(index as usize, viewer.as_deref())?;
         Some(serde_json::to_string(&row).unwrap_or_else(|_| "null".into()))
     }
 
@@ -1127,7 +1125,7 @@ mod tests {
         }
         let snap = doc.snapshot();
         let loaded = ChatDoc::open_from_snapshot(snap).unwrap();
-        let rows: Value = serde_json::from_str(&loaded.read_rows_json()).unwrap();
+        let rows: Value = serde_json::from_str(&loaded.read_rows_json(None)).unwrap();
         assert_eq!(rows[0]["role"], "user");
         assert_eq!(rows[0]["parts"][0]["text"], "hi");
     }
@@ -1140,7 +1138,7 @@ mod tests {
     impl DocChangeListener for RecordingListener {
         fn on_change(&self, _touched: Touched) {
             // Re-enter the doc on the same thread; must not deadlock.
-            let json = self.doc.read_rows_json();
+            let json = self.doc.read_rows_json(None);
             let parsed: Value = serde_json::from_str(&json).unwrap();
             self.rows
                 .lock()
@@ -1217,7 +1215,7 @@ mod tests {
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["forwardedFrom"], "Sam Rivera");
         assert_eq!(row["replyRef"]["chatId"], "01SRC");
         assert_eq!(row["replyRef"]["messageId"], "01ORIG");
@@ -1260,7 +1258,7 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["id"], "keep");
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
@@ -1280,7 +1278,7 @@ mod tests {
         doc.edit_message("m1".into(), "hello edited".into())
             .unwrap();
         doc.commit();
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["parts"][0]["text"], "hello edited");
         assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
     }
@@ -1345,7 +1343,7 @@ mod tests {
             .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into(), "2".into()])
             .is_err());
         doc.commit();
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["parts"][1]["kind"], "poll");
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
         assert_eq!(row["parts"][1]["showVoters"], true);
@@ -1361,7 +1359,7 @@ mod tests {
         assert!(doc
             .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into()])
             .is_err());
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         let deadline = row["parts"][1]["deadline"].as_i64();
         assert!(poll_closed(deadline, arbos_core::ids::now_ms()));
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
@@ -1382,7 +1380,7 @@ mod tests {
         doc.toggle_reaction("m-flat".into(), "👍".into(), "user:a".into())
             .unwrap();
         doc.commit();
-        let flat: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let flat: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         let flat_reacts = flat.get("reactions").cloned().unwrap_or(json!({}));
         assert!(
             flat_reacts
@@ -1406,7 +1404,7 @@ mod tests {
         let mut found = false;
         for i in 0..n {
             let row: Value =
-                serde_json::from_str(&legacy_doc.read_message_json(i).unwrap()).unwrap();
+                serde_json::from_str(&legacy_doc.read_message_json(i, None).unwrap()).unwrap();
             if row["id"] == "msg-legacy-react" {
                 let reacts = row.get("reactions").cloned().unwrap_or(json!({}));
                 assert!(
@@ -1513,7 +1511,7 @@ mod tests {
         );
         let peer = ChatDoc::open();
         peer.apply(updates[0].clone()).unwrap();
-        assert_eq!(doc.read_rows_json(), peer.read_rows_json());
+        assert_eq!(doc.read_rows_json(None), peer.read_rows_json(None));
     }
 
     #[test]
@@ -1549,7 +1547,7 @@ mod tests {
 
     impl LocalUpdateListener for ReentrantLocalUpdate {
         fn on_local_update(&self, _update: Vec<u8>) {
-            let _ = self.doc.read_rows_json();
+            let _ = self.doc.read_rows_json(None);
             *self.saw_rows.lock().unwrap() = true;
         }
     }
@@ -1602,13 +1600,13 @@ mod tests {
         assert_eq!(doc.message_count(), rows as u64);
 
         let started = std::time::Instant::now();
-        let all = doc.read_rows_json();
+        let all = doc.read_rows_json(None);
         let one_shot = started.elapsed();
 
         let started = std::time::Instant::now();
         let mut per_index = Vec::with_capacity(rows);
         for i in 0..rows as u64 {
-            per_index.push(doc.read_message_json(i).expect("row exists"));
+            per_index.push(doc.read_message_json(i, None).expect("row exists"));
         }
         let indexed = started.elapsed();
 

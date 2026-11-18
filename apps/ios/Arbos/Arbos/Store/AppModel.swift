@@ -210,9 +210,12 @@ final class AppModel: ObservableObject {
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
     @Published private(set) var user: AuthUser? {
-        // A poll that hides its voters hands this phone my own vote and nobody else's, so
-        // the core has to know who is reading.
-        didSet { setPollViewer(sender: myUserId) }
+        // Rows are read as the signed-in person (a poll that hides its voters hands over the
+        // reader's own vote only), so a change of who that is reads the open chats again.
+        didSet {
+            guard oldValue?.id != user?.id else { return }
+            for (chatId, doc) in docs { applySnapshot(chatId, list: doc.readAll(as: myUserId)) }
+        }
     }
     #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
@@ -2417,6 +2420,7 @@ final class AppModel: ObservableObject {
         let started = Date()
         // Import and the Loro → Message conversion run off the main thread; the
         // main actor only receives finished docs and message arrays.
+        let viewer = myUserId
         let docs: [(DeviceStore.SavedDoc, CoreChatDoc, [Message]?)] = await Task.detached(priority: .userInitiated) {
             saved.compactMap { s in
                 let doc = CoreChatDoc(key: s.key)
@@ -2426,7 +2430,7 @@ final class AppModel: ObservableObject {
                     NSLog("store: snapshot for \(s.key) unreadable: \(error.localizedDescription)")
                     return nil
                 }
-                let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll()
+                let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll(as: viewer)
                 if let messages, AppModel.storedCopyIsBlank(rows: messages.count, docCount: doc.count, cursor: s.cursor) {
                     // Resuming at the saved cursor would fetch nothing and leave the chat
                     // blank for good; start the room from scratch instead.
@@ -2664,7 +2668,7 @@ final class AppModel: ObservableObject {
                 peopleChats.append(clone)
             }
             // Store-restore shape: the doc and its decoded list land before the room starts.
-            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll(as: myUserId)))
             // No relay in the rig: the socket would redial forever and flap the link
             // (each flap publishes `caughtUp`). The doc's change handler stays.
             self.rooms[key]?.stop()
@@ -2717,7 +2721,7 @@ final class AppModel: ObservableObject {
             }
         }
         doc.commit()
-        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll()))
+        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll(as: myUserId)))
         rooms[chatId]?.stop()
         caughtUp.insert(chatId)
     }
@@ -3036,14 +3040,15 @@ final class AppModel: ObservableObject {
         // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
         // is thread-safe — and applied when it is back, unless a newer read superseded it.
         if doc.count < Self.asyncSnapshotMinRows {
-            applySnapshot(chatId, list: doc.readAll())
+            applySnapshot(chatId, list: doc.readAll(as: myUserId))
             return
         }
+        let viewer = myUserId
         Task.detached(priority: .userInitiated) { [weak self] in
             #if DEBUG
             let t0 = Date()
             #endif
-            let list = doc.readAll()
+            let list = doc.readAll(as: viewer)
             #if DEBUG
             PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
             #endif
@@ -3108,7 +3113,7 @@ final class AppModel: ObservableObject {
         var needSnapshot = false
         let pendingIds = unacked[chatId] ?? []
         for ix in indexes.sorted() {
-            guard var m = doc.readMessage(ix) else { continue }
+            guard var m = doc.readMessage(ix, as: myUserId) else { continue }
             if m.role == .user { m.pending = pendingIds.contains(m.id) }
             if ix < list.count, list[ix].id == m.id {
                 list[ix] = m
@@ -6124,21 +6129,6 @@ final class AppModel: ObservableObject {
 
     /// My vote on a poll: `selections` replaces whatever I held; empty retracts it.
     func votePoll(chatId: Id, messageId: Id, selections: [String]) {
-        #if DEBUG || ARBOS_FIXTURE
-        if isFixture, docs[chatId] == nil, let me = myUserId {
-            fixturePoll(chatId: chatId, messageId: messageId) { poll in
-                let had = poll.picked(by: me)
-                for id in had { poll.counts[id, default: 1] -= 1 }
-                poll.votes = poll.votes.mapValues { $0.filter { $0 != me } }
-                for id in selections {
-                    poll.votes[id, default: []].append(me)
-                    poll.counts[id, default: 0] += 1
-                }
-                poll.voters += (selections.isEmpty ? 0 : 1) - (had.isEmpty ? 0 : 1)
-            }
-            return
-        }
-        #endif
         guard let me = myUserId, let doc = docs[chatId] else { return }
         do {
             try doc.setPollVote(messageId: messageId, sender: me, selections: selections)
@@ -6149,27 +6139,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    #if DEBUG || ARBOS_FIXTURE
-    /// The fixture has no chat doc: a vote or a close rewrites the row's poll part in place.
-    private func fixturePoll(chatId: Id, messageId: Id, _ change: (inout Poll) -> Void) {
-        guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }),
-              let p = list[i].parts.firstIndex(where: { $0.pollValue != nil }),
-              case .poll(let id, var poll) = list[i].parts[p] else { return }
-        change(&poll)
-        list[i].parts[p] = .poll(id: id, poll: poll)
-        messages[chatId] = list
-        Haptics.pick()
-    }
-    #endif
-
     /// Close my own poll, now: it keeps its counts and takes no more votes.
     func closePoll(chatId: Id, messageId: Id) {
-        #if DEBUG || ARBOS_FIXTURE
-        if isFixture, docs[chatId] == nil {
-            fixturePoll(chatId: chatId, messageId: messageId) { $0.deadline = nowMs() }
-            return
-        }
-        #endif
         guard let me = myUserId, let doc = docs[chatId] else { return }
         do {
             try doc.closePoll(messageId: messageId, sender: me)
@@ -6362,7 +6333,7 @@ final class AppModel: ObservableObject {
         if let published = messages[chatId] {
             list = published
         } else if let doc = docs[chatId], doc.count > 0 {
-            list = doc.readAll()
+            list = doc.readAll(as: myUserId)
         } else {
             list = []
         }
@@ -6378,7 +6349,7 @@ final class AppModel: ObservableObject {
         } else if let rows = channelRows[chatId] {
             list = rows
         } else if let doc = docs[chatId], doc.count > 0 {
-            list = doc.readAll()
+            list = doc.readAll(as: myUserId)
         } else {
             list = []
         }
@@ -7034,7 +7005,7 @@ final class AppModel: ObservableObject {
         replyRef: ReplyRef? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
-        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
+        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1, as: myUserId), row.id == messageId {
             row.pending = true
             var next = messages
             next[chatId, default: []].append(row)

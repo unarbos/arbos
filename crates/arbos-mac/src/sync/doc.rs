@@ -83,17 +83,29 @@ impl ChatDoc {
     }
 
     pub fn read_message(&self, ix: usize) -> Option<Message> {
+        self.read_message_as(ix, None)
+    }
+
+    /// One row as `viewer` (`user:<id>`) reads it: a poll that hides its voters hands over
+    /// that reader's own vote and no other voter's id (`arbos_core::doc::project_poll`).
+    /// Every read that feeds the transcript names the reader; a read for anything else does
+    /// not need one.
+    pub fn read_message_as(&self, ix: usize, viewer: Option<&str>) -> Option<Message> {
         let map = message_map(&self.messages(), ix)?;
         let mut json = serde_json::to_value(map.get_deep_value()).ok()?;
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
-        arbos_core::doc::project_poll_for_viewer(&mut json);
+        arbos_core::doc::project_poll(&mut json, viewer);
         serde_json::from_value(json).ok()
     }
 
     pub fn read_all(&self) -> Vec<Message> {
+        self.read_all_as(None)
+    }
+
+    pub fn read_all_as(&self, viewer: Option<&str>) -> Vec<Message> {
         (0..self.len())
-            .filter_map(|ix| self.read_message(ix))
+            .filter_map(|ix| self.read_message_as(ix, viewer))
             .collect()
     }
 
@@ -130,7 +142,7 @@ mod core_writer_tests {
         let mut json = row.clone();
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
-        arbos_core::doc::project_poll_for_viewer(&mut json);
+        arbos_core::doc::project_poll(&mut json, None);
         serde_json::from_value(json).expect("core row deserializes as Message")
     }
 

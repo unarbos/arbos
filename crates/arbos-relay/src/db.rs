@@ -1914,6 +1914,22 @@ impl Db {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(i64, bool)> {
+        self.append_row_with(room, device, batch_id, bytes, None)
+            .map(|(seq, dup, _)| (seq, dup))
+    }
+
+    /// [`Self::append_row`], and in the same transaction a second row right behind it:
+    /// `(device, batch id, bytes)` of what the relay itself writes in answer to the first (a
+    /// poll correction). Both are stored or neither is, and no reader sees the first without
+    /// the second. Returns the second row's seq too; a duplicate first row stores nothing.
+    pub fn append_row_with(
+        &self,
+        room: &str,
+        device: &str,
+        batch_id: &str,
+        bytes: &[u8],
+        answer: Option<(&str, &str, &[u8])>,
+    ) -> Result<(i64, bool, Option<i64>)> {
         let now = now_ms();
         self.with(|c| {
             // The room position and its row commit together: an insert failure must not leave
@@ -1922,17 +1938,21 @@ impl Db {
             let tx = c.unchecked_transaction()?;
             if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
                 tx.commit()?;
-                return Ok((seq, true));
+                return Ok((seq, true, None));
             }
             tx.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
-            tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
-            let seq: i64 = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
-            tx.execute(
-                "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![room, seq, device, batch_id, bytes, now],
-            )?;
+            let mut seqs = [0i64; 2];
+            let rows = [Some((device, batch_id, bytes)), answer];
+            for (seq, (device, batch_id, bytes)) in seqs.iter_mut().zip(rows.into_iter().flatten()) {
+                tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
+                *seq = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
+                tx.execute(
+                    "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![room, *seq, device, batch_id, bytes, now],
+                )?;
+            }
             tx.commit()?;
-            Ok((seq, false))
+            Ok((seqs[0], false, answer.map(|_| seqs[1])))
         })
     }
 

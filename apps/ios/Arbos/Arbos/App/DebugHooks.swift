@@ -53,9 +53,6 @@ enum DebugHooks {
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
-    /// Polls rig: the Launch week group ends with my own open poll (it shows who voted and
-    /// closes in a day) and Mira's closed one.
-    static var fixturePoll: Bool { value("ARBOS_FIXTURE_POLL") == "1" }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
     /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the

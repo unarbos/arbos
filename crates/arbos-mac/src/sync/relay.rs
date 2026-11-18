@@ -868,10 +868,11 @@ impl Shared {
         self.me_user().map(|u| u.login).unwrap_or_default()
     }
 
-    /// Before reading chat rows for the UI: a poll that hides its voters hands the reader
-    /// their own vote and nobody else's, so the core has to know who is reading.
-    fn read_polls_as_me(&self) {
-        arbos_core::doc::set_viewer(Some(format!("user:{}", self.me_id())));
+    /// Who reads the transcript (`user:<id>`), for `ChatDoc::read_all_as`: a poll that hides
+    /// its voters hands over the reader's own vote and no other voter's id. `None` until the
+    /// account is known; `refresh_me` re-reads the open chats when it becomes known.
+    fn viewer(&self) -> Option<String> {
+        self.me_user().map(|u| format!("user:{}", u.id))
     }
 
     /// Make sure we know who we are before reading chat members (`/me` once).
@@ -2172,7 +2173,15 @@ async fn refresh_me(shared: &Arc<Shared>) {
     };
     let u: credentials::AccountUser = (&dto.user).into();
     shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+    let unknown_until_now = shared.viewer().is_none();
     *shared.me.lock().unwrap() = Some(u);
+    if unknown_until_now {
+        // Rows read before the account was known carry nobody's own vote on a poll that
+        // hides its voters: read the open chats again, as this reader.
+        for chat_id in shared.docs.keys() {
+            emit_snapshot(shared, &chat_id);
+        }
+    }
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     // D92: `features.leaf_avatars` / `leaf_lottie` are retired. The default agent picture is
@@ -4902,8 +4911,7 @@ fn emit_snapshot_from(shared: &Shared, chat_id: &str, handle: &Arc<RoomDoc<ChatD
         return;
     }
     let Some(doc) = handle.lock() else { return };
-    shared.read_polls_as_me();
-    let mut messages = doc.read_all();
+    let mut messages = doc.read_all_as(shared.viewer().as_deref());
     for m in &mut messages {
         apply_pending(shared, chat_id, m);
     }
@@ -5151,9 +5159,9 @@ async fn forward_changes(
                 }
                 let handle = &room_doc;
                 let Some(doc) = handle.lock() else { continue };
-                shared.read_polls_as_me();
+                let viewer = shared.viewer();
                 for ix in touched.messages {
-                    if let Some(mut message) = doc.read_message(ix) {
+                    if let Some(mut message) = doc.read_message_as(ix, viewer.as_deref()) {
                         apply_pending(&shared, &key, &mut message);
                         emit_doc_event(&shared, &key, &room_doc, SyncEvent::MessageUpsert {
                             chat_id: key.clone(),

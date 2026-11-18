@@ -348,7 +348,7 @@ pub fn check_push(
 /// the relay after the poll closed, a vote whose device clock is off, a second close from the
 /// author's other device. A refused push is re-sent on every reconnect and nothing behind it
 /// in that device's queue can go, so a refusal there would cut an honest device off the chat.
-/// Those pushes are stored and then put right by the relay itself: see [`poll_corrections`].
+/// Those pushes are stored and, in the same step, put right by the relay: see [`corrections`].
 ///
 /// The one allowance is the one the insert arms make: a row arriving whole that the relay has
 /// already attested is history a heal carries, and it carries the votes on it. A device cannot
@@ -362,6 +362,12 @@ fn check_polls(
     let refuse = |code, detail| Some(PushCheck::Refuse { code, detail });
     for (id, fields) in &changes.polls {
         let arrives = changes.inserted.iter().any(|(i, _)| i == id);
+        // A row pushed back under an id the relay saw deleted is taken out again in the same
+        // step ([`corrections`]), whatever it carries: there is nothing on it left to judge,
+        // and a stale device healing a room must not be refused for it.
+        if arrives && state.db.message_deleted(chat_id, id).unwrap_or(false) {
+            continue;
+        }
         let written: Vec<&str> = changes
             .rewritten
             .iter()
@@ -380,13 +386,15 @@ fn check_polls(
                 format!("{id} does not hold a poll within bounds"),
             );
         };
-        let attested = arrives
-            && state
-                .db
-                .message_author(chat_id, id)
-                .ok()
-                .flatten()
-                .is_some();
+        let attested = arrives && healed(state, chat_id, id);
+        // A poll the relay sees for the first time may close at most a week (and a day of
+        // clock difference) from now, as every composer bounds it.
+        if arrives && !attested && poll.closes_too_late(arbos_core::ids::now_ms()) {
+            return refuse(
+                "bad_poll",
+                format!("the poll on {id} closes later than a poll may run"),
+            );
+        }
         // Every vote on a row that arrives whole; on a row already here, the ones this push
         // wrote — including one it removed, which is why this walks the written fields and
         // not the fields that are left.
@@ -470,59 +478,91 @@ fn check_polls(
     None
 }
 
-/// How far a vote's or a close's time may sit from the relay's clock and be kept as written.
-pub const POLL_CLOCK_TOLERANCE_MS: i64 = 2 * 60 * 1000;
+/// A row arriving whole that is history a heal restores: the relay recorded its author
+/// before and nobody deleted it since. The relay lost it; no client can make that happen.
+fn healed(state: &AppState, chat_id: &str, id: &str) -> bool {
+    let recorded = state.db.message_author(chat_id, id).ok().flatten();
+    recorded.is_some() && !state.db.message_deleted(chat_id, id).unwrap_or(true)
+}
 
-/// Fields the relay writes back onto a poll row after it stored a push.
+/// What the relay writes back onto a message, in the same step as it stores the push that
+/// made it necessary: a deleted message taken out again, or fields of a poll set right.
 #[derive(Debug, PartialEq)]
-pub struct PollFix {
+pub struct RowFix {
     pub message_id: String,
+    pub delete: bool,
     pub fields: Vec<(String, serde_json::Value)>,
 }
 
-/// The relay as the clock of a poll it can read. `now` is the relay's time. For each timed
-/// poll a stored push wrote on, what the relay must write back so that the row every reader
-/// reduces holds the relay's judgement and not the pusher's:
+impl RowFix {
+    /// Write the fix on `doc`. Does not commit: the caller wraps every fix of one push in
+    /// one transaction.
+    pub fn apply(&self, doc: &arbos_core::doc::ChatDoc) -> anyhow::Result<()> {
+        if self.delete {
+            doc.delete_message(&self.message_id)?;
+        } else {
+            let fields: Vec<(&str, serde_json::Value)> = self
+                .fields
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect();
+            doc.set_message_fields(&self.message_id, &fields);
+        }
+        Ok(())
+    }
+}
+
+/// The relay's own writes in answer to a push it is about to store. `now` is the relay's
+/// time. The caller applies them to the room's doc and stores them with the push in one
+/// transaction, under the room's admission lock, so the next push — on any socket — is
+/// judged against the corrected row and never against the pusher's values.
 ///
-/// - **A close is final.** A `pollClosed` written over an earlier one is set back to the
-///   earlier one. A first close keeps its time when it is within
-///   [`POLL_CLOCK_TOLERANCE_MS`] before `now`, and is set to `now` otherwise, so it can
-///   neither be dated back over votes already cast nor forward to keep the poll open.
+/// - **A deleted message stays deleted.** A row inserted under an id the relay saw deleted is
+///   taken out again, whoever pushes it and whatever it carries.
+/// - **A close is final and timed by the relay.** A `pollClosed` written over an earlier one
+///   is set back to the earlier one. A first close is set to `now`.
 /// - **No vote after the deadline.** Once the deadline that stood before the push has passed
 ///   by `now`, a changed `vote|x` or `voteAt|x` is set back to what it was (a first vote
-///   becomes an empty one, timed `now`). Change, retraction and backdating alike.
-/// - **A vote is timed by the relay.** While the poll is open, a `voteAt|x` further than the
-///   tolerance from `now` — or a vote changed without a fresh time — is set to `now`.
+///   becomes an empty one). Change, retraction and backdating alike.
+/// - **A vote is timed by the relay.** While the poll is open, every changed vote gets
+///   `voteAt|x = now`. No device time is kept, so the count depends on one clock: a voter
+///   whose phone runs ahead and an author whose Mac runs behind are both counted right.
 ///
 /// These are corrections, not refusals, because honest devices produce every one of these
-/// pushes (see [`check_polls`]). A row arriving whole that the relay attested before is a
-/// heal restoring history: its votes, their times and its close are left as they come, since
-/// stamping them `now` would void a finished poll's count. Someone able to delete a poll (its
-/// author, a moderator) can therefore delete it and push it back under the same id with a
-/// count of their own making; closing that needs a relay-side record of each poll.
+/// pushes (see [`check_polls`]).
+///
+/// Left as it comes: a poll row arriving whole that is a heal ([`healed`]) — its votes, their
+/// times and its close. A device restoring someone else's finished poll has to carry them,
+/// and stamping them `now` would void the count. Forging one needs the relay to have lost
+/// the row, which no client can cause; pushing a *deleted* poll back is the case above.
 ///
 /// Under end-to-end encryption the relay reads none of this and none of it holds.
-pub fn poll_corrections(
+pub fn corrections(
     state: &AppState,
     chat_id: &str,
     changes: &MessageChanges,
     now: i64,
-) -> Vec<PollFix> {
+) -> anyhow::Result<Vec<RowFix>> {
     let empty = serde_json::json!({});
     let mut fixes = Vec::new();
+    for (id, _) in &changes.inserted {
+        if state.db.message_deleted(chat_id, id)? {
+            fixes.push(RowFix {
+                message_id: id.clone(),
+                delete: true,
+                fields: Vec::new(),
+            });
+        }
+    }
     for (id, after) in &changes.polls {
         let Some(poll) = after.get(POLL_FIELD).and_then(Poll::parse) else {
             continue;
         };
         let arrives = changes.inserted.iter().any(|(i, _)| i == id);
-        let healed = arrives
-            && state
-                .db
-                .message_author(chat_id, id)
-                .ok()
-                .flatten()
-                .is_some();
-        if !poll.timed() || healed {
+        if !poll.timed()
+            || fixes.iter().any(|fix| fix.message_id == *id)
+            || (arrives && healed(state, chat_id, id))
+        {
             continue;
         }
         let before = changes
@@ -530,20 +570,7 @@ pub fn poll_corrections(
             .iter()
             .find(|(i, _)| i == id)
             .map_or(&empty, |(_, fields)| fields);
-        let time_of = |fields: &serde_json::Value, key: &str| fields.get(key).and_then(poll::time);
-        let recent = |at: i64| (now - POLL_CLOCK_TOLERANCE_MS..=now).contains(&at);
         let mut fields = Vec::new();
-
-        let closed_before = time_of(before, POLL_CLOSED_FIELD);
-        match (closed_before, time_of(after, POLL_CLOSED_FIELD)) {
-            (Some(was), is) if is != Some(was) => {
-                fields.push((POLL_CLOSED_FIELD.to_owned(), was.into()));
-            }
-            (None, Some(is)) if !recent(is) => {
-                fields.push((POLL_CLOSED_FIELD.to_owned(), now.into()));
-            }
-            _ => {}
-        }
 
         let open = !poll::closed(poll.deadline(before.get(POLL_CLOSED_FIELD)), now);
         let voters: std::collections::BTreeSet<&str> = [after, before]
@@ -560,19 +587,11 @@ pub fn poll_corrections(
                 format!("{POLL_VOTE_PREFIX}{voter}"),
                 format!("{POLL_VOTE_AT_PREFIX}{voter}"),
             );
-            let vote_changed = after.get(&vote) != before.get(&vote);
-            let at_changed = after.get(&at) != before.get(&at);
-            if !vote_changed && !at_changed {
+            if after.get(&vote) == before.get(&vote) && after.get(&at) == before.get(&at) {
                 continue;
             }
             if open {
-                let fresh = at_changed
-                    && time_of(after, &at).is_some_and(|t| {
-                        (now - POLL_CLOCK_TOLERANCE_MS..=now + POLL_CLOCK_TOLERANCE_MS).contains(&t)
-                    });
-                if !fresh {
-                    fields.push((at, now.into()));
-                }
+                fields.push((at, now.into()));
             } else {
                 let was = before.get(&vote).cloned();
                 fields.push((vote, was.unwrap_or_else(|| serde_json::json!([]))));
@@ -580,14 +599,29 @@ pub fn poll_corrections(
                 fields.push((at, was.unwrap_or_else(|| now.into())));
             }
         }
+
+        let closed_before = before.get(POLL_CLOSED_FIELD).and_then(poll::time);
+        let closed_after = after.get(POLL_CLOSED_FIELD).and_then(poll::time);
+        match (closed_before, closed_after) {
+            (Some(was), is) if is != Some(was) => {
+                fields.push((POLL_CLOSED_FIELD.to_owned(), was.into()));
+            }
+            // A vote stamped in this same push was cast before the close it came with.
+            (None, Some(_)) => {
+                let at = now + i64::from(open && !fields.is_empty());
+                fields.push((POLL_CLOSED_FIELD.to_owned(), at.into()));
+            }
+            _ => {}
+        }
         if !fields.is_empty() {
-            fixes.push(PollFix {
+            fixes.push(RowFix {
                 message_id: id.clone(),
+                delete: false,
                 fields,
             });
         }
     }
-    fixes
+    Ok(fixes)
 }
 
 #[cfg(test)]
@@ -1620,198 +1654,238 @@ mod tests {
     const NOW: i64 = 1_800_000_000_000;
     const MINUTE: i64 = 60_000;
 
-    /// The poll's fields after the relay wrote `fixes` back, as every reader then reduces it.
-    fn reduced(room: &Room, fixes: &[PollFix]) -> serde_json::Value {
-        for fix in fixes {
-            let fields: Vec<(&str, serde_json::Value)> = fix
-                .fields
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.clone()))
-                .collect();
-            room.doc.set_message_fields(&fix.message_id, &fields);
+    impl Room {
+        /// A push as the relay takes it: the diff, then the relay's corrections written on
+        /// the same doc before the next push is looked at (`rooms.rs`, under the room lock).
+        fn pushed(
+            &mut self,
+            state: &AppState,
+            chat: &str,
+            now: i64,
+            fields: &[(&str, serde_json::Value)],
+        ) -> Vec<RowFix> {
+            let c = self.push(|d| d.set_message_fields("p1", fields));
+            let fixes = corrections(state, chat, &c, now).unwrap();
+            self.doc
+                .transact(|d| fixes.iter().try_for_each(|fix| fix.apply(d)))
+                .unwrap();
+            fixes
         }
-        room.doc.projected_rows()[0]["parts"][1].clone()
+
+        /// The poll as every reader reduces it.
+        fn poll(&self) -> serde_json::Value {
+            self.doc.projected_rows()[0]["parts"][1].clone()
+        }
     }
 
-    /// Bob voted for Lisbon at `NOW - 10 min`; Alice closed the poll at `NOW - 5 min`.
+    fn stamp(fields: &[(&str, serde_json::Value)]) -> Vec<RowFix> {
+        vec![RowFix {
+            message_id: "p1".into(),
+            delete: false,
+            fields: fields
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        }]
+    }
+
+    /// Bob voted for Lisbon at `NOW - 10 min`; Alice closed the poll at `NOW - 5 min`. Both
+    /// through the relay, so both carry the relay's time.
     fn closed_poll(state: &AppState) -> (Room, String, String, String) {
         let (mut room, chat, alice, bob, _alice_dev, _bob_dev) = chat_with_a_poll(state);
-        room.push(|d| {
-            d.set_message_fields(
-                "p1",
-                &[
-                    (&format!("{POLL_VOTE_PREFIX}user:{bob}"), json!(["1"])),
-                    (
-                        &format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
-                        json!(NOW - 10 * MINUTE),
-                    ),
-                    (POLL_CLOSED_FIELD, json!(NOW - 5 * MINUTE)),
-                ],
-            )
-        });
+        let vote = format!("{POLL_VOTE_PREFIX}user:{bob}");
+        let at = format!("{POLL_VOTE_AT_PREFIX}user:{bob}");
+        room.pushed(
+            state,
+            &chat,
+            NOW - 10 * MINUTE,
+            &[(&vote, json!(["1"])), (&at, json!(1))],
+        );
+        room.pushed(
+            state,
+            &chat,
+            NOW - 5 * MINUTE,
+            &[(POLL_CLOSED_FIELD, json!(1))],
+        );
+        assert_eq!(room.poll()["counts"], json!({ "1": 1 }));
+        assert_eq!(room.poll()["deadline"], NOW - 5 * MINUTE);
         (room, chat, alice, bob)
     }
 
+    /// Every vote and every first close carries the relay's time, whatever the device wrote:
+    /// the count depends on one clock. A voter whose phone runs ahead and an author whose
+    /// Mac runs behind are both counted right.
+    #[test]
+    fn a_vote_and_a_first_close_are_timed_by_the_relay() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _alice, bob, ..) = chat_with_a_poll(&state);
+        let vote = format!("{POLL_VOTE_PREFIX}user:{bob}");
+        let at = format!("{POLL_VOTE_AT_PREFIX}user:{bob}");
+        // Bob's phone runs 90 s ahead; he votes a minute before Alice closes.
+        let fixes = room.pushed(
+            &state,
+            &chat,
+            NOW - MINUTE,
+            &[(&vote, json!(["1"])), (&at, json!(NOW - MINUTE + 90_000))],
+        );
+        assert_eq!(fixes, stamp(&[(&at, json!(NOW - MINUTE))]));
+        // Alice's Mac runs 90 s behind.
+        let fixes = room.pushed(
+            &state,
+            &chat,
+            NOW,
+            &[(POLL_CLOSED_FIELD, json!(NOW - 90_000))],
+        );
+        assert_eq!(fixes, stamp(&[(POLL_CLOSED_FIELD, json!(NOW))]));
+        assert_eq!(
+            room.poll()["counts"],
+            json!({ "1": 1 }),
+            "Bob's vote counts"
+        );
+        assert_eq!(room.poll()["deadline"], NOW);
+
+        // A time the device got exactly right is stamped all the same, and so is a vote
+        // changed with no new time, and a time written alone.
+        let (mut room, chat, _alice, bob, ..) = chat_with_a_poll(&state);
+        let vote = format!("{POLL_VOTE_PREFIX}user:{bob}");
+        let at = format!("{POLL_VOTE_AT_PREFIX}user:{bob}");
+        for (now, fields) in [
+            (
+                NOW,
+                vec![(vote.as_str(), json!(["1"])), (at.as_str(), json!(NOW))],
+            ),
+            (NOW + 1, vec![(vote.as_str(), json!(["2"]))]),
+            (NOW + 2, vec![(at.as_str(), json!(5))]),
+        ] {
+            assert_eq!(
+                room.pushed(&state, &chat, now, &fields),
+                stamp(&[(&at, json!(now))])
+            );
+        }
+        // A vote and the close it came with, in one push: the vote was cast first.
+        let fixes = room.pushed(
+            &state,
+            &chat,
+            NOW + 3,
+            &[
+                (&vote, json!(["1"])),
+                (&at, json!(9)),
+                (POLL_CLOSED_FIELD, json!(9)),
+            ],
+        );
+        assert_eq!(
+            fixes,
+            stamp(&[(&at, json!(NOW + 3)), (POLL_CLOSED_FIELD, json!(NOW + 4))])
+        );
+        assert_eq!(room.poll()["counts"], json!({ "1": 1 }));
+    }
+
     /// A close is final: the author's own later write of `pollClosed` — forward to reopen
-    /// the poll, back to void votes already cast — is put back by the relay.
+    /// the poll, back to void votes already cast — is put back by the relay. Two writes one
+    /// after the other fare no better: the second is judged against the corrected row, not
+    /// against the first one's value.
     #[test]
     fn a_close_cannot_be_rewritten() {
         let state = test_state(AuthMode::Github);
-        let (mut room, chat, ..) = closed_poll(&state);
-        let tally = json!({ "1": 1 });
-        for (what, rewrite) in [
-            ("reopened", NOW + 365 * 24 * 60 * MINUTE),
-            ("backdated over Bob's vote", NOW - 11 * MINUTE),
+        let closed = NOW - 5 * MINUTE;
+        for (what, rewrites) in [
+            ("reopened", vec![NOW + 365 * 24 * 60 * MINUTE]),
+            ("backdated over Bob's vote", vec![NOW - 11 * MINUTE]),
+            (
+                "reopened in two steps",
+                vec![NOW + 365 * 24 * 60 * MINUTE, NOW + 366 * 24 * 60 * MINUTE],
+            ),
         ] {
-            let c = room.set("p1", POLL_CLOSED_FIELD, json!(rewrite));
-            assert_ne!(
-                reduced(&room, &[])["deadline"],
-                NOW - 5 * MINUTE,
-                "{what}: the push itself moved the close"
-            );
-            let fixes = poll_corrections(&state, &chat, &c, NOW);
-            assert_eq!(
-                fixes,
-                [PollFix {
-                    message_id: "p1".into(),
-                    fields: vec![(POLL_CLOSED_FIELD.into(), json!(NOW - 5 * MINUTE))],
-                }],
-                "{what}"
-            );
-            let part = reduced(&room, &fixes);
-            assert_eq!(part["deadline"], NOW - 5 * MINUTE, "{what}");
-            assert_eq!(part["counts"], tally, "{what}: Bob's vote still counts");
-        }
-    }
-
-    /// A first close takes the relay's time unless its own is at most the tolerance old: it
-    /// cannot be dated back over votes, nor forward to stay open.
-    #[test]
-    fn a_first_close_is_timed_by_the_relay() {
-        let state = test_state(AuthMode::Github);
-        for (written, kept) in [
-            (NOW - MINUTE, true),
-            (NOW, true),
-            (NOW - POLL_CLOCK_TOLERANCE_MS - 1, false),
-            (NOW + 1, false),
-            (1, false),
-        ] {
-            let (mut room, chat, ..) = chat_with_a_poll(&state);
-            let c = room.set("p1", POLL_CLOSED_FIELD, json!(written));
-            let fixes = poll_corrections(&state, &chat, &c, NOW);
-            assert_eq!(fixes.is_empty(), kept, "{written}");
-            let want = if kept { written } else { NOW };
-            assert_eq!(reduced(&room, &fixes)["deadline"], want, "{written}");
+            let (mut room, chat, ..) = closed_poll(&state);
+            for rewrite in rewrites {
+                let c = room.set("p1", POLL_CLOSED_FIELD, json!(rewrite));
+                assert_ne!(room.poll()["deadline"], closed, "{what}: the push moved it");
+                let fixes = corrections(&state, &chat, &c, NOW).unwrap();
+                assert_eq!(
+                    fixes,
+                    stamp(&[(POLL_CLOSED_FIELD, json!(closed))]),
+                    "{what}"
+                );
+                fixes.iter().for_each(|fix| fix.apply(&room.doc).unwrap());
+                assert_eq!(room.poll()["deadline"], closed, "{what}");
+                assert_eq!(room.poll()["counts"], json!({ "1": 1 }), "{what}");
+            }
         }
     }
 
     /// After the deadline by the relay's clock nothing about a vote changes: not the choice
-    /// alone (riding on the old time), not a retraction, not a backdated first vote.
+    /// alone (riding on the old time), not a retraction, not a backdated first vote — and not
+    /// two pushes one after the other, where the second would otherwise have the first one's
+    /// uncorrected value put back as "what it was".
     #[test]
     fn a_vote_written_after_the_close_is_put_back() {
         let state = test_state(AuthMode::Github);
-        let (.., alice, bob) = closed_poll(&state);
+        let (_, _, alice, bob) = closed_poll(&state);
         let (vote, at) = (
             format!("{POLL_VOTE_PREFIX}user:{bob}"),
             format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
         );
-        let cases: [(&str, Vec<(String, serde_json::Value)>); 4] = [
+        type Push = Vec<(String, serde_json::Value)>;
+        let cases: [(&str, Vec<Push>); 5] = [
             (
                 "the choice changed, the time untouched",
-                vec![(vote.clone(), json!(["2"]))],
+                vec![vec![(vote.clone(), json!(["2"]))]],
             ),
-            ("a retraction", vec![(vote.clone(), json!([]))]),
+            ("a retraction", vec![vec![(vote.clone(), json!([]))]]),
             (
                 "a changed choice with a backdated time",
-                vec![
+                vec![vec![
                     (vote.clone(), json!(["2"])),
                     (at.clone(), json!(NOW - 20 * MINUTE)),
-                ],
+                ]],
             ),
             (
                 "someone's backdated first vote",
-                vec![
+                vec![vec![
                     (format!("{POLL_VOTE_PREFIX}user:{alice}"), json!(["2"])),
                     (
                         format!("{POLL_VOTE_AT_PREFIX}user:{alice}"),
                         json!(NOW - 20 * MINUTE),
                     ),
+                ]],
+            ),
+            (
+                "a changed choice, then a retraction right behind it",
+                vec![
+                    vec![(vote.clone(), json!(["2"]))],
+                    vec![(vote.clone(), json!([]))],
                 ],
             ),
         ];
-        for (what, writes) in cases {
+        for (what, pushes) in cases {
             let (mut room, chat, ..) = closed_poll(&state);
-            let c = room.push(|d| {
+            for writes in pushes {
                 let fields: Vec<(&str, serde_json::Value)> = writes
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.clone()))
                     .collect();
-                d.set_message_fields("p1", &fields)
-            });
-            assert_ne!(
-                reduced(&room, &[])["counts"],
-                json!({ "1": 1 }),
-                "{what}: the push alone changes the count"
-            );
-            let fixes = poll_corrections(&state, &chat, &c, NOW);
-            assert_eq!(
-                reduced(&room, &fixes)["counts"],
-                json!({ "1": 1 }),
-                "{what}: the count the poll closed with"
-            );
+                let c = room.push(|d| d.set_message_fields("p1", &fields));
+                assert_ne!(
+                    room.poll()["counts"],
+                    json!({ "1": 1 }),
+                    "{what}: the push alone changes the count"
+                );
+                let fixes = corrections(&state, &chat, &c, NOW).unwrap();
+                fixes.iter().for_each(|fix| fix.apply(&room.doc).unwrap());
+                assert_eq!(room.poll()["counts"], json!({ "1": 1 }), "{what}");
+            }
         }
     }
 
-    /// While the poll is open a vote's time is the relay's: a time further than the
-    /// tolerance from the relay's clock, or a vote changed without a new time, is stamped
-    /// now. A time the device got about right is kept, and nothing more is written.
-    #[test]
-    fn an_open_polls_vote_is_timed_by_the_relay() {
-        let state = test_state(AuthMode::Github);
-        let (mut room, chat, _alice, bob, ..) = chat_with_a_poll(&state);
-        let (vote, at) = (
-            format!("{POLL_VOTE_PREFIX}user:{bob}"),
-            format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
-        );
-        let mut push = |fields: &[(&str, serde_json::Value)]| {
-            let c = room.push(|d| d.set_message_fields("p1", fields));
-            poll_corrections(&state, &chat, &c, NOW)
-        };
-        let stamped = [PollFix {
-            message_id: "p1".into(),
-            fields: vec![(at.clone(), json!(NOW))],
-        }];
-        assert!(push(&[(&vote, json!(["1"])), (&at, json!(NOW - 1000))]).is_empty());
-        assert!(push(&[(&vote, json!(["2"])), (&at, json!(NOW + 1000))]).is_empty());
-        assert_eq!(
-            push(&[(&vote, json!(["1"])), (&at, json!(NOW - 3 * MINUTE))]),
-            stamped
-        );
-        assert_eq!(
-            push(&[(&vote, json!(["2"])), (&at, json!(NOW + 3 * MINUTE))]),
-            stamped
-        );
-        assert_eq!(
-            push(&[(&at, json!(5))]),
-            stamped,
-            "the time alone, dated back"
-        );
-        assert_eq!(
-            push(&[(&vote, json!(["1"]))]),
-            stamped,
-            "a vote with no new time"
-        );
-    }
-
     /// A vote cast before its device heard of the close, arriving after it: stored (a refusal
-    /// would cut the device off the chat) and then emptied by the relay, so it is not counted.
+    /// would cut the device off the chat) and emptied by the relay, so it is not counted.
     #[test]
     fn a_vote_arriving_after_the_close_is_stored_and_not_counted() {
         let state = test_state(AuthMode::Github);
         let (mut room, chat, alice, bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
         let mut bobs = ChatDoc::new(Some(2), false);
         bobs.import(&room.doc.snapshot()).unwrap();
-        room.push(|d| d.close_poll("p1", &format!("user:{alice}")).unwrap());
+        room.pushed(&state, &chat, NOW, &[(POLL_CLOSED_FIELD, json!(1))]);
         bobs.transact(|d| {
             d.set_poll_vote("p1", &format!("user:{bob}"), &["1".to_owned()])
                 .unwrap()
@@ -1834,26 +1908,88 @@ mod tests {
             None,
             "an honest device's push is never refused"
         );
-        let fixes = poll_corrections(&state, &chat, &c, arbos_core::ids::now_ms() + 1);
-        assert_eq!(reduced(&room, &fixes)["voters"], 0);
+        let fixes = corrections(&state, &chat, &c, NOW + MINUTE).unwrap();
+        fixes.iter().for_each(|fix| fix.apply(&room.doc).unwrap());
+        assert_eq!(room.poll()["voters"], 0);
+        let _ = alice;
     }
 
-    /// A row the relay attested before, arriving whole, is history a heal restores: its
-    /// votes, their times and its close are left as they come.
+    /// A poll row arriving whole. One the relay recorded and nobody deleted is history a
+    /// heal restores, left as it comes. One that was deleted is taken out again, whoever
+    /// pushes it back and whatever votes and close it carries.
     #[test]
-    fn a_healed_poll_keeps_its_count() {
+    fn a_lost_poll_is_healed_and_a_deleted_one_stays_deleted() {
         let state = test_state(AuthMode::Github);
-        let (source, chat, ..) = closed_poll(&state);
-        let mut lost = Room::new();
-        let snapshot = source.doc.snapshot();
-        let before = lost.doc.frontiers();
-        lost.doc.import(&snapshot).unwrap();
-        let c = lost
-            .doc
-            .messages_changed(&before, &lost.doc.frontiers(), &lost.ids);
-        assert_eq!(c.inserted.len(), 1, "the poll row arrives whole");
-        assert!(poll_corrections(&state, &chat, &c, NOW).is_empty());
-        assert_eq!(reduced(&lost, &[])["counts"], json!({ "1": 1 }));
+        let (source, chat, _alice, _bob) = closed_poll(&state);
+        let arrive = || {
+            let mut lost = Room::new();
+            let before = lost.doc.frontiers();
+            lost.doc.import(&source.doc.snapshot()).unwrap();
+            let c = lost
+                .doc
+                .messages_changed(&before, &lost.doc.frontiers(), &lost.ids);
+            assert_eq!(c.inserted.len(), 1, "the poll row arrives whole");
+            (lost, c)
+        };
+        let (lost, c) = arrive();
+        assert_eq!(corrections(&state, &chat, &c, NOW).unwrap(), []);
+        assert_eq!(lost.poll()["counts"], json!({ "1": 1 }));
+
+        state.db.note_message_deleted(&chat, "p1").unwrap();
+        let (lost, c) = arrive();
+        let fixes = corrections(&state, &chat, &c, NOW).unwrap();
+        assert_eq!(
+            fixes,
+            [RowFix {
+                message_id: "p1".into(),
+                delete: true,
+                fields: vec![],
+            }]
+        );
+        fixes.iter().for_each(|fix| fix.apply(&lost.doc).unwrap());
+        lost.doc.transact(|_| ());
+        assert!(lost.doc.projected_rows().is_empty(), "it is gone again");
+    }
+
+    /// A poll the relay sees for the first time closes at most a week (and a day of clock
+    /// difference) from now. One already past its time is only a closed poll: a poll
+    /// composed offline may arrive late.
+    #[test]
+    fn a_new_polls_closing_time_is_bounded() {
+        use arbos_core::poll::{CLOSES_AT_ALLOWANCE_MS, DURATION_MAX_MS};
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
+        let now = arbos_core::ids::now_ms();
+        for (closes_at, refused) in [
+            (now - 3_600_000, None),
+            (now + DURATION_MAX_MS, None),
+            (
+                now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + MINUTE,
+                Some("bad_poll"),
+            ),
+        ] {
+            let mut room = Room::new();
+            let late = Poll {
+                closes_at: Some(closes_at),
+                ..poll()
+            };
+            let c = room.push(|d| {
+                d.append_poll_message("p_new", &late, "dev", &as_user(&alice))
+                    .unwrap()
+            });
+            assert_eq!(
+                code(&check_push(
+                    &state,
+                    &alice_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                refused,
+                "{closes_at}"
+            );
+        }
     }
 
     #[test]

@@ -12303,6 +12303,8 @@ mod poll_rows_tests {
             "vote|user:me": ["2"], "voteAt|user:me": 6,
             "parts": [{ "id": "t", "kind": "text", "text": "Poll: Where?" }] });
         arbos_core::doc::project_poll(&mut row, Some("user:me"));
+        // The row the Mac is handed, before it is even read into a message.
+        assert!(!row.to_string().contains("user:ana"), "{row}");
         let message: Message = serde_json::from_value(row).expect("a core row reads as a Message");
         let Some(Part::Poll {
             votes,
