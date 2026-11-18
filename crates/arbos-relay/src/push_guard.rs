@@ -40,9 +40,11 @@ use crate::moderation;
 use crate::people;
 use crate::state::AppState;
 
-/// Fields that name who a message came from. A client writes them when it writes the message;
-/// rewriting them afterwards on a row that already exists is what a forgery looks like.
-const IDENTITY_FIELDS: [&str; 2] = ["sender", "role"];
+/// Fields that name a message and who it came from. A client writes them when it writes the
+/// message; rewriting them afterwards on a row that already exists is what a forgery looks
+/// like. `id` is here for every pusher, the author included: `message_authors` and every other
+/// record the relay keeps about a message is keyed on it.
+const IDENTITY_FIELDS: [&str; 3] = ["id", "sender", "role"];
 
 /// The relay's own identity for the rows it writes (`notices::write_doc`). Those never come
 /// through a socket, so they are never checked here; the constant is for tests that spell out
@@ -238,6 +240,14 @@ pub fn check_push(
     // message as far as the record is concerned: the id already has an author, so the
     // `(Some(a), s)` arm reads it as a heal of attested history and attests nothing new.
     for (id, _) in &changes.inserted {
+        // An entry the relay cannot name is one it cannot attribute, gate or later protect.
+        // Every writer gives a message its id as it creates it, so nothing honest sends one.
+        if id.is_empty() {
+            return PushCheck::Refuse {
+                code: "bad_message",
+                detail: "every entry in a chat's messages is a message with an id".to_owned(),
+            };
+        }
         if changes.ids_after.iter().filter(|(x, _)| x == id).count() > 1 {
             return PushCheck::Refuse {
                 code: "duplicate_id",
@@ -320,7 +330,8 @@ pub fn check_push(
     // says nothing about any one of them — and treating that silence as proof of a new message
     // would refuse the heal of a room's whole history, which is the one case heals exist for.
     // Each announce narrows this, one chat at a time.
-    if carries_new_message && !state.db.chat_has_authors(chat_id).unwrap_or(false) {
+    // A record that cannot be read is not a silent one: the push stays a new message, gated.
+    if carries_new_message && !state.db.chat_has_authors(chat_id).unwrap_or(true) {
         carries_new_message = false;
     }
     PushCheck::Allow {
@@ -1413,5 +1424,158 @@ mod tests {
             )),
             Some(false)
         );
+    }
+
+    // ---- a message's id ----------------------------------------------------------------
+
+    /// Alice and Bob in a chat whose doc holds `m_alice`, attested to Alice.
+    fn chat_with_alices_message(state: &AppState) -> (Room, String, String, Principal, Principal) {
+        let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(state);
+        let mut room = Room::new();
+        room.push(|d| {
+            d.append_user_message("m_alice", "hello", "dev", &as_user(&alice))
+                .unwrap()
+        });
+        (room, chat, bob, alice_dev, bob_dev)
+    }
+
+    /// Write or remove the `id` of `m_alice`, after `also` wrote other fields on it.
+    fn write_id(
+        room: &mut Room,
+        new_id: Option<&str>,
+        also: impl FnOnce(&ChatDoc),
+    ) -> MessageChanges {
+        room.push(|d| {
+            also(d);
+            let m = d.find_message("m_alice").expect("the message is there");
+            match new_id {
+                Some(id) => m.insert("id", id).unwrap(),
+                None => m.delete("id").unwrap(),
+            }
+        })
+    }
+
+    /// A message is the row at its place in the list, whatever `id` it carries once the push
+    /// has been applied. A push that writes a field only its author may write is refused all
+    /// the same when it also rewrites or removes that row's `id`.
+    #[test]
+    fn a_write_to_a_message_id_does_not_hide_the_other_fields_written_with_it() {
+        for new_id in [Some("m_other"), None] {
+            let state = test_state(AuthMode::Github);
+            let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+            let c = write_id(&mut room, new_id, |d| {
+                d.set_message_fields("m_alice", &[("sender", json!(format!("user:{bob}")))])
+            });
+            assert_eq!(
+                code(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some("not_yours"),
+                "the author rewritten along with the id ({new_id:?})"
+            );
+        }
+    }
+
+    /// The same for a vote: nobody casts one under another member's name by writing the
+    /// poll's `id` in the same push.
+    #[test]
+    fn a_write_to_a_poll_id_does_not_hide_a_vote_cast_with_it() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, _bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let c = room.push(|d| {
+            d.set_poll_vote("p1", &format!("user:{alice}"), &["1".to_owned()])
+                .unwrap();
+            d.find_message("p1")
+                .unwrap()
+                .insert("id", "p_other")
+                .unwrap();
+        });
+        assert!(refused(&check_push(
+            &state,
+            &bob_dev,
+            PEOPLE_PROJECT,
+            &chat,
+            false,
+            &c
+        )));
+    }
+
+    /// What people do to messages every day writes no identity field: a reaction, an edit of
+    /// the text, a status or preview field, on one's own message or on someone else's.
+    #[test]
+    fn ordinary_writes_to_an_existing_message_are_allowed() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let me = format!("user:{bob}");
+        let mut allowed = |what: &str, write: &dyn Fn(&ChatDoc)| {
+            let c = room.push(write);
+            assert_eq!(
+                kind(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some(false),
+                "{what}"
+            );
+        };
+        allowed("a reaction", &|d| {
+            d.set_reaction("m_alice", "👍", &me, true).unwrap()
+        });
+        allowed("a reaction taken back", &|d| {
+            d.set_reaction("m_alice", "👍", &me, false).unwrap()
+        });
+        allowed("an edit", &|d| {
+            d.edit_message_text("m_alice", "changed").unwrap()
+        });
+        allowed("a field", &|d| {
+            d.set_message_fields("m_alice", &[("preview", json!("off"))])
+        });
+    }
+
+    /// Every entry in `messages` arrives as a message with an id. One without is refused, so
+    /// no row sits in a chat that the relay never attributed and cannot name afterwards.
+    #[test]
+    fn an_entry_without_an_id_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let c = room.push(|d| d.messages_list().push("not a message").unwrap());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("bad_message")
+        );
+    }
+
+    /// `id` is written with the message and never again: not by a member, and not by the
+    /// author either, since every record the relay keeps about a message is keyed on it.
+    #[test]
+    fn nobody_rewrites_or_removes_the_id_of_an_existing_message() {
+        for new_id in [Some("m_other"), None] {
+            let state = test_state(AuthMode::Github);
+            let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);
+            let c = write_id(&mut room, new_id, |_| ());
+            for (who, dev) in [("a member", &bob_dev), ("the author", &alice_dev)] {
+                assert_eq!(
+                    code(&check_push(&state, dev, PEOPLE_PROJECT, &chat, false, &c)),
+                    Some("not_yours"),
+                    "{who} writing {new_id:?} over the id"
+                );
+            }
+        }
     }
 }
