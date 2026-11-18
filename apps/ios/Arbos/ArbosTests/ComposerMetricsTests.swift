@@ -283,6 +283,105 @@ final class ComposerMetricsTests: XCTestCase {
          .init(name: "notes.txt", mime: "text/plain", data: Data([3]))]
     }
 
+    // Tester report, 2026-11-17: crop or trim a staged attachment before sending it.
+    func testAnEditedFileTakesTheOriginalsPlaceAndCancelKeepsIt() {
+        let trio = pendingTrio()
+        let edited = AppModel.PendingAttachment(name: "portrait.jpg", mime: "image/jpeg", data: Data([9]))
+        let after = ComposerAttachment.replacing(trio[1].id, with: edited, in: trio)
+        XCTAssertEqual(after.map(\.name), ["profile-card.png", "portrait.jpg", "notes.txt"], "same place in the row")
+        XCTAssertEqual(after[1].data, Data([9]))
+        // Cancel never calls `replacing`; an attachment removed while its editor was open stays removed.
+        XCTAssertEqual(ComposerAttachment.replacing(UUID(), with: edited, in: trio), trio)
+        XCTAssertTrue(ComposerAttachment.canEdit(trio[0]))
+        XCTAssertFalse(ComposerAttachment.canEdit(trio[2]), "a text file has nothing to crop")
+        XCTAssertFalse(ComposerAttachment.canEdit(.init(name: "a.gif", mime: "image/gif", data: Data())))
+        XCTAssertTrue(ComposerAttachment.canEdit(.init(name: "a.mov", mime: "video/quicktime", data: Data())))
+    }
+
+    func testCropRectangleStaysInsideThePictureAndSquareIsSquareInPixels() {
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+        // Bottom-right corner pulled in: the top-left corner does not move.
+        let pulled = PhotoCrop.dragging(full, right: true, bottom: true, by: CGSize(width: -0.25, height: -0.5), square: false, aspect: 2)
+        XCTAssertEqual(pulled, CGRect(x: 0, y: 0, width: 0.75, height: 0.5))
+        // Pushed past the edge, and past the opposite corner: clamped, never inverted.
+        let pushed = PhotoCrop.dragging(pulled, right: true, bottom: true, by: CGSize(width: 5, height: -5), square: false, aspect: 2)
+        XCTAssertEqual(pushed.maxX, 1, accuracy: 1e-9)
+        XCTAssertEqual(pushed.height, PhotoCrop.minSide, accuracy: 1e-9)
+        // A 2:1 picture: a square covers half as much of the width as of the height.
+        let square = PhotoCrop.squared(full, aspect: 2)
+        XCTAssertEqual(square, CGRect(x: 0.25, y: 0, width: 0.5, height: 1))
+        let dragged = PhotoCrop.dragging(square, right: false, bottom: false, by: CGSize(width: 0.1, height: 0.1), square: true, aspect: 2)
+        XCTAssertEqual(dragged.width * 2, dragged.height, accuracy: 1e-9)
+        XCTAssertEqual(dragged.maxX, square.maxX, accuracy: 1e-9)
+        XCTAssertEqual(PhotoCrop.moving(square, by: CGSize(width: 3, height: 3)).origin, CGPoint(x: 0.5, y: 0))
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 100)).image { _ in }
+        XCTAssertEqual(PhotoCrop.cropped(image, to: square).size, CGSize(width: 100, height: 100))
+    }
+
+    // Tester report, 2026-11-17: a video shows its first frame, Play and its length — made
+    // from bytes already on the phone, never fetched for the poster.
+    @MainActor
+    func testVideoPosterKeyFallbackAndLength() async throws {
+        let owner = try XCTUnwrap(WorkLifetime().ticket)
+        let key = try XCTUnwrap(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "att-1-clip.mp4"))
+        XCTAssertEqual(key, ChatImageCache.Key(owner: owner, slot: "people:c1", ref: "att-1-clip.mp4"))
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "local:clip.mp4"), "still uploading: the card")
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: nil))
+        XCTAssertNil(VideoThumb.key(owner: owner, slot: "people:c1", kind: .file, blobRef: "att-1-notes.pdf"))
+        XCTAssertEqual(VideoThumb.durationLabel(7.2), "0:07")
+        XCTAssertEqual(VideoThumb.durationLabel(3903), "1:05:03")
+        XCTAssertEqual(VideoThumb.durationLabel(.nan), "")
+        XCTAssertEqual(VideoThumb.durationLabel(.infinity), "")
+        XCTAssertEqual(VideoThumb.durationLabel(1e300), "99:59:59")
+
+        let made = await Task.detached { FixtureMedia.clip }.value
+        let clip = try XCTUnwrap(made)
+        // Nothing until the bytes are in hand: the row keeps the file card and fetches nothing.
+        XCTAssertNil(VideoThumb.frame(for: key))
+        VideoThumb.remember(clip, name: "clip.mp4", for: key)
+        await VideoThumb.settled(key)
+        let frame = try XCTUnwrap(VideoThumb.frame(for: key))
+        XCTAssertEqual(frame.image.size, CGSize(width: 320, height: 180))
+        XCTAssertEqual(frame.seconds, 2, accuracy: 0.1)
+        // The picture cache holds nothing under the video's ref: a poster is not a blob.
+        XCTAssertNil(ChatImageCache.decoded(for: key))
+
+        // What decides is the content: a video under a wrong name still has a frame, scaled
+        // into the box, and bytes that are not a video have none whatever they are called.
+        let box = CGSize(width: 160, height: 160)
+        let misnamed = await VideoThumb.frame(from: clip, name: "notes.txt", maxPixels: box)
+        XCTAssertEqual(misnamed?.image.size, CGSize(width: 160, height: 90))
+        let junkKey = try XCTUnwrap(VideoThumb.key(owner: owner, slot: "people:c1", kind: .video, blobRef: "att-2-junk.mp4"))
+        VideoThumb.remember(Data("not a video".utf8), name: "junk.mp4", for: junkKey)
+        await VideoThumb.settled(junkKey)
+        XCTAssertNil(VideoThumb.frame(for: junkKey), "no frame: the file card stays")
+    }
+
+    // What the editor will and will not open, and what an edit may put back.
+    @MainActor
+    func testOpeningAnEditAndTheSizeCheck() async throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20)).image { _ in }
+        let png = AppModel.PendingAttachment(name: "shot.png", mime: "image/png", data: try XCTUnwrap(picture.pngData()))
+        guard case .edit(let edit) = await PendingEdit.open(png), case .picture(let image) = edit.source else {
+            return XCTFail("a still picture opens in the crop screen")
+        }
+        let half = await edit.cropped(image, to: CGRect(x: 0, y: 0, width: 0.5, height: 1))
+        XCTAssertEqual(half?.name, "shot.png")
+        XCTAssertEqual(half.flatMap { UIImage(data: $0.data) }?.size, CGSize(width: 20 * picture.scale, height: 20 * picture.scale))
+        XCTAssertLessThan(try XCTUnwrap(half).data.count, png.data.count * 2, "8-bit, not a 16-bit PNG several times the size")
+
+        // Not a picture and not a video, whatever the mime says: refused with a reason, no editor.
+        if case .edit = await PendingEdit.open(.init(name: "a.png", mime: "image/png", data: Data("junk".utf8))) { XCTFail("junk opened") }
+        let junkVideo = await PendingEdit.open(.init(name: "a.mov", mime: "video/quicktime", data: Data("junk".utf8)))
+        guard case .refused = junkVideo else { return XCTFail("junk video opened") }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("edit-") }
+        XCTAssertEqual(leftovers, [], "the editor's copy of a refused video is deleted")
+
+        XCTAssertTrue(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes))))
+        XCTAssertFalse(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes + 1))),
+                       "an edit that grew past the limit is not staged")
+    }
+
     func testRemovingOnePendingAttachmentKeepsTheOthers() {
         let trio = pendingTrio()
         let left = ChatSession.removingPending(trio[1].id, from: trio)

@@ -235,4 +235,65 @@ final class ComposerParityUITests: XCTestCase {
                              + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
     }
+
+    private func openChatWithStaged(_ what: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "ARBOS_FIXTURE": "1",
+            "ARBOS_NO_STORE": "1",
+            "ARBOS_OPEN_PROJECT": "fx-comms",
+            "ARBOS_OPEN_CHAT": "fx-comms-main",
+            "ARBOS_FIXTURE_COMPOSER_ATTACHMENT": what,
+        ]
+        app.launch()
+        return app
+    }
+
+    /// Tester report, 2026-11-17: crop a staged picture before sending it. Cancel and Done
+    /// both come back to the composer with the picture still staged.
+    func testAStagedPictureCanBeCroppedAndCancelLeavesIt() {
+        let app = openChatWithStaged("1")
+        let edit = app.descendants(matching: .any)["composer-edit-attachment"].firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: appear), "a staged picture offers Edit")
+        let thumb = app.descendants(matching: .any)["composer-attachment"].firstMatch
+        let done = app.descendants(matching: .any)["crop-done"].firstMatch
+        let before = thumb.value as? String
+
+        edit.tap()
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "the crop screen is up")
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(thumb.waitForExistence(timeout: 10), "cancel: the picture is still staged")
+        XCTAssertEqual(thumb.value as? String, before, "cancel: and it is the same file")
+
+        edit.tap()
+        XCTAssertTrue(done.waitForExistence(timeout: 10))
+        let corner = app.descendants(matching: .any)["crop-handle-3"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        corner.press(forDuration: 0.1, thenDragTo: corner.withOffset(CGVector(dx: -80, dy: -80)))
+        app.buttons["Square"].firstMatch.tap()
+        done.tap()
+        XCTAssertTrue(thumb.waitForExistence(timeout: 10), "done: the cropped picture took its place")
+        XCTAssertNotEqual(thumb.value as? String, before, "done: a different file is staged (its size changed)")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "composer-attachment").count, 1)
+    }
+
+    /// Edit on a staged video must never take the app down. Embedding the system trimmer in
+    /// the SwiftUI tree aborted the app (2026-11-17); it is presented from a plain controller
+    /// now, and where the system cannot trim the file (the simulator) Edit leaves it as it was.
+    func testEditingAStagedVideoKeepsTheAppAndTheVideo() {
+        let app = openChatWithStaged("video")
+        let edit = app.descendants(matching: .any)["composer-edit-attachment"].firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: appear), "a staged video offers Edit")
+        edit.tap()
+        // Where the system cannot trim (the simulator) the composer's note says so; on a
+        // phone the trimmer opens and Cancel closes it.
+        let cancel = app.buttons["Cancel"].firstMatch
+        let note = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Couldn't edit that attachment")).firstMatch
+        if cancel.waitForExistence(timeout: 5) { cancel.tap() } else {
+            XCTAssertTrue(note.waitForExistence(timeout: 5), "no trimmer: the reason is on screen, not a blank flash")
+        }
+        XCTAssertEqual(app.state, .runningForeground, "the app is still running")
+        XCTAssertTrue(app.descendants(matching: .any)["composer-attachment"].firstMatch.waitForExistence(timeout: 10),
+                      "the video is still staged")
+        XCTAssertTrue(field(app).isHittable, "and the composer is usable again")
+    }
 }
