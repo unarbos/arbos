@@ -539,6 +539,16 @@ final class AppModel: ObservableObject {
     /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
     /// Set through `applyNativeRooms`.
     private(set) var nativeRooms: [Id: String] = [:]
+    /// My reactions on native chats' rows shown before the homeserver confirmed them, by chat
+    /// (`reactNativePeople`).
+    var heldReactions: [Id: [HeldReaction]] = [:]
+    /// How long a held reaction waits for its echo once the homeserver call has returned, and
+    /// how long for a call that does not return. Variables so a test does not wait them out.
+    var reactionEchoGrace: Duration = .seconds(10)
+    var reactionSendLimit: Duration = .seconds(60)
+    /// Tests stand in for the Matrix client's reaction call here (chat, message, key, on);
+    /// false is "the row has no event yet". Nil outside tests.
+    var nativeReact: ((Id, Id, String, Bool) async throws -> Bool)?
     /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
     @Published var walletPrompt: WalletPrompt?
 
@@ -6058,6 +6068,7 @@ final class AppModel: ObservableObject {
     /// failed write rolls the paint back.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
+        let emoji = MessageReaction.writeKey(emoji)
         if nativeRooms[chatId] != nil {
             reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
             return
