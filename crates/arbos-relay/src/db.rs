@@ -1052,7 +1052,7 @@ impl Db {
     }
 
     pub fn device_by_token_hash(&self, h: &str) -> Result<Option<String>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT id FROM devices WHERE token_hash = ?1 AND revoked_at IS NULL",
                 params![h],
@@ -1133,7 +1133,7 @@ impl Db {
     /// match and otherwise returns the most recently active project with that name; callers that
     /// know the user should use `project_of_user_by_name`.
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 &format!(
                     "SELECT {} FROM projects WHERE (id = ?1 OR name = ?1) AND deleted_at IS NULL ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
@@ -1506,7 +1506,7 @@ impl Db {
     }
 
     pub fn chat_exists(&self, project_id: &str, chat_id: &str) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT 1 FROM chats WHERE project_id = ?1 AND id = ?2",
                 params![project_id, chat_id],
@@ -1659,7 +1659,7 @@ impl Db {
 
     /// The user's box, if one was created.
     pub fn user_box(&self, user_id: &str) -> Result<Option<Sandbox>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 &format!("SELECT {} FROM boxes WHERE user_id = ?1", Self::BOX_COLS),
                 params![user_id],
@@ -1686,7 +1686,7 @@ impl Db {
     }
 
     pub fn user_by_box_token_hash(&self, h: &str) -> Result<Option<String>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT user_id FROM boxes WHERE box_token_hash = ?1",
                 params![h],
@@ -1776,7 +1776,7 @@ impl Db {
     }
 
     pub fn device_user(&self, device_id: &str) -> Result<Option<String>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT user_id FROM devices WHERE id = ?1",
                 params![device_id],
@@ -4088,6 +4088,48 @@ mod reader_tests {
         // The scrub's truncating checkpoint is not held up by idle readers.
         db.flush_after_scrub().unwrap();
         assert_eq!(db.room_head("p/c").unwrap(), 20);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a room socket asks on every upgrade and every frame (who the device is, whether it
+    /// is signed out, whose project or chat this is) is answered beside the writer, and a
+    /// sign-out is seen by the very next question.
+    #[test]
+    fn the_permission_reads_of_a_room_socket_do_not_wait_for_the_writer() {
+        let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        db.insert_device("d1", "laptop", "hash-1", "u1", "paircode")
+            .unwrap();
+
+        // With these on the writer's connection this would never return: its lock is held.
+        let writer = db.0.lock().unwrap();
+        assert_eq!(
+            db.device_status("d1").unwrap(),
+            Some(("u1".to_owned(), false))
+        );
+        assert_eq!(db.device_user("d1").unwrap().as_deref(), Some("u1"));
+        assert_eq!(db.device_kind("d1").unwrap().as_deref(), Some("paircode"));
+        assert_eq!(
+            db.device_by_token_hash("hash-1").unwrap().as_deref(),
+            Some("d1")
+        );
+        assert!(db.user_by_box_token_hash("none").unwrap().is_none());
+        assert!(db.user("u1").unwrap().is_none());
+        assert!(db.user_box("u1").unwrap().is_none());
+        assert!(db.project("p").unwrap().is_none());
+        assert!(!db.chat_exists("p", "c").unwrap());
+        assert!(db.people_chat("c").unwrap().is_none());
+        assert!(db.membership("c", "user:u1").unwrap().is_none());
+        assert!(!db.member_is_banned("c", "user:u1").unwrap());
+        assert!(!db.is_project_member("p", "u1").unwrap());
+        drop(writer);
+
+        assert!(db.revoke_device_fully("d1").unwrap());
+        assert_eq!(
+            db.device_status("d1").unwrap(),
+            Some(("u1".to_owned(), true)),
+            "a sign-out is visible to the next read"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
