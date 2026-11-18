@@ -1156,6 +1156,19 @@ struct ChatSession: View {
         // A token that lands one version after these rows skips the history compare.
         let tailEdit = version != nil && version == model.tailEditVersion[chatId]
             && shown.map { $0 &+ 1 } == version && list.count == refreshIds.count
+        // A reaction on one message: restamp its rows in place, animated, so the chip pops in
+        // and the rows below make room instead of jumping. Everything else in the transcript
+        // is left alone (a full pass per reaction was the wait before the chip in a long chat).
+        func restamp(_ edited: Message) {
+            rowsPath = .reaction
+            var next = rows
+            Transcript.restampReactions(&next, for: edited)
+            messageById[edited.id] = edited
+            withAnimation(.reactionPop) {
+                rows = next
+                rowsVersion &+= 1
+            }
+        }
         if !policyChanged, list.count == refreshIds.count, list.count > 0,
            tailEdit || zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
             let last = list[list.count - 1]
@@ -1163,6 +1176,11 @@ struct ChatSession: View {
             if prefixSame {
                 if messageById[last.id] == last {
                     rowsPath = .unchanged
+                    return
+                }
+                // One message to compare, so a streaming token pays nothing for this.
+                if let edited = Transcript.reactionOnly(last, was: messageById[last.id]) {
+                    restamp(edited)
                     return
                 }
                 rowsPath = .tail
@@ -1189,6 +1207,11 @@ struct ChatSession: View {
                 rows = Array(rows.prefix(cut)) + newTail
                 messageById = byId
                 rowsVersion &+= 1
+                return
+            }
+            // An earlier message changed (the compare above stopped at it).
+            if let edited = Transcript.reactionOnlyEdit(list, was: messageById) {
+                restamp(edited)
                 return
             }
         }
@@ -4859,8 +4882,12 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
-                                        guard account.accepts(model) else { return }
-                                        model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
+                                        // Next turn of the run loop: the chip's own tap has then
+                                        // run, whichever of the two handlers SwiftUI calls first.
+                                        DispatchQueue.main.async {
+                                            guard account.accepts(model), !ChatGestures.doubleTapOnChip(of: row.messageId) else { return }
+                                            model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
+                                        }
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
         }
