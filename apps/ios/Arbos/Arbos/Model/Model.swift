@@ -812,6 +812,28 @@ struct MessageReaction: Equatable, Hashable {
         return stripped.isEmpty ? emoji : stripped
     }
 
+    /// The key a reaction is written under: `emoji` without its skin tone, spelled as the
+    /// untoned pick is. After a text-default base the tone stands where U+FE0F does (✌🏽 is
+    /// U+270C U+1F3FD, ✌️ is U+270C U+FE0F), so stripping alone wrote a bare `✌` beside
+    /// everyone else's `✌️`: two chips that look the same (tester report, 2026-11-16,
+    /// "double reaction"). Only a stripped tone is replaced: a bare key already stored is
+    /// toggled as it is, and nothing is merged on the read side.
+    /// Ceiling: sequences of several people with different tones (handshake, couples) are
+    /// stripped as before, which is not always the spelling of the untoned pick.
+    static func writeKey(_ emoji: String) -> String {
+        var out = String.UnicodeScalarView()
+        var before: Unicode.Scalar?
+        for scalar in emoji.unicodeScalars {
+            if !skinToneScalars.contains(scalar.value) {
+                out.append(scalar)
+            } else if let before, before != "\u{FE0F}", !before.properties.isEmojiPresentation {
+                out.append("\u{FE0F}")
+            }
+            before = scalar
+        }
+        return out.isEmpty ? emoji : String(out)
+    }
+
     /// True when both strings are the same reaction after skin-tone stripping.
     static func sameBase(_ a: String, _ b: String) -> Bool {
         normalizeEmoji(a) == normalizeEmoji(b)

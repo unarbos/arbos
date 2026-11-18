@@ -70,4 +70,22 @@ final class HomeNavPushTests: XCTestCase {
         XCTAssertTrue(source.contains(".backSwipeToPop()"),
                       "pushed panes keep the interactive edge swipe")
     }
+
+    /// Back from a chat opened in Archived chats returns to that list, not to Home
+    /// (tester report, 2026-11-17): the list is a route, and it stays under what opens.
+    func testAChatOpenedFromArchivedKeepsTheListUnderIt() {
+        let model = AppModel()
+        model.showArchived()
+        model.showArchived()
+        XCTAssertEqual(model.path, [.archived], "a second tap must not stack a duplicate")
+        let chat = AppModel.Route.chat(chatId: "fx-dm", projectId: peopleSlot)
+        // Every `open(…)` replaces the path, as this does.
+        model.openFromArchived { model.path = [chat] }
+        XCTAssertEqual(model.path, [.archived, chat])
+        model.path.removeLast()
+        XCTAssertEqual(model.path, [.archived], "back lands on the archived list")
+        let server = AppModel.Route.server(serverId: "s1")
+        model.openFromArchived { model.path = [.archived, server] }
+        XCTAssertEqual(model.path, [.archived, server], "the list is never put under itself")
+    }
 }

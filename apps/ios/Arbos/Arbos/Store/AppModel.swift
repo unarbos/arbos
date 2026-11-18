@@ -482,6 +482,11 @@ final class AppModel: ObservableObject {
         /// Home's "+" — New Message (Jacob, 2026-11-10: the compose panel pushes in from
         /// the right like a chat and Settings, instead of rising as a bottom sheet).
         case newMessage
+        /// The Archived chats list behind Home's footer. A route, not a page presented
+        /// beside the path: opening a chat changes the path, which drops every page
+        /// presented outside it, and back from that chat went to Home (tester report,
+        /// 2026-11-17).
+        case archived
     }
 
     // MARK: Servers (D88)
@@ -534,6 +539,16 @@ final class AppModel: ObservableObject {
     /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
     /// Set through `applyNativeRooms`.
     private(set) var nativeRooms: [Id: String] = [:]
+    /// My reactions on native chats' rows shown before the homeserver confirmed them, by chat
+    /// (`reactNativePeople`).
+    var heldReactions: [Id: [HeldReaction]] = [:]
+    /// How long a held reaction waits for its echo once the homeserver call has returned, and
+    /// how long for a call that does not return. Variables so a test does not wait them out.
+    var reactionEchoGrace: Duration = .seconds(10)
+    var reactionSendLimit: Duration = .seconds(60)
+    /// Tests stand in for the Matrix client's reaction call here (chat, message, key, on);
+    /// false is "the row has no event yet". Nil outside tests.
+    var nativeReact: ((Id, Id, String, Bool) async throws -> Bool)?
     /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
     @Published var walletPrompt: WalletPrompt?
 
@@ -2332,7 +2347,11 @@ final class AppModel: ObservableObject {
                 pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = UserError.classify("load your chats", error)
+            let failure = UserError.classify("load your chats", error)
+            // The raw detail is for whoever reads the log; the line under Home shows the sentence.
+            // As an argument, never the format: the raw words can be the relay's body.
+            NSLog("registry: reload failed: %@", failure.raw.isEmpty ? failure.sentence : failure.raw)
+            registryError = failure
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -5333,6 +5352,19 @@ final class AppModel: ObservableObject {
         path.append(.newMessage)
     }
 
+    /// Open the Archived chats list from Home's footer.
+    func showArchived() {
+        if case .archived? = path.last { return }
+        path.append(.archived)
+    }
+
+    /// Open a row of the Archived chats list. Opening replaces the path; the list goes
+    /// back under whatever opened, so back returns to it.
+    func openFromArchived(_ open: () -> Void) {
+        open()
+        if path.first != .archived { path.insert(.archived, at: 0) }
+    }
+
     /// Leave the New Message push (and any Create screen stacked on it) for Home.
     /// Create's Cancel / Close call this so they drop the whole compose flow, not only
     /// the Create page — the old sheet's `dismiss()` closed the whole sheet the same way.
@@ -6036,6 +6068,7 @@ final class AppModel: ObservableObject {
     /// failed write rolls the paint back.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
+        let emoji = MessageReaction.writeKey(emoji)
         if nativeRooms[chatId] != nil {
             reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
             return
