@@ -14,7 +14,7 @@ import Foundation
 /// 4. Neither fits where the bubble is → the whole group shifts the least distance
 ///    that brings it into view (the bubble is "scrolled into view").
 /// 5. The group is taller than the visible area → capsule at the top, menu at the
-///    bottom, and the bubble is clipped between them.
+///    bottom, and the bubble scrolls in the room between them.
 /// 6. The emoji keyboard is up (the capsule's add-emoji control) → the menu is hidden and
 ///    only the capsule and the bubble are fitted above the keyboard: a tall menu has no
 ///    room there and its last rows ended up under the keyboard
@@ -53,7 +53,7 @@ struct MessageActionsLayout: Equatable {
     let capsuleY: CGFloat
     let bubbleY: CGFloat
     let menuY: CGFloat
-    /// The bubble's drawn height — its own, unless rule 5 clipped it.
+    /// The bubble's drawn height — its own, unless rule 5 cut it to a window it scrolls in.
     let bubbleHeight: CGFloat
     /// Bounds everything was fitted into.
     let visibleTop: CGFloat

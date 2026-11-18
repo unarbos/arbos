@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Arbos
 
@@ -165,5 +166,121 @@ final class OptimisticReactionTests: XCTestCase {
 
         let chip = try XCTUnwrap(reactionOn(model, chatId: chatId, messageId: target.id, emoji: "💯"))
         XCTAssertEqual(chip.senders, [me], "the re-read keeps my reaction; it does not drop the paint")
+    }
+}
+
+/// A reaction restamps the rows of its one message instead of rebuilding the transcript, and
+/// the result is what the rebuild gives (tester report, 2026-11-16: the double-tap heart "is
+/// just not smooth").
+final class ReactionRowTests: XCTestCase {
+    @MainActor func testAReactionRestampsItsMessageAsAFullRebuildWould() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let me = try XCTUnwrap(model.myUserId)
+        let group = model.messages(of: "fx-group-launch")
+        try restampMatchesRebuild(group, me: me) {
+            Transcript.rows($0, projectId: "\(peopleSlot):fx-group-launch", me: me, people: true, multiParty: true)
+        }
+
+        // The same group with a member blocked: their messages fold into one row.
+        let blocked = try XCTUnwrap(group.first { $0.sender != me && $0.role == .user }?.sender)
+        let folded = Transcript.rows(group, projectId: "\(peopleSlot):fx-group-launch", me: me, people: true, multiParty: true, hiddenSenders: [blocked])
+        XCTAssertTrue(folded.contains { if case .hidden = $0.kind { return true }; return false }, "the fixture folds a row")
+        try restampMatchesRebuild(group, me: me) {
+            Transcript.rows($0, projectId: "\(peopleSlot):fx-group-launch", me: me, people: true, multiParty: true, hiddenSenders: [blocked])
+        }
+
+        // An agent chat, with a reply made of tool calls around its prose and a subagent's reply.
+        var agent = model.messages(of: "fx-comms-main")
+        var tools = try XCTUnwrap(agent.last { $0.role == .assistant })
+        tools.id = "tools"
+        tools.parts = [.tool(id: "t1", call: ToolCall(id: "c1", name: "shell"), isError: false), .text(id: "t2", text: "Done."),
+                       .tool(id: "t3", call: ToolCall(id: "c2", name: "read"), isError: true)]
+        var sub = tools
+        sub.id = "sub"
+        sub.subagentId = "sub-1"
+        sub.subagentName = "Scout"
+        agent += [tools, sub]
+        try restampMatchesRebuild(agent, me: me) { Transcript.rows($0, projectId: "fx-comms", me: me) }
+    }
+
+    private func restampMatchesRebuild(_ before: [Message], me: String, build: ([Message]) -> [Row],
+                                       file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertGreaterThan(before.count, 1, file: file, line: line)
+        for i in before.indices {
+            // On, a second emoji, then both off again: each step against the rebuild.
+            var list = before
+            var rows = build(list)
+            for emoji in ["❤️", "🔥", "❤️", "🔥"] {
+                let was = Transcript.index(list)
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                let edited = try XCTUnwrap(Transcript.reactionOnlyEdit(list, was: was), "message \(i) \(emoji)")
+                XCTAssertEqual(edited.id, list[i].id)
+                Transcript.restampReactions(&rows, for: edited)
+                XCTAssertEqual(rows, build(list), "message \(i) after \(emoji)", file: file, line: line)
+            }
+        }
+    }
+
+    @MainActor func testOnlyAReactionOnOneMessageIsTakenForOne() throws {
+        let model = AppModel()
+        model.loadFixture()
+        let me = try XCTUnwrap(model.myUserId)
+        let before = model.messages(of: "fx-group-launch")
+
+        // Anything but a reaction on one message is not this path.
+        let was = Transcript.index(before)
+        XCTAssertNil(Transcript.reactionOnlyEdit(before, was: was), "nothing changed")
+        var two = before
+        two[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        two[1].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        XCTAssertNil(Transcript.reactionOnlyEdit(two, was: was), "two messages changed")
+        var other = before
+        other[0].reactions = [MessageReaction(emoji: "🔥", senders: [me])]
+        other[0].createdAt += 1
+        XCTAssertNil(Transcript.reactionOnlyEdit(other, was: was), "more than its reactions changed")
+    }
+
+    /// In the open chat a reaction takes the restamp branch of `refreshRows`, on the newest
+    /// message (where the tail rebuild used to take it) and on an earlier one (the full pass).
+    @MainActor func testAReactionInTheOpenChatTakesTheReactionPath() async throws {
+        let model = AppModel()
+        model.loadFixture()
+        let chatId = "fx-comms-main"
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = UIHostingController(rootView: ChatView(chatId: chatId, projectId: "fx-comms").environmentObject(model))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func path(after change: () -> Void) async -> PerfSignpost.RowsPath? {
+            try? await Task.sleep(for: .milliseconds(300))
+            PerfSignpost.lastRowsPath = nil
+            change()
+            for _ in 0..<300 where PerfSignpost.lastRowsPath == nil { try? await Task.sleep(for: .milliseconds(10)) }
+            return PerfSignpost.lastRowsPath
+        }
+        let first = await path {}
+        _ = first
+        let list = model.messages(of: chatId)
+        let newest = try XCTUnwrap(list.last).id
+        let earlier = try XCTUnwrap(list.first).id
+        XCTAssertNotEqual(newest, earlier)
+        for id in [newest, earlier, newest] {
+            let took = await path { model.toggleReaction(chatId: chatId, messageId: id, emoji: "❤️") }
+            XCTAssertEqual(took, .reaction, "message \(id)")
+        }
+    }
+
+    /// Two quick taps on a chip are the chip's (on, then off again), not a heart for the
+    /// message; a chip of another message does not stand in the way (tester report,
+    /// 2026-11-16, "double reaction").
+    func testADoubleTapWithATapOnThatMessagesChipInItIsNotAHeart() {
+        defer { ChatGestures.chipTap = nil }
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m1", now: 100))
+        ChatGestures.chipTap = ("m1", 100)
+        XCTAssertTrue(ChatGestures.doubleTapOnChip(of: "m1", now: 100.3))
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m2", now: 100.3), "another message's double-tap is a heart")
+        XCTAssertFalse(ChatGestures.doubleTapOnChip(of: "m1", now: 101), "a later double-tap on the bubble is")
     }
 }
