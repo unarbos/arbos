@@ -2010,24 +2010,32 @@ struct ChatSession: View {
                     case "rig-notify":
                         // Rig: a UI test's own taps wait for scrolling to stop, so what has to
                         // happen while the transcript is still moving is asked for by Darwin
-                        // notification instead (`arbos.rig.<name>`): the composer focused
-                        // (`keyboard`, or `keyboard-on-coast` for the moment the next flick's
-                        // finger lifts), the chevron's hop with the composer focused a third of
-                        // the way through it (`hop-keyboard`), or a quote-tap reveal of a
-                        // message older than the rows now drawn (`reveal-old`, the window slides
-                        // onto it) or of the one before the newest (`reveal-near`).
+                        // notification instead (`arbos.rig.<name>`). `reveal-old` is a quote-tap
+                        // reveal of a message older than the rows now drawn, so the window slides
+                        // onto it; `hop-keyboard` is the chevron's own action with the composer
+                        // focused a tenth of a second into its hop.
+                        // `coast-…` waits for the next flick: `coast-hop-keyboard` runs as its
+                        // finger lifts, `coast-keyboard` focuses the composer once the coast has
+                        // brought the reader inside the latch's threshold.
                         #if DEBUG
+                        let focusSoon = { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { composerFocused = true } }
+                        let revealOld = {
+                            if let row = visibleRows.dropLast(windowSkipEnd + windowCount + Self.windowStep)
+                                .last(where: { $0.role != .system }) { revealQuoted(row.messageId) }
+                        }
                         let rigs: [(String, () -> Void)] = [
-                            ("keyboard", { composerFocused = true }),
-                            ("keyboard-on-coast", { scrollProbe.onCoast = { composerFocused = true } }),
-                            ("hop-keyboard", {
-                                jumpToLatest()
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { composerFocused = true }
-                            }),
-                            ("reveal-old", { if let row = visibleRows.dropLast(windowSkipEnd + windowCount + Self.windowStep)
-                                .last(where: { $0.role != .system }) { revealQuoted(row.messageId) } }),
-                            ("reveal-near", { if let row = visibleRows.dropLast(1)
-                                .last(where: { $0.role != .system }) { revealQuoted(row.messageId) } }),
+                            ("reveal-old", revealOld),
+                            ("hop-keyboard", { jumpToLatest(); focusSoon() }),
+                            ("coast-hop-keyboard", { scrollProbe.onCoast = { arrived in
+                                guard !arrived else { return false }
+                                jumpToLatest(); focusSoon()
+                                return true
+                            } }),
+                            ("coast-keyboard", { scrollProbe.onCoast = { arrived in
+                                guard arrived else { return false }
+                                composerFocused = true
+                                return true
+                            } }),
                         ]
                         for (name, run) in rigs {
                             var token: Int32 = 0
@@ -2793,16 +2801,12 @@ struct ChatSession: View {
                 // the resize that follows treats them as what they were just measured to be.
                 guard TranscriptScrollLatch.keyboardFollowsEnd(
                     fromEnd: scrollProbe.fromEnd, pinned: pinnedToBottom, held: readerHeld,
-                    animating: scrollProbe.animating) else {
+                    animating: scrollProbe.animating, coastingToEnd: scrollProbe.coastingToEnd,
+                    revealing: revealingRow != nil) else {
                     pinnedToBottom = false
                     awayFromBottom = true
                     return
                 }
-                // The end being followed is the newest row. A reveal can leave the row window
-                // slid into history with nothing marking the reader away, and pinning them to
-                // that window's end left the newest rows out of the stack, where no scrolling
-                // reaches them (tester report, 2026-11-17).
-                resetWindowToTail()
                 jumpBackTo = nil
                 pinnedToBottom = true
                 readerHeld = false
@@ -2811,6 +2815,16 @@ struct ChatSession: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
+            }
+            // Whatever pins the reader to the end, the end is the newest row. A reveal slides
+            // the row window into history, and a pin taken there (a send from the picker, the
+            // keyboard, a drag that reaches the window's own end) held the reader on the end
+            // of that window with the newest rows out of the stack, where no scrolling reaches
+            // them (tester report, 2026-11-17). A reveal still on its way to its row is left
+            // alone: it is not pinned to anything until it lands.
+            .onChange(of: pinnedToBottom) { _, pinned in
+                guard pinned, windowSkipEnd > 0 else { return }
+                if revealingRow != nil { pinnedToBottom = false } else { settleToBottom(proxy) }
             }
             .onChange(of: awayFromBottom) { _, away in
                 // Reader scrolled back to the end by hand — clear the pill and any
@@ -4911,11 +4925,17 @@ private final class ScrollProbe {
     /// `AwayFromBottomReporter` last sampled it. `nil` before the first sample, and always
     /// below iOS 18, where nothing samples it.
     var fromEnd: CGFloat?
-    /// A scroll made by code is animating, or was the last thing to move the transcript.
+    /// The scroll view last reported `.animating`: a scroll made by code is running. The
+    /// phase does not always return to `.idle` when that scroll ends, so this can stay true
+    /// until the reader next touches the transcript.
     var animating = false
+    /// A flick is coasting with the finger lifted, toward the end.
+    var coastingToEnd = false
     #if DEBUG
-    /// Rig: run once, when the next flick starts to coast (`rig-notify`).
-    var onCoast: (() -> Void)?
+    /// Rig (`rig-notify`): offered a flick as its finger lifts (`arrived` false) and again
+    /// once its coast has brought the reader inside the latch's threshold; dropped when it
+    /// returns true.
+    var onCoast: ((_ arrived: Bool) -> Bool)?
     #endif
 }
 
@@ -5208,25 +5228,46 @@ enum TranscriptScrollLatch {
     /// following) is animated, and half way through it the distance is a number from the
     /// middle of history. Code that scrolls to the end pins first, so `pinned` with nothing
     /// of the reader's since (`held` is their touch) or with the animation still running is
-    /// that scroll, and the keyboard follows where it is going.
+    /// that scroll, and the keyboard follows where it is going. So is a flick of the reader's
+    /// own that is coasting toward the end and has already brought them inside the latch's
+    /// threshold: stopping it a line or two short, under the keyboard, is nobody's intent.
     ///
     /// With nothing measured (below iOS 18) the one bottom anchor carries everyone to the end
     /// whatever is decided here, so the answer is to follow.
-    static func keyboardFollowsEnd(fromEnd: CGFloat?, pinned: Bool, held: Bool, animating: Bool) -> Bool {
+    ///
+    /// A reveal in progress is going to its row, not to the end, however near the end it is
+    /// passing: right after the row window slides the transcript sits on that window's end
+    /// for a moment before the reveal's scroll, and following from there would cancel it.
+    static func keyboardFollowsEnd(fromEnd: CGFloat?, pinned: Bool, held: Bool, animating: Bool,
+                                   coastingToEnd: Bool, revealing: Bool) -> Bool {
         guard let fromEnd else { return true }
-        if pinned, !held || animating { return true }
+        if revealing { return false }
+        if pinned, !held || animating || coastingToEnd { return true }
         return fromEnd <= keyboardSlack
     }
 
-    /// The container shrank while a flick was coasting with no finger down, which only the
-    /// keyboard rising does: a drag can retract a keyboard, never raise one. A reader the
-    /// flick has already brought to the end stays on it, as they would had it finished a
+    /// The keyboard rose while a flick was coasting, and the flick's own samples have the
+    /// reader latched at the end: they stay on it, as they would had the flick finished a
     /// moment earlier. Putting the offset back instead holds the newest rows under the
-    /// keyboard while the flick's own last sample has latched them as in view, and nothing
-    /// comes after it to say otherwise. `distance` is the raw sample, because the latch is.
+    /// keyboard with the latch saying they are in view, and nothing comes after it to say
+    /// otherwise.
+    ///
+    /// `pinned` and not a distance. The latch is measured against the container the gesture
+    /// began with, and the raw sample is not: a keyboard dragged part of the way down and
+    /// let go comes back up during the coast as well, and against the container it had
+    /// enlarged the raw sample puts a reader 250 pt up in history inside the threshold.
     static func keyboardRoseOnACoastAtTheEnd(coasting: Bool, oldContainer: CGFloat,
-                                             newContainer: CGFloat, distance: CGFloat) -> Bool {
-        coasting && newContainer < oldContainer - 0.5 && !away(distance: distance)
+                                             newContainer: CGFloat, pinned: Bool) -> Bool {
+        coasting && newContainer < oldContainer - 0.5 && pinned
+    }
+
+    /// The rest of a coast that code has overtaken. A chevron tap or a send takes the
+    /// transcript to the end and clears `held`; the coast that was under way goes on
+    /// reporting where it is for a few samples, from the middle of history, and letting those
+    /// write the latch undid the pin before the scroll to the end had begun. A finger on the
+    /// glass is different: that is the reader, whatever code did a moment ago.
+    static func coastOvertaken(coasting: Bool, held: Bool) -> Bool {
+        coasting && !held
     }
 
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
@@ -5306,14 +5347,15 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                 }
                 coasting = phase == .decelerating
                 probe.animating = phase == .animating
-                #if DEBUG
-                if coasting, let run = probe.onCoast { probe.onCoast = nil; run() }
-                #endif
+                if !coasting { probe.coastingToEnd = false }
                 // The reader has taken hold: see `TranscriptResizeAnchor`.
                 if userDriven { held = true }
                 // The gesture's container goes with the gesture. Left behind, the next drag
                 // measures itself against a container from before the keyboard moved.
                 else { gestureContainer = nil }
+                #if DEBUG
+                if coasting, probe.onCoast?(false) == true { probe.onCoast = nil }
+                #endif
             }
             .scrollPosition($position)
             .onScrollGeometryChange(for: Sample.self) { g in
@@ -5329,7 +5371,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                 probe.fromEnd = TranscriptScrollLatch.fromEnd(sampled: new.distance, topInset: new.topInset)
                 if TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(
                     coasting: coasting, oldContainer: old.container,
-                    newContainer: new.container, distance: old.distance) {
+                    newContainer: new.container, pinned: pinned) {
                     gestureContainer = nil
                     away = false
                     pinned = true
@@ -5345,6 +5387,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                     if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
                 }
                 #endif
+                if TranscriptScrollLatch.coastOvertaken(coasting: coasting, held: held) { return }
                 if userDriven {
                     // The finger owns the offset while it is down. A container resize
                     // under it is the keyboard retracting out of the reader's own drag,
@@ -5374,6 +5417,10 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                                                                  gestureStart: start))
                     away = isAway
                     pinned = !isAway
+                    probe.coastingToEnd = coasting && new.offset > old.offset
+                    #if DEBUG
+                    if coasting, !isAway, probe.onCoast?(true) == true { probe.onCoast = nil }
+                    #endif
                     return
                 }
                 gestureContainer = nil
