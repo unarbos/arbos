@@ -115,9 +115,8 @@ final class TranscriptScrollLatchTests: XCTestCase {
     /// were"). At the end it still carries the reader to the newest row, which is #3051; up
     /// in history it leaves them where they are.
     ///
-    /// "At the end" is the measurement and takes no latch: a reader the chevron brought to
-    /// the end while a flick was still coasting is left `away` by that flick's last sample,
-    /// and is at the end all the same.
+    /// For a reader at rest where their own scrolling left them, "at the end" is the
+    /// measurement alone: the latch gives the same answer pinned or not.
     func testTheKeyboardOpeningFollowsTheEndForAReaderMeasuredThere() {
         let slack = TranscriptScrollLatch.keyboardSlack
         func follows(_ fromEnd: CGFloat) -> Bool {
@@ -188,11 +187,14 @@ final class TranscriptScrollLatchTests: XCTestCase {
     /// rather than putting the offset back under it. Decided on the resize itself: a keyboard
     /// shown for the first time can arrive long after the tap.
     func testAKeyboardRisingOnACoastSticksOnlyForAReaderTheFlickHasLatchedAtTheEnd() {
-        func rose(coasting: Bool = true, from old: CGFloat = 778, to new: CGFloat = 477, pinned: Bool) -> Bool {
-            TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(coasting: coasting, oldContainer: old,
-                                                               newContainer: new, pinned: pinned)
+        func rose(coasting: Bool = true, towardEnd: Bool = true, from old: CGFloat = 778, to new: CGFloat = 477,
+                  pinned: Bool) -> Bool {
+            TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(coasting: coasting, towardEnd: towardEnd,
+                                                               oldContainer: old, newContainer: new, pinned: pinned)
         }
         XCTAssertTrue(rose(pinned: true), "arrived: stay on the newest row")
+        XCTAssertFalse(rose(towardEnd: false, pinned: true),
+                       "a flick into history, still latched at the end for its first points: the reader is leaving")
         XCTAssertFalse(rose(pinned: false), "still in history: the offset is put back as before")
         XCTAssertFalse(rose(coasting: false, pinned: true), "a finger on the glass owns the offset")
         XCTAssertFalse(rose(from: 477, to: 778, pinned: true),
@@ -212,7 +214,7 @@ final class TranscriptScrollLatchTests: XCTestCase {
         let latched = TranscriptScrollLatch.distance(sampled: raw, container: pulledDown, gestureStart: keyboardUp)
         XCTAssertTrue(TranscriptScrollLatch.away(distance: latched), "the latch has them in history")
         XCTAssertFalse(TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(
-            coasting: true, oldContainer: pulledDown, newContainer: keyboardUp,
+            coasting: true, towardEnd: true, oldContainer: pulledDown, newContainer: keyboardUp,
             pinned: !TranscriptScrollLatch.away(distance: latched)))
     }
 

@@ -4048,6 +4048,7 @@ struct ChatSession: View {
                 readerHeld = false
                 awayFromBottom = false
                 newBelowCount = 0
+                resetWindowToTail()
                 model.sendMedia(chatId: chatId, pick: pick)
                 sentOnce = true
                 scrollAfterSend()
@@ -5299,9 +5300,9 @@ enum TranscriptScrollLatch {
         return fromEnd <= keyboardSlack
     }
 
-    /// The keyboard rose while a flick was coasting, and the flick's own samples have the
-    /// reader latched at the end: they stay on it, as they would had the flick finished a
-    /// moment earlier. Putting the offset back instead holds the newest rows under the
+    /// The keyboard rose while a flick toward the end was coasting, and the flick's own
+    /// samples have the reader latched at the end: they stay on it, as they would had the
+    /// flick finished a moment earlier. Putting the offset back instead holds the newest rows under the
     /// keyboard with the latch saying they are in view, and nothing comes after it to say
     /// otherwise.
     ///
@@ -5309,9 +5310,14 @@ enum TranscriptScrollLatch {
     /// began with, and the raw sample is not: a keyboard dragged part of the way down and
     /// let go comes back up during the coast as well, and against the container it had
     /// enlarged the raw sample puts a reader 250 pt up in history inside the threshold.
-    static func keyboardRoseOnACoastAtTheEnd(coasting: Bool, oldContainer: CGFloat,
+    ///
+    /// And only toward the end. A flick into history that starts at the end is still latched
+    /// there for its first few points, and a keyboard coming back under it (a short drag down
+    /// that let it go) would otherwise pin a reader who is leaving, with the rest of their
+    /// coast then ignored as overtaken.
+    static func keyboardRoseOnACoastAtTheEnd(coasting: Bool, towardEnd: Bool, oldContainer: CGFloat,
                                              newContainer: CGFloat, pinned: Bool) -> Bool {
-        coasting && newContainer < oldContainer - 0.5 && pinned
+        coasting && towardEnd && newContainer < oldContainer - 0.5 && pinned
     }
 
     /// The rest of a coast that code has overtaken. A chevron tap or a send takes the
@@ -5423,7 +5429,7 @@ private struct AwayFromBottomReporterModern: ViewModifier {
                 let grew = new.height > old.height + 0.5
                 probe.fromEnd = TranscriptScrollLatch.fromEnd(sampled: new.distance, topInset: new.topInset)
                 if TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(
-                    coasting: coasting, oldContainer: old.container,
+                    coasting: coasting, towardEnd: probe.coastingToEnd, oldContainer: old.container,
                     newContainer: new.container, pinned: pinned) {
                     gestureContainer = nil
                     away = false

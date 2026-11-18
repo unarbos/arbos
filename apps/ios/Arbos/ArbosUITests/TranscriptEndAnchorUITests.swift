@@ -354,6 +354,62 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         XCTAssertFalse(chevron(app).exists, "and the reader is following the end, so no chevron")
     }
 
+    /// Hold a row into its menu and close the menu with a tap beside it. Opening drops the
+    /// keyboard and closing gives it back, which is the keyboard opening by another hand.
+    private func openAndCloseTheHoldMenu(on row: XCUIElement, in app: XCUIApplication) {
+        row.press(forDuration: 0.8)
+        let menu = app.descendants(matching: .any)["message-actions-menu"].firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 20), "the hold opened the menu")
+        let window = app.windows.firstMatch.frame
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: window.maxX - 30, dy: menu.frame.midY)).tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: menu)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 20), .completed, "a tap beside the menu closed it")
+        waitForKeyboard(app)
+    }
+
+    /// The hold menu closing gives the keyboard back to a reader who had it. At the end,
+    /// they are still at the end.
+    func testClosingTheHoldMenuAtTheEndGivesTheKeyboardBackAtTheEnd() {
+        let app = openLaunchWeek()
+        raiseKeyboard(app)
+        assertAtTheEnd(app, "keyboard up")
+        let top = composerTop(app)
+        guard let row = bubbles(app).last(where: { $0.frame.height > 0 && $0.frame.maxY <= top }) else {
+            return XCTFail("a row is above the composer")
+        }
+        openAndCloseTheHoldMenu(on: row, in: app)
+        assertAtTheEnd(app, "the menu closed and the keyboard came back")
+    }
+
+    /// And up in history, they are still where they were.
+    func testClosingTheHoldMenuInHistoryGivesTheKeyboardBackWhereTheReaderWas() {
+        // The padded history: text rows short enough for one to sit whole above the keyboard.
+        let app = openLongLaunchWeekWithRig()
+        drag(app, by: 0.5, times: 3)
+        raiseKeyboard(app)
+        let header = app.descendants(matching: .any)["chat-search-button"].firstMatch.frame
+        let top = composerTop(app)
+        let rows = bubbles(app)
+        if let any = rows.first { _ = restingFrame(any) }
+        guard let row = rows.first(where: { $0.frame.minY > header.maxY && $0.frame.maxY < top }) else {
+            return XCTFail("a row sits between the header and the composer with the keyboard up")
+        }
+        let id = row.identifier
+        let before = row.frame
+
+        openAndCloseTheHoldMenu(on: row, in: app)
+        let after = app.descendants(matching: .any)[id].firstMatch
+        XCTAssertTrue(after.exists, "the row the reader was on is still drawn")
+        // Not sent to the end, which is thousands of points away, and that is all this can
+        // hold the transcript to. The scroll offset does not change through any of it (logged),
+        // but with no size-change anchor for a reader in history the lazy stack re-lays the
+        // rows above when the container changes, and in about one run in three the rows on
+        // screen come back 177 pt higher.
+        XCTAssertEqual(restingFrame(after).minY, before.minY, accuracy: app.windows.firstMatch.frame.height / 2,
+                       "the reader is on the same rows when the menu gives the keyboard back")
+        XCTAssertTrue(chevron(app).exists, "and still in history")
+    }
+
     /// The container *growing* under a reader at the end must also keep them at the end.
     ///
     /// This is the direction #2920 changes, and the reason it is a separate case from the one
