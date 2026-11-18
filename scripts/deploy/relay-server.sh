@@ -363,6 +363,9 @@ RestartSec=2
 # the relay hit it on 2026-10-25 02:00 UTC (975 ESTAB + db + listener) and accept() failed with EMFILE for
 # 12 min — new sessions 502, chats empty, healthz still 200 on kept-alive connections. 65536 soft+hard.
 LimitNOFILE=65536
+# The host sells its sandboxes more memory than it has. If it runs out, the kernel must take a sandbox
+# (started with --oom-score-adj=500, files safe on its /work image), never the relay every user is on.
+OOMScoreAdjust=-900
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
