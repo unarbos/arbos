@@ -1136,18 +1136,29 @@ impl Element for SelectableText {
             }
         });
         let rig = selection.read(cx).rig_chip;
-        for chip in chips.iter() {
+        let fragments: Vec<_> = chips
+            .iter()
+            .map(|c| chip_fragments(&layout, &c.range))
+            .collect();
+        let pills = mention::pills(&fragments.concat(), layout.line_height());
+        let mut pills = pills.iter();
+        for (chip, fragments) in chips.iter().zip(&fragments) {
             let (alpha, still) = match rig {
                 Some(state) if chip.clickable() => (state.alpha(), false),
                 _ => selection.read(cx).chips.alpha(&chip.key, now, snap),
             };
             fading |= still;
-            paint_chip_pill(
-                &layout,
-                chip,
-                mention::pill_color(chip.accent, alpha),
-                window,
-            );
+            for (_fragment, &bounds) in fragments.iter().zip(&mut pills) {
+                #[cfg(test)]
+                PAINTED_CHIPS.with(|p| {
+                    p.borrow_mut().push(PaintedChip::Pill {
+                        bounds,
+                        text: (_fragment.0, _fragment.1),
+                        line: (_fragment.2, layout.line_height()),
+                    })
+                });
+                paint_chip_pill(bounds, mention::pill_color(chip.accent, alpha), window);
+            }
         }
         if fading {
             window.request_animation_frame();
@@ -1369,39 +1380,17 @@ fn chip_at<'a>(
         .find(|c| c.clickable() && c.range.contains(&ix))
 }
 
-/// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, `PILL_PAD_X` wider than the glyphs on each side and
-/// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
-fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut Window) {
-    for (start, end, top) in chip_fragments(layout, &chip.range) {
-        let line_h = layout.line_height();
-        let bounds = Bounds::new(
-            point(
-                start - px(mention::PILL_PAD_X),
-                top - px(mention::PILL_PAD_Y),
-            ),
-            size(
-                end - start + px(mention::PILL_PAD_X * 2.0),
-                line_h + px(mention::PILL_PAD_Y * 2.0),
-            ),
-        );
-        #[cfg(test)]
-        PAINTED_CHIPS.with(|p| {
-            p.borrow_mut().push(PaintedChip::Pill {
-                bounds,
-                text: (start, end),
-                line: (top, line_h),
-            })
-        });
-        window.paint_quad(gpui::quad(
-            bounds,
-            Corners::all(px(mention::PILL_RADIUS)),
-            color,
-            gpui::Edges::all(px(0.0)),
-            gpui::transparent_black(),
-            gpui::BorderStyle::default(),
-        ));
-    }
+/// One of the chip's pills (one per line fragment the `@Name` run occupies),
+/// where [`mention::pills`] places it. Painted before the text.
+fn paint_chip_pill(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    window.paint_quad(gpui::quad(
+        bounds,
+        Corners::all(px(mention::PILL_RADIUS)),
+        color,
+        gpui::Edges::all(px(0.0)),
+        gpui::transparent_black(),
+        gpui::BorderStyle::default(),
+    ));
 }
 
 /// The entity's picture, a `PICTURE` pt disc centred in the `@` glyph's cell
@@ -2489,6 +2478,151 @@ mod tests {
                 disc.size.height <= px(mention::PICTURE),
                 "the disc is at most the picture size"
             );
+        }
+    }
+
+    /// What a bubble line paints for `text`'s chips (one copy of each; every
+    /// frame paints again).
+    fn painted(cx: &mut gpui::TestAppContext, text: &str) -> Vec<PaintedChip> {
+        use std::cell::RefCell;
+        let mentions = chip_table(&Rc::new(RefCell::new(Vec::new())));
+        let text: SharedString = mentions.display(text).into();
+        PAINTED_CHIPS.with(|p| p.borrow_mut().clear());
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipLine {
+            selection: cx.new(TextSelection::new),
+            mentions,
+            text,
+        });
+        vcx.run_until_parked();
+        let mut painted: Vec<PaintedChip> = Vec::new();
+        for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
+            if !painted.contains(&p) {
+                painted.push(p);
+            }
+        }
+        painted
+    }
+
+    fn painted_pills(cx: &mut gpui::TestAppContext, text: &str) -> Vec<Bounds<Pixels>> {
+        painted(cx, text)
+            .into_iter()
+            .filter_map(|p| match p {
+                PaintedChip::Pill { bounds, .. } => Some(bounds),
+                PaintedChip::Disc { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Jacob's ask `mention-chip-highlight-2026-10-28` ("its picture on the
+    /// centre line, wherever it falls") for chips one under the other: in
+    /// runs of mentions that wrap over two and over three lines, every pill
+    /// is centred on its own line and every picture on its pill.
+    #[gpui::test]
+    fn stacked_chips_keep_the_pill_and_the_picture_on_the_lines_centre(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mid_y = |b: &Bounds<Pixels>| f32::from(b.origin.y + b.size.height / 2.0);
+        let mut seen = std::collections::BTreeSet::new();
+        for pairs in 1..=14 {
+            let painted = painted(cx, &"@comms @here ".repeat(pairs));
+            let pills: Vec<_> = painted
+                .iter()
+                .filter_map(|p| match p {
+                    PaintedChip::Pill { bounds, line, .. } => Some((*bounds, *line)),
+                    PaintedChip::Disc { .. } => None,
+                })
+                .collect();
+            let mut lines: Vec<i32> = pills.iter().map(|(_, l)| f32::from(l.0) as i32).collect();
+            lines.sort();
+            lines.dedup();
+            seen.insert(lines.len());
+            for (pill, (top, line_h)) in &pills {
+                let centre = f32::from(*top + *line_h / 2.0);
+                assert!((mid_y(pill) - centre).abs() < 0.01, "{pairs}: {pill:?}");
+            }
+            let mut discs = 0;
+            for p in &painted {
+                let PaintedChip::Disc { bounds: disc, .. } = p else {
+                    continue;
+                };
+                discs += 1;
+                let (pill, _) = pills
+                    .iter()
+                    .find(|(pill, _)| pill.contains(&disc.center()))
+                    .unwrap_or_else(|| panic!("{pairs}: {disc:?} sits on a pill"));
+                assert!(
+                    (mid_y(disc) - mid_y(pill)).abs() < 0.01,
+                    "{pairs}: {disc:?}"
+                );
+            }
+            assert!(discs > 0);
+        }
+        assert!(seen.contains(&2) && seen.contains(&3), "lines: {seen:?}");
+    }
+
+    /// The clear space between two pills, across and down; negative on an
+    /// axis where they overlap. Two pills are apart when either is positive.
+    fn clear_space(a: &Bounds<Pixels>, b: &Bounds<Pixels>) -> (f32, f32) {
+        let across = f32::from(a.left().max(b.left()) - a.right().min(b.right()));
+        let down = f32::from(a.top().max(b.top()) - a.bottom().min(b.bottom()));
+        (across, down)
+    }
+
+    /// Tester (Nov 14): "these blue '@ mentions' clip into each other". Two
+    /// chips one space apart, two with only a comma between them, and a run
+    /// of chips that wraps so chips sit one under the other: no two pills
+    /// intersect; side by side they keep at least `PILL_PAD_MIN`-pad's worth
+    /// of space, one under the other `PILL_GAP`. The run wraps inside its
+    /// column, and a pill with nothing stacked against it keeps its full
+    /// height.
+    #[gpui::test]
+    fn neighbouring_chips_never_touch(cx: &mut gpui::TestAppContext) {
+        let full = crate::ui::theme::CHAT_LINE_HEIGHT + 2.0 * mention::PILL_PAD_Y;
+        let wrapped = "@comms @here ".repeat(14);
+        for (text, chips, lines) in [
+            ("@comms @here", 2, 1),
+            ("@comms,@here", 2, 1),
+            (wrapped.as_str(), 28, 2),
+        ] {
+            let pills = painted_pills(cx, text);
+            let mut tops: Vec<i32> = pills.iter().map(|p| f32::from(p.top()) as i32).collect();
+            tops.sort();
+            tops.dedup_by(|a, b| (*a - *b).abs() < 6);
+            assert!(tops.len() >= lines, "{text:?} wraps: {tops:?}");
+            // The run wraps between chips and stays in the 480 pt column. At
+            // most one chip per line end is in two pieces: gpui may break
+            // between `@` and the cell's gap, as it does on main (known limit).
+            assert!(
+                (chips..chips + tops.len()).contains(&pills.len()),
+                "{text:?}: {} pills for {chips} chips on {} lines",
+                pills.len(),
+                tops.len()
+            );
+            for p in &pills {
+                assert!(p.right() <= px(20.0 + 480.0 + mention::PILL_PAD_X), "{p:?}");
+            }
+            let mut stacked = false;
+            for (i, a) in pills.iter().enumerate() {
+                for b in &pills[i + 1..] {
+                    assert!(!a.intersects(b), "{text:?}: {a:?} meets {b:?}");
+                    let (across, down) = clear_space(a, b);
+                    assert!(
+                        across >= 1.0 || down >= mention::PILL_GAP - 0.01,
+                        "{text:?}: {a:?} and {b:?} are {across} / {down} apart"
+                    );
+                    stacked |= across < 0.0;
+                }
+            }
+            assert_eq!(stacked, lines > 1, "{text:?}: a chip under a chip");
+            for p in &pills {
+                let h = f32::from(p.size.height);
+                if lines == 1 {
+                    assert_eq!(h, full, "{text:?}: nothing stacked, full height");
+                } else {
+                    // A line between two others gives up 2 pt at each edge.
+                    assert!((full - 2.0 * mention::PILL_GAP..=full).contains(&h), "{h}");
+                }
+            }
         }
     }
 
