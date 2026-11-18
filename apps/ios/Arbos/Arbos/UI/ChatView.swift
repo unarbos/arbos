@@ -325,6 +325,8 @@ struct ChatSession: View {
     /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
     @State private var pendingPreviewURL: URL?
     @State private var photoItem: PhotosPickerItem?
+    /// The staged attachment open in the crop / trim editor.
+    @State private var editingPending: PendingEdit?
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
@@ -2720,6 +2722,15 @@ struct ChatSession: View {
                 if rigged > 0, pending.isEmpty {
                     pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
                 }
+                #if DEBUG || ARBOS_FIXTURE
+                if DebugHooks.fixtureComposerVideo, pending.isEmpty {
+                    Task {
+                        guard let clip = await Task.detached(operation: { FixtureMedia.clip }).value,
+                              account.accepts(model), pending.isEmpty else { return }
+                        pending = [.init(name: "clip.mp4", mime: "video/mp4", data: clip)]
+                    }
+                }
+                #endif
             }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
@@ -3821,6 +3832,37 @@ struct ChatSession: View {
             }
         }
         .quickLookPreview($pendingPreviewURL)
+        .fullScreenCover(item: $editingPending) { edit in
+            AttachmentEditor(edit: edit) { edited in
+                guard account.accepts(model) else { return }
+                if let edited {
+                    if ComposerAttachment.fits(edited) {
+                        pending = ComposerAttachment.replacing(edit.id, with: edited, in: pending)
+                    } else {
+                        model.setSendError(chatId, UserError(verb: "use the edited file", class: .upload(.tooLarge),
+                                                             raw: "edited attachment is \(edited.data.count) bytes"))
+                    }
+                }
+                editingPending = nil
+            }
+        }
+    }
+
+    /// The chip's Edit: open the crop screen or the trimmer, or say why this one cannot be edited.
+    private func editPending(_ a: AppModel.PendingAttachment) {
+        guard account.accepts(model), editingPending == nil else { return }
+        Task {
+            let opened = await PendingEdit.open(a)
+            guard account.accepts(model), pending.contains(where: { $0.id == a.id }) else {
+                if case .edit(let edit) = opened { edit.close() }
+                return
+            }
+            switch opened {
+            case .edit(let edit): editingPending = edit
+            case .refused(let why):
+                model.setSendError(chatId, UserError(verb: "edit that attachment", class: why, raw: "\(a.mime), \(a.data.count) bytes"))
+            }
+        }
     }
 
     /// The chip's ✕: that one goes, the others and the draft stay.
@@ -4004,6 +4046,7 @@ struct ChatSession: View {
             canOpenPending: { Self.isCaptionablePending($0) },
             onOpenPending: { openPendingPreview($0) },
             onRemovePending: { removePending($0) },
+            onEditPending: { editPending($0) },
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
             memoDragX: memoDragX,
@@ -5371,6 +5414,7 @@ private struct ComposerField<Leading: View>: View {
     let canOpenPending: (AppModel.PendingAttachment) -> Bool
     let onOpenPending: (AppModel.PendingAttachment) -> Void
     let onRemovePending: (UUID) -> Void
+    let onEditPending: (AppModel.PendingAttachment) -> Void
     /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
@@ -5640,7 +5684,7 @@ private struct ComposerField<Leading: View>: View {
         VStack(alignment: .leading, spacing: Theme.composerStackGap) {
             if stacked, !pending.isEmpty {
                 ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
-                                      onOpen: onOpenPending, onRemove: onRemovePending)
+                                      onOpen: onOpenPending, onRemove: onRemovePending, onEdit: onEditPending)
             }
             HStack(spacing: 8) {
                 if !stacked { leadingSlot }
