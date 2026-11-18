@@ -401,8 +401,12 @@ async fn removal(state: &AppState, chat_id: &str, event_id: &str) -> MxResult<()
         Ok(())
     })
     .await
-    .map(drop)
-    .map_err(db_err)
+    .map_err(db_err)?;
+    // Remembered, so the row cannot be pushed back under the same id (`push_guard`).
+    state
+        .db
+        .note_message_deleted(chat_id, &message_id)
+        .map_err(db_err)
 }
 
 #[cfg(test)]

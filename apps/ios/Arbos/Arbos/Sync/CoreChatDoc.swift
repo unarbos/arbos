@@ -68,11 +68,6 @@ final class CoreChatDoc {
 
     // MARK: Reading
 
-    /// One projected row as the core hands it over, unparsed (tests assert on what crosses).
-    func rawRow(_ ix: Int, as viewer: String? = nil) -> String? {
-        doc.readMessageJson(index: UInt64(ix), viewer: viewer)
-    }
-
     /// `viewer` is who is reading (`user:<id>`): a poll that hides its voters hands over that
     /// reader's own vote and no other voter's id. Every read that feeds a transcript names
     /// the reader; a read for anything else does not need one.

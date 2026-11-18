@@ -8265,7 +8265,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             selections,
         } => {
-            let me = format!("user:{}", shared.me_id());
+            // Not before the account is known: a vote written as nobody is one the relay
+            // refuses, and a refused push is sent again for ever.
+            let Some(me) = shared.viewer() else {
+                shared.fail("cast your vote", "the account is not loaded yet".to_owned());
+                return;
+            };
             let handle = shared.docs.get(&chat_id);
             if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 // A refused vote is shown, not dropped: the card may still look open for
@@ -8282,7 +8287,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
         } => {
-            let me = format!("user:{}", shared.me_id());
+            let Some(me) = shared.viewer() else {
+                shared.fail("close the poll", "the account is not loaded yet".to_owned());
+                return;
+            };
             let handle = shared.docs.get(&chat_id);
             if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 if let Err(e) = doc.core.transact(|d| d.close_poll(&message_id, &me)) {

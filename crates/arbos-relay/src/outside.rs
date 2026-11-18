@@ -2164,6 +2164,11 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
                 open_streams().lock().unwrap().remove(&key);
                 state.activity.lock().await.remove(&pid);
                 if blank.load(Ordering::Relaxed) {
+                    // The blank row was taken out: remembered, so its id cannot be pushed
+                    // back (`push_guard`).
+                    if let Err(e) = state.db.note_message_deleted(chat_id, &msg_id) {
+                        tracing::warn!(chat = %chat_id, message = %msg_id, error = %e, "deletion not recorded");
+                    }
                     return Err((
                         "bad_request",
                         "text required: the message ended empty and was not posted".to_owned(),

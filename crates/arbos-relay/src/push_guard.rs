@@ -252,6 +252,10 @@ pub fn check_push(
 
     let mut carries_new_message = false;
     let mut attributed = Vec::new();
+    // Has the relay stored this message itself? An announce records an author for any id a
+    // member names, so the author record alone does not make an arriving row history: only a
+    // row the relay stored and no longer holds is a heal, exempt from the people gates.
+    let stored = |id: &str| state.db.message_stored(chat_id, id).unwrap_or(false);
     for (id, sender) in &changes.inserted {
         let mut attest = || {
             if let Some(who) = me.attribution(state, sender.as_deref()) {
@@ -260,8 +264,11 @@ pub fn check_push(
         };
         match (author_of(id).as_deref(), sender.as_deref()) {
             // History the relay attested to you: your own old rows, which is most of what a
-            // device heals a room with.
-            (Some(a), _) if me.owns(state, a) => {}
+            // device heals a room with. A record the relay holds only from an announce is not
+            // that: the app announced this message and here is its row, arriving first.
+            (Some(a), _) if me.owns(state, a) => {
+                carries_new_message |= !stored(id);
+            }
             // History the relay attested to someone else. A heal may carry it, but only under
             // the name the relay recorded. Dropping that name or changing it is the forgery,
             // whether the row then reads as another member or as nobody.
@@ -275,6 +282,7 @@ pub fn check_push(
                         ),
                     };
                 }
+                carries_new_message |= !stored(id);
             }
             // No record, and no name or your own: a message the relay is seeing for the first
             // time. This is the push the people gates are for, and the moment to record whose
@@ -478,11 +486,13 @@ fn check_polls(
     None
 }
 
-/// A row arriving whole that is history a heal restores: the relay recorded its author
-/// before and nobody deleted it since. The relay lost it; no client can make that happen.
+/// A row arriving whole that is history a heal restores: the relay stored a row under this
+/// id itself (`message_authors.stored`, set in the transaction of a push it accepted) and
+/// nobody deleted it since. The relay lost it, which no client can make happen. An author
+/// record written by an announce does not count: any member can announce any id.
 fn healed(state: &AppState, chat_id: &str, id: &str) -> bool {
-    let recorded = state.db.message_author(chat_id, id).ok().flatten();
-    recorded.is_some() && !state.db.message_deleted(chat_id, id).unwrap_or(true)
+    state.db.message_stored(chat_id, id).unwrap_or(false)
+        && !state.db.message_deleted(chat_id, id).unwrap_or(true)
 }
 
 /// What the relay writes back onto a message, in the same step as it stores the push that
@@ -495,8 +505,8 @@ pub struct RowFix {
 }
 
 impl RowFix {
-    /// Write the fix on `doc`. Does not commit: the caller wraps every fix of one push in
-    /// one transaction.
+    /// Write the fix on `doc`, whole or as an error. Does not commit: the caller wraps every
+    /// fix of one push in one transaction.
     pub fn apply(&self, doc: &arbos_core::doc::ChatDoc) -> anyhow::Result<()> {
         if self.delete {
             doc.delete_message(&self.message_id)?;
@@ -506,7 +516,7 @@ impl RowFix {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone()))
                 .collect();
-            doc.set_message_fields(&self.message_id, &fields);
+            doc.write_message_fields(&self.message_id, &fields)?;
         }
         Ok(())
     }
@@ -533,8 +543,10 @@ impl RowFix {
 ///
 /// Left as it comes: a poll row arriving whole that is a heal ([`healed`]) — its votes, their
 /// times and its close. A device restoring someone else's finished poll has to carry them,
-/// and stamping them `now` would void the count. Forging one needs the relay to have lost
-/// the row, which no client can cause; pushing a *deleted* poll back is the case above.
+/// and stamping them `now` would void the count. That needs a row the relay stored itself
+/// and then lost. A poll arriving under an id the relay only heard announced is a new poll
+/// and gets every rule here and in [`check_polls`]; a *deleted* poll pushed back is the
+/// first case above.
 ///
 /// Under end-to-end encryption the relay reads none of this and none of it holds.
 pub fn corrections(
@@ -666,11 +678,15 @@ mod tests {
                 &serde_json::json!({}),
             )
             .unwrap();
+        // History the relay holds: announced by its author, and stored from the push that
+        // carried it (an announce alone names an id and is not history).
         for (id, who) in [("m_alice", &alice), ("m_bob", &bob)] {
+            let sender = format!("user:{who}");
             state
                 .db
-                .insert_chat_event(&chat, None, id, Some(who), &format!("user:{who}"))
+                .insert_chat_event(&chat, None, id, Some(who), &sender)
                 .unwrap();
+            state.db.record_message_author(&chat, id, &sender).unwrap();
         }
         (chat, alice, bob, alice_dev, bob_dev)
     }
@@ -1949,6 +1965,97 @@ mod tests {
         fixes.iter().for_each(|fix| fix.apply(&lost.doc).unwrap());
         lost.doc.transact(|_| ());
         assert!(lost.doc.projected_rows().is_empty(), "it is gone again");
+    }
+
+    /// An author record written by an announce is not a stored row. A poll arriving under
+    /// such an id is a new message with every rule of one, whatever the heal flag claims;
+    /// the same row under an id the relay stored is history.
+    #[test]
+    fn only_a_stored_row_is_history_a_heal_restores() {
+        let state = test_state(AuthMode::Github);
+        let (_room, chat, alice, bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
+        // Alice's closed poll with Bob's vote on it, arriving whole under `id`.
+        let arrive = |id: &str| {
+            let mut lost = Room::new();
+            lost.push(|d| {
+                d.append_poll_message(id, &poll(), "dev", &as_user(&alice))
+                    .unwrap();
+                d.set_message_fields(
+                    id,
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{bob}"), json!(["1"])),
+                        (
+                            &format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
+                            json!(NOW - MINUTE),
+                        ),
+                        (POLL_CLOSED_FIELD, json!(NOW)),
+                    ],
+                );
+            })
+        };
+        // `p1` the relay stored (`chat_with_a_poll` records it as the push path does).
+        assert!(state.db.message_stored(&chat, "p1").unwrap());
+        let c = arrive("p1");
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some(false),
+            "restored by Bob: history, and not a new message"
+        );
+        assert_eq!(corrections(&state, &chat, &c, NOW).unwrap(), []);
+
+        // `p9` was only ever announced, by Alice herself.
+        state
+            .db
+            .insert_chat_event(&chat, None, "p9", Some(&alice), &format!("user:{alice}"))
+            .unwrap();
+        assert!(!state.db.message_stored(&chat, "p9").unwrap());
+        let c = arrive("p9");
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some("not_yours"),
+            "her own announced id does not let her bring Bob's vote with it"
+        );
+        // Without the vote in his name it is her new poll: gated as one, and stamped.
+        let mut own = Room::new();
+        let c = own.push(|d| {
+            d.append_poll_message("p9", &poll(), "dev", &as_user(&alice))
+                .unwrap();
+            d.set_message_fields("p9", &[(POLL_CLOSED_FIELD, json!(5))]);
+        });
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some(true),
+            "a new message, whatever the heal flag says"
+        );
+        assert_eq!(
+            corrections(&state, &chat, &c, NOW).unwrap(),
+            [RowFix {
+                message_id: "p9".into(),
+                delete: false,
+                fields: vec![(POLL_CLOSED_FIELD.into(), json!(NOW))],
+            }]
+        );
     }
 
     /// A poll the relay sees for the first time closes at most a week (and a day of clock

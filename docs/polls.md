@@ -358,17 +358,35 @@ retraction once the device's own clock is past the deadline; a close only by the
 
   **A correction is part of the push.** It is computed and applied to the room's doc under
   the room's admission lock, and stored with the push in one database transaction
-  (`Db::append_row_with`), before the lock is released and before the push is acknowledged.
-  The next push, on any socket, is judged against the corrected row; no reader of the room's
-  rows sees the push without its correction. If a correction cannot be computed or stored,
-  the push is not stored either: the socket errors and the device sends it again. A device
-  still shows its own uncorrected value until the relay's row reaches it.
-- A poll row arriving whole that the relay recorded before **and nobody deleted** is a heal of
-  history the relay lost. Its votes, their times and its close are taken as they come: a
-  device restoring someone else's finished poll has to carry them, and stamping them with
-  today's time would void the count. Forging one needs the relay to have lost the row, which
-  no client can cause. Pushing a *deleted* poll back with votes of one's own making is the
-  case above: it is removed again.
+  (`Db::append_row_with`) together with who wrote each new message, which ids the relay now
+  holds a row for, and which the push deleted. Both rows are broadcast, in order, before the
+  lock is released, so no other push's row gets between them or ahead of them (a receiver
+  drops a row whose seq is not above the last it sent on). The next push, on any socket, is
+  judged against the corrected row; no reader of the room's rows sees the push without its
+  correction. If a correction cannot be computed, written whole or stored, the push is not
+  stored either: the socket errors and the device sends it again. A correction that would
+  change nothing (every field already holds the relay's value) is simply not written. A
+  device still shows its own uncorrected value until the relay's row reaches it.
+- A poll row arriving whole under an id **the relay itself stored a row for, and nobody
+  deleted,** is a heal of history the relay lost. Its votes, their times and its close are
+  taken as they come: a device restoring someone else's finished poll has to carry them, and
+  stamping them with today's time would void the count. "Stored" is a mark on the author
+  record (`message_authors.stored`) set only in the transaction of a push the relay accepted.
+  The announce route (`POST /chats/{id}/notify`) also writes an author record, for any
+  message id a member puts in its body, row or no row, and apps announce a message around
+  the moment they push it; that record names who announced an id and nothing more. A poll
+  arriving under an id that was only announced is a new poll: its vote fields must be the
+  pusher's, its times are stamped by the relay, its close must be its author's, it is
+  counted against the rate limit whatever the heal flag says. Records from before the mark
+  existed count as stored.
+- What is left: a row the relay stored and then really lost can be restored by any member
+  with content of their choosing, under the recorded author's name. That takes a loss of the
+  relay's data, which no client can cause, and it is the older AF-599 note in `push_guard.rs`,
+  not something polls add. Pushing a *deleted* poll back is the correction above: removed.
+- `deleted_messages` holds one row per message deleted for everyone (by a push, the delete
+  route, a Matrix redaction, or the relay dropping an agent's blank row). It is never pruned,
+  like `message_authors`: forgetting a deletion would let the id be pushed back. Its size is
+  the number of deletions.
 
 **What nothing enforces.** Under end-to-end encryption the relay reads no poll field, so none
 of the relay rules exist: times are then the writers' device clocks and a modified client can
@@ -388,7 +406,11 @@ and the relay hold.
 
 **Older builds** read a poll through the strict validator, which rejects the new `showVoters`
 field, so a poll posted by a new build is plain text to them ("Poll: question / 1. … / 2. …"):
-readable, not votable, and nothing they write can alter it. This is deliberate. A build that
+readable, not votable, and nothing they write can alter the poll or its votes. One thing they
+can alter: the author, on an older build, sees their poll as an ordinary text message of their
+own and is offered Edit on it. An edit there changes the text part only — what previews,
+notifications, search, agents and other older builds read — while newer builds keep drawing
+the card from the unchanged `poll` field. This is deliberate. A build that
 does not know about closing would otherwise keep offering votes on a closed poll and would
 show voter names on hover (Mac) for a poll whose author hid them. **Deploy order:** the relay
 has to run this change before any client that writes the new fields; a relay without it

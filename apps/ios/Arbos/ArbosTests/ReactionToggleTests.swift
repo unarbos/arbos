@@ -161,7 +161,9 @@ final class PollTests: XCTestCase {
         XCTAssertEqual(nobody.votes, [:], "no names at all without a reader")
         XCTAssertEqual(nobody.counts, ["2": 2])
         // The row itself, as it crosses the FFI: Ana's stored vote fields are not on it.
-        let row = try XCTUnwrap(doc.rawRow(0, as: "user:me"))
+        let ffi = ArbosFFI.ChatDoc.open()
+        try ffi.apply(bytes: doc.exportSnapshot())
+        let row = try XCTUnwrap(ffi.readMessageJson(index: 0, viewer: "user:me"))
         XCTAssertFalse(row.contains("user:ana"), row)
         XCTAssertTrue(row.contains("vote|user:me"), "my own fields stay: \(row)")
     }

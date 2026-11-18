@@ -1607,6 +1607,8 @@ struct RowView: View, Equatable {
     @State private var selectedReactionEmoji: String? = nil
     /// The poll option whose voters are listed under the card (a tap on its count).
     @State private var pollVotersOption: String? = nil
+    /// "Close this poll?" is up.
+    @State private var pollClosing = false
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
@@ -2240,13 +2242,25 @@ struct RowView: View, Equatable {
                                  model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
                              },
                              foot: poll.foot(by: by),
+                             // Like a vote, neither is the lifted finger of a hold that
+                             // opened the message menu.
                              onHint: poll.showVoters == true ? { id in
+                                 guard !ChatGestures.heldIntoMenu else { return }
                                  pollVotersOption = pollVotersOption == id ? nil : id
                              } : nil,
                              onClosePoll: by == nil && poll.closable && !closed ? {
-                                 model.closePoll(chatId: chatId, messageId: row.messageId)
+                                 guard !ChatGestures.heldIntoMenu else { return }
+                                 pollClosing = true
                              } : nil)
                     .frame(maxWidth: maxBubble - lane, alignment: .leading)
+                    // A close is final, so it asks first, with the app's one confirm.
+                    .confirm(ConfirmSpec(title: "Close this poll?",
+                                         message: "It keeps its counts and takes no more votes. It cannot be opened again.",
+                                         action: "Close poll"),
+                             isPresented: $pollClosing) {
+                        guard account.accepts(model) else { return }
+                        model.closePoll(chatId: chatId, messageId: row.messageId)
+                    }
                 Spacer(minLength: 0)
             }
             if let option = namesFor {

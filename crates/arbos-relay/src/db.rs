@@ -737,6 +737,11 @@ impl Db {
         Self::migrate_mono_avatar_defaults(&c)?;
         Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        // Rows from before the column are history the relay held: stored. An announce writes 0.
+        let _ = c.execute(
+            "ALTER TABLE message_authors ADD COLUMN stored INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
@@ -1905,7 +1910,26 @@ impl Db {
         )
         .optional()
     }
+}
 
+/// What a stored room push changes besides its own row, written in that row's transaction.
+#[derive(Default)]
+pub struct RowEffects<'a> {
+    /// `(device, batch id, bytes)` of the row the relay writes right behind the push: its
+    /// correction (`push_guard::corrections`).
+    pub answer: Option<(&'a str, &'a str, &'a [u8])>,
+    /// The chat the message ids below belong to.
+    pub chat_id: &'a str,
+    /// `(message id, author)` the push guard attributed to the pusher.
+    pub authors: &'a [(String, String)],
+    /// Message ids the push put in the chat: from here on the relay has stored them itself,
+    /// which an announce can never claim.
+    pub stored: &'a [String],
+    /// Message ids the push took out of the chat.
+    pub deleted: &'a [String],
+}
+
+impl Db {
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
     pub fn append_row(
         &self,
@@ -1914,22 +1938,23 @@ impl Db {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(i64, bool)> {
-        self.append_row_with(room, device, batch_id, bytes, None)
+        self.append_row_with(room, device, batch_id, bytes, &RowEffects::default())
             .map(|(seq, dup, _)| (seq, dup))
     }
 
-    /// [`Self::append_row`], and in the same transaction a second row right behind it:
-    /// `(device, batch id, bytes)` of what the relay itself writes in answer to the first (a
-    /// poll correction). Both are stored or neither is, and no reader sees the first without
-    /// the second. Returns the second row's seq too; a duplicate first row stores nothing.
+    /// [`Self::append_row`] with everything else a stored push changes, in the same
+    /// transaction ([`RowEffects`]): all of it is stored or none of it is, and no reader sees
+    /// the row without the relay's answer to it. Returns the answer row's seq too; a
+    /// duplicate first row stores nothing.
     pub fn append_row_with(
         &self,
         room: &str,
         device: &str,
         batch_id: &str,
         bytes: &[u8],
-        answer: Option<(&str, &str, &[u8])>,
+        effects: &RowEffects<'_>,
     ) -> Result<(i64, bool, Option<i64>)> {
+        let answer = effects.answer;
         let now = now_ms();
         self.with(|c| {
             // The room position and its row commit together: an insert failure must not leave
@@ -1949,6 +1974,25 @@ impl Db {
                 tx.execute(
                     "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                     params![room, *seq, device, batch_id, bytes, now],
+                )?;
+            }
+            for (message_id, sender) in effects.authors {
+                tx.execute(
+                    "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at, stored)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![effects.chat_id, message_id, sender, now],
+                )?;
+            }
+            for message_id in effects.stored {
+                tx.execute(
+                    "UPDATE message_authors SET stored = 1 WHERE chat_id = ?1 AND message_id = ?2",
+                    params![effects.chat_id, message_id],
+                )?;
+            }
+            for message_id in effects.deleted {
+                tx.execute(
+                    "INSERT OR IGNORE INTO deleted_messages(chat_id, message_id, deleted_at) VALUES (?1, ?2, ?3)",
+                    params![effects.chat_id, message_id, now],
                 )?;
             }
             tx.commit()?;

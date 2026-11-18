@@ -326,12 +326,15 @@ pub const POLL_FIELD: &str = "poll";
 pub const POLL_VOTE_PREFIX: &str = "vote|";
 
 /// Prefix of the message field holding when that person's vote was last written, in ms since
-/// the epoch by their device's clock: `"voteAt|<sender>" → 1763300000000`. Written with the
-/// vote on a timed poll ([`Poll::timed`]); it is what a close is compared against.
+/// the epoch: `"voteAt|<sender>" → 1763300000000`. Written with the vote on a timed poll
+/// ([`Poll::timed`]); it is what a close is compared against. The device writes its own
+/// clock; in a chat the relay can read, the relay replaces it with its own time when it
+/// stores the vote, so what every reader reduces is the relay's clock.
 pub const POLL_VOTE_AT_PREFIX: &str = "voteAt|";
 
 /// The message field holding the author's manual close: the time it was closed, in ms since
-/// the epoch by the author's clock. Written once, by the author.
+/// the epoch. Written once, by the author, with the device's clock; in a chat the relay can
+/// read, the relay replaces it with its own time when it stores the close.
 pub const POLL_CLOSED_FIELD: &str = "pollClosed";
 
 fn is_poll_key(key: &str) -> bool {
@@ -2207,6 +2210,17 @@ impl ChatDoc {
         part.insert("message", text).ok();
         self.commit_now();
         Some(part_id)
+    }
+
+    /// Write fields on a message, all of them or an error: for a caller that must not take a
+    /// partly written change for a whole one (the relay's corrections). Does not commit.
+    pub fn write_message_fields(&self, msg_id: &str, fields: &[(&str, Value)]) -> CoreResult<()> {
+        let m = self
+            .find_message(msg_id)
+            .ok_or_else(|| CoreError::msg("no such message"))?;
+        fields
+            .iter()
+            .try_for_each(|(k, v)| loro_err(m.insert(k, json_to_lv(v))))
     }
 
     /// Set scalar fields on a message (status, decision, subagentId, model, usage, completedAt, …).
