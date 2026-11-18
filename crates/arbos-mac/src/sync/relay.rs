@@ -6480,8 +6480,9 @@ async fn fetch_blob_response(
             .http
             .get(blob_request_url(shared, id, key))
             // The shared 30 s deadline covers reading the body too, which can cut a
-            // large video short. Do not turn a slow download into a partial file.
-            .timeout(None)
+            // large video short. Do not turn a slow download into a partial file;
+            // reqwest has no per-request "no timeout", so allow a generous hour.
+            .timeout(Duration::from_secs(60 * 60))
             .bearer_auth(&token)
             .send()
             .await?;
