@@ -372,6 +372,36 @@ final class BackSwipeUITests: XCTestCase {
         assertReplying(app, to: "Hero for the landing page")
     }
 
+    /// Started on a code block's Copy button and let go just past the threshold: a reply,
+    /// and the lift does not copy.
+    func testSwipeLeftFromACodeCopyButtonRepliesAndCopiesNothing() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120", "ARBOS_FIXTURE_LONG_RICH": "1"])
+        XCTAssertTrue(chatBack(app, "fx-group-launch").waitForExistence(timeout: appear), "the Launch week group opened")
+        settleTranscript(app)
+        let window = app.windows.firstMatch.frame
+        let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Copy code'")).firstMatch
+        // Into history until a code card's Copy button is clear of the header and the composer.
+        var tries = 0
+        while tries < 30, !(copy.exists && copy.isHittable && copy.frame.minY > 160 && copy.frame.maxY < window.maxY - 200) {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 220)), withVelocity: .slow, thenHoldForDuration: 0.3)
+            tries += 1
+        }
+        let seen = app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex.map(\.identifier)
+        XCTAssertTrue(copy.exists && copy.isHittable, "a code card's Copy button is on screen after \(tries) drags; rows: \(seen); cards: \(app.descendants(matching: .any).matching(identifier: "code-card").count)")
+        // First that this read sees a copy at all: a plain tap says Copied, for 1.5 s.
+        let saysCopied = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Copied'")).firstMatch
+        copy.tap()
+        XCTAssertTrue(saysCopied.exists, "a tap copies, and the test can see it")
+        sleep(3)
+        XCTAssertTrue(copy.exists && copy.isHittable, "the button is back to Copy code")
+        dragLeft(from: copy.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)), 62)
+        // Read at once: the button says Copied for 1.5 s.
+        let copied = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Copied'")).firstMatch.exists
+        XCTAssertFalse(copied, "the lift did not copy the code")
+        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle), "the composer quotes the message")
+    }
+
     /// Hold a bubble into its menu, then slide the same finger left along it and lift: that
     /// finger is choosing in the menu, it is not a reply swipe.
     func testAHoldIntoTheMenuThatSlidesLeftStartsNoReply() {
@@ -399,7 +429,9 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertGreaterThan(bubble.frame.minX - x, 24, "the row has an empty side to start on")
         dragLeft(from: app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: bubble.frame.midY)), 120)
         assertNoReply(app)
-        XCTAssertEqual(leftSwipe(app).prefix(2), ["start", "peek"], "the times were peeked")
+        let trace = leftSwipe(app)
+        XCTAssertEqual(trace.prefix(2), ["start", "peek"], "the left swipe was the time peek")
+        XCTAssertTrue(trace.contains { $0.hasPrefix("time:") && $0.contains(where: \.isNumber) }, "a message's time came on screen: \(trace)")
         XCTAssertTrue(chatBack(app, "fx-comms-main").exists, "the chat did not go back")
     }
 

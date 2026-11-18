@@ -1595,8 +1595,6 @@ struct RowView: View, Equatable {
     private func openProfile(_ target: ProfileTarget) -> () -> Void {
         return {
             guard account.accepts(model), !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
-            // The lift of a reply swipe that began on the name is not a tap on it.
-            guard !ChatGestures.replySwiped else { return }
             model.toggleProfile(target)
         }
     }
@@ -1673,6 +1671,10 @@ struct RowView: View, Equatable {
                     .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
+                    #if DEBUG
+                    // The rig's readout (`ARBOS_SWIPE_TRACE=1`): a time came on screen.
+                    .onAppear { BackSwipeTrace.note("time:\(time.filter { !$0.isWhitespace })") }
+                    #endif
             }
         }
         // Swipe to reply (tester reports, 2026-11-13): drag a bubble left → the row follows
@@ -1765,7 +1767,8 @@ struct RowView: View, Equatable {
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
-                        Button(action: openPerson) {
+                        // (The lift of a reply swipe that began on the name is not a tap on it.)
+                        Button(action: { if !ChatGestures.replySwiped { openPerson() } }) {
                             LiveSenderName(name: personName,
                                            url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
@@ -1816,7 +1819,7 @@ struct RowView: View, Equatable {
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
                         if named {
-                            Button(action: openMember) {
+                            Button(action: { if !ChatGestures.replySwiped { openMember() } }) {
                                 memberName(agent)
                             }
                             .buttonStyle(.plain)
@@ -2778,6 +2781,8 @@ struct CodeCard: View {
                     .accessibilityIdentifier("code-body")
             }
             Button {
+                // Not the lift of a hold into the menu, nor of a reply swipe that began here.
+                guard !ChatGestures.tapEndsHold() else { return }
                 Self.copyToPasteboard(code)
                 Haptics.pick()
                 copied = true
@@ -4006,7 +4011,7 @@ struct VoiceMemoBubble: View {
 
     var body: some View {
         Button {
-            guard account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
+            guard !ChatGestures.tapEndsHold(), account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
             player.toggle(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
         } label: {
             HStack(spacing: 10) {

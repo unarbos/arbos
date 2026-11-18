@@ -3304,7 +3304,8 @@ struct ChatSession: View {
     /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
     /// only focus moves, and `closeActions` gives it back.
     private func openActions(_ row: Row) {
-        guard account.accepts(model) else { return }
+        // No menu, so no hold into one: a latch left set would turn every reply swipe into the peek.
+        guard account.accepts(model) else { ChatGestures.heldIntoMenu = false; return }
         Haptics.pick()
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
