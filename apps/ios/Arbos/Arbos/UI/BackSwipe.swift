@@ -181,6 +181,18 @@ enum ChatGestures {
         return heldIntoMenu
     }
 
+    /// The message whose reaction chip last took a tap, and when (system uptime). The row's
+    /// double-tap runs alongside the chip's own tap, so two quick taps on a chip (on, then
+    /// off again) also put a heart on the message (tester report, 2026-11-16, "double
+    /// reaction").
+    static var chipTap: (messageId: String, at: TimeInterval)?
+
+    /// True when a double-tap on `messageId` that ends at `now` had a tap on one of that
+    /// message's chips in it. A chip of another message does not count.
+    static func doubleTapOnChip(of messageId: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        chipTap.map { $0.messageId == messageId && now - $0.at < 0.6 } ?? false
+    }
+
     private static func on(_ name: String) -> Bool {
         #if DEBUG
         return !DebugHooks.gesturesOff.contains(name)

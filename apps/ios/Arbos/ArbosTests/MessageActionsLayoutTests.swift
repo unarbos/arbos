@@ -184,6 +184,34 @@ final class MessageActionsLayoutTests: XCTestCase {
         let still = se(CGRect(x: 16, y: 120, width: 343, height: 60), pickerOpen: true)
         XCTAssertEqual(MessageActionsLayout.compute(still).bubbleShift(from: still), 0)
     }
+
+    /// A message taller than the screen (tester report, 2026-11-14): the capsule and the whole
+    /// menu stay on screen and the message gets the room between them to scroll in. A name
+    /// line lifted above the bubble is part of that height and changes nothing else.
+    func testAMessageTallerThanTheScreenScrollsBetweenTheCapsuleAndTheMenu() {
+        for nameLift: CGFloat in [0, 20] {
+            let pressed = CGRect(x: 16, y: -400, width: 361, height: 2400)
+            let i = input(bubble: CGRect(x: 16, y: pressed.minY - nameLift, width: 361, height: pressed.height + nameLift))
+            let l = MessageActionsLayout.compute(i)
+            assertInsideVisibleArea(l, i)
+            XCTAssertEqual(l.capsuleY, l.visibleTop)
+            XCTAssertEqual(l.menuY + menuHeight, l.visibleBottom, "every menu row is reachable")
+            XCTAssertEqual(l.bubbleHeight, l.visibleBottom - l.visibleTop - capsule - menuHeight - 16, "the scroll window")
+            XCTAssertLessThan(l.bubbleHeight, i.bubble.height, "shorter than the message: it scrolls")
+        }
+    }
+
+    /// A named bubble that fits: the name line goes above the pressed bubble, which stays
+    /// where the finger is, and the capsule sits above the name.
+    func testANameLineLiftsAboveABubbleThatStaysPut() {
+        let pressed = CGRect(x: 16, y: 300, width: 361, height: 60), nameLift: CGFloat = 20
+        let i = input(bubble: CGRect(x: 16, y: pressed.minY - nameLift, width: 361, height: pressed.height + nameLift))
+        let l = MessageActionsLayout.compute(i)
+        assertInsideVisibleArea(l, i)
+        XCTAssertEqual(l.bubbleY + nameLift, pressed.minY)
+        XCTAssertEqual(l.capsuleY + capsule + i.gap, pressed.minY - nameLift)
+        XCTAssertEqual(l.menuY, pressed.maxY + i.gap)
+    }
 }
 
 /// The keyboard goes down when the bubble menu opens and comes back only when it was up
