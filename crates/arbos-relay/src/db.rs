@@ -2250,6 +2250,19 @@ impl Db {
         })
     }
 
+    /// Is the user's wake job still in line, never yet started by the runner?
+    pub fn wake_job_waiting(&self, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT 1 FROM box_wake_jobs WHERE user_id = ?1 AND attempts = 0",
+                params![user_id],
+                |_| Ok(()),
+            )
+            .optional()
+        })
+        .map(|r| r.is_some())
+    }
+
     pub fn finish_wake_job(&self, user_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
