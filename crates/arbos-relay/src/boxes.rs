@@ -1055,6 +1055,7 @@ async fn box_connected_inner(state: &AppState, user_id: &str) {
         // already awake, or a wake job gave up); it is not a measurement.
         let elapsed = now_ms() - t0;
         if elapsed <= STALE_WAKE_TIMER_MS {
+            crate::metrics::box_woke(elapsed);
             let _ = state
                 .db
                 .record_timing(user_id, "wake_to_box_connected_ms", elapsed, None);
@@ -1590,7 +1591,10 @@ async fn run_wake_job(state: &AppState, (user_id, reason, attempts): (String, St
     // Mark the job as in flight by pushing its due time out; the box dial finishes it.
     let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
     tracing::info!(%user_id, %reason, attempts, "waking box");
-    match start_box(state, &user_id).await {
+    let started = std::time::Instant::now();
+    let start = start_box(state, &user_id).await;
+    crate::metrics::box_start(&start, started.elapsed());
+    match start {
         Ok(()) => {}
         Err(e) if e.to_string() == crate::boxd::FETCHING => {
             // Not a failed wake: the daemon is bringing a cold box back from the object

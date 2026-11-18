@@ -381,6 +381,7 @@ fn error_frame(code: &str, message: &str) -> Message {
 /// and agentd read that silence as a dead link and reconnected 10 s later (2026-11-04). The
 /// people-push refusal below has always carried `batchId`; this is the same courtesy for rooms.
 fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(code);
     frame(
         FrameType::Error,
         json!({ "code": code, "message": message, "batchId": batch_id }),
@@ -393,6 +394,7 @@ fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message
 /// `chat_unavailable`) and, on a block, `byHandle` (+ `byName`). The code set never grows:
 /// fielded clients only keep a room Live for these two codes.
 fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(refused.code());
     let mut header = json!({
         "code": refused.code(),
         "message": refused.message(),
@@ -850,6 +852,7 @@ async fn handle_frame(
             let (seq, dup) = state
                 .db
                 .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            crate::metrics::room_push(dup);
             // Whose message each new row carries, recorded from the socket that pushed it and
             // before anyone can read the row. The announce routes write this record too, but
             // they take the message id from a request body and are gated only on membership —
