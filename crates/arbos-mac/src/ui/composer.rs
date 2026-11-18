@@ -2220,8 +2220,8 @@ impl Element for InputElement {
                 }
             })
             .collect();
-        let pads = mention::pill_pads(&token_fragments.concat());
-        let mut pads = pads.iter();
+        let token_pills = mention::pills(&token_fragments.concat(), lh);
+        let mut token_pills = token_pills.iter();
         for (((t, mention), alpha), fragments) in tokens
             .iter()
             .zip(token_mentions)
@@ -2233,13 +2233,10 @@ impl Element for InputElement {
             };
             let a = point(ax, ay);
             let mut rects = Vec::with_capacity(fragments.len());
-            for ((x0, x1, top), &pad) in fragments.into_iter().zip(&mut pads) {
+            for pill in (&mut token_pills).take(fragments.len()) {
                 let pill = Bounds::new(
-                    point(
-                        bounds.left() + x0 - pad,
-                        bounds.top() + top - dy - px(mention::PILL_PAD_Y),
-                    ),
-                    size(x1 - x0 + pad * 2.0, lh + px(mention::PILL_PAD_Y * 2.0)),
+                    point(bounds.left(), bounds.top() - dy) + pill.origin,
+                    pill.size,
                 );
                 rects.push(pill);
                 pills.push(
@@ -5789,7 +5786,8 @@ mod mention_token_tests {
     }
 
     /// Tester (Nov 14): mention pills drew into each other. Chips one space
-    /// apart on a row keep `PILL_GAP` between their pills.
+    /// apart on a row keep clear space between their pills (`mention::pills`,
+    /// the same placement a sent bubble uses).
     #[gpui::test]
     fn chips_one_space_apart_keep_a_gap(cx: &mut TestAppContext) {
         let (input, cx) = input(cx);
@@ -5810,7 +5808,7 @@ mod mention_token_tests {
         for pair in rects.windows(2) {
             assert_eq!(pair[0].top(), pair[1].top());
             let gap = f32::from(pair[1].left() - pair[0].right());
-            assert!(gap >= mention::PILL_GAP - 0.01, "{gap} between {pair:?}");
+            assert!(gap >= 1.0, "{gap} between {pair:?}");
         }
     }
 

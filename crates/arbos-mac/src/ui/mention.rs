@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{px, App, Entity, Hsla, Pixels, RenderImage};
+use gpui::{point, px, size, App, Bounds, Entity, Hsla, Pixels, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
@@ -30,39 +30,31 @@ use crate::ui::theme::Theme;
 /// pill hugs the text line with `PILL_PAD_X` on each side and `PILL_PAD_Y`
 /// above and below the glyph box; the picture is a disc `PICTURE` tall
 /// centred in the `@` glyph's cell.
-///
-/// Neighbouring pills never overlap (tester, 2026-11-14: "these blue '@
-/// mentions' clip into each other"), by spacing, not by a smaller pill:
-/// - "@a @b": the one space between two chips is drawn as [`CHIP_SPACE`], so
-///   both keep their full pads with room between them;
-/// - any other close pair ("@a,@b", the composer's raw text): [`pill_pads`]
-///   pulls both pills in until `PILL_GAP` is left;
-/// - one under the other: a bubble text with two or more chips is set
-///   [`stacked_leading`] looser, so the pills of two lines keep `PILL_GAP`.
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
-/// The least clear space between two pills.
+/// The clear space two neighbouring pills keep (tester, 2026-11-14: "these
+/// blue '@ mentions' clip into each other"), see [`pills`].
 pub const PILL_GAP: f32 = 2.0;
-/// What `display` puts between two chips one space apart: an em space, wider
-/// than two pads and the gap at any text size. Copies carry it.
-pub const CHIP_SPACE: char = '\u{2003}';
+/// The least a pill reaches past its text toward a neighbour on its line.
+pub const PILL_PAD_MIN: f32 = 1.0;
 
-/// What a line of text with stacked chips adds to its line height: the pill's
-/// reach past the line box above and below, and `PILL_GAP`.
-pub fn stacked_leading() -> Pixels {
-    px(PILL_PAD_Y * 2.0 + PILL_GAP)
-}
-
-/// How far each pill reaches past its text fragment `(x0, x1, top)`, the same
-/// on both sides: `PILL_PAD_X`, less when a pill on the same line is closer
-/// than two pads and `PILL_GAP` — then half of what the space between the two
-/// texts leaves after the gap. The gap is `PILL_GAP` whenever the texts are
-/// at least that far apart (any separator glyph is); closer texts get no pad
-/// and keep the space they have.
+/// The pill of each text fragment `(x0, x1, top)` on `line_h` lines, in the
+/// fragments' coordinates: `PILL_PAD_X` wider than the text on each side and
+/// `PILL_PAD_Y` taller than the line above and below — except toward another
+/// pill, so that neighbours never run into each other:
+/// - on one line, a pill closer than two pads and `PILL_GAP` to its
+///   neighbour ("@a @b" is one space apart) is narrowed, the same on both of
+///   its sides, to half of what the space leaves after the gap, and never
+///   below `PILL_PAD_MIN`. With a 3.5 pt space that is 1 pt pads and 1.5 pt
+///   between the pills; texts closer than 2 pt would still meet;
+/// - a pill over another on the next line gives up its reach past the line
+///   on that edge and 1 pt more, and so does the one under it: `PILL_GAP`
+///   between them. Every other edge keeps its full height.
+///
 /// O(n²) over one text's chips; sort by line if a message ever carries hundreds.
-pub fn pill_pads(fragments: &[(Pixels, Pixels, Pixels)]) -> Vec<Pixels> {
-    fragments
+pub fn pills(fragments: &[(Pixels, Pixels, Pixels)], line_h: Pixels) -> Vec<Bounds<Pixels>> {
+    let mut pills: Vec<Bounds<Pixels>> = fragments
         .iter()
         .enumerate()
         .map(|(i, &(x0, x1, top))| {
@@ -80,9 +72,27 @@ pub fn pill_pads(fragments: &[(Pixels, Pixels, Pixels)]) -> Vec<Pixels> {
                     }
                 })
                 .fold(Pixels::MAX, Pixels::min);
-            px(PILL_PAD_X).min(((space - px(PILL_GAP)) / 2.0).max(px(0.0)))
+            let pad = px(PILL_PAD_X).min(((space - px(PILL_GAP)) / 2.0).max(px(PILL_PAD_MIN)));
+            Bounds::new(
+                point(x0 - pad, top - px(PILL_PAD_Y)),
+                size(x1 - x0 + pad * 2.0, line_h + px(PILL_PAD_Y * 2.0)),
+            )
         })
-        .collect()
+        .collect();
+    let half = px(PILL_GAP / 2.0);
+    for upper in 0..pills.len() {
+        for lower in 0..pills.len() {
+            let (a, b) = (pills[upper], pills[lower]);
+            let (line, next) = (fragments[upper].2, fragments[lower].2);
+            if next > line && next - line <= line_h && a.left() < b.right() && b.left() < a.right()
+            {
+                pills[upper].size.height = line + line_h - half - a.top();
+                pills[lower].origin.y = next + half;
+                pills[lower].size.height = b.bottom() - (next + half);
+            }
+        }
+    }
+    pills
 }
 /// The picture disc, at most; it shrinks to its cell so it never touches
 /// the name (Grok: a clear gap between icon and name).
@@ -638,9 +648,6 @@ impl Mentions {
         }
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
-        // The last thing written was a chip (the next `before` is what lies
-        // between it and the next `@`).
-        let mut after_chip = false;
         while let Some(at) = rest.find('@') {
             let (before, from_at) = rest.split_at(at);
             out.push_str(before);
@@ -652,18 +659,12 @@ impl Mentions {
             if starts_token && handle_len > 0 {
                 let handle = &from_at[1..1 + handle_len];
                 if let Some(m) = self.by_handle.get(&handle.to_lowercase()) {
-                    if after_chip && before == " " {
-                        out.pop();
-                        out.push(CHIP_SPACE);
-                    }
                     out.push_str(CELL);
                     out.push_str(&m.name);
                     rest = &from_at[1 + handle_len..];
-                    after_chip = true;
                     continue;
                 }
             }
-            after_chip = false;
             out.push('@');
             rest = &from_at[1..];
         }
@@ -1247,20 +1248,6 @@ pub(crate) mod tests {
         assert_eq!(p.state(&2), ChipState::Hover);
         assert!(p.alpha(&1, t1 + PILL_FADE + half, false).1, "1 is cooling");
         assert!(p.alpha(&2, t1 + PILL_FADE + half, false).1, "2 is warming");
-    }
-
-    /// One space between two chips becomes the wide space; anything else
-    /// between them, and a space after plain text, stays as typed.
-    #[test]
-    fn one_space_between_two_chips_is_drawn_wide() {
-        let m = four();
-        assert_eq!(
-            m.display("@comms @sam, @comms  @sam and @sam"),
-            format!(
-                "{CELL}Comms{CHIP_SPACE}{CELL}Sam Rivera, {CELL}Comms  {CELL}Sam Rivera and {CELL}Sam Rivera"
-            )
-        );
-        assert_eq!(m.find(&m.display("@comms @sam")).len(), 2);
     }
 
     #[test]

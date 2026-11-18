@@ -1081,21 +1081,7 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        if self.chips.len() < 2 {
-            return self.styled.request_layout(None, inspector_id, window, cx);
-        }
-        // Two chips may land one under the other, and a pill is taller than
-        // its line: the text is set looser so their pills never meet. Known
-        // ceiling: a one-line text with two chips is that much taller too —
-        // whether it wraps is not known before layout.
-        let line_height = window.line_height() + mention::stacked_leading();
-        let looser = gpui::TextStyleRefinement {
-            line_height: Some(line_height.into()),
-            ..Default::default()
-        };
-        window.with_text_style(Some(looser), |window| {
-            self.styled.request_layout(None, inspector_id, window, cx)
-        })
+        self.styled.request_layout(None, inspector_id, window, cx)
     }
 
     fn prepaint(
@@ -1154,8 +1140,8 @@ impl Element for SelectableText {
             .iter()
             .map(|c| chip_fragments(&layout, &c.range))
             .collect();
-        let pads = mention::pill_pads(&fragments.concat());
-        let mut pads = pads.iter();
+        let pills = mention::pills(&fragments.concat(), layout.line_height());
+        let mut pills = pills.iter();
         for (chip, fragments) in chips.iter().zip(&fragments) {
             let (alpha, still) = match rig {
                 Some(state) if chip.clickable() => (state.alpha(), false),
@@ -1164,14 +1150,8 @@ impl Element for SelectableText {
             fading |= still;
             paint_chip_pill(
                 layout.line_height(),
-                // The looser line of `request_layout` is not the pill's.
-                if chips.len() < 2 {
-                    px(0.0)
-                } else {
-                    mention::stacked_leading()
-                },
                 fragments,
-                &mut pads,
+                &mut pills,
                 mention::pill_color(chip.accent, alpha),
                 window,
             );
@@ -1397,31 +1377,23 @@ fn chip_at<'a>(
 }
 
 /// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, wider than the glyphs by its `mention::pill_pads` (`PILL_PAD_X`,
-/// less toward a close neighbour) and `PILL_PAD_Y` past the line box above
-/// and below. Painted before the text.
+/// occupies, as [`mention::pills`] places it. Painted before the text.
+// The text span and line box are only recorded for the render tests.
+#[cfg_attr(not(test), allow(unused_variables))]
 fn paint_chip_pill<'a>(
     line_h: Pixels,
-    leading: Pixels,
     fragments: &[(Pixels, Pixels, Pixels)],
-    pads: &mut impl Iterator<Item = &'a Pixels>,
+    pills: &mut impl Iterator<Item = &'a Bounds<Pixels>>,
     color: Hsla,
     window: &mut Window,
 ) {
-    for (&(start, end, top), &pad) in fragments.iter().zip(pads) {
-        let bounds = Bounds::new(
-            point(start - pad, top + leading / 2.0 - px(mention::PILL_PAD_Y)),
-            size(
-                end - start + pad * 2.0,
-                line_h - leading + px(mention::PILL_PAD_Y * 2.0),
-            ),
-        );
+    for (&(start, end, top), &bounds) in fragments.iter().zip(pills) {
         #[cfg(test)]
         PAINTED_CHIPS.with(|p| {
             p.borrow_mut().push(PaintedChip::Pill {
                 bounds,
                 text: (start, end),
-                line: (top + leading / 2.0, line_h - leading),
+                line: (top, line_h),
             })
         });
         window.paint_quad(gpui::quad(
@@ -2547,9 +2519,8 @@ mod tests {
         pills
     }
 
-    /// The clear space between two pills: across when they share a line,
-    /// down when one is under the other; `None` when neither axis separates
-    /// them by a line or a column (they are nowhere near each other).
+    /// The clear space between two pills, across and down; negative on an
+    /// axis where they overlap. Two pills are apart when either is positive.
     fn clear_space(a: &Bounds<Pixels>, b: &Bounds<Pixels>) -> (f32, f32) {
         let across = f32::from(a.left().max(b.left()) - a.right().min(b.right()));
         let down = f32::from(a.top().max(b.top()) - a.bottom().min(b.bottom()));
@@ -2559,40 +2530,57 @@ mod tests {
     /// Tester (Nov 14): "these blue '@ mentions' clip into each other". Two
     /// chips one space apart, two with only a comma between them, and a run
     /// of chips that wraps so chips sit one under the other: no two pills
-    /// intersect, and every pair keeps `PILL_GAP` across or down.
+    /// intersect; side by side they keep at least `PILL_PAD_MIN`-pad's worth
+    /// of space, one under the other `PILL_GAP`. The run wraps inside its
+    /// column, and a pill with nothing stacked against it keeps its full
+    /// height.
     #[gpui::test]
     fn neighbouring_chips_never_touch(cx: &mut gpui::TestAppContext) {
-        let gap = mention::PILL_GAP - 0.01;
+        let full = crate::ui::theme::CHAT_LINE_HEIGHT + 2.0 * mention::PILL_PAD_Y;
         let wrapped = "@comms @here ".repeat(14);
-        for (text, lines) in [
-            ("@comms @here", 1),
-            ("@comms,@here", 1),
-            (wrapped.as_str(), 2),
+        for (text, chips, lines) in [
+            ("@comms @here", 2, 1),
+            ("@comms,@here", 2, 1),
+            (wrapped.as_str(), 28, 2),
         ] {
             let pills = painted_pills(cx, text);
-            assert!(pills.len() >= 2, "{text:?}: {pills:#?}");
-            let mut tops: Vec<f32> = pills.iter().map(|p| f32::from(p.top())).collect();
-            tops.dedup();
+            let mut tops: Vec<i32> = pills.iter().map(|p| f32::from(p.top()) as i32).collect();
+            tops.sort();
+            tops.dedup_by(|a, b| (*a - *b).abs() < 6);
             assert!(tops.len() >= lines, "{text:?} wraps: {tops:?}");
+            // The run wraps between chips and stays in the 480 pt column. At
+            // most one chip per line end is in two pieces: gpui may break
+            // between `@` and the cell's gap, as it does on main (known limit).
+            assert!(
+                (chips..chips + tops.len()).contains(&pills.len()),
+                "{text:?}: {} pills for {chips} chips on {} lines",
+                pills.len(),
+                tops.len()
+            );
+            for p in &pills {
+                assert!(p.right() <= px(20.0 + 480.0 + mention::PILL_PAD_X), "{p:?}");
+            }
             let mut stacked = false;
             for (i, a) in pills.iter().enumerate() {
                 for b in &pills[i + 1..] {
                     assert!(!a.intersects(b), "{text:?}: {a:?} meets {b:?}");
                     let (across, down) = clear_space(a, b);
                     assert!(
-                        across >= gap || down >= gap,
+                        across >= 1.0 || down >= mention::PILL_GAP - 0.01,
                         "{text:?}: {a:?} and {b:?} are {across} / {down} apart"
                     );
                     stacked |= across < 0.0;
                 }
             }
             assert_eq!(stacked, lines > 1, "{text:?}: a chip under a chip");
-            // The pill is the chip's full height: the line box and its reach.
             for p in &pills {
-                assert_eq!(
-                    f32::from(p.size.height),
-                    crate::ui::theme::CHAT_LINE_HEIGHT + 2.0 * mention::PILL_PAD_Y
-                );
+                let h = f32::from(p.size.height);
+                if lines == 1 {
+                    assert_eq!(h, full, "{text:?}: nothing stacked, full height");
+                } else {
+                    // A line between two others gives up 2 pt at each edge.
+                    assert!((full - 2.0 * mention::PILL_GAP..=full).contains(&h), "{h}");
+                }
             }
         }
     }
