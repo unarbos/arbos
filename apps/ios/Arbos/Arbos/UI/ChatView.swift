@@ -2544,13 +2544,14 @@ struct ChatSession: View {
         case .timeEnded:
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
         case .replyChanged(let rowId, let dx):
-            let offset = NestedHorizontalScroll.claiming ? 0 : ReplySwipe.offset(dx: dx)
-            withTransaction(still) { replyDrag = (rowId, offset) }
+            let live = ReplySwipe.live(menuOpen: actionsRow != nil, nestedScroll: NestedHorizontalScroll.claiming)
+            withTransaction(still) { replyDrag = (rowId, live ? ReplySwipe.offset(dx: dx) : 0) }
         case .replyEnded(let rowId, let reply):
             // No overshoot under Reduce Motion.
             withAnimation(UIAccessibility.isReduceMotionEnabled ? .easeOut(duration: 0.2) : .spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = nil }
             // The menu's Reply, for the rows the menu offers it on.
-            if reply, !NestedHorizontalScroll.claiming, let row = rows.first(where: { $0.id == rowId }), isMessageRow(row) {
+            if reply, ReplySwipe.live(menuOpen: actionsRow != nil, nestedScroll: NestedHorizontalScroll.claiming),
+               let row = rows.first(where: { $0.id == rowId }), isMessageRow(row) {
                 beginReply(to: row)
             }
         case .back:

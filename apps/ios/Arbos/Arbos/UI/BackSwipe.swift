@@ -236,6 +236,12 @@ enum ReplySwipe {
     /// Does letting go at `dx` reply?
     static func replies(dx: CGFloat) -> Bool { -dx >= threshold }
 
+    /// Does a reply drag already under way still count? Not once the message menu is open —
+    /// the same finger paused into a hold after the drag was claimed, or a second finger
+    /// held another bubble — and not while a table inside the bubble scrolls sideways: the
+    /// row goes back to rest and the lift replies to nothing.
+    static func live(menuOpen: Bool, nestedScroll: Bool) -> Bool { !menuOpen && !nestedScroll }
+
     /// The bubbles on screen, by their marker views (`ReplySwipeBubble`): the bubble's own
     /// frame, so the empty side of a row and the gaps between rows are not "on a bubble".
     /// A registry of live views and not a SwiftUI gesture on the row: every press gesture

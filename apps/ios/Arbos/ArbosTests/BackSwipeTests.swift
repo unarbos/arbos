@@ -96,6 +96,10 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertEqual(ReplySwipe.offset(dx: -30), 30, "1:1 under the threshold")
         XCTAssertEqual(ReplySwipe.offset(dx: -(t + 50)), t + 10, "a fifth of the excess")
         XCTAssertEqual(ReplySwipe.offset(dx: -1000), t + 24, "and at most 24 pt of it")
+        // A drag already claimed stops counting once the message menu opens over it.
+        XCTAssertTrue(ReplySwipe.live(menuOpen: false, nestedScroll: false))
+        XCTAssertFalse(ReplySwipe.live(menuOpen: true, nestedScroll: false), "a hold opened the menu mid-drag, or a second finger did")
+        XCTAssertFalse(ReplySwipe.live(menuOpen: false, nestedScroll: true), "a table inside the bubble is scrolling sideways")
     }
 
     /// "On a bubble" is the bubble's own frame: a marker view in the window under the point.
