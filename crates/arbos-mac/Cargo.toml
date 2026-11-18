@@ -94,5 +94,6 @@ objc2-av-kit = { version = "0.3", default-features = false, features = ["std", "
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVAsset"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 # `#[gpui::test]` for the composer: a headless app, keystrokes into a real window, no display needed.
 gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54", features = ["test-support"] }
