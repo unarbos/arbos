@@ -18944,7 +18944,8 @@ from pathlib import Path
 marker = Path(@MARKER@)
 release = Path(@RELEASE@)
 exited = Path(@EXITED@)
-Path(@PID@).write_text(str(os.getpid()))
+Path(@PID@ + '.tmp').write_text(str(os.getpid()))
+os.replace(@PID@ + '.tmp', @PID@)
 try:
     for line in sys.stdin:
         cmd = json.loads(line)
