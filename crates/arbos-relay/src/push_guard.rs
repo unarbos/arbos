@@ -1455,11 +1455,9 @@ mod tests {
         })
     }
 
-    /// A message is the row at its place in the list, whatever `id` it carries once the push
-    /// has been applied. A push that writes a field only its author may write is refused all
-    /// the same when it also rewrites or removes that row's `id`.
+    /// Every field a push writes on an existing message is judged.
     #[test]
-    fn a_write_to_a_message_id_does_not_hide_the_other_fields_written_with_it() {
+    fn every_field_written_on_an_existing_message_is_judged() {
         for new_id in [Some("m_other"), None] {
             let state = test_state(AuthMode::Github);
             let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
@@ -1476,15 +1474,14 @@ mod tests {
                     &c
                 )),
                 Some("not_yours"),
-                "the author rewritten along with the id ({new_id:?})"
+                "{new_id:?}"
             );
         }
     }
 
-    /// The same for a vote: nobody casts one under another member's name by writing the
-    /// poll's `id` in the same push.
+    /// Every vote a push writes on an existing poll is judged.
     #[test]
-    fn a_write_to_a_poll_id_does_not_hide_a_vote_cast_with_it() {
+    fn every_vote_written_on_an_existing_poll_is_judged() {
         let state = test_state(AuthMode::Github);
         let (mut room, chat, alice, _bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
         let c = room.push(|d| {
@@ -1564,7 +1561,7 @@ mod tests {
     /// `id` is written with the message and never again: not by a member, and not by the
     /// author either, since every record the relay keeps about a message is keyed on it.
     #[test]
-    fn nobody_rewrites_or_removes_the_id_of_an_existing_message() {
+    fn a_messages_id_is_not_writable() {
         for new_id in [Some("m_other"), None] {
             let state = test_state(AuthMode::Github);
             let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);

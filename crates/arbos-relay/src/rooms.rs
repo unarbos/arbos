@@ -198,9 +198,7 @@ fn diff_pushed_row(
     let before = cached.doc.frontiers();
     match cached.doc.import(payload) {
         Ok(status) if status.pending.is_none() => {}
-        // Changes held back for a dependency the room lacks are not in the diff below. They
-        // would apply later, inside whichever push supplies the dependency, and be judged
-        // under that pusher's name.
+        // Not applied in full, so the diff below would not be all of what the push does.
         Ok(_) => return None,
         // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
         // before, so this is not a rejection of malformed input — it is "nothing is known
@@ -2860,18 +2858,14 @@ mod covered_push_tests {
         }
     }
 
-    /// An update is judged by what importing it changes, under the name of the socket that
-    /// pushed it. That only holds if the import applies all of it: changes held back for a
-    /// dependency the room lacks would change nothing now and apply later, inside whichever
-    /// push supplies the dependency, under that pusher's name. So a push that is not applied
-    /// in full is not stored.
+    /// A push is judged by what importing it changes, so one that is not applied in full is
+    /// not stored.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_push_whose_import_leaves_changes_pending_is_not_stored() {
+    async fn a_push_that_is_not_fully_applied_is_not_stored() {
         let state = test_state(AuthMode::Github);
         let (room, bob_doc, alice_token, bob_token) = chat_with_bobs_message(&state);
         let head = state.db.room_state(&room).unwrap().head;
 
-        // A removal of Bob's message that depends on an op his replica has not written yet.
         let mut ahead = ChatDoc::new(Some(7), false);
         ahead.import(&bob_doc.snapshot()).unwrap();
         ahead.set_message_fields("m-bob", &[("seen", json!(true))]);
@@ -2891,7 +2885,6 @@ mod covered_push_tests {
         )
         .await;
 
-        // Bob carries on: his next message is the op the update above was waiting for.
         let mark = bob_doc.oplog_vv();
         bob_doc
             .append_user_message(
@@ -2910,7 +2903,7 @@ mod covered_push_tests {
         assert_eq!(
             stored.doc.message_ids(),
             ["m-bob", "m-bob-2"],
-            "nothing another device pushed is applied under Bob's name"
+            "the room holds what was stored and nothing else"
         );
         assert_eq!(first[0].ty, FrameType::Error, "header={}", first[0].header);
         assert_eq!(first[0].header["batchId"], "held-back");
