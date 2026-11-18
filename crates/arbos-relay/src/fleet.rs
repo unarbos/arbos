@@ -419,6 +419,11 @@ pub fn run_args(
         "--cap-drop=AUDIT_WRITE".into(),
         "--security-opt=no-new-privileges".into(),
         "--restart=no".into(),
+        // The image's HEALTHCHECK is a `curl` every 10 s. Under gVisor each one is a `runsc exec`
+        // into the sandbox, six a minute for every box on the host whether it is in use or not,
+        // and nothing reads the result: the relay knows a box is alive by its 3 s poll
+        // (`box_seen_http`) and by `watch_containers`.
+        "--no-healthcheck".into(),
         "--label".into(),
         "arbos.fleet=gvisor".into(),
         "-p".into(),
@@ -1575,6 +1580,7 @@ mod tests {
             "--memory-swap=3g",
             "--pids-limit=512",
             "--security-opt=no-new-privileges",
+            "--no-healthcheck",
             "--cap-drop=NET_RAW",
             "type=bind,src=/d/boxes/u/mnt,dst=/work",
             "type=bind,src=/d/boxes/u/mnt/.home,dst=/home/daytona",
