@@ -72,6 +72,7 @@
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
 		A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
+		A1BB000000000000000000F1 /* HoldMenuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB000000000000000000F0 /* HoldMenuUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
 		A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* PresenceAnchorUITests.swift */; };
 		A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */; };
@@ -362,6 +363,7 @@
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeChatListNoFilterUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
+		A1BB000000000000000000F0 /* HoldMenuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldMenuUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000042 /* PresenceAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceAnchorUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEndAnchorUITests.swift; sourceTree = "<group>"; };
@@ -893,6 +895,7 @@
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
 				A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */,
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
+				A1BB000000000000000000F0 /* HoldMenuUITests.swift */,
 				A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */,
 				A1BB00000000000000000042 /* PresenceAnchorUITests.swift */,
 				A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */,
@@ -1322,6 +1325,7 @@
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */,
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
+				A1BB000000000000000000F1 /* HoldMenuUITests.swift in Sources */,
 				A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */,
 				A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */,
 				A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */,

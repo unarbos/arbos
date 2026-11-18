@@ -1146,11 +1146,6 @@ struct ChatSession: View {
         }
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
-        // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
-        // Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
-        // `names_senders`, and the solo-1:1 quote-header hide depends on it
-        // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
-        let multiParty = isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
         // People I blocked: their rows fold into one line for me (groups only; a DM with
         // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
@@ -1264,6 +1259,12 @@ struct ChatSession: View {
         // paste path tipped the one-expression body over Xcode's limit).
         sessionRoot
     }
+
+    /// Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
+    /// Project agent groups (`chat.isGroup`) count too — same rule Mac uses for
+    /// `names_senders`, and the solo-1:1 quote-header hide depends on it
+    /// ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+    private var multiParty: Bool { isChannel || (people?.isGroup ?? false) || (chat?.isGroup ?? false) }
 
     /// Transcript canvas + composer inset (no sheets / lifecycle).
     @ViewBuilder
@@ -1489,10 +1490,15 @@ struct ChatSession: View {
                                           viewport: geo.size.height)
                 }
                 if let row = actionsRow, let anchor = anchors[row.id] {
-                    let frame = geo[anchor]
+                    // The anchor takes in the gap above the row and the lifted copy has none:
+                    // without this the bubble hopped up by the gap as it lifted, and the menu
+                    // was placed for a taller bubble than the one drawn.
+                    let gap = row.id == windowedRows.first?.id ? 0 : row.gapBefore
+                    let frame = geo[anchor].inset(by: UIEdgeInsets(top: gap, left: 0, bottom: 0, right: 0))
                     // This reader ignores the safe area, so its own insets read 0; the
                     // overlay needs the real status-bar / home-indicator insets to fit.
                     let safeArea = KeyboardFrameObserver.windowSafeArea
+                    let named = multiParty ? row.namedForHold : nil
                     MessageActionsOverlay(
                         row: row,
                         frame: frame,
@@ -1501,6 +1507,7 @@ struct ChatSession: View {
                         safeTop: max(geo.safeAreaInsets.top, safeArea.top),
                         safeBottom: max(geo.safeAreaInsets.bottom, safeArea.bottom),
                         held: heldReactions(row),
+                        nameLift: named == nil ? 0 : RowView.nameLineHeight(theme),
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
@@ -1528,7 +1535,7 @@ struct ChatSession: View {
                             // showReactionSenders: holding the message lists who
                             // used each emoji under the held bubble (chip hold
                             // does the same one-emoji list in the transcript).
-                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: named ?? row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
                                     showReactionSenders: !row.reactions.isEmpty)
@@ -1536,6 +1543,16 @@ struct ChatSession: View {
                         }
                     )
                     .onAppear { PerfSignpost.endAfterCommit(.messageMenu) }
+                } else if let row = actionsRow {
+                    // The held row publishes no frame: deleted elsewhere, or pushed out of the
+                    // lazy stack by a reply streaming in under it. No overlay is drawn, so
+                    // nothing on screen could close the menu, and the transcript stays
+                    // unscrollable and disabled. The wait covers the pass in which the menu
+                    // opens and the row's frame has not arrived yet.
+                    Color.clear.task(id: row.id) {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        if !Task.isCancelled { closeActions() }
+                    }
                 }
             }
             .ignoresSafeArea()
@@ -2641,6 +2658,13 @@ struct ChatSession: View {
             // The finger that held a bubble into its menu may slide to a choice: the
             // transcript does not scroll under it.
             .scrollDisabled(actionsRow != nil)
+            // Nor does anything in it take the lift: the row's hold runs alongside every
+            // button in the row and a button's tap has no time limit, so the finger that held
+            // a reply quote, a sender's name or a play button also pressed it when it lifted
+            // (tester reports, 2026-11-14 and 2026-11-17). Disabling the transcript as the
+            // menu opens cancels that press; `allowsHitTesting(false)` does not, the press is
+            // already under way.
+            .disabled(actionsRow != nil)
             .background(TouchWatch())
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
@@ -3306,10 +3330,12 @@ struct ChatSession: View {
     private func closeActions(after item: MessageMenuItem? = nil) {
         ChatGestures.heldIntoMenu = false
         HeldFinger.shared.reset()
+        // Before the account check: a menu that cannot close leaves the chat blurred, unscrollable
+        // and untappable. Only giving the keyboard back needs the account.
+        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         guard account.accepts(model) else { return }
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
-        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         if restore { composerFocused = true }
     }
 

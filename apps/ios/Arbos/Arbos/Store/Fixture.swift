@@ -181,6 +181,9 @@ extension AppModel {
         if DebugHooks.fixtureLongReply, let c = DebugHooks.openChat {
             messages[c, default: []].append(assistant("fx-long", c, Self.longReply, at: now - 60_000))
         }
+        if DebugHooks.fixtureTallReply, let c = DebugHooks.openChat {
+            messages[c, default: []].append(assistant("fx-long", c, Self.nyPostReply + "\n\n" + Self.longReview + "\n\n" + Self.longReply, at: now - 60_000))
+        }
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),

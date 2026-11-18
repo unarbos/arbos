@@ -110,6 +110,43 @@ final class MessageActionsHitAreaTests: XCTestCase {
         XCTAssertNil(at(300, 301), "right of the menu")
     }
 
+    // MARK: A tap that closes the menu
+
+    /// A tap closes the menu everywhere but on the capsule and the menu: on the blur, on the
+    /// lifted message, and on the part of a long message that runs on beside or under the
+    /// menu, where a link used to take the tap (tester reports, 2026-11-13 and 2026-11-14).
+    func testATapOutsideTheCapsuleAndTheMenuDismisses() {
+        let capsule = CGRect(x: 16, y: 67, width: ReactionCapsule.width, height: ReactionCapsule.height)
+        let menu = CGRect(x: 16, y: 582, width: 250, height: 228)
+        func closes(_ x: CGFloat, _ y: CGFloat, menu: CGRect?) -> Bool {
+            MessageActionsTarget.dismisses(CGPoint(x: x, y: y), capsule: capsule, menu: menu)
+        }
+        XCTAssertTrue(closes(200, 300, menu: menu), "on the lifted message")
+        XCTAssertTrue(closes(340, 700, menu: menu), "bottom right, beside the menu")
+        XCTAssertTrue(closes(8, 700, menu: menu), "left of the menu")
+        XCTAssertTrue(closes(200, 30, menu: menu), "above the capsule")
+        XCTAssertFalse(closes(100, 600, menu: menu), "a menu row")
+        XCTAssertFalse(closes(100, 582 + 3 * 44 + 4, menu: menu), "the band above Delete is the menu's")
+        XCTAssertFalse(closes(18, 69, menu: menu), "the capsule's padding")
+        XCTAssertTrue(closes(100, 600, menu: nil), "the emoji keyboard took the menu's place")
+    }
+
+    // MARK: The sender's name on a lifted bubble
+
+    /// A bubble that continues a run has no name in the transcript; lifted it gets one. One
+    /// that has its name, and my own, are left as they are (tester report, 2026-11-17).
+    func testALiftedBubbleIsNamedOnlyWhenTheRowIsNot() {
+        func row(_ kind: RowKind, role: Role = .project) -> Row { Row(id: "r", messageId: "m", role: role, kind: kind) }
+        let unnamed = row(.other(text: "hi", handle: "mira", avatar: nil, named: false, quote: nil))
+        XCTAssertEqual(unnamed.namedForHold?.kind, .other(text: "hi", handle: "mira", avatar: nil, named: true, quote: nil))
+        XCTAssertEqual(unnamed.namedForHold?.id, "r")
+        XCTAssertNil(row(.other(text: "hi", handle: "mira", avatar: nil, named: true, quote: nil)).namedForHold)
+        XCTAssertNil(row(.user(text: "hi", delivery: .delivered, quote: nil), role: .user).namedForHold)
+        let agent = row(.member(blocks: [], live: false, handle: "scout", name: "Scout", avatar: nil, named: false, agentId: "p1", quote: nil))
+        XCTAssertEqual(agent.namedForHold?.kind,
+                       .member(blocks: [], live: false, handle: "scout", name: "Scout", avatar: nil, named: true, agentId: "p1", quote: nil))
+    }
+
     /// A finger that never left where it pressed chooses nothing when it lifts; one that
     /// slid away lifts where it is.
     @MainActor

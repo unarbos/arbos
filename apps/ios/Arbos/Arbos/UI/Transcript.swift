@@ -332,6 +332,32 @@ struct Row: Identifiable, Equatable {
     }
 }
 
+extension Row {
+    /// This row as the hold menu lifts it out of a group chat: someone else's bubble that
+    /// continues a sender run carries no name in the transcript, and alone on the blur it
+    /// no longer says whose it is (tester report, 2026-11-17). Nil when the row already
+    /// carries its name or has no sender to name.
+    var namedForHold: Row? {
+        var row = self
+        switch kind {
+        case .other(let text, let handle, let avatar, false, let quote, let preview):
+            row.kind = .other(text: text, handle: handle, avatar: avatar, named: true, quote: quote, preview: preview)
+        case .member(let blocks, let live, let handle, let name, let avatar, false, let agentId, let quote):
+            row.kind = .member(blocks: blocks, live: live, handle: handle, name: name, avatar: avatar, named: true,
+                               agentId: agentId, quote: quote)
+        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: source,
+                              forwardedFrom: forwardedFrom, sender: sender, named: true, quote: quote)
+        case .file(let item, let subtitle, let caption, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .file(item: item, subtitle: subtitle, caption: caption, forwardedFrom: forwardedFrom,
+                             sender: sender, named: true, quote: quote)
+        default:
+            return nil
+        }
+        return row
+    }
+}
+
 enum Transcript {
     /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-ios-2026-10-28]):
     /// consecutive messages from one sender this close together (ms) form one **run** —
@@ -2297,6 +2323,12 @@ struct RowView: View, Equatable {
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
     /// 6 from the reply quote to the text (#1393).
     static let nameToTextGap: CGFloat = 2
+    /// What the name line adds to a bubble's height (`LiveSenderName`, 16 pt at least for
+    /// the agent badge, plus the gap under it). A media card's name sits 4 pt above the
+    /// card, not 2: the hold menu, the one reader, lands 2 pt low there.
+    static func nameLineHeight(_ theme: Theme) -> CGFloat {
+        max(16, UIFont.systemFont(ofSize: theme.pt(Theme.small), weight: .semibold).lineHeight) + nameToTextGap
+    }
     static let quoteToTextGap: CGFloat = 6
 
     /// A people-chat member's name inside its bubble, in the same colour as its bar

@@ -168,6 +168,15 @@ enum MessageActionsTarget: Equatable {
         let inMenu = CGPoint(x: point.x - menu.x, y: point.y - menu.y)
         return rows.rows.first { $0.labelRect.contains(inMenu) }.map { .row($0.item) }
     }
+
+    /// Does a tap at `point` close the overlay? Everywhere but on the capsule and the menu
+    /// (`nil` while the emoji keyboard has its place): the blur, and the lifted message
+    /// itself, whatever it holds. A tap on the lifted message used to reach its links, file
+    /// card and reply quote instead, the part cut off under the menu included
+    /// (tester reports, 2026-11-13 and 2026-11-14).
+    static func dismisses(_ point: CGPoint, capsule: CGRect, menu: CGRect?) -> Bool {
+        !capsule.contains(point) && menu?.contains(point) != true
+    }
 }
 
 struct MessageActionsOverlay<Bubble: View>: View {
@@ -182,6 +191,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
     let safeBottom: CGFloat
     /// Emoji I already hold on this message (tinted in the capsule).
     let held: Set<String>
+    /// Height of the sender's name line when `bubble` carries one the pressed row does not
+    /// (`Row.namedForHold`): the lifted bubble grows upward by it, so the text stays under
+    /// the finger.
+    var nameLift: CGFloat = 0
     let items: [MessageMenuItem]
     let onReact: (String) -> Void
     let onMenu: (MessageMenuItem) -> Void
@@ -196,6 +209,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
     @State private var pressedFrame: CGRect?
+    /// The lifted bubble's own height: the name line and the reaction senders it adds make it
+    /// taller than the pressed row.
+    @State private var liftedHeight: CGFloat?
     @ObservedObject private var keyboard = KeyboardFrameObserver.shared
     @ObservedObject private var finger = HeldFinger.shared
     private static var sideInset: CGFloat { 16 }
@@ -208,7 +224,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
 
     var body: some View {
         GeometryReader { geo in
-            let bubbleFrame = pressedFrame ?? frame
+            let pressed = pressedFrame ?? frame
+            let bubbleFrame = CGRect(x: pressed.minX, y: pressed.minY - nameLift, width: pressed.width,
+                                     height: liftedHeight ?? pressed.height + nameLift)
             let layout = MessageActionsLayout.compute(.init(
                 bubble: bubbleFrame,
                 capsuleHeight: ReactionCapsule.height,
@@ -223,13 +241,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
             // What the held finger is over: both groups hug the bubble's side of the chat.
             let origin = geo.frame(in: .global).origin
             let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
+            let groupX: (CGFloat) -> CGFloat = { mine ? width - Self.sideInset - $0 : Self.sideInset }
             let target: (CGPoint?) -> MessageActionsTarget? = { point in
                 guard let point else { return nil }
-                let x: (CGFloat) -> CGFloat = { mine ? width - Self.sideInset - $0 : Self.sideInset }
                 return MessageActionsTarget.at(
                     CGPoint(x: point.x - origin.x, y: point.y - origin.y),
-                    capsule: CGPoint(x: x(ReactionCapsule.width), y: layout.capsuleY),
-                    menu: CGPoint(x: x(menuWidth), y: layout.menuY), rows: rows)
+                    capsule: CGPoint(x: groupX(ReactionCapsule.width), y: layout.capsuleY),
+                    menu: CGPoint(x: groupX(menuWidth), y: layout.menuY), rows: rows)
             }
             let hot = target(finger.point)
             ZStack(alignment: .topLeading) {
@@ -237,7 +255,6 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .fill(.ultraThinMaterial)
                     .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
                     .ignoresSafeArea()
-                    .onTapGesture { onDismiss() }
                 capsule(hot: hot)
                     .frame(width: width, alignment: mine ? .trailing : .leading)
                     // Scale before the offset: the anchor is then the capsule's own corner, not
@@ -245,12 +262,29 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     .scaleEffect(shown || reduceMotion ? 1 : 0.9, anchor: mine ? .bottomTrailing : .bottomLeading)
                     .offset(y: layout.capsuleY)
                     .accessibilityIdentifier("message-actions-capsule")
-                bubble()
-                    .frame(width: width)
-                    // Only a bubble taller than the visible area is cut (layout rule 5).
-                    .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
-                    .clipped()
-                    .offset(y: layout.bubbleY)
+                // A message taller than the room it gets scrolls in place (layout rule 5;
+                // tester report, 2026-11-14).
+                ScrollView {
+                    bubble()
+                        .frame(width: width)
+                        // Not animated: the first measure lands as the overlay arrives, and the
+                        // menu must not be seen sliding to where it belongs.
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            var now = Transaction()
+                            now.disablesAnimations = true
+                            withTransaction(now) { liftedHeight = height }
+                        }
+                        // A link in the lifted copy opens nothing, for VoiceOver either.
+                        .environment(\.openURL, OpenURLAction { _ in .handled })
+                        // The lifted message is a picture of itself: this cover takes every
+                        // touch, so a tap closes the overlay (below) instead of opening a link,
+                        // a file or the quoted message, and a drag scrolls.
+                        .overlay { Color.clear.contentShape(Rectangle()) }
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(width: width, height: layout.bubbleHeight)
+                .offset(y: layout.bubbleY)
+                .accessibilityIdentifier("message-actions-bubble")
                 // The emoji keyboard takes the menu's place (layout rule 6).
                 if !pickOpen {
                     menu(hot: hot)
@@ -261,6 +295,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .transition(.opacity)
                 }
             }
+            // One rule for every tap no cell or row took (their buttons win over this).
+            .gesture(SpatialTapGesture().onEnded { tap in
+                let capsule = CGRect(x: groupX(ReactionCapsule.width), y: layout.capsuleY,
+                                     width: ReactionCapsule.width, height: ReactionCapsule.height)
+                let menu = CGRect(x: groupX(menuWidth), y: layout.menuY, width: menuWidth, height: menuHeight)
+                if MessageActionsTarget.dismisses(tap.location, capsule: capsule, menu: pickOpen ? nil : menu) { onDismiss() }
+            })
             .animation(.easeOut(duration: 0.2), value: layout)
             .animation(.easeOut(duration: 0.2), value: pickOpen)
             .onAppear {
@@ -281,6 +322,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
         }
         .ignoresSafeArea()
+        // VoiceOver stays in the overlay, not in the chat under the blur, and has a way out.
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape) { onDismiss() }
         .overlay {
             if pickOpen {
                 EmojiKeyboardField(onPick: onReact)
