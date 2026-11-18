@@ -799,6 +799,14 @@ async fn handle_frame(
                 .unwrap_or(room_name);
             let pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
+            // What the relay will write back onto a poll once the push is stored: its own
+            // clock on a vote or a close that does not agree with it (`poll_corrections`).
+            let poll_fixes = crate::push_guard::poll_corrections(
+                state,
+                chat_of_room,
+                &pending.changes,
+                arbos_core::ids::now_ms(),
+            );
             let (carries_new_message, attributed) = match crate::push_guard::check_push(
                 state,
                 principal,
@@ -886,6 +894,24 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
+                // After the row, as a row of the relay's own: every device, the pusher's
+                // included, receives the correction and reduces the same poll.
+                for fix in poll_fixes {
+                    let fields: Vec<(&str, serde_json::Value)> = fix
+                        .fields
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.clone()))
+                        .collect();
+                    let project = (project_id != people::PEOPLE_PROJECT).then_some(project_id);
+                    let written = crate::notices::write_doc(state, project, chat_of_room, |doc| {
+                        doc.set_message_fields(&fix.message_id, &fields);
+                        Ok(())
+                    })
+                    .await;
+                    if let Err(e) = written {
+                        tracing::warn!(%room_name, message_id = %fix.message_id, error = %e, "poll correction not written");
+                    }
+                }
                 if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
                     // socket task.
@@ -2788,6 +2814,101 @@ mod covered_push_tests {
             state.db.rate_count(&alice, "msg", 60_000).unwrap(),
             rates_before,
             "covered dups must not count as messages"
+        );
+    }
+
+    /// A vote changed after the poll closed, through the socket: the push is acknowledged —
+    /// a refusal would be re-sent on every reconnect and cut the device off the chat — and
+    /// the relay then writes the earlier vote back, so the room's poll keeps the count it
+    /// closed with (`push_guard::poll_corrections`, `docs/polls.md` §11).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_vote_pushed_after_the_close_is_acked_and_then_put_back() {
+        use arbos_core::doc::{POLL_CLOSED_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX};
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &bob);
+        let now = arbos_core::ids::now_ms();
+        let (vote, at) = (
+            format!("{POLL_VOTE_PREFIX}user:{bob}"),
+            format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
+        );
+
+        // The room holds Alice's poll, Bob's vote for Lisbon ten minutes ago, and her close
+        // five minutes ago.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let poll = arbos_core::poll::Poll::new(
+            "Where?",
+            &["Lisbon".to_owned(), "Berlin".to_owned()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let opts = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &poll, "dev:alice", &opts)
+            .unwrap();
+        writer.set_message_fields(
+            "p1",
+            &[
+                (&vote, json!(["1"])),
+                (&at, json!(now - 600_000)),
+                (POLL_CLOSED_FIELD, json!(now - 300_000)),
+            ],
+        );
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:alice",
+                "seed",
+                &writer.export_updates_since(&base),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "p1", &format!("user:{alice}"))
+            .unwrap();
+        let counts = || {
+            let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            doc.projected_rows()[0]["parts"][1]["counts"].clone()
+        };
+        assert_eq!(counts(), json!({ "1": 1 }));
+
+        // Bob's device changes his choice and leaves the old time on it.
+        let bobs = ChatDoc::from_snapshot(Some(8), false, &writer.snapshot()).unwrap();
+        let before = bobs.oplog_vv();
+        bobs.set_message_fields("p1", &[(&vote, json!(["2"]))]);
+        let late = vec![("late-vote".to_owned(), bobs.export_updates_since(&before))];
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &late).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+
+        // The pushed row, then the relay's own.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while state.db.room_state(&room).unwrap().head < head_before + 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the relay wrote its correction"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            counts(),
+            json!({ "1": 1 }),
+            "the count the poll closed with"
         );
     }
 

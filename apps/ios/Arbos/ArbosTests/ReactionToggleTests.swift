@@ -39,7 +39,7 @@ final class PollTests: XCTestCase {
     private func doc(_ key: String) throws -> CoreChatDoc {
         let doc = CoreChatDoc(key: key)
         try doc.insertPollMessage(id: "p1", question: " Where? ", options: ["Lisbon", "", "Berlin"], multiple: false,
-                                  deviceId: "dev", author: .init(sender: "user:ana", name: "Ana"))
+                                  showVoters: true, deviceId: "dev", author: .init(sender: "user:ana", name: "Ana"))
         doc.commit()
         return doc
     }
@@ -69,7 +69,7 @@ final class PollTests: XCTestCase {
         XCTAssertEqual(poll.votes, ["2": ["user:ana", "user:ben"]])
         XCTAssertEqual(poll.voters, 2)
         XCTAssertEqual(poll.picked(by: "user:ana"), ["2"])
-        XCTAssertEqual(poll.foot(by: "Ana"), "Ana's poll · 2 voted · pick one")
+        XCTAssertEqual(poll.foot(by: "Ana"), "Ana's poll · 2 voted · pick one · names shown")
 
         // What a tap sends: a swap, or a retraction when it is the option already held.
         XCTAssertEqual(poll.picking("1", by: "user:ana"), ["1"])
@@ -86,7 +86,7 @@ final class PollTests: XCTestCase {
 
     func testAMultipleAnswerPollTogglesEachOption() {
         let poll = Poll(question: "Q", options: [ChoiceOption(id: "1", label: "A"), ChoiceOption(id: "2", label: "B")],
-                        max: 2, votes: ["1": ["user:ana"]])
+                        max: 2, votes: ["1": ["user:ana"]], counts: ["1": 1], voters: 1)
         XCTAssertEqual(poll.picking("2", by: "user:ana"), ["1", "2"])
         XCTAssertEqual(poll.picking("1", by: "user:ana"), [])
         XCTAssertEqual(poll.foot(by: nil), "Your poll · 1 voted · pick any")
@@ -113,7 +113,7 @@ final class PollTests: XCTestCase {
         let now = nowMs()
         XCTAssertEqual(poll.showVoters, true)
         XCTAssertTrue(poll.closable)
-        let closesAt = try XCTUnwrap(poll.closesAt)
+        let closesAt = try XCTUnwrap(poll.deadline)
         XCTAssertTrue((now + 3_590_000...now + 3_610_000).contains(closesAt))
         XCTAssertFalse(poll.closed(now: now))
         XCTAssertTrue(poll.closed(now: closesAt), "its own time closes it")
@@ -122,12 +122,13 @@ final class PollTests: XCTestCase {
 
         // Only its author closes it; then the core takes no vote, change or retraction.
         XCTAssertThrowsError(try doc.closePoll(messageId: "p1", sender: "user:ben"))
+        usleep(3_000) // a vote in the very millisecond of the close is not before it
         try doc.closePoll(messageId: "p1", sender: "user:ana")
         doc.commit()
         poll = try XCTUnwrap(self.poll(doc))
-        XCTAssertNotNil(poll.closedAt)
-        XCTAssertTrue(poll.closed(now: now))
-        XCTAssertEqual(poll.foot(by: nil, now: now), "Your poll · 1 voted · closed · names shown")
+        XCTAssertTrue(poll.closed(now: nowMs()), "closed by hand, an hour before its time")
+        XCTAssertLessThan(try XCTUnwrap(poll.deadline), closesAt)
+        XCTAssertEqual(poll.foot(by: nil), "Your poll · 1 voted · closed · names shown")
         XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:cat", selections: ["2"]))
         XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:ben", selections: []))
         XCTAssertEqual(try XCTUnwrap(self.poll(doc)).votes, ["1": ["user:ben"]])
@@ -138,6 +139,30 @@ final class PollTests: XCTestCase {
         XCTAssertNil(old.showVoters)
         XCTAssertFalse(old.closable)
         XCTAssertFalse(old.closed(now: .max))
+    }
+
+    /// A poll that hides its voters reaches the phone with counts and my own vote: nobody
+    /// else's id is in the part the card is drawn from, so no screen can name them.
+    func testAPollThatHidesItsVotersGivesThePhoneNoOtherNames() throws {
+        let doc = CoreChatDoc(key: "poll-hidden")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: false, deviceId: "dev", author: .init(sender: "user:zoe", name: "Zoe"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ana", selections: ["2"])
+        try doc.setPollVote(messageId: "p1", sender: "user:me", selections: ["2"])
+        doc.commit()
+        setPollViewer(sender: "user:me")
+        defer { setPollViewer(sender: nil) }
+        let mine = try XCTUnwrap(poll(doc))
+        XCTAssertEqual(mine.counts, ["2": 2])
+        XCTAssertEqual(mine.voters, 2)
+        XCTAssertEqual(mine.votes, ["2": ["user:me"]], "my own vote, so the card can mark it")
+        XCTAssertEqual(mine.picked(by: "user:me"), ["2"])
+        XCTAssertEqual(mine.foot(by: "Zoe"), "Zoe's poll · 2 voted · pick one")
+
+        setPollViewer(sender: nil)
+        let nobody = try XCTUnwrap(poll(doc))
+        XCTAssertEqual(nobody.votes, [:], "no names at all without a reader")
+        XCTAssertEqual(nobody.counts, ["2": 2])
     }
 
     /// A reply quotes a poll by its question: the strip above the composer and the header in

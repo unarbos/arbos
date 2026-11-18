@@ -1968,8 +1968,8 @@ struct RowView: View, Equatable {
             // A poll with a time still to run redraws by itself, so the card closes and its
             // "closes in" line moves without waiting for the row to change: every 30 s, on a
             // beat that lands on the closing time itself.
-            if let closesAt = poll.closesAt, !poll.closed(now: nowMs()) {
-                TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(closesAt % 30_000) / 1000), by: 30)) { _ in
+            if let deadline = poll.deadline, !poll.closed(now: nowMs()) {
+                TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(deadline % 30_000) / 1000), by: 30)) { _ in
                     pollCard(poll, by: by)
                 }
             } else {
@@ -2172,7 +2172,7 @@ struct RowView: View, Equatable {
             HStack(spacing: 0) {
                 Color.clear.frame(width: lane, height: 1)
                 QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
-                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
+                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.counts[$0.id] ?? 0)") },
                              multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
                              onPick: { id in
                                  // A hold that opened the message menu is not a vote.

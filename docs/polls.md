@@ -310,40 +310,75 @@ a poll, an optional duration. Closing by hand was already planned.
   the poll like the question. Its presence also marks a *timed* poll: one whose votes carry a
   time and which can be closed. A poll without it is counts-only and never closes.
 - `poll.closesAt: ms`, when the poll closes by itself; absent runs until closed by hand. An
-  integer in `1..=TIME_MAX` (2100-01-01). The composers offer 1 hour, 1 day, 1 week.
-- `"voteAt|<sender>": ms` on the message, written with each vote on a timed poll: the voter's
-  device clock at the moment of the vote.
-- `pollClosed: ms` on the message: the author's manual close, by the author's device clock.
+  integer in `1..=TIME_MAX` (2100-01-01), valid only on a timed poll. `Poll::new` takes a
+  duration of at most a week; the composers offer 1 hour, 1 day, 1 week.
+- `"voteAt|<sender>": ms` on the message, written with each vote on a timed poll.
+- `pollClosed: ms` on the message: the author's manual close.
 
-**The close rule** lives in `project_poll`, the one reducer every reader uses. On a timed poll a
-vote counts when it has a time and that time is not after the deadline, the earlier of
-`closesAt` and `pollClosed`. It reads only the row, never the reader's clock, so every reader
-of the same row shows the same count. The writers (`set_poll_vote`, `close_poll`) refuse once
-their own clock is past the deadline, and `close_poll` refuses anyone but the row's `sender`.
+**One rule for "closed".** `arbos_core::poll::closed(deadline, now)` is `now >= deadline`, where
+the deadline is the earlier of `closesAt` and `pollClosed`. The writers, the reducer, the relay
+and both apps (the iPhone over the FFI) call that one function; the apps read the deadline from
+the projected part.
 
-**Relay.** `pollClosed` is the author's to write, by the relay's record of who posted the row
-(`not_yours` otherwise), must be a time and cannot be taken off (`bad_poll`). `voteAt|<x>` is
-x's to write, like the vote, and a vote on a timed poll must carry one (`bad_vote`). The relay
-does **not** refuse a vote pushed after the close: section 10's reason stands, an honest device
-may be delivering a vote cast before it, and a refused push is re-sent forever.
+**What the reducer enforces** (`project_poll`, on every device and on the relay's readers). On a
+timed poll a vote counts when it has a time and the poll was not closed at that time. It reads
+only the row, never the reader's clock, so every reader of the same row shows the same count,
+whatever order a close and a vote were merged in. It is the tie-breaker, not a guard: it
+believes the times on the row.
 
-**What clock is trusted, and its limits.** The voter's device clock for a vote, the author's
-for a close; `closesAt` is absolute. Nothing checks them against a server clock, because a
-Loro doc has none. So: a device whose clock runs behind can vote a little after the close and
-be counted; a modified client can backdate its own vote (not anyone else's) to before the
-close. One vote per person is one key, so a vote *changed* after the close is not counted at
-all — the earlier choice is gone from the key. Only the voter can do that to their own vote,
-and an honest build refuses the write; the window is a device that has not yet received a
-manual close. Votes are not anonymous in storage: each is a field named after its voter, which
-every member's device and the relay hold. "Show who voted" off means the apps do not display
-the names, nothing stronger.
+**What the writers enforce** (`set_poll_vote`, `close_poll`, in the apps). No vote, change or
+retraction once the device's own clock is past the deadline; a close only by the row's
+`sender`, and only once.
+
+**What the relay enforces** (`push_guard`), for chats it can read, by its own clock:
+
+- Refused outright, because no honest device pushes them: a close by anyone but the poll's
+  author, by the relay's record of who posted the row (`not_yours`); a close that is not a
+  time, or its removal (`bad_poll`); a vote or a vote time under someone else's name
+  (`not_yours`); a vote on a timed poll with no time (`bad_vote`).
+- Corrected after the push is stored (`poll_corrections`), by a row the relay writes itself
+  and every device receives:
+  - a `pollClosed` written over an earlier one is set back: a close is final;
+  - a first `pollClosed` further than two minutes behind the relay's clock, or ahead of it, is
+    set to the relay's time, so it cannot be dated back over votes or forward to stay open;
+  - once the deadline has passed by the relay's clock, a changed `vote|x` or `voteAt|x` is set
+    back to what it was (a first vote becomes an empty one): no vote, change, retraction or
+    backdated time after the close;
+  - while the poll is open, a `voteAt|x` more than two minutes from the relay's clock, or a
+    vote changed without a new time, is set to the relay's time.
+
+  These are corrections and not refusals because honest devices produce every one of them: a
+  vote cast offline or in the second the author closed, a phone whose clock is off, a close
+  from the author's second device. The client re-sends a refused push on every reconnect and
+  nothing queued behind it can go, so a refusal would cut that device off the chat for good.
+  The cost of correcting: for the moment between the push and the correction the row holds
+  the pusher's values, and if the relay stops in that moment the correction is not written.
+- A poll row arriving whole that the relay attested before is a heal of lost history. Its
+  votes, their times and its close are taken as they come, without the ownership check and
+  without correction: a device restoring someone else's closed poll has to carry the close
+  and the times, and stamping them with today's time would void the finished count. So
+  someone who can delete a poll (its author, a moderator) can delete it and push it back
+  under the same id with a count of their own making. Closing that needs a relay-side
+  record of each poll's votes.
+
+**What nothing enforces.** Under end-to-end encryption the relay reads no poll field, so none
+of the relay rules exist: times are then the writers' device clocks and a modified client can
+backdate its own vote or rewrite its own close, with only the reducer's rule left. Votes are
+not anonymous in storage in any mode: each is a field named after its voter, held by every
+member's device and by the relay.
+
+**Voter visibility.** When `showVoters` is not true, `project_poll` hands the layer above it
+the counts (`counts`, `voters`) and the reader's own vote, and no other sender id; the apps
+have no names to draw. The reader is whoever the process signed in (`set_viewer`); the relay
+and the boxes set none and get no names. The ids are still in the document.
 
 **Older builds** read a poll through the strict validator, which rejects the new `showVoters`
 field, so a poll posted by a new build is plain text to them ("Poll: question / 1. … / 2. …"):
 readable, not votable, and nothing they write can alter it. This is deliberate. A build that
 does not know about closing would otherwise keep offering votes on a closed poll and would
-show voter names on hover (Mac) for a poll whose author hid them. The relay has to run this
-change before the apps do: a relay without it refuses the new shape as `bad_poll`.
+show voter names on hover (Mac) for a poll whose author hid them. **Deploy order:** the relay
+has to run this change before any client that writes the new fields; a relay without it
+refuses the new shape as `bad_poll` and that client's push is stuck.
 
 **Replies and removal.** A poll row takes the ordinary message menu: Reply (the quote reads
 "Poll: <question>"), Delete for its author and the chat's moderators, no Edit.

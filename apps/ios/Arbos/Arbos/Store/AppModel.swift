@@ -209,7 +209,11 @@ final class AppModel: ObservableObject {
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
-    @Published private(set) var user: AuthUser?
+    @Published private(set) var user: AuthUser? {
+        // A poll that hides its voters hands this phone my own vote and nobody else's, so
+        // the core has to know who is reading.
+        didSet { setPollViewer(sender: myUserId) }
+    }
     #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
     func setFixtureUser(_ who: AuthUser) { user = who }
@@ -6092,8 +6096,14 @@ final class AppModel: ObservableObject {
         #if DEBUG || ARBOS_FIXTURE
         if isFixture, docs[chatId] == nil, let me = myUserId {
             fixturePoll(chatId: chatId, messageId: messageId) { poll in
+                let had = poll.picked(by: me)
+                for id in had { poll.counts[id, default: 1] -= 1 }
                 poll.votes = poll.votes.mapValues { $0.filter { $0 != me } }
-                for id in selections { poll.votes[id, default: []].append(me) }
+                for id in selections {
+                    poll.votes[id, default: []].append(me)
+                    poll.counts[id, default: 0] += 1
+                }
+                poll.voters += (selections.isEmpty ? 0 : 1) - (had.isEmpty ? 0 : 1)
             }
             return
         }
@@ -6125,7 +6135,7 @@ final class AppModel: ObservableObject {
     func closePoll(chatId: Id, messageId: Id) {
         #if DEBUG || ARBOS_FIXTURE
         if isFixture, docs[chatId] == nil {
-            fixturePoll(chatId: chatId, messageId: messageId) { $0.closedAt = nowMs() }
+            fixturePoll(chatId: chatId, messageId: messageId) { $0.deadline = nowMs() }
             return
         }
         #endif

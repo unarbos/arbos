@@ -105,6 +105,10 @@ pub struct MessageChanges {
     /// with a poll on it, and each one it wrote a poll field on: [`POLL_FIELD`] and the
     /// [`POLL_VOTE_PREFIX`] keys. [`Self::rewritten`] says which of them were written.
     pub polls: Vec<(String, Value)>,
+    /// `(message id, its poll fields before the update)` for each message already in the list
+    /// that the update wrote a poll field on — what [`Self::polls`] held at `from`. A message
+    /// the update inserted has no entry: it had nothing before.
+    pub polls_before: Vec<(String, Value)>,
     /// The diff could not be read, so nothing above is known to be complete. A caller deciding
     /// authorisation must treat this as "anything may have changed".
     pub unreadable: bool,
@@ -354,24 +358,29 @@ fn poll_fields(m: &LoroMap) -> Value {
 /// message reads as its text. Call before deserializing a message row.
 ///
 /// A closed poll refuses votes here, for every reader alike: on a timed poll a vote counts
-/// only when its own time (`voteAt|<sender>`) is not after [`Poll::deadline`] — the earlier of
-/// `closesAt` and the author's manual close — and a vote with no time does not count at all.
-/// The rule reads only the row, never this device's clock, so two readers of the same row
-/// agree. The times are the writers' device clocks; a doc has no server order to check them
-/// against. The part carries `closedAt` when the author closed it by hand.
-pub fn project_poll(json: &mut Value) {
+/// only when the poll was not yet closed at the vote's own time (`voteAt|<sender>`, judged by
+/// [`crate::poll::closed`] against [`Poll::deadline`]), and a vote with no time does not count
+/// at all. The rule reads only the row, never this device's clock, so two readers of the same
+/// row agree. For a people chat the relay keeps those times to its own clock (`push_guard`).
+///
+/// The part carries `counts` (option id → how many hold it), `voters` (how many people voted)
+/// and `deadline` when it has one. `votes` (option id → senders) names everyone only where the
+/// author chose "Show who voted"; otherwise it holds `viewer`'s own vote and nobody else's, so
+/// no caller above this function has the other names to show. They are still in the document.
+pub fn project_poll(json: &mut Value, viewer: Option<&str>) {
     let Some(obj) = json.as_object_mut() else {
         return;
     };
     let Some(poll) = obj.get(POLL_FIELD).and_then(Poll::parse) else {
         return;
     };
-    let closed = obj.get(POLL_CLOSED_FIELD).filter(|_| poll.timed());
-    let closed_at = closed.and_then(crate::poll::time);
-    let deadline = poll.deadline(closed);
+    let deadline = poll.deadline(obj.get(POLL_CLOSED_FIELD));
+    let shown = poll.show_voters == Some(true);
     // Sorted, so every reader lists an option's voters in the same order whatever order the
     // doc's map hands its keys over in.
     let mut votes: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut voters = 0usize;
     for (key, value) in obj.iter() {
         let Some(sender) = key.strip_prefix(POLL_VOTE_PREFIX) else {
             continue;
@@ -380,14 +389,17 @@ pub fn project_poll(json: &mut Value) {
             let at = obj
                 .get(&format!("{POLL_VOTE_AT_PREFIX}{sender}"))
                 .and_then(crate::poll::time);
-            match (at, deadline) {
-                (None, _) => continue,
-                (Some(at), Some(deadline)) if at > deadline => continue,
-                _ => {}
+            if at.is_none_or(|at| crate::poll::closed(deadline, at)) {
+                continue;
             }
         }
-        for option in poll.selections(value).unwrap_or_default() {
-            votes.entry(option).or_default().push(sender);
+        let picked = poll.selections(value).unwrap_or_default();
+        voters += usize::from(!picked.is_empty());
+        for option in picked {
+            *counts.entry(option.clone()).or_default() += 1;
+            if shown || viewer == Some(sender) {
+                votes.entry(option).or_default().push(sender);
+            }
         }
     }
     votes.values_mut().for_each(|who| who.sort_unstable());
@@ -396,12 +408,32 @@ pub fn project_poll(json: &mut Value) {
     part["id"] = Value::from("poll");
     part["kind"] = Value::from("poll");
     part["votes"] = votes;
-    if let Some(at) = closed_at {
-        part["closedAt"] = Value::from(at);
+    part["counts"] = serde_json::json!(counts);
+    part["voters"] = Value::from(voters);
+    if let Some(deadline) = deadline {
+        part["deadline"] = Value::from(deadline);
     }
     if let Some(Value::Array(parts)) = obj.get_mut("parts") {
         parts.push(part);
     }
+}
+
+/// Who is reading this process's chat docs (`user:<id>`), for [`project_poll`]: the one
+/// person whose own vote a poll that hides its voters still hands over. Unset — the relay, a
+/// box — hands over nobody's.
+///
+/// Process-wide: each app shows one signed-in person at a time. A per-doc viewer if a process
+/// ever reads docs for two people at once.
+static VIEWER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub fn set_viewer(sender: Option<String>) {
+    *VIEWER.write().unwrap_or_else(|e| e.into_inner()) = sender;
+}
+
+/// [`project_poll`] for [`set_viewer`]'s reader.
+pub fn project_poll_for_viewer(json: &mut Value) {
+    let viewer = VIEWER.read().unwrap_or_else(|e| e.into_inner());
+    project_poll(json, viewer.as_deref());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -971,7 +1003,7 @@ impl ChatDoc {
         let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
         project_hidden_parts(&mut json);
         project_reactions(&mut json);
-        project_poll(&mut json);
+        project_poll_for_viewer(&mut json);
         Some(json)
     }
 
@@ -1246,10 +1278,7 @@ impl ChatDoc {
             return Err(CoreError::msg("not a vote this poll allows"));
         };
         let now = now_ms();
-        if poll
-            .deadline(fields.get(POLL_CLOSED_FIELD))
-            .is_some_and(|deadline| now >= deadline)
-        {
+        if crate::poll::closed(poll.deadline(fields.get(POLL_CLOSED_FIELD)), now) {
             return Err(CoreError::msg("this poll is closed"));
         }
         loro_err(m.insert(
@@ -1278,10 +1307,10 @@ impl ChatDoc {
         if map_str(&m, "sender").as_deref() != Some(sender) {
             return Err(CoreError::msg("only the poll's author closes it"));
         }
+        // Closed already, by hand (even with a time still ahead) or by its own time: the
+        // first close stands.
         let now = now_ms();
-        if poll
-            .deadline(fields.get(POLL_CLOSED_FIELD))
-            .is_some_and(|deadline| now >= deadline)
+        if fields.get(POLL_CLOSED_FIELD).is_some() || crate::poll::closed(poll.deadline(None), now)
         {
             return Ok(());
         }
@@ -2350,7 +2379,34 @@ impl ChatDoc {
                         out.rewritten.push((id.clone(), key.to_string()));
                     }
                     if delta.updated.keys().any(|k| is_poll_key(k)) {
-                        out.polls.push((id, poll_fields(&m)));
+                        // What the written fields held before: the same diff read backwards
+                        // names each one's old value (`None` where it did not exist). Done
+                        // only for a push that writes a poll field, which is rare.
+                        let after = poll_fields(&m);
+                        let mut before = after.clone();
+                        let back = self.doc.diff(to, from).ok();
+                        let old = back.as_ref().and_then(|batch| {
+                            batch.iter().find_map(|(c, d)| match d {
+                                Diff::Map(d) if c == cid => Some(d),
+                                _ => None,
+                            })
+                        });
+                        // No backwards diff is unreachable while the forward one read;
+                        // `before` then says nothing changed, and the caller's checks still run.
+                        if let (Some(old), Some(before)) = (old, before.as_object_mut()) {
+                            for (key, value) in old.updated.iter().filter(|(k, _)| is_poll_key(k)) {
+                                match value {
+                                    Some(ValueOrContainer::Value(v)) => {
+                                        before.insert(key.to_string(), lv_to_json(v));
+                                    }
+                                    _ => {
+                                        before.remove(key.as_ref() as &str);
+                                    }
+                                }
+                            }
+                        }
+                        out.polls_before.push((id.clone(), before));
+                        out.polls.push((id, after));
                     }
                 }
                 _ => {}
@@ -2808,6 +2864,11 @@ mod message_change_tests {
         assert_eq!(fields["poll"], json!(poll));
         assert_eq!(fields["vote|user:bob"], json!(["2"]));
         assert!(crate::poll::time(&fields["voteAt|user:bob"]).is_some());
+        assert_eq!(
+            changes.polls_before,
+            [("p1".to_owned(), json!({ "poll": poll }))],
+            "and what the row held before the vote"
+        );
 
         // The writer refuses what the poll does not allow, and a row without a poll.
         assert!(doc
@@ -2858,12 +2919,13 @@ mod message_change_tests {
             let parts = row["parts"].as_array().unwrap();
             assert_eq!(parts[0]["kind"], "text");
             assert_eq!(message_text(row), "Poll: Where?\n1. Lisbon\n2. Berlin");
+            // This poll hides its voters and nobody is reading: counts, and no names.
             assert_eq!(
                 parts[1],
                 json!({ "id": "poll", "kind": "poll", "question": "Where?", "max": 1,
                     "showVoters": false,
                     "options": [{ "id": "1", "label": "Lisbon" }, { "id": "2", "label": "Berlin" }],
-                    "votes": { "2": ["user:alice", "user:bob"] } })
+                    "votes": {}, "counts": { "2": 2 }, "voters": 2 })
             );
         }
 
@@ -2871,63 +2933,143 @@ mod message_change_tests {
         let mut row = json!({ "poll": { "question": "Q", "options": [], "max": 1 },
             "parts": [{ "id": "t", "kind": "text", "text": "Poll: Q" }] });
         let untouched = row.clone();
-        project_poll(&mut row);
+        project_poll(&mut row, None);
         assert_eq!(row, untouched);
         // And a vote the poll does not allow counts for nothing.
         let mut row = json!({ "poll": poll, "vote|user:x": ["9"], "vote|user:y": ["1", "2"],
             "voteAt|user:x": 5, "voteAt|user:y": 5, "parts": [] });
-        project_poll(&mut row);
-        assert_eq!(row["parts"][0]["votes"], json!({}));
+        project_poll(&mut row, None);
+        assert_eq!(row["parts"][0]["counts"], json!({}));
+        assert_eq!(row["parts"][0]["voters"], 0);
     }
 
-    /// The reducer's close rule, over rows as any reader holds them: a vote counts when its
-    /// own time is not after the deadline, whatever this device's clock says, so every reader
-    /// of the same row draws the same count.
+    /// Who voted leaves the projection only where the author chose to show it. Otherwise a
+    /// reader gets the counts and their own vote, and nobody else's name.
+    #[test]
+    fn voter_names_are_projected_only_when_the_poll_shows_them() {
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        let part = |show: bool, viewer: Option<&str>| {
+            let poll = Poll::new("Where?", &labels, true, show, None).unwrap();
+            let mut row = json!({ "poll": poll, "parts": [],
+                "vote|user:ana": ["1", "2"], "voteAt|user:ana": 5,
+                "vote|user:ben": ["2"], "voteAt|user:ben": 6,
+                "vote|user:cat": [], "voteAt|user:cat": 7 });
+            project_poll(&mut row, viewer);
+            row["parts"][0].clone()
+        };
+        let shown = part(true, None);
+        assert_eq!(
+            shown["votes"],
+            json!({ "1": ["user:ana"], "2": ["user:ana", "user:ben"] })
+        );
+        for hidden in [part(false, None), part(false, Some("user:zed"))] {
+            assert_eq!(hidden["votes"], json!({}), "no names at all");
+            assert!(!hidden.to_string().contains("user:"), "{hidden}");
+        }
+        let mine = part(false, Some("user:ben"));
+        assert_eq!(
+            mine["votes"],
+            json!({ "2": ["user:ben"] }),
+            "my own vote only"
+        );
+        assert!(!mine.to_string().contains("user:ana"));
+        // The counts are the same whoever reads, and a retraction is nobody voting.
+        for p in [shown, mine] {
+            assert_eq!(p["counts"], json!({ "1": 1, "2": 2 }));
+            assert_eq!(p["voters"], 2);
+        }
+    }
+
+    fn timed_poll(show_voters: bool, closes_at: Option<i64>) -> Poll {
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        Poll {
+            closes_at,
+            ..Poll::new("Where?", &labels, false, show_voters, None).unwrap()
+        }
+    }
+
+    /// The reducer's close rule, over rows as any reader holds them: a vote counts when the
+    /// poll was still open at the vote's own time, whatever this device's clock says, so
+    /// every reader of the same row draws the same count.
     #[test]
     fn a_closed_poll_counts_only_the_votes_written_before_it_closed() {
-        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
         let votes = |mut row: Value| {
             row["parts"] = json!([]);
-            project_poll(&mut row);
+            project_poll(&mut row, None);
             row["parts"][0].clone()
         };
         // Closed by its duration at 100.
-        let timed = Poll::new("Where?", &labels, false, false, Some(100)).unwrap();
+        let timed = timed_poll(true, Some(100));
         let part = votes(json!({ "poll": timed,
             "vote|user:early": ["1"], "voteAt|user:early": 99,
             "vote|user:edge": ["1"], "voteAt|user:edge": 100,
             "vote|user:late": ["2"], "voteAt|user:late": 101,
             "vote|user:untimed": ["2"],
             "vote|user:junk": ["2"], "voteAt|user:junk": "yesterday" }));
-        assert_eq!(part["votes"], json!({ "1": ["user:early", "user:edge"] }));
-        assert_eq!(part["closesAt"], 100);
-        assert!(part.get("closedAt").is_none(), "nobody closed it by hand");
+        assert_eq!(part["votes"], json!({ "1": ["user:early"] }));
+        assert_eq!(part["counts"], json!({ "1": 1 }));
+        assert_eq!(part["deadline"], 100);
 
         // Closed by its author at 50, before its duration ran out: the earlier one decides.
         let part = votes(json!({ "poll": timed, "pollClosed": 50,
-            "vote|user:early": ["1"], "voteAt|user:early": 50,
-            "vote|user:late": ["2"], "voteAt|user:late": 51 }));
+            "vote|user:early": ["1"], "voteAt|user:early": 49,
+            "vote|user:late": ["2"], "voteAt|user:late": 50 }));
         assert_eq!(part["votes"], json!({ "1": ["user:early"] }));
-        assert_eq!(part["closedAt"], 50);
+        assert_eq!(part["deadline"], 50);
 
         // A close that is not a time closes nothing.
-        let open = Poll::new("Where?", &labels, false, true, None).unwrap();
-        let part = votes(json!({ "poll": open, "pollClosed": "now",
+        let part = votes(json!({ "poll": timed_poll(true, None), "pollClosed": "now",
             "vote|user:a": ["1"], "voteAt|user:a": 7 }));
         assert_eq!(part["votes"], json!({ "1": ["user:a"] }));
-        assert!(part.get("closedAt").is_none());
-        assert_eq!(
-            part["showVoters"], true,
-            "the visibility flag rides on the part"
-        );
+        assert!(part.get("deadline").is_none());
 
         // A poll from before the new fields: votes carry no time and count, and a close
         // written on it is ignored — it cannot be closed.
         let old = json!({ "question": "Where?", "max": 1,
             "options": [{ "id": "1", "label": "Lisbon" }, { "id": "2", "label": "Berlin" }] });
         let part = votes(json!({ "poll": old, "pollClosed": 1, "vote|user:a": ["2"] }));
-        assert_eq!(part["votes"], json!({ "2": ["user:a"] }));
-        assert!(part.get("closedAt").is_none() && part.get("showVoters").is_none());
+        assert_eq!(part["counts"], json!({ "2": 1 }));
+        assert!(part.get("deadline").is_none() && part.get("showVoters").is_none());
+    }
+
+    /// A close and a vote written apart reach the same tally whichever is merged first: the
+    /// count is read from the merged row, not from the order the updates arrived in.
+    #[test]
+    fn a_close_and_a_vote_merged_in_either_order_reach_the_same_tally() {
+        let author = ChatDoc::new(Some(1), false);
+        author
+            .append_poll_message("p1", &timed_poll(true, None), "dev", &with("user:alice"))
+            .unwrap();
+        author.commit_now();
+        let voter = ChatDoc::from_snapshot(Some(2), false, &author.snapshot()).unwrap();
+        let (base_author, base_voter) = (author.oplog_vv(), voter.oplog_vv());
+        // Bob votes before the close and Carol after it, each on a device that has not
+        // heard of the close. Times are written by hand so the order is not the test's speed.
+        voter.set_message_fields(
+            "p1",
+            &[
+                ("vote|user:bob", json!(["1"])),
+                ("voteAt|user:bob", json!(40)),
+                ("vote|user:carol", json!(["2"])),
+                ("voteAt|user:carol", json!(60)),
+            ],
+        );
+        author.set_message_fields("p1", &[(POLL_CLOSED_FIELD, json!(50))]);
+        let (close, votes) = (
+            author.export_updates_since(&base_author),
+            voter.export_updates_since(&base_voter),
+        );
+
+        let tally = |first: &[u8], second: &[u8]| {
+            let mut doc = ChatDoc::from_snapshot(Some(9), false, &author.snapshot()).unwrap();
+            doc.import(first).unwrap();
+            doc.import(second).unwrap();
+            doc.projected_rows()[0]["parts"][1].clone()
+        };
+        let (close_first, votes_first) = (tally(&close, &votes), tally(&votes, &close));
+        assert_eq!(close_first, votes_first);
+        assert_eq!(close_first["votes"], json!({ "1": ["user:bob"] }));
+        assert_eq!(close_first["deadline"], 50);
     }
 
     /// The writers hold the same line: only the author closes, and a closed poll takes no
@@ -2935,38 +3077,44 @@ mod message_change_tests {
     #[test]
     fn only_the_author_closes_a_poll_and_a_closed_poll_refuses_votes() {
         let doc = ChatDoc::new(Some(1), false);
-        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
-        let poll = Poll::new("Where?", &labels, false, true, None).unwrap();
-        doc.append_poll_message("p1", &poll, "dev", &with("user:alice"))
+        doc.append_poll_message("p1", &timed_poll(true, None), "dev", &with("user:alice"))
             .unwrap();
         doc.set_poll_vote("p1", "user:bob", &["1".into()]).unwrap();
         let tally = || doc.projected_rows()[0]["parts"][1].clone();
         assert_eq!(tally()["votes"], json!({ "1": ["user:bob"] }));
 
         assert!(doc.close_poll("p1", "user:bob").is_err(), "not Bob's poll");
-        assert!(tally().get("closedAt").is_none());
+        assert!(tally().get("deadline").is_none());
+        // A vote in the very millisecond of the close is not before it.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         doc.close_poll("p1", "user:alice").unwrap();
-        let closed_at = tally()["closedAt"].as_i64().unwrap();
+        let closed_at = tally()["deadline"].as_i64().unwrap();
         assert!(doc
             .set_poll_vote("p1", "user:carol", &["2".into()])
             .is_err());
         assert!(doc.set_poll_vote("p1", "user:bob", &["2".into()]).is_err());
         assert!(doc.set_poll_vote("p1", "user:bob", &[]).is_err());
         assert_eq!(tally()["votes"], json!({ "1": ["user:bob"] }));
-        // Closing again changes nothing: the first close stands.
+        // Closing again writes nothing: the first close stands.
+        let before = doc.oplog_vv();
         doc.close_poll("p1", "user:alice").unwrap();
-        assert_eq!(tally()["closedAt"], closed_at);
+        doc.commit_now();
+        assert!(doc.export_updates_since(&before).is_empty() || doc.oplog_vv() == before);
+        assert_eq!(tally()["deadline"], closed_at);
         assert!(doc.close_poll("gone", "user:alice").is_ok());
 
-        // A poll whose time has run out refuses the vote the same way.
-        let over = Poll::new("Where?", &labels, false, false, Some(1)).unwrap();
-        doc.append_poll_message("p2", &over, "dev", &with("user:alice"))
-            .unwrap();
+        // A poll whose time has run out refuses the vote the same way, and is not closed
+        // a second time by hand.
+        doc.append_poll_message(
+            "p2",
+            &timed_poll(false, Some(1)),
+            "dev",
+            &with("user:alice"),
+        )
+        .unwrap();
         assert!(doc.set_poll_vote("p2", "user:bob", &["1".into()]).is_err());
-
-        // The visibility flag is part of the poll, which is written once: a vote and a
-        // close leave it as it was posted.
-        assert_eq!(tally()["showVoters"], true);
+        doc.close_poll("p2", "user:alice").unwrap();
+        assert_eq!(doc.projected_rows()[1]["parts"][1]["deadline"], 1);
     }
 
     /// An insert reports the `sender` the writer put on the row, which is what lets the caller

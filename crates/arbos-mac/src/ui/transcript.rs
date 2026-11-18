@@ -750,8 +750,10 @@ pub enum RowKind {
     /// casts, changes or retracts my vote.
     Poll {
         question: String,
-        /// `(option id, label, the doc senders who hold it)`, in the poll's order.
-        options: Vec<(String, String, Vec<String>)>,
+        /// `(option id, label, how many hold it, the senders this Mac may name)`, in the
+        /// poll's order. The senders are everyone where the poll shows who voted, otherwise
+        /// at most me: the core hands over no other name.
+        options: Vec<(String, String, usize, Vec<String>)>,
         /// "Allow multiple answers".
         multiple: bool,
         /// Whose poll, when it is not mine.
@@ -760,9 +762,10 @@ pub enum RowKind {
         show_voters: bool,
         /// It can be closed (every poll posted since closing exists).
         timed: bool,
-        /// When it closes by itself (ms), and when its author closed it by hand.
-        closes_at: Option<i64>,
-        closed_at: Option<i64>,
+        /// How many people voted.
+        voted: usize,
+        /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
+        deadline: Option<i64>,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
@@ -3606,28 +3609,23 @@ impl Transcript {
                 by,
                 show_voters,
                 timed,
-                closes_at,
-                closed_at,
+                voted,
+                deadline,
             } => {
-                // Closed by hand or by its time. Drawn from this Mac's clock; the counts are
-                // the reducer's, which goes by each vote's own time.
+                // The core's one rule, by this Mac's clock. The counts are the reducer's,
+                // which goes by each vote's own time.
                 let now = arbos_core::ids::now_ms();
-                let closed = closed_at.is_some() || closes_at.is_some_and(|t| now >= t);
+                let closed = arbos_core::poll::closed(deadline, now);
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let look = CardLook::of(&theme);
                 let mine: Vec<String> = options
                     .iter()
-                    .filter(|(_, _, voters)| voters.contains(&me))
+                    .filter(|(.., voters)| voters.contains(&me))
                     .map(|(id, ..)| id.clone())
                     .collect();
-                let voted = options
-                    .iter()
-                    .flat_map(|(_, _, voters)| voters)
-                    .collect::<HashSet<_>>()
-                    .len();
                 let mut list = option_list(&look.palette);
-                for (ix, (id, label, voters)) in options.iter().enumerate() {
+                for (ix, (id, label, count, voters)) in options.iter().enumerate() {
                     let on = mine.contains(id);
                     let next = poll_pick(&mine, id, multiple);
                     let names: SharedString = voters
@@ -3660,7 +3658,7 @@ impl Transcript {
                                 .flex_shrink_0()
                                 .text_size(px(TEXT_SMALL))
                                 .text_color(theme.text_muted)
-                                .child(voters.len().to_string()),
+                                .child(count.to_string()),
                         )
                         // Who voted for it, behind a hover — the reaction chip's tip — and
                         // only where the author chose "Show who voted".
@@ -3679,13 +3677,13 @@ impl Transcript {
                     );
                 }
                 let mine_to_close = by.is_none() && timed && !closed;
-                let foot = poll_foot(
+                let foot = arbos_core::poll::foot(
                     by.as_deref(),
-                    voted,
+                    voted as u32,
                     multiple,
                     show_voters,
                     closed,
-                    closes_at.map(|t| t - now),
+                    deadline.map(|t| t - now),
                 );
                 let (state, chat, message_id) =
                     (self.state.clone(), chat_id.clone(), row.message_id.clone());
@@ -4007,38 +4005,6 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
     } else {
         assistant_slot(bubble)
     }
-}
-
-/// The line under a poll's options: "Ana's poll · 3 voted · pick one · names shown · closes
-/// in 2 h", or "… · closed" once it is. `left_ms` is the time to its own close, when it has one.
-fn poll_foot(
-    by: Option<&str>,
-    voted: usize,
-    multiple: bool,
-    show_voters: bool,
-    closed: bool,
-    left_ms: Option<i64>,
-) -> String {
-    let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
-    let rule = match (closed, multiple) {
-        (true, _) => "closed",
-        (false, true) => "pick any",
-        (false, false) => "pick one",
-    };
-    let mut foot = format!("{whose} · {voted} voted · {rule}");
-    if show_voters {
-        foot.push_str(" · names shown");
-    }
-    if let Some(left) = left_ms.filter(|_| !closed) {
-        let minutes = (left / 60_000).max(1);
-        let left = match minutes {
-            m if m >= 2 * 24 * 60 => format!("{} days", m / (24 * 60)),
-            m if m >= 60 => format!("{} h", m / 60),
-            m => format!("{m} min"),
-        };
-        foot.push_str(&format!(" · closes in {left}"));
-    }
-    foot
 }
 
 /// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
@@ -4968,21 +4934,23 @@ pub fn build_rows_with_cache(
                         options,
                         max,
                         votes,
+                        counts,
+                        voters,
                         show_voters,
-                        closes_at,
-                        closed_at,
+                        deadline,
                         ..
                     } => Some(RowKind::Poll {
                         show_voters: *show_voters == Some(true),
                         timed: show_voters.is_some(),
-                        closes_at: *closes_at,
-                        closed_at: *closed_at,
+                        voted: *voters,
+                        deadline: *deadline,
                         question: question.clone(),
                         options: options
                             .iter()
                             .map(|o| {
-                                let voters = votes.get(&o.id).cloned().unwrap_or_default();
-                                (o.id.clone(), o.label.clone(), voters)
+                                let count = counts.get(&o.id).copied().unwrap_or(0);
+                                let senders = votes.get(&o.id).cloned().unwrap_or_default();
+                                (o.id.clone(), o.label.clone(), count, senders)
                             })
                             .collect(),
                         multiple: *max > 1,
@@ -12255,8 +12223,8 @@ mod poll_rows_tests {
             by,
             show_voters,
             timed,
-            closes_at,
-            closed_at,
+            voted,
+            deadline,
         } = &rows[1].kind
         else {
             panic!("the poll row is a poll card");
@@ -12266,9 +12234,9 @@ mod poll_rows_tests {
             "the author's choice rides on the row"
         );
         assert_eq!(
-            (*closes_at, *closed_at),
-            (None, None),
-            "open, no time limit"
+            (*voted, *deadline),
+            (2, None),
+            "two voted; open, no time limit"
         );
         // A reply quotes the poll by its question, not by its list of options.
         assert_eq!(quote_text(&messages[0]), "Poll: Where?");
@@ -12278,10 +12246,11 @@ mod poll_rows_tests {
         assert_eq!(
             options,
             &[
-                ("1".to_owned(), "Lisbon".to_owned(), vec![]),
+                ("1".to_owned(), "Lisbon".to_owned(), 0, vec![]),
                 (
                     "2".to_owned(),
                     "Berlin".to_owned(),
+                    2,
                     vec!["user:ana".to_owned(), "user:me".to_owned()]
                 ),
             ]
@@ -12315,28 +12284,50 @@ mod poll_rows_tests {
         assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
     }
 
+    /// A poll that hides its voters reaches this Mac with counts and the reader's own vote:
+    /// no other member's id is in the message the transcript is built from, so no surface
+    /// above it can name them.
     #[test]
-    fn the_foot_says_whose_poll_how_many_voted_and_whether_it_is_open() {
+    fn a_poll_that_hides_its_voters_gives_the_mac_no_other_names() {
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let mut row = serde_json::json!({ "id": "p1", "role": "user", "sender": "user:zoe",
+            "status": "done", "createdAt": 1, "poll": poll,
+            "vote|user:ana": ["2"], "voteAt|user:ana": 5,
+            "vote|user:me": ["2"], "voteAt|user:me": 6,
+            "parts": [{ "id": "t", "kind": "text", "text": "Poll: Where?" }] });
+        arbos_core::doc::project_poll(&mut row, Some("user:me"));
+        let message: Message = serde_json::from_value(row).expect("a core row reads as a Message");
+        let Some(Part::Poll {
+            votes,
+            counts,
+            voters,
+            ..
+        }) = message
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Poll { .. }))
+        else {
+            panic!("the poll part");
+        };
         assert_eq!(
-            poll_foot(None, 0, false, false, false, None),
-            "Your poll · 0 voted · pick one"
+            (counts.get("2"), *voters),
+            (Some(&2), 2),
+            "both votes are counted"
         );
         assert_eq!(
-            poll_foot(Some("Ana"), 3, true, true, false, Some(2 * 3_600_000 + 5)),
-            "Ana's poll · 3 voted · pick any · names shown · closes in 2 h"
+            votes.get("2"),
+            Some(&vec!["user:me".to_owned()]),
+            "my own vote"
         );
-        assert_eq!(
-            poll_foot(None, 1, false, false, false, Some(30_000)),
-            "Your poll · 1 voted · pick one · closes in 1 min"
-        );
-        assert_eq!(
-            poll_foot(None, 1, false, false, false, Some(7 * 24 * 3_600_000)),
-            "Your poll · 1 voted · pick one · closes in 7 days"
-        );
-        assert_eq!(
-            poll_foot(Some("Ana"), 3, true, false, true, Some(-5)),
-            "Ana's poll · 3 voted · closed"
-        );
+        let whole = serde_json::to_string(&message).unwrap();
+        assert!(!whole.contains("user:ana"), "{whole}");
     }
 
     #[test]

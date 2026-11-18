@@ -7472,9 +7472,8 @@ impl AppState {
         closes_in_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let closes_at = closes_in_ms.map(|d| arbos_core::ids::now_ms() + d);
         let Some(poll) =
-            arbos_core::poll::Poll::new(question, options, multiple, show_voters, closes_at)
+            arbos_core::poll::Poll::new(question, options, multiple, show_voters, closes_in_ms)
         else {
             return false;
         };

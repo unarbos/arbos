@@ -15,8 +15,47 @@ const OPTION_ID_MAX: usize = 8;
 /// The latest time a poll field may name, in ms since the epoch (2100-01-01): the sanity bound
 /// on `closesAt`, a manual close and a vote's time.
 pub const TIME_MAX: i64 = 4_102_444_800_000;
-/// The longest a composer lets a poll run: one week.
+/// The longest a poll may be posted to run: one week.
 pub const DURATION_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Whether a poll is closed at `now`: the one rule, for the writers, the relay and both apps.
+/// `deadline` is [`Poll::deadline`] (the `deadline` of the projected part); `None` never closes.
+pub fn closed(deadline: Option<i64>, now: i64) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+/// The line under a poll's options, the same words on both apps: "Ana's poll · 3 voted · pick
+/// one · names shown · closes in 2 h", or "… · closed". `by` is whose poll when it is not the
+/// reader's; `left_ms` is the time to the deadline, when it has one.
+pub fn foot(
+    by: Option<&str>,
+    voted: u32,
+    multiple: bool,
+    show_voters: bool,
+    closed: bool,
+    left_ms: Option<i64>,
+) -> String {
+    let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
+    let rule = match (closed, multiple) {
+        (true, _) => "closed",
+        (false, true) => "pick any",
+        (false, false) => "pick one",
+    };
+    let mut foot = format!("{whose} · {voted} voted · {rule}");
+    if show_voters {
+        foot.push_str(" · names shown");
+    }
+    if let Some(left) = left_ms.filter(|_| !closed) {
+        let minutes = (left / 60_000).max(1);
+        let left = match minutes {
+            m if m >= 2 * 24 * 60 => format!("{} days", m / (24 * 60)),
+            m if m >= 60 => format!("{} h", m / 60),
+            m => format!("{m} min"),
+        };
+        foot.push_str(&format!(" · closes in {left}"));
+    }
+    foot
+}
 
 /// A time stored on a poll row (`closesAt`, the manual close, a vote's time): an integer in
 /// `1..=TIME_MAX`. Anything else is not a time.
@@ -59,14 +98,19 @@ fn sized(s: &str, max: usize) -> bool {
 
 impl Poll {
     /// A poll from what a composer collected, or `None` when it is out of bounds. Blank option
-    /// rows are dropped; ids are the option's place in the list.
+    /// rows are dropped; ids are the option's place in the list. `closes_in_ms` is how long it
+    /// runs from now, at most [`DURATION_MAX_MS`]; `None` runs until its author closes it.
     pub fn new(
         question: &str,
         labels: &[String],
         multiple: bool,
         show_voters: bool,
-        closes_at: Option<i64>,
+        closes_in_ms: Option<i64>,
     ) -> Option<Self> {
+        if closes_in_ms.is_some_and(|d| !(1..=DURATION_MAX_MS).contains(&d)) {
+            return None;
+        }
+        let closes_at = closes_in_ms.map(|d| crate::ids::now_ms() + d);
         let options: Vec<PollOption> = labels
             .iter()
             .map(|l| l.trim())
@@ -103,7 +147,11 @@ impl Poll {
         sized(&self.question, QUESTION_MAX)
             && (OPTIONS_MIN..=OPTIONS_MAX).contains(&self.options.len())
             && (1..=self.options.len()).contains(&self.max)
-            && self.closes_at.is_none_or(|t| (1..=TIME_MAX).contains(&t))
+            // A closing time only on a timed poll: without `showVoters` its votes carry no
+            // time and nothing could be held against the close.
+            && self
+                .closes_at
+                .is_none_or(|t| self.timed() && (1..=TIME_MAX).contains(&t))
             && self.options.iter().enumerate().all(|(i, o)| {
                 id_ok(&o.id)
                     && sized(&o.label, LABEL_MAX)
@@ -280,15 +328,25 @@ mod tests {
             "a typed boolean"
         );
         assert!(with("showVoters", json!(1)).is_none());
-        assert!(with("closesAt", json!(1_800_000_000_000i64)).is_some());
-        assert!(with("closesAt", json!(0)).is_none(), "not a time");
-        assert!(with("closesAt", json!(-5)).is_none());
-        assert!(with("closesAt", json!(TIME_MAX + 1)).is_none());
-        assert!(with("closesAt", json!("soon")).is_none());
-        assert!(with("closesAt", json!(1.5)).is_none());
+        assert!(
+            with("closesAt", json!(1_800_000_000_000i64)).is_none(),
+            "a closing time needs a timed poll"
+        );
+        let timed = |closes_at: Value| {
+            let mut v = old.clone();
+            v["showVoters"] = json!(false);
+            v["closesAt"] = closes_at;
+            Poll::parse(&v)
+        };
+        assert!(timed(json!(1_800_000_000_000i64)).is_some());
+        assert!(timed(json!(0)).is_none(), "not a time");
+        assert!(timed(json!(-5)).is_none());
+        assert!(timed(json!(TIME_MAX + 1)).is_none());
+        assert!(timed(json!("soon")).is_none());
+        assert!(timed(json!(1.5)).is_none());
 
         // The deadline is the earlier of the two closes; a close that is not a time is none.
-        let timed = Poll::new("Q", &labels(2), false, false, Some(100)).unwrap();
+        let timed = timed(json!(100)).unwrap();
         assert_eq!(timed.deadline(None), Some(100));
         assert_eq!(timed.deadline(Some(&json!(40))), Some(40));
         assert_eq!(timed.deadline(Some(&json!(400))), Some(100));
@@ -296,6 +354,46 @@ mod tests {
         let open = Poll::new("Q", &labels(2), false, true, None).unwrap();
         assert_eq!(open.deadline(None), None);
         assert_eq!(open.deadline(Some(&json!(7))), Some(7));
+        // One rule for "closed": at the deadline and after it, never without one.
+        assert!(!closed(Some(100), 99) && closed(Some(100), 100) && closed(Some(100), 101));
+        assert!(!closed(None, i64::MAX));
+    }
+
+    /// A composed poll's duration is bounded where the poll is made, for every composer.
+    #[test]
+    fn a_composed_poll_runs_at_most_a_week() {
+        let now = crate::ids::now_ms();
+        let hour = Poll::new("Q", &labels(2), false, false, Some(3_600_000)).unwrap();
+        let closes_at = hour.closes_at.unwrap();
+        assert!((now + 3_600_000..=now + 3_660_000).contains(&closes_at));
+        assert!(Poll::new("Q", &labels(2), false, false, Some(DURATION_MAX_MS)).is_some());
+        assert!(Poll::new("Q", &labels(2), false, false, Some(DURATION_MAX_MS + 1)).is_none());
+        assert!(Poll::new("Q", &labels(2), false, false, Some(0)).is_none());
+        assert!(Poll::new("Q", &labels(2), false, false, Some(-1)).is_none());
+    }
+
+    #[test]
+    fn the_foot_says_whose_poll_how_many_voted_and_whether_it_is_open() {
+        assert_eq!(
+            foot(None, 0, false, false, false, None),
+            "Your poll · 0 voted · pick one"
+        );
+        assert_eq!(
+            foot(Some("Ana"), 3, true, true, false, Some(2 * 3_600_000 + 5)),
+            "Ana's poll · 3 voted · pick any · names shown · closes in 2 h"
+        );
+        assert_eq!(
+            foot(None, 1, false, false, false, Some(30_000)),
+            "Your poll · 1 voted · pick one · closes in 1 min"
+        );
+        assert_eq!(
+            foot(None, 1, false, false, false, Some(7 * 24 * 3_600_000)),
+            "Your poll · 1 voted · pick one · closes in 7 days"
+        );
+        assert_eq!(
+            foot(Some("Ana"), 3, true, false, true, Some(-5)),
+            "Ana's poll · 3 voted · closed"
+        );
     }
 
     #[test]

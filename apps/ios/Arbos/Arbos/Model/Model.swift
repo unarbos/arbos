@@ -688,25 +688,26 @@ struct Poll: Equatable {
     var options: [ChoiceOption]
     /// How many options one person may hold: 1, or the option count for "multiple answers".
     var max: Int
-    /// Option id → the senders (`user:<id>`) who hold it.
+    /// Option id → the senders (`user:<id>`) this phone may name: everyone where the poll
+    /// shows who voted, otherwise my own vote and nobody else's. The core hands over no other
+    /// name (`arbos_core::doc::project_poll`).
     var votes: [String: [String]]
+    /// Option id → how many hold it, and how many people voted.
+    var counts: [String: Int] = [:]
+    var voters = 0
     /// "Show who voted", the author's choice, fixed with the poll. nil on a poll from before
     /// the choice existed: counts only, and it cannot be closed.
     var showVoters: Bool? = nil
-    /// When it closes by itself, and when its author closed it by hand (ms since the epoch).
-    var closesAt: Int64? = nil
-    var closedAt: Int64? = nil
+    /// When it closes or closed (ms since the epoch); nil runs until its author closes it.
+    var deadline: Int64? = nil
 
     var multiple: Bool { max > 1 }
     /// Its author can close it (every poll posted since closing exists).
     var closable: Bool { showVoters != nil }
 
-    /// Closed by hand or by its time, by this phone's clock. The counts are the core
-    /// reducer's, which goes by each vote's own time (`arbos_core::doc::project_poll`).
-    func closed(now: Int64) -> Bool {
-        closedAt != nil || closesAt.map { now >= $0 } == true
-    }
-    var voters: Int { Set(votes.values.joined()).count }
+    /// The core's one rule (`arbos_core::poll::closed`), by this phone's clock. The counts
+    /// are the core reducer's, which goes by each vote's own time.
+    func closed(now: Int64) -> Bool { pollClosed(deadline: deadline, nowMs: now) }
 
     /// The option ids `sender` holds, in the poll's order.
     func picked(by sender: String?) -> [String] {
@@ -722,20 +723,11 @@ struct Poll: Equatable {
         return multiple ? mine + [id] : [id]
     }
 
-    /// The card's foot: "Ana's poll · 3 voted · pick one · names shown · closes in 2 h", or
-    /// "… · closed" once it is.
+    /// The card's foot, in the core's words (`arbos_core::poll::foot`): "Ana's poll · 3 voted ·
+    /// pick one · names shown · closes in 2 h", or "… · closed" once it is.
     func foot(by name: String?, now: Int64 = nowMs()) -> String {
-        let isClosed = closed(now: now)
-        var foot = "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · "
-            + (isClosed ? "closed" : multiple ? "pick any" : "pick one")
-        if showVoters == true { foot += " · names shown" }
-        if let closesAt, !isClosed {
-            let minutes = Swift.max(1, (closesAt - now) / 60_000)
-            let left = minutes >= 2 * 24 * 60 ? "\(minutes / (24 * 60)) days"
-                : minutes >= 60 ? "\(minutes / 60) h" : "\(minutes) min"
-            foot += " · closes in \(left)"
-        }
-        return foot
+        pollFoot(by: name, voted: UInt32(voters), multiple: multiple, showVoters: showVoters == true,
+                 closed: closed(now: now), leftMs: deadline.map { $0 - now })
     }
 }
 
@@ -1750,9 +1742,10 @@ enum DocJSON {
             let votes = (pm["votes"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
             return .poll(id: id, poll: Poll(question: question, options: options,
                                             max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes,
+                                            counts: (pm["counts"] as? [String: NSNumber] ?? [:]).mapValues(\.intValue),
+                                            voters: (pm["voters"] as? NSNumber)?.intValue ?? 0,
                                             showVoters: pm["showVoters"] as? Bool,
-                                            closesAt: (pm["closesAt"] as? NSNumber)?.int64Value,
-                                            closedAt: (pm["closedAt"] as? NSNumber)?.int64Value))
+                                            deadline: (pm["deadline"] as? NSNumber)?.int64Value))
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))

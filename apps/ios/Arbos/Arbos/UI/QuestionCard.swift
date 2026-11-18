@@ -81,17 +81,16 @@ struct QuestionCard: View {
                 } else if !options.isEmpty {
                     list
                 }
-                // A closed poll keeps its foot: it is where the card says "closed".
-                if (open || foot != nil) && !options.isEmpty {
+                // A poll's foot stays on a closed card (it is where the card says "closed") and
+                // carries the author's "Close poll". Every other card's foot is the block below.
+                if let foot, onPick != nil {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(foot ?? (shellCard
-                             ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
-                             : "Or answer in the chat below"))
+                        Text(foot)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(palette.badgeInk)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier(shellCard ? "shell-card-foot" : "question-card-foot")
+                            .accessibilityIdentifier("question-card-foot")
                         if let onClosePoll {
                             // No confirm step: the card says "closed" at once.
                             Button("Close poll") {
@@ -107,6 +106,16 @@ struct QuestionCard: View {
                     }
                     .padding(.top, 4)
                     .padding(.leading, 1)
+                } else if open && !options.isEmpty {
+                    Text(foot ?? (shellCard
+                         ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
+                         : "Or answer in the chat below"))
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(palette.badgeInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                        .padding(.leading, 1)
+                        .accessibilityIdentifier(shellCard ? "shell-card-foot" : "question-card-foot")
                 }
             }
             .padding(.top, Self.pad)
@@ -314,7 +323,14 @@ struct QuestionCard: View {
         VStack(spacing: 0) {
             ForEach(Array(options.enumerated()), id: \.element.id) { ix, option in
                 if ix > 0 { hairline }
-                optionRow(ix: ix, option: option)
+                if let onHint {
+                    HStack(spacing: 0) {
+                        optionRow(ix: ix, option: option)
+                        countButton(option, onHint: onHint)
+                    }
+                } else {
+                    optionRow(ix: ix, option: option)
+                }
             }
             if multi && open && onPick == nil {
                 hairline
@@ -332,70 +348,68 @@ struct QuestionCard: View {
     private func optionRow(ix: Int, option: ChoiceOption) -> some View {
         let chosen = open && onPick == nil ? selected.contains(option.id) : picked.contains(option.id)
         let faded = !open && !chosen
-        // A poll's count is its own control when it lists the voters, so it is not part of
-        // the row's button and still answers on a closed poll.
-        let countTaps = onHint != nil
-        return HStack(spacing: 0) {
-            Button {
-                guard open else { return }
-                if let onPick {
-                    guard account.accepts(model) else { return }
-                    onPick(option.id)
-                    return
-                }
-                Haptics.pick()
-                if multi {
-                    if selected.remove(option.id) == nil { selected.insert(option.id) }
-                } else {
-                    answer(ids: [option.id], label: named(option.label))
-                }
-            } label: {
-                HStack(spacing: 11) {
-                    Text(Self.letter(ix))
-                        .font(theme.font(14))
-                        .foregroundStyle(chosen ? palette.inner : palette.badgeInk)
-                        .frame(width: Self.badge, height: Self.badge)
-                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(chosen ? theme.text : palette.badge))
-                    Text(named(option.label))
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(faded ? theme.placeholder : (option.destructive ? theme.danger : theme.text))
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    if !countTaps, let hint = option.hint, !hint.isEmpty {
-                        Text(named(hint))
-                            .font(theme.font(Theme.tiny))
-                            .foregroundStyle(palette.badgeInk)
-                            .multilineTextAlignment(.trailing)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: 150, alignment: .trailing)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(minHeight: Self.rowHeight)
-                .contentShape(Rectangle())
+        return Button {
+            guard open else { return }
+            if let onPick {
+                guard account.accepts(model) else { return }
+                onPick(option.id)
+                return
             }
-            .buttonStyle(RowPress(enabled: open, fill: palette.press))
-            .disabled(!open)
-            .accessibilityLabel("\(Self.letter(ix)), \(named(option.label))")
-            .accessibilityIdentifier("option-\(option.id)")
-            if let onHint, let hint = option.hint {
-                Button {
-                    guard account.accepts(model) else { return }
-                    onHint(option.id)
-                } label: {
-                    Text(hint)
+            Haptics.pick()
+            if multi {
+                if selected.remove(option.id) == nil { selected.insert(option.id) }
+            } else {
+                answer(ids: [option.id], label: named(option.label))
+            }
+        } label: {
+            HStack(spacing: 11) {
+                Text(Self.letter(ix))
+                    .font(theme.font(14))
+                    .foregroundStyle(chosen ? palette.inner : palette.badgeInk)
+                    .frame(width: Self.badge, height: Self.badge)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(chosen ? theme.text : palette.badge))
+                Text(named(option.label))
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(faded ? theme.placeholder : (option.destructive ? theme.danger : theme.text))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if onHint == nil, let hint = option.hint, !hint.isEmpty {
+                    Text(named(hint))
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(palette.badgeInk)
-                        .frame(minWidth: 44, minHeight: Self.rowHeight)
-                        .contentShape(Rectangle())
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: 150, alignment: .trailing)
                 }
-                .buttonStyle(RowPress(enabled: true, fill: palette.press))
-                .accessibilityLabel("\(hint) voted for \(option.label). Shows who.")
-                .accessibilityIdentifier("option-count-\(option.id)")
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(minHeight: Self.rowHeight)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(RowPress(enabled: open, fill: palette.press))
+        .disabled(!open)
+        .accessibilityLabel("\(Self.letter(ix)), \(named(option.label))")
+        .accessibilityIdentifier("option-\(option.id)")
+    }
+
+    /// A poll that shows who voted: the option's count as its own control beside the row, so
+    /// it lists the voters on a tap and still answers on a closed poll.
+    private func countButton(_ option: ChoiceOption, onHint: @escaping (String) -> Void) -> some View {
+        Button {
+            guard account.accepts(model) else { return }
+            onHint(option.id)
+        } label: {
+            Text(option.hint ?? "")
+                .font(theme.font(Theme.tiny))
+                .foregroundStyle(palette.badgeInk)
+                .frame(minWidth: 44, minHeight: Self.rowHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(RowPress(enabled: true, fill: palette.press))
+        .accessibilityLabel("\(option.hint ?? "0") voted for \(option.label). Shows who.")
+        .accessibilityIdentifier("option-count-\(option.id)")
     }
 
     private var sendRow: some View {

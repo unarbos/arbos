@@ -868,6 +868,12 @@ impl Shared {
         self.me_user().map(|u| u.login).unwrap_or_default()
     }
 
+    /// Before reading chat rows for the UI: a poll that hides its voters hands the reader
+    /// their own vote and nobody else's, so the core has to know who is reading.
+    fn read_polls_as_me(&self) {
+        arbos_core::doc::set_viewer(Some(format!("user:{}", self.me_id())));
+    }
+
     /// Make sure we know who we are before reading chat members (`/me` once).
     async fn ensure_me(self: &Arc<Self>) {
         if self.me_user().is_some() {
@@ -4896,6 +4902,7 @@ fn emit_snapshot_from(shared: &Shared, chat_id: &str, handle: &Arc<RoomDoc<ChatD
         return;
     }
     let Some(doc) = handle.lock() else { return };
+    shared.read_polls_as_me();
     let mut messages = doc.read_all();
     for m in &mut messages {
         apply_pending(shared, chat_id, m);
@@ -5144,6 +5151,7 @@ async fn forward_changes(
                 }
                 let handle = &room_doc;
                 let Some(doc) = handle.lock() else { continue };
+                shared.read_polls_as_me();
                 for ix in touched.messages {
                     if let Some(mut message) = doc.read_message(ix) {
                         apply_pending(&shared, &key, &mut message);
@@ -8252,11 +8260,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{}", shared.me_id());
             let handle = shared.docs.get(&chat_id);
             if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
+                // A refused vote is shown, not dropped: the card may still look open for
+                // a moment after the poll's time ran out.
                 if let Err(e) = doc
                     .core
                     .transact(|d| d.set_poll_vote(&message_id, &me, &selections))
                 {
-                    eprintln!("relay: poll vote: {e:#}");
+                    shared.fail("cast your vote", e.to_string());
                 }
             };
         }
@@ -8268,7 +8278,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let handle = shared.docs.get(&chat_id);
             if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 if let Err(e) = doc.core.transact(|d| d.close_poll(&message_id, &me)) {
-                    eprintln!("relay: poll close: {e:#}");
+                    shared.fail("close the poll", e.to_string());
                 }
             };
         }

@@ -280,6 +280,33 @@ pub fn poll_text(question: String, options: Vec<String>, multiple: bool) -> Opti
     Poll::new(&question, &options, multiple, false, None).map(|p| p.fallback_text())
 }
 
+/// Whether a poll is closed at `now_ms`: the core's one rule (`arbos_core::poll::closed`).
+/// `deadline` is the projected poll part's `deadline`.
+#[uniffi::export]
+pub fn poll_closed(deadline: Option<i64>, now_ms: i64) -> bool {
+    arbos_core::poll::closed(deadline, now_ms)
+}
+
+/// The line under a poll's options (`arbos_core::poll::foot`).
+#[uniffi::export]
+pub fn poll_foot(
+    by: Option<String>,
+    voted: u32,
+    multiple: bool,
+    show_voters: bool,
+    closed: bool,
+    left_ms: Option<i64>,
+) -> String {
+    arbos_core::poll::foot(by.as_deref(), voted, multiple, show_voters, closed, left_ms)
+}
+
+/// Who is signed in on this device (`user:<id>`), so a poll that hides its voters still
+/// hands this app the reader's own vote and nobody else's (`arbos_core::doc::set_viewer`).
+#[uniffi::export]
+pub fn set_poll_viewer(sender: Option<String>) {
+    arbos_core::doc::set_viewer(sender);
+}
+
 /// Encode one binary room frame. `header_json` must be a JSON object.
 #[uniffi::export]
 pub fn encode_frame(
@@ -887,11 +914,7 @@ impl ChatDoc {
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
-        if closes_in_ms.is_some_and(|d| !(1..=arbos_core::poll::DURATION_MAX_MS).contains(&d)) {
-            return Err(write_err("not a poll within bounds"));
-        }
-        let closes_at = closes_in_ms.map(|d| arbos_core::ids::now_ms() + d);
-        let poll = Poll::new(&question, &options, multiple, show_voters, closes_at)
+        let poll = Poll::new(&question, &options, multiple, show_voters, closes_in_ms)
             .ok_or_else(|| write_err("not a poll within bounds"))?;
         self.lock_doc()
             .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
@@ -1326,16 +1349,21 @@ mod tests {
         assert_eq!(row["parts"][1]["kind"], "poll");
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
         assert_eq!(row["parts"][1]["showVoters"], true);
-        assert!(row["parts"][1]["closesAt"].as_i64().unwrap() > arbos_core::ids::now_ms());
+        let deadline = row["parts"][1]["deadline"].as_i64();
+        assert!(deadline.unwrap() > arbos_core::ids::now_ms());
+        assert!(!poll_closed(deadline, arbos_core::ids::now_ms()));
 
         // Only its author closes it, and then it takes no vote.
         assert!(doc.close_poll("p1".into(), "user:b".into()).is_err());
+        // A vote in the very millisecond of the close is not before it.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         doc.close_poll("p1".into(), "user:a".into()).unwrap();
         assert!(doc
             .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into()])
             .is_err());
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
-        assert!(row["parts"][1]["closedAt"].as_i64().is_some());
+        let deadline = row["parts"][1]["deadline"].as_i64();
+        assert!(poll_closed(deadline, arbos_core::ids::now_ms()));
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
     }
 

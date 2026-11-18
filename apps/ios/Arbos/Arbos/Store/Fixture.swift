@@ -306,14 +306,16 @@ extension AppModel {
             }
             messages["fx-group-launch", default: []].append(contentsOf: [
                 pollRow("gp1", sender: "user:fx-u3", handle: "mira-k", name: "Mira Kaplan",
+                        // Voters hidden: the part names my own vote and nobody else's.
                         poll: Poll(question: "Where was the last offsite?", options: options, max: 1,
-                                   votes: ["1": ["user:fx-u3", "user:fx-me"], "2": ["user:fx-u4"]],
-                                   showVoters: false, closedAt: now - 20 * 60_000),
+                                   votes: ["1": ["user:fx-me"]], counts: ["1": 2, "2": 1], voters: 3,
+                                   showVoters: false, deadline: now - 20 * 60_000),
                         at: now - 30 * 60_000),
                 pollRow("gp2", sender: "user:fx-me", handle: "jacob", name: "Jacob Steeves",
                         poll: Poll(question: "Where do we meet?", options: options, max: 1,
                                    votes: ["1": ["user:fx-u3"], "2": ["user:fx-u4"]],
-                                   showVoters: true, closesAt: now + 86_400_000),
+                                   counts: ["1": 1, "2": 1], voters: 2,
+                                   showVoters: true, deadline: now + 86_400_000),
                         at: now - 10 * 60_000),
             ])
         }

@@ -148,6 +148,8 @@ impl SyncSource for FixtureSource {
         mut commands: mpsc::UnboundedReceiver<ClientCommand>,
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
+            // A poll that hides its voters hands the reader their own vote only.
+            arbos_core::doc::set_viewer(Some(format!("user:{ME_ID}")));
             let (doc_tx, mut doc_rx) = mpsc::unbounded_channel();
             let shared = Arc::new(Shared {
                 docs: Arc::new(Mutex::new(HashMap::new())),
