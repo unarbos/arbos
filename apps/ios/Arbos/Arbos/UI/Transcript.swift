@@ -332,6 +332,32 @@ struct Row: Identifiable, Equatable {
     }
 }
 
+extension Row {
+    /// This row as the hold menu lifts it out of a group chat: someone else's bubble that
+    /// continues a sender run carries no name in the transcript, and alone on the blur it
+    /// no longer says whose it is (tester report, 2026-11-17). Nil when the row already
+    /// carries its name or has no sender to name.
+    var namedForHold: Row? {
+        var row = self
+        switch kind {
+        case .other(let text, let handle, let avatar, false, let quote, let preview):
+            row.kind = .other(text: text, handle: handle, avatar: avatar, named: true, quote: quote, preview: preview)
+        case .member(let blocks, let live, let handle, let name, let avatar, false, let agentId, let quote):
+            row.kind = .member(blocks: blocks, live: live, handle: handle, name: name, avatar: avatar, named: true,
+                               agentId: agentId, quote: quote)
+        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: source,
+                              forwardedFrom: forwardedFrom, sender: sender, named: true, quote: quote)
+        case .file(let item, let subtitle, let caption, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .file(item: item, subtitle: subtitle, caption: caption, forwardedFrom: forwardedFrom,
+                             sender: sender, named: true, quote: quote)
+        default:
+            return nil
+        }
+        return row
+    }
+}
+
 enum Transcript {
     /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-ios-2026-10-28]):
     /// consecutive messages from one sender this close together (ms) form one **run** —
@@ -383,6 +409,42 @@ enum Transcript {
             return set(message.replyTo) || (people && message.senderHandle != nil && set(message.inReplyTo))
         case .system:
             return false
+        }
+    }
+
+    /// Rows that can carry a message's reaction chips: prose and media.
+    static func bearsReactions(_ kind: RowKind) -> Bool {
+        switch kind {
+        case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+        default: return false
+        }
+    }
+
+    /// The one message of `list` that differs from `was`, when all that differs is its
+    /// reactions; nil for any other edit. `list` and `was` hold the same ids.
+    static func reactionOnlyEdit(_ list: [Message], was: [Id: Message]) -> Message? {
+        var edited: Message?
+        for m in list where was[m.id] != m {
+            guard edited == nil, reactionOnly(m, was: was[m.id]) != nil else { return nil }
+            edited = m
+        }
+        return edited
+    }
+
+    /// `message` when it differs from `was` in its reactions and nothing else.
+    static func reactionOnly(_ message: Message, was: Message?) -> Message? {
+        guard var old = was, old.reactions != message.reactions else { return nil }
+        old.reactions = message.reactions
+        return old == message ? message : nil
+    }
+
+    /// Put `message`'s reactions on its rows as `rows(_:)` would, leaving every other row as
+    /// it is. A reaction used to rebuild the whole transcript before its chip could show.
+    static func restampReactions(_ rows: inout [Row], for message: Message) {
+        let own = rows.indices.filter { rows[$0].messageId == message.id }
+        let bearer = message.reactions.isEmpty ? nil : own.last { bearsReactions(rows[$0].kind) }
+        for i in own where rows[i].reactions != (i == bearer ? message.reactions : []) {
+            rows[i].reactions = i == bearer ? message.reactions : []
         }
     }
 
@@ -857,13 +919,7 @@ enum Transcript {
             if runStart, let ix = chunk.lastIndex(where: { Self.bearsAvatar($0.kind) }) {
                 chunk[ix].showsAvatar = true
             }
-            if !message.reactions.isEmpty,
-               let ix = chunk.lastIndex(where: {
-                   switch $0.kind {
-                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
-                   default: return false
-                   }
-               }) {
+            if !message.reactions.isEmpty, let ix = chunk.lastIndex(where: { bearsReactions($0.kind) }) {
                 chunk[ix].reactions = message.reactions
             }
             // Reply count on the first prose/media row so the badge sits on the message's top bubble.
@@ -1634,6 +1690,7 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+                    .transition(.reactionPop)
                 if showReactionSenders {
                     ForEach(row.reactions, id: \.emoji) { reaction in
                         reactionSenders(reaction)
@@ -2113,8 +2170,10 @@ struct RowView: View, Equatable {
                         )
                 )
                 .contentShape(Capsule(style: .continuous))
+                .transition(.reactionPop)
                 .onTapGesture {
                     guard account.accepts(model) else { return }
+                    ChatGestures.chipTap = (row.messageId, ProcessInfo.processInfo.systemUptime)
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 }
                 // High-priority so the row's bubble long-press (capsule + menu)
@@ -2297,6 +2356,12 @@ struct RowView: View, Equatable {
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
     /// 6 from the reply quote to the text (#1393).
     static let nameToTextGap: CGFloat = 2
+    /// What the name line adds to a bubble's height (`LiveSenderName`, 16 pt at least for
+    /// the agent badge, plus the gap under it). A media card's name sits 4 pt above the
+    /// card, not 2: the hold menu, the one reader, lands 2 pt low there.
+    static func nameLineHeight(_ theme: Theme) -> CGFloat {
+        max(16, UIFont.systemFont(ofSize: theme.pt(Theme.small), weight: .semibold).lineHeight) + nameToTextGap
+    }
     static let quoteToTextGap: CGFloat = 6
 
     /// A people-chat member's name inside its bubble, in the same colour as its bar

@@ -161,4 +161,57 @@ final class ReactionPickerUITests: XCTestCase {
         shot("\(tag)-4-after-pick")
         XCTAssertEqual(anyChip.count, chipsBefore + 1, "the tapped emoji is a new chip under the bubble")
     }
+
+    /// A double-tap placed on the bubble itself. `bubble:<id>` is the whole row, chips included,
+    /// so the middle of the element is the chip's edge once a chip is there.
+    private func doubleTapBubble(_ bubble: XCUIElement) {
+        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).doubleTap()
+    }
+
+    /// The open chat with my ❤️ on its newest bubble, put there by a double-tap.
+    private func hearted() -> (app: XCUIApplication, bubble: XCUIElement, heart: XCUIElement) {
+        let app = launch()
+        let bubble = lastBubble(app)
+        let heart = chip(app, "❤️")
+        XCTAssertFalse(heart.exists, "no ❤️ chip before the double-tap")
+        doubleTapBubble(bubble)
+        XCTAssertTrue(heart.waitForExistence(timeout: settle), "a ❤️ chip sits under the bubble")
+        XCTAssertEqual(heart.label, "❤️ reaction, 1")
+        return (app, bubble, heart)
+    }
+
+    /// Double-tap a bubble: a ❤️ chip, mine. Again: gone (tester reports, 2026-11-13 and
+    /// 2026-11-16: the heart lagged, and taking it off lagged).
+    func testDoubleTapHeartsAndUnhearts() {
+        let (_, bubble, heart) = hearted()
+        shot("double-tap-1-on")
+        doubleTapBubble(bubble)
+        assertGone(heart, "the second double-tap took the ❤️ off")
+        shot("double-tap-2-off")
+    }
+
+    /// Two quick taps on my chip: the first takes it off, and the row's double-tap does not
+    /// put a heart back (tester report, 2026-11-16, "double reaction").
+    func testTwoTapsOnAChipAreNotAHeart() {
+        let (_, _, heart) = hearted()
+        heart.doubleTap()
+        sleep(2)
+        shot("double-tap-3-chip")
+        XCTAssertFalse(heart.exists, "the tap on the chip took it off, and the double-tap did not heart the message again")
+    }
+
+    /// A tap on the bubble and then one on the chip, as close together as the two taps of a
+    /// double-tap: the chip's tap takes the heart off and the pair is not a heart.
+    func testATapOnTheBubbleThenOneOnTheChipIsNotAHeart() {
+        let (app, bubble, heart) = hearted()
+        // Screen points taken first, so nothing is looked up between the two taps.
+        let screen = app.coordinate(withNormalizedOffset: .zero)
+        let onBubble = screen.withOffset(CGVector(dx: bubble.frame.midX, dy: bubble.frame.minY + bubble.frame.height * 0.2))
+        let onChip = screen.withOffset(CGVector(dx: heart.frame.midX, dy: heart.frame.midY))
+        onBubble.tap()
+        onChip.tap()
+        sleep(2)
+        shot("double-tap-4-bubble-then-chip")
+        XCTAssertFalse(heart.exists, "a tap on the bubble and one on the chip left the chip's own tap and no heart")
+    }
 }

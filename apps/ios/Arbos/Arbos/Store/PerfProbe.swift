@@ -100,7 +100,7 @@ enum PerfSignpost {
 
     /// Which branch of `ChatSession.refreshRows()` ran: `full` walks every message in the chat.
     enum RowsPath: String {
-        case unchanged, tail, append, full
+        case unchanged, tail, reaction, append, full
     }
 
     struct RowsMark {
@@ -112,7 +112,11 @@ enum PerfSignpost {
         RowsMark(state: signposter.beginInterval("rows-build", id: signposter.makeSignpostID()), started: CACurrentMediaTime())
     }
 
+    /// The branch the last refresh took, for tests.
+    static var lastRowsPath: RowsPath?
+
     static func rowsEnd(_ mark: RowsMark, path: RowsPath, messages: Int, rows: Int, window: Int) {
+        lastRowsPath = path
         signposter.endInterval("rows-build", mark.state,
                                "\(path.rawValue, privacy: .public) messages=\(messages) rows=\(rows) window=\(window)")
         FrameProbe.shared.logRows(path: path, messages: messages, rows: rows, window: window,
@@ -172,7 +176,7 @@ enum PerfSignpost {
         path.last(where: { (route: AppModel.Route) -> Bool in
             switch route {
             case .chat, .server: return true
-            case .profile, .ownProfile, .newMessage: return false
+            case .profile, .ownProfile, .newMessage, .archived: return false
             }
         })
     }
@@ -183,7 +187,7 @@ enum PerfSignpost {
         case .server: return nil
         // Never reached: `measuredTop` reads through a profile / compose push. Spelled
         // out so a new route cannot silently join the "not a chat" branch.
-        case .profile, .ownProfile, .newMessage: return nil
+        case .profile, .ownProfile, .newMessage, .archived: return nil
         }
     }
 

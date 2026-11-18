@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, Entity, Hsla, RenderImage};
+use gpui::{point, px, size, App, Bounds, Entity, Hsla, Pixels, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
@@ -33,6 +33,77 @@ use crate::ui::theme::Theme;
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
+/// The clear space two neighbouring pills keep (tester, 2026-11-14: "these
+/// blue '@ mentions' clip into each other"), see [`pills`].
+pub const PILL_GAP: f32 = 2.0;
+/// The least a pill reaches past its text toward a neighbour on its line.
+pub const PILL_PAD_MIN: f32 = 1.0;
+
+/// The pill of each text fragment `(x0, x1, top)` on `line_h` lines, in the
+/// fragments' coordinates: `PILL_PAD_X` wider than the text on each side and
+/// `PILL_PAD_Y` taller than the line above and below — except toward another
+/// pill, so that neighbours never run into each other:
+/// - on one line, a pill closer than two pads and `PILL_GAP` to its
+///   neighbour ("@a @b" is one space apart) is narrowed, the same on both of
+///   its sides, to half of what the space leaves after the gap, and never
+///   below `PILL_PAD_MIN`. With a 3.5 pt space that is 1 pt pads and 1.5 pt
+///   between the pills; texts closer than 2 pt would still meet;
+/// - a pill with another over or under it on the neighbouring line is
+///   `PILL_GAP` shorter than its line, top and bottom alike, so the two keep
+///   `PILL_GAP` between them and each stays centred on its line — the
+///   picture, centred on the line too, stays on the pill's centre line
+///   (Jacob's ask `mention-chip-highlight-2026-10-28`). A pill with nothing
+///   stacked against it keeps its full height.
+///
+/// O(n²) over one text's chips; sort by line if a message ever carries hundreds.
+pub fn pills(fragments: &[(Pixels, Pixels, Pixels)], line_h: Pixels) -> Vec<Bounds<Pixels>> {
+    let mut pills: Vec<Bounds<Pixels>> = fragments
+        .iter()
+        .enumerate()
+        .map(|(i, &(x0, x1, top))| {
+            let space = fragments
+                .iter()
+                .enumerate()
+                .filter(|(j, f)| *j != i && f.2 == top)
+                .filter_map(|(_, f)| {
+                    if f.1 <= x0 {
+                        Some(x0 - f.1)
+                    } else if f.0 >= x1 {
+                        Some(f.0 - x1)
+                    } else {
+                        None
+                    }
+                })
+                .fold(Pixels::MAX, Pixels::min);
+            let pad = px(PILL_PAD_X).min(((space - px(PILL_GAP)) / 2.0).max(px(PILL_PAD_MIN)));
+            Bounds::new(
+                point(x0 - pad, top - px(PILL_PAD_Y)),
+                size(x1 - x0 + pad * 2.0, line_h + px(PILL_PAD_Y * 2.0)),
+            )
+        })
+        .collect();
+    // Stacked: a pill on the line above or below reaches over this one.
+    // (`* 1.5`: line tops are fractional while a transcript scrolls.)
+    let stacked: Vec<bool> = (0..pills.len())
+        .map(|i| {
+            (0..pills.len()).any(|j| {
+                let apart = (fragments[i].2 - fragments[j].2).abs();
+                apart > line_h * 0.5
+                    && apart < line_h * 1.5
+                    && pills[i].left() < pills[j].right()
+                    && pills[j].left() < pills[i].right()
+            })
+        })
+        .collect();
+    let half = px(PILL_GAP / 2.0);
+    for (i, pill) in pills.iter_mut().enumerate() {
+        if stacked[i] {
+            pill.origin.y = fragments[i].2 + half;
+            pill.size.height = line_h - half * 2.0;
+        }
+    }
+    pills
+}
 /// The picture disc, at most; it shrinks to its cell so it never touches
 /// the name (Grok: a clear gap between icon and name).
 pub const PICTURE: f32 = 15.0;

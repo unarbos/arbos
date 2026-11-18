@@ -33,7 +33,6 @@ enum SheetRow {
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var remoteServers: [Server] = []
@@ -384,17 +383,18 @@ struct NewChatSheet: View {
         guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
+        // No `dismiss()` after an open, here or for a person below: opening replaces the
+        // stack, this page with it, and a dismiss after that popped the page just opened
+        // and left a black screen (tester report, 2026-11-15).
         if s.isMember {
             model.open(server: s)
-            dismiss()
             opening = false
             return
         }
         Task {
             guard model.acceptsAccountWork(work) else { return }
-            let opened = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
+            _ = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
             guard model.acceptsAccountWork(work) else { return }
-            if opened { dismiss() }
             opening = false
         }
     }
@@ -405,9 +405,8 @@ struct NewChatSheet: View {
         opening = true
         Task {
             guard model.acceptsAccountWork(work) else { return }
-            let opened = await model.openDM(handle: handle)
+            _ = await model.openDM(handle: handle)
             guard model.acceptsAccountWork(work) else { return }
-            if opened != nil { dismiss() }
             opening = false
         }
     }
