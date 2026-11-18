@@ -238,4 +238,16 @@ impl Db {
             .map(|n| n as usize)
         })
     }
+
+    /// Boxes of a provider that hold a slot on the host: every one but those stopped by hand.
+    pub fn count_resident_boxes(&self, provider: &str) -> Result<usize> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM boxes WHERE provider = ?1 AND held_stopped = 0",
+                params![provider],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+        })
+    }
 }

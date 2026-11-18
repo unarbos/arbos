@@ -269,6 +269,7 @@ pub struct Capacity {
     pub waitlist: usize,
     pub disk_free_gb: f64,
     pub min_free_disk_gb: f64,
+    pub mem_available_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
     /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
@@ -290,31 +291,43 @@ pub fn max_boxes(state: &AppState) -> usize {
 
 pub async fn capacity(state: &AppState) -> Capacity {
     let max = max_boxes(state);
+    // A box its user stopped by hand holds no memory and always-on leaves it down, so it takes
+    // no slot. Unreadable counts as full.
     let resident = state
         .db
-        .count_boxes_of_provider(Provider::Gvisor.as_str())
+        .count_resident_boxes(Provider::Gvisor.as_str())
         .unwrap_or(usize::MAX);
     let waitlist = state.db.waitlist().map(|w| w.len()).unwrap_or(0);
-    let disk_free_gb = disk_free_gb(&state.cfg.data_dir).await;
+    let p = sample_pressure(state).await;
     Capacity {
         max_boxes: max,
         resident,
         waitlist,
-        disk_free_gb,
+        disk_free_gb: p.disk_free_gb,
         min_free_disk_gb: state.cfg.fleet.min_free_disk_gb,
-        has_room: room_for_one(
-            max,
-            resident,
-            disk_free_gb,
-            state.cfg.fleet.min_free_disk_gb,
-        ),
+        mem_available_gb: p.mem_available_gb,
+        has_room: room_for_one(max, resident, &p, &state.cfg.fleet),
         boxd: crate::boxd::capacity(state).await,
     }
 }
 
-/// The gate itself, kept pure for the tests.
-pub fn room_for_one(max: usize, resident: usize, disk_free_gb: f64, min_free_gb: f64) -> bool {
-    resident < max && disk_free_gb >= min_free_gb
+/// The gate itself, kept pure for the tests: a free slot, disk above its floor, and available
+/// memory above the eviction floor. A host that is evicting sandboxes for memory does not make
+/// new ones, whatever the count says.
+pub fn room_for_one(max: usize, resident: usize, p: &Pressure, cfg: &FleetCfg) -> bool {
+    resident < max
+        && p.disk_free_gb >= cfg.min_free_disk_gb
+        && p.mem_available_gb >= cfg.evict_min_available_gb
+}
+
+/// How many waitlisted users one admission tick lets through: the free slots, and none while
+/// the gate is shut.
+pub fn admit_count(cap: &Capacity) -> usize {
+    if cap.has_room {
+        cap.max_boxes.saturating_sub(cap.resident)
+    } else {
+        0
+    }
 }
 
 /// Admit a user who needs a sandbox: `Ok(true)` = go ahead and create it; `Ok(false)` = the host
@@ -1024,22 +1037,23 @@ pub async fn spawn_fleet_tasks(state: AppState) {
             let Ok(list) = state.db.waitlist() else {
                 continue;
             };
-            let Some(first) = list.first() else {
-                continue;
-            };
-            if !capacity(&state).await.has_room {
+            if list.is_empty() {
                 continue;
             }
-            let user_id = first.user_id.clone();
-            let _ = state.db.waitlist_remove(&user_id);
-            let _ = state
-                .db
-                .fleet_event("admitted", Some(&user_id), "slot free (tick)");
-            tracing::info!(%user_id, "waitlist: admitting");
-            boxes::ensure_awake(&state, &user_id, "waitlist admitted").await;
-            let _ = state
-                .db
-                .push_user_event(&user_id, &machine_ready_push(), None);
+            // Every free slot is filled in one tick, oldest first (it was one user a minute: a
+            // raised cap took an hour to reach the sixtieth person in line).
+            let free = admit_count(&capacity(&state).await);
+            for user_id in list.into_iter().take(free).map(|w| w.user_id) {
+                let _ = state.db.waitlist_remove(&user_id);
+                let _ = state
+                    .db
+                    .fleet_event("admitted", Some(&user_id), "slot free (tick)");
+                tracing::info!(%user_id, "waitlist: admitting");
+                boxes::ensure_awake(&state, &user_id, "waitlist admitted").await;
+                let _ = state
+                    .db
+                    .push_user_event(&user_id, &machine_ready_push(), None);
+            }
         }
     });
 }
@@ -1442,10 +1456,72 @@ mod tests {
 
     #[test]
     fn gate_counts_residents_and_disk() {
-        assert!(room_for_one(80, 79, 200.0, 40.0));
-        assert!(!room_for_one(80, 80, 200.0, 40.0), "N reached");
-        assert!(!room_for_one(80, 10, 39.9, 40.0), "disk floor");
-        assert!(room_for_one(80, 10, 40.0, 40.0));
+        let cfg = FleetCfg::default();
+        let host = |disk_free_gb, mem_available_gb| Pressure {
+            disk_free_gb,
+            mem_available_gb,
+            ..Pressure::default()
+        };
+        assert!(room_for_one(80, 79, &host(200.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 80, &host(200.0, 400.0), &cfg),
+            "N reached"
+        );
+        assert!(
+            !room_for_one(80, 10, &host(39.9, 400.0), &cfg),
+            "disk floor"
+        );
+        assert!(room_for_one(80, 10, &host(40.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 10, &host(200.0, 63.9), &cfg),
+            "a host short of memory is evicting; it makes no new sandbox"
+        );
+        assert!(room_for_one(80, 10, &host(200.0, 64.0), &cfg));
+    }
+
+    fn gvisor_row(state: &AppState, user: &str) {
+        state
+            .db
+            .upsert_box(&Sandbox {
+                user_id: user.into(),
+                provider: "gvisor".into(),
+                sandbox_id: Some(container_name(user)),
+                daytona_state: None,
+                device_id: format!("box:{user}"),
+                box_token_hash: "h".into(),
+                mcp_token: "m".into(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    /// A box its user stopped holds no memory and stays down, so it does not keep the next
+    /// sign-up out; and a tick admits as many people as there are free slots, not one.
+    #[tokio::test]
+    async fn a_stopped_box_takes_no_slot_and_a_tick_fills_every_free_one() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_fleet_setting("max_boxes", "3").unwrap();
+        for u in ["u_a", "u_b", "u_c"] {
+            gvisor_row(&state, u);
+        }
+        let mut cap = capacity(&state).await;
+        assert_eq!((cap.max_boxes, cap.resident), (3, 3));
+        state.db.set_box_held("u_a", true).unwrap();
+        state.db.set_box_held("u_b", true).unwrap();
+        cap = capacity(&state).await;
+        assert_eq!(cap.resident, 1);
+        // The host's own disk and memory are not this test's subject.
+        cap.has_room = true;
+        assert_eq!(admit_count(&cap), 2);
+        cap.has_room = false;
+        assert_eq!(admit_count(&cap), 0, "a shut gate admits nobody");
     }
 
     #[test]
