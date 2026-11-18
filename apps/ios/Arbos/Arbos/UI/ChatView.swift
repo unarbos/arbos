@@ -426,6 +426,8 @@ struct ChatSession: View {
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
     /// Driven by the transcript's swipe recognizer (`TranscriptSwipeHost`).
     @State private var timeReveal: CGFloat = 0
+    /// Swipe to reply: the one row a left drag is pulling, and how far (`ReplySwipe.offset`).
+    @State private var replyDrag: (row: Id, offset: CGFloat)?
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -2564,7 +2566,8 @@ struct ChatSession: View {
     /// decided on the first points so a vertical pan is the scroll view's alone. A nested
     /// table scrolling sideways undoes a peek in progress ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
-        guard account.accepts(model) else { return }
+        // A row a reply swipe was pulling never stays pulled.
+        guard account.accepts(model) else { replyDrag = nil; return }
         var still = Transaction()
         still.disablesAnimations = true
         switch event {
@@ -2581,6 +2584,17 @@ struct ChatSession: View {
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        case .replyChanged(let rowId, let dx):
+            let live = ReplySwipe.live(menuOpen: actionsRow != nil, nestedScroll: NestedHorizontalScroll.claiming)
+            withTransaction(still) { replyDrag = (rowId, live ? ReplySwipe.offset(dx: dx) : 0) }
+        case .replyEnded(let rowId, let reply):
+            // No overshoot under Reduce Motion.
+            withAnimation(UIAccessibility.isReduceMotionEnabled ? .easeOut(duration: 0.2) : .spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = nil }
+            // The menu's Reply, for the rows the menu offers it on.
+            if reply, ReplySwipe.live(menuOpen: actionsRow != nil, nestedScroll: NestedHorizontalScroll.claiming),
+               let row = rows.first(where: { $0.id == rowId }), isMessageRow(row) {
+                beginReply(to: row)
+            }
         case .back:
             BackSwipe.dismissKeyboard()
             dismiss()
@@ -3401,7 +3415,8 @@ struct ChatSession: View {
     /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
     /// only focus moves, and `closeActions` gives it back.
     private func openActions(_ row: Row) {
-        guard account.accepts(model) else { return }
+        // No menu, so no hold into one: a latch left set would turn every reply swipe into the peek.
+        guard account.accepts(model) else { ChatGestures.heldIntoMenu = false; return }
         Haptics.pick()
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
@@ -4903,7 +4918,9 @@ extension ChatSession {
             let reply = isMessageRow(row)
             RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    replyDrag: replyDrag?.row == row.id ? replyDrag?.offset ?? 0 : 0,
+                    // (The lift of a reply swipe that began on the quote is not a tap on it.)
+                    onQuoteTap: { quote in if !ChatGestures.replySwiped { revealQuoted(quote, from: row.messageId) } },
                     onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
@@ -4954,6 +4971,8 @@ extension ChatSession {
                                         }
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
+                // VoiceOver's way to what the reply swipe does.
+                .accessibilityActions { if reply { Button("Reply") { beginReply(to: row) } } }
         }
     }
 
