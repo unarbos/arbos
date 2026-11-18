@@ -856,6 +856,7 @@ async fn main() -> anyhow::Result<()> {
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
         )
+        .route("/admin/fleet/evict", post(fleet::admin_fleet_evict))
         .route(
             "/admin/waitlist/{id}/admit",
             post(fleet::admin_waitlist_admit),
