@@ -365,10 +365,12 @@ final class ComposerMetricsTests: XCTestCase {
         guard case .edit(let edit) = await PendingEdit.open(png), case .picture(let image) = edit.source else {
             return XCTFail("a still picture opens in the crop screen")
         }
-        let half = await edit.cropped(image, to: CGRect(x: 0, y: 0, width: 0.5, height: 1))
-        XCTAssertEqual(half?.name, "shot.png")
-        XCTAssertEqual(half.flatMap { UIImage(data: $0.data) }?.size, CGSize(width: 20 * picture.scale, height: 20 * picture.scale))
-        XCTAssertLessThan(try XCTUnwrap(half).data.count, png.data.count * 2, "8-bit, not a 16-bit PNG several times the size")
+        guard case .edited(let half) = await edit.cropped(image, to: CGRect(x: 0, y: 0, width: 0.5, height: 1)) else {
+            return XCTFail("the crop came back")
+        }
+        XCTAssertEqual(half.name, "shot.png")
+        XCTAssertEqual(UIImage(data: half.data)?.size, CGSize(width: 20 * picture.scale, height: 20 * picture.scale))
+        XCTAssertLessThan(half.data.count, png.data.count * 2, "8-bit, not a 16-bit PNG several times the size")
 
         // Not a picture and not a video, whatever the mime says: refused with a reason, no editor.
         if case .edit = await PendingEdit.open(.init(name: "a.png", mime: "image/png", data: Data("junk".utf8))) { XCTFail("junk opened") }
@@ -378,8 +380,27 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(leftovers, [], "the editor's copy of a refused video is deleted")
 
         XCTAssertTrue(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes))))
-        XCTAssertFalse(ComposerAttachment.fits(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes + 1))),
-                       "an edit that grew past the limit is not staged")
+        guard case .failed(.upload(.tooLarge)) = PendingEdit.sized(.init(name: "a.mov", mime: "video/quicktime", data: Data(count: ComposerAttachment.maxBytes + 1))) else {
+            return XCTFail("an edit that grew past the limit is not staged, and says so")
+        }
+
+        // What the trimmer saved: a small file comes back as the attachment; one over the
+        // limit is refused from its size alone (a sparse file here, never read); a missing
+        // one is a failure with a reason, not a silent cancel. The saved file goes each time.
+        let saved = FileManager.default.temporaryDirectory.appendingPathComponent("trimmed-\(UUID().uuidString).MOV")
+        try Data([1, 2, 3]).write(to: saved)
+        guard case .edited(let trimmed) = await edit.trimmed(at: saved.path) else { return XCTFail("the trimmed file came back") }
+        XCTAssertEqual(trimmed.name, "shot.mov")
+        XCTAssertEqual(trimmed.mime, "video/quicktime")
+        XCTAssertEqual(trimmed.data, Data([1, 2, 3]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: saved.path))
+        XCTAssertTrue(FileManager.default.createFile(atPath: saved.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: saved)
+        try handle.truncate(atOffset: UInt64(ComposerAttachment.maxBytes) + 1)
+        try handle.close()
+        guard case .failed(.upload(.tooLarge)) = await edit.trimmed(at: saved.path) else { return XCTFail("over the limit: refused") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: saved.path))
+        guard case .failed(.upload(.unreadable)) = await edit.trimmed(at: saved.path) else { return XCTFail("missing: a failure") }
     }
 
     func testRemovingOnePendingAttachmentKeepsTheOthers() {
