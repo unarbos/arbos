@@ -243,7 +243,7 @@ mod tests {
 }
 
 #[cfg(test)]
-pub(crate) mod render_tests {
+mod render_tests {
     //! The real `Shell` over a real `AppState`, headless: a DM with Sam (blocked), a group
     //! with Sam and Priya. Every surface says Blocked, every Unblock asks first, the DM's
     //! composer is the "You blocked Sam · Unblock" bar, and the chat note names the block.
@@ -293,7 +293,7 @@ pub(crate) mod render_tests {
         person("gh_2", "sam", "Sam Rivera")
     }
 
-    pub(crate) fn mount(
+    fn mount(
         cx: &mut TestAppContext,
     ) -> (
         tokio::runtime::Runtime,
@@ -371,11 +371,7 @@ pub(crate) mod render_tests {
         (rt, state, shell, vcx)
     }
 
-    pub(crate) fn settle(
-        state: &Entity<AppState>,
-        shell: &Entity<Shell>,
-        vcx: &mut VisualTestContext,
-    ) {
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
         for _ in 0..3 {
             state.update(vcx, |_, cx| cx.notify());
             shell.update(vcx, |_, cx| cx.notify());
@@ -383,7 +379,7 @@ pub(crate) mod render_tests {
         }
     }
 
-    pub(crate) fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
         point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
     }
 

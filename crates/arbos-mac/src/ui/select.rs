@@ -1148,13 +1148,17 @@ impl Element for SelectableText {
                 _ => selection.read(cx).chips.alpha(&chip.key, now, snap),
             };
             fading |= still;
-            paint_chip_pill(
-                layout.line_height(),
-                fragments,
-                &mut pills,
-                mention::pill_color(chip.accent, alpha),
-                window,
-            );
+            for (_fragment, &bounds) in fragments.iter().zip(&mut pills) {
+                #[cfg(test)]
+                PAINTED_CHIPS.with(|p| {
+                    p.borrow_mut().push(PaintedChip::Pill {
+                        bounds,
+                        text: (_fragment.0, _fragment.1),
+                        line: (_fragment.2, layout.line_height()),
+                    })
+                });
+                paint_chip_pill(bounds, mention::pill_color(chip.accent, alpha), window);
+            }
         }
         if fading {
             window.request_animation_frame();
@@ -1376,35 +1380,17 @@ fn chip_at<'a>(
         .find(|c| c.clickable() && c.range.contains(&ix))
 }
 
-/// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, as [`mention::pills`] places it. Painted before the text.
-// The text span and line box are only recorded for the render tests.
-#[cfg_attr(not(test), allow(unused_variables))]
-fn paint_chip_pill<'a>(
-    line_h: Pixels,
-    fragments: &[(Pixels, Pixels, Pixels)],
-    pills: &mut impl Iterator<Item = &'a Bounds<Pixels>>,
-    color: Hsla,
-    window: &mut Window,
-) {
-    for (&(start, end, top), &bounds) in fragments.iter().zip(pills) {
-        #[cfg(test)]
-        PAINTED_CHIPS.with(|p| {
-            p.borrow_mut().push(PaintedChip::Pill {
-                bounds,
-                text: (start, end),
-                line: (top, line_h),
-            })
-        });
-        window.paint_quad(gpui::quad(
-            bounds,
-            Corners::all(px(mention::PILL_RADIUS)),
-            color,
-            gpui::Edges::all(px(0.0)),
-            gpui::transparent_black(),
-            gpui::BorderStyle::default(),
-        ));
-    }
+/// One of the chip's pills (one per line fragment the `@Name` run occupies),
+/// where [`mention::pills`] places it. Painted before the text.
+fn paint_chip_pill(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    window.paint_quad(gpui::quad(
+        bounds,
+        Corners::all(px(mention::PILL_RADIUS)),
+        color,
+        gpui::Edges::all(px(0.0)),
+        gpui::transparent_black(),
+        gpui::BorderStyle::default(),
+    ));
 }
 
 /// The entity's picture, a `PICTURE` pt disc centred in the `@` glyph's cell
@@ -2495,9 +2481,9 @@ mod tests {
         }
     }
 
-    /// The pills a bubble line paints for `text` (one copy of each; every
+    /// What a bubble line paints for `text`'s chips (one copy of each; every
     /// frame paints again).
-    fn painted_pills(cx: &mut gpui::TestAppContext, text: &str) -> Vec<Bounds<Pixels>> {
+    fn painted(cx: &mut gpui::TestAppContext, text: &str) -> Vec<PaintedChip> {
         use std::cell::RefCell;
         let mentions = chip_table(&Rc::new(RefCell::new(Vec::new())));
         let text: SharedString = mentions.display(text).into();
@@ -2508,15 +2494,70 @@ mod tests {
             text,
         });
         vcx.run_until_parked();
-        let mut pills: Vec<Bounds<Pixels>> = Vec::new();
+        let mut painted: Vec<PaintedChip> = Vec::new();
         for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
-            if let PaintedChip::Pill { bounds, .. } = p {
-                if !pills.contains(&bounds) {
-                    pills.push(bounds);
-                }
+            if !painted.contains(&p) {
+                painted.push(p);
             }
         }
-        pills
+        painted
+    }
+
+    fn painted_pills(cx: &mut gpui::TestAppContext, text: &str) -> Vec<Bounds<Pixels>> {
+        painted(cx, text)
+            .into_iter()
+            .filter_map(|p| match p {
+                PaintedChip::Pill { bounds, .. } => Some(bounds),
+                PaintedChip::Disc { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Jacob's ask `mention-chip-highlight-2026-10-28` ("its picture on the
+    /// centre line, wherever it falls") for chips one under the other: in
+    /// runs of mentions that wrap over two and over three lines, every pill
+    /// is centred on its own line and every picture on its pill.
+    #[gpui::test]
+    fn stacked_chips_keep_the_pill_and_the_picture_on_the_lines_centre(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mid_y = |b: &Bounds<Pixels>| f32::from(b.origin.y + b.size.height / 2.0);
+        let mut seen = std::collections::BTreeSet::new();
+        for pairs in 1..=14 {
+            let painted = painted(cx, &"@comms @here ".repeat(pairs));
+            let pills: Vec<_> = painted
+                .iter()
+                .filter_map(|p| match p {
+                    PaintedChip::Pill { bounds, line, .. } => Some((*bounds, *line)),
+                    PaintedChip::Disc { .. } => None,
+                })
+                .collect();
+            let mut lines: Vec<i32> = pills.iter().map(|(_, l)| f32::from(l.0) as i32).collect();
+            lines.sort();
+            lines.dedup();
+            seen.insert(lines.len());
+            for (pill, (top, line_h)) in &pills {
+                let centre = f32::from(*top + *line_h / 2.0);
+                assert!((mid_y(pill) - centre).abs() < 0.01, "{pairs}: {pill:?}");
+            }
+            let mut discs = 0;
+            for p in &painted {
+                let PaintedChip::Disc { bounds: disc, .. } = p else {
+                    continue;
+                };
+                discs += 1;
+                let (pill, _) = pills
+                    .iter()
+                    .find(|(pill, _)| pill.contains(&disc.center()))
+                    .unwrap_or_else(|| panic!("{pairs}: {disc:?} sits on a pill"));
+                assert!(
+                    (mid_y(disc) - mid_y(pill)).abs() < 0.01,
+                    "{pairs}: {disc:?}"
+                );
+            }
+            assert!(discs > 0);
+        }
+        assert!(seen.contains(&2) && seen.contains(&3), "lines: {seen:?}");
     }
 
     /// The clear space between two pills, across and down; negative on an

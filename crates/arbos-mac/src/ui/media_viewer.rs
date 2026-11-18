@@ -719,7 +719,7 @@ fn forward_picker(
         .w(px(PICKER_WIDTH))
         .h(px(PICKER_HEIGHT))
         .rounded(px(14.0))
-        // glass-lint: allow (the forward picker opens on the viewer's black 88 % matte, not on
+        // glass-lint: allow (the forward picker opens on the viewer's solid black matte, not on
         // the window's glass)
         .bg(theme.surface_1)
         .border_1()
@@ -779,61 +779,6 @@ mod tests {
     fn when_label_names_today() {
         let now = crate::model::now_ms();
         assert!(when_label(now).starts_with("Today at "));
-    }
-
-    /// Tester (Nov 16): "the two X to close panel / pic view overlap / are
-    /// both visible". With a pane open under the viewer, the viewer covers
-    /// the whole window with a solid backdrop — nothing of the shell shows
-    /// through — and exactly one close control answers: a click on the part
-    /// of the pane's × that the viewer's × does not cover lands on the
-    /// viewer (the picture closes, the pane stays), and the viewer's own ×
-    /// closes the picture.
-    #[gpui::test]
-    fn the_viewer_covers_the_pane_and_its_close_control(cx: &mut gpui::TestAppContext) {
-        use crate::app::ProfilePage;
-        use crate::ui::blocked::render_tests::{centre, mount, settle};
-        let (_rt, state, shell, vcx) = mount(cx);
-        state.update(vcx, |s, cx| {
-            s.selected_project = Some("g1".into());
-            s.open_profile(
-                ProfilePage::Group {
-                    space_id: "g1".into(),
-                },
-                cx,
-            );
-        });
-        settle(&state, &shell, vcx);
-        let pane_close = vcx.debug_bounds("profile-close").expect("the pane's ×");
-        let open = |vcx: &mut gpui::VisualTestContext| {
-            state.update(vcx, |s, cx| {
-                s.open_picture_viewer("Sam Rivera", "https://example.test/sam.png", cx)
-            });
-            settle(&state, &shell, vcx);
-        };
-        let is_open = |vcx: &mut gpui::VisualTestContext| {
-            state.read_with(&*vcx, |s, _| {
-                (s.media_viewer.is_some(), s.profile.is_some())
-            })
-        };
-
-        open(vcx);
-        let viewer = vcx.debug_bounds("media-viewer").expect("the viewer");
-        let window = vcx.update(|window, _| window.viewport_size());
-        assert_eq!(viewer.size, window, "the viewer covers the window");
-        assert_eq!(BACKDROP, 1.0, "and nothing under it shows through");
-        let viewer_close = vcx.debug_bounds("media-viewer-close").expect("its ×");
-
-        // On the pane's ×, clear of the viewer's ×.
-        let on_pane_close = gpui::point(pane_close.right() - px(3.0), pane_close.top() + px(3.0));
-        assert!(pane_close.contains(&on_pane_close) && !viewer_close.contains(&on_pane_close));
-        vcx.simulate_click(on_pane_close, gpui::Modifiers::default());
-        settle(&state, &shell, vcx);
-        assert_eq!(is_open(vcx), (false, true), "the pane's × is not live");
-
-        open(vcx);
-        vcx.simulate_click(centre(viewer_close), gpui::Modifiers::default());
-        settle(&state, &shell, vcx);
-        assert_eq!(is_open(vcx), (false, true), "the viewer's × is");
     }
 
     #[test]

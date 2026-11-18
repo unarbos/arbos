@@ -48,9 +48,12 @@ pub const PILL_PAD_MIN: f32 = 1.0;
 ///   its sides, to half of what the space leaves after the gap, and never
 ///   below `PILL_PAD_MIN`. With a 3.5 pt space that is 1 pt pads and 1.5 pt
 ///   between the pills; texts closer than 2 pt would still meet;
-/// - a pill over another on the next line gives up its reach past the line
-///   on that edge and 1 pt more, and so does the one under it: `PILL_GAP`
-///   between them. Every other edge keeps its full height.
+/// - a pill with another over or under it on the neighbouring line is
+///   `PILL_GAP` shorter than its line, top and bottom alike, so the two keep
+///   `PILL_GAP` between them and each stays centred on its line — the
+///   picture, centred on the line too, stays on the pill's centre line
+///   (Jacob's ask `mention-chip-highlight-2026-10-28`). A pill with nothing
+///   stacked against it keeps its full height.
 ///
 /// O(n²) over one text's chips; sort by line if a message ever carries hundreds.
 pub fn pills(fragments: &[(Pixels, Pixels, Pixels)], line_h: Pixels) -> Vec<Bounds<Pixels>> {
@@ -79,17 +82,24 @@ pub fn pills(fragments: &[(Pixels, Pixels, Pixels)], line_h: Pixels) -> Vec<Boun
             )
         })
         .collect();
+    // Stacked: a pill on the line above or below reaches over this one.
+    // (`* 1.5`: line tops are fractional while a transcript scrolls.)
+    let stacked: Vec<bool> = (0..pills.len())
+        .map(|i| {
+            (0..pills.len()).any(|j| {
+                let apart = (fragments[i].2 - fragments[j].2).abs();
+                apart > line_h * 0.5
+                    && apart < line_h * 1.5
+                    && pills[i].left() < pills[j].right()
+                    && pills[j].left() < pills[i].right()
+            })
+        })
+        .collect();
     let half = px(PILL_GAP / 2.0);
-    for upper in 0..pills.len() {
-        for lower in 0..pills.len() {
-            let (a, b) = (pills[upper], pills[lower]);
-            let (line, next) = (fragments[upper].2, fragments[lower].2);
-            if next > line && next - line <= line_h && a.left() < b.right() && b.left() < a.right()
-            {
-                pills[upper].size.height = line + line_h - half - a.top();
-                pills[lower].origin.y = next + half;
-                pills[lower].size.height = b.bottom() - (next + half);
-            }
+    for (i, pill) in pills.iter_mut().enumerate() {
+        if stacked[i] {
+            pill.origin.y = fragments[i].2 + half;
+            pill.size.height = line_h - half * 2.0;
         }
     }
     pills
