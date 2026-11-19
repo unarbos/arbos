@@ -935,6 +935,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         )
         .child(footer);
     div()
+        .track_focus(&shell.avatar_focus)
         .absolute()
         .inset_0()
         .occlude()
@@ -1811,5 +1812,62 @@ mod me_picker_tests {
         );
         // Set avatar stays disabled through all of it (nothing to set).
         assert!(!picker.dirty());
+    }
+
+    /// Doug 2026-11-19: the picker opened from Edit Agent drew under that sheet. It is the top
+    /// sheet now: its buttons take the click, it owns the keyboard and Esc, and closing it
+    /// leaves Edit Agent up with the keyboard back in the Name field.
+    #[gpui::test]
+    fn the_picker_opens_over_edit_agent_and_closes_back_to_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        state.update(vcx, |s, cx| {
+            let agent = crate::model::Project {
+                id: "p1".into(),
+                name: "Home".into(),
+                ..Default::default()
+            };
+            s.apply(SyncEvent::Projects(vec![agent]), cx);
+            s.open_profile(
+                ProfilePage::Agent {
+                    project_id: "p1".into(),
+                },
+                cx,
+            );
+        });
+        settle(&shell, vcx);
+        shell.update_in(vcx, |sh, window, cx| sh.open_agent_edit(window, cx));
+        settle(&shell, vcx);
+        let name = |vcx: &mut VisualTestContext| {
+            shell.read_with(&*vcx, |sh, cx| {
+                sh.agent_name_input.read(cx).text().to_owned()
+            })
+        };
+        let open = |vcx: &mut VisualTestContext| {
+            shell.read_with(&*vcx, |sh, _| {
+                (sh.avatar_picker.is_some(), sh.agent_edit_open)
+            })
+        };
+
+        click(vcx, &shell, "edit-avatar");
+        assert_eq!(open(vcx), (true, true), "the picker opens, the sheet stays");
+        vcx.simulate_input("x");
+        settle(&shell, vcx);
+        assert_eq!(
+            name(vcx),
+            "Home",
+            "the Name field under the picker does not type"
+        );
+        // Under the sheet this click landed on the sheet and the picker stayed.
+        click(vcx, &shell, "avatar-cancel");
+        assert_eq!(open(vcx), (false, true), "Cancel closes the picker alone");
+        vcx.simulate_input("x");
+        settle(&shell, vcx);
+        assert_eq!(name(vcx), "Homex", "the keyboard is back in the Name field");
+
+        click(vcx, &shell, "edit-avatar");
+        assert_eq!(open(vcx), (true, true));
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        assert_eq!(open(vcx), (false, true), "Esc closes the picker alone");
     }
 }

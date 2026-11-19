@@ -371,6 +371,8 @@ impl QuestionCard {
                 ix > 0,
                 look,
             )
+            // A multi-select list ends in its Send row.
+            .when(!multi && ix + 1 == options.len(), last_row)
             .when(open, |el| {
                 el.on_click(cx.listener(move |this, _, window, cx| {
                     window.focus(&this.focus_handle, cx);
@@ -401,14 +403,14 @@ impl QuestionCard {
 
     /// The last row of a card that needs a Send: no badge, the label in the body weight.
     fn send_row(&self, look: &CardLook, cx: &mut Context<Self>) -> Stateful<Div> {
-        option_row(
+        last_row(option_row(
             format!("{}-submit", self.question_id),
             None,
             "Send",
             RowState::Open,
             true,
             look,
-        )
+        ))
         .font_weight(FontWeight::SEMIBOLD)
         .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
     }
@@ -854,6 +856,12 @@ pub fn card_header(
     header
 }
 
+/// The list's last row. gpui clips a child to its parent's rectangle, not to its radius, so
+/// a row at either end rounds its own corners or its fill pokes out of the list's.
+pub fn last_row<E: Styled>(row: E) -> E {
+    row.rounded_b(px(LIST_RADIUS))
+}
+
 /// The white (dark: lighter) inner list that holds the rows.
 pub fn option_list(palette: &CardPalette) -> Div {
     div()
@@ -894,8 +902,10 @@ pub fn option_row(
         .min_h(px(ROW_HEIGHT))
         .px(px(ROW_PAD_X))
         .py(px(6.0))
-        .when(hairline_above, |el| {
-            el.border_t_1().border_color(palette.hairline)
+        .map(|el| match hairline_above {
+            true => el.border_t_1().border_color(palette.hairline),
+            // The list's first row (see `last_row`).
+            false => el.rounded_t(px(LIST_RADIUS)),
         })
         .when(state == RowState::Highlighted, |el| {
             el.bg(palette.highlight)
@@ -948,4 +958,36 @@ fn pill(
         .text_color(if on { palette.inner } else { theme.text })
         .cursor_pointer()
         .child(label.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::AbsoluteLength;
+
+    use super::*;
+
+    /// A row's fill (hover, keyboard cursor) follows the list's corners: the first row rounds
+    /// the top pair, the last the bottom pair, a single row all four, a middle row none.
+    #[test]
+    fn the_end_rows_round_their_corners_to_the_lists() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let look = CardLook::of(&theme);
+        let row = |first: bool| option_row("r", None, "A", RowState::Open, !first, &look);
+        let corners = |mut row: Stateful<Div>| {
+            let c = &row.style().corner_radii;
+            (
+                c.top_left.is_some() && c.top_right.is_some(),
+                c.bottom_left.is_some() && c.bottom_right.is_some(),
+            )
+        };
+        assert_eq!(corners(row(true)), (true, false), "first");
+        assert_eq!(corners(row(false)), (false, false), "middle");
+        assert_eq!(corners(last_row(row(false))), (false, true), "last");
+        assert_eq!(corners(last_row(row(true))), (true, true), "single");
+        let mut last = last_row(row(false));
+        assert_eq!(
+            last.style().corner_radii.bottom_left,
+            Some(AbsoluteLength::Pixels(px(LIST_RADIUS)))
+        );
+    }
 }

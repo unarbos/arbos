@@ -260,6 +260,8 @@ pub struct Shell {
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
+    /// The keyboard's owner while the avatar picker is up (`modal_focus`).
+    pub(crate) avatar_focus: FocusHandle,
     /// The Generate tab's prompt.
     pub(crate) avatar_prompt_input: Entity<ComposerInput>,
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
@@ -1177,6 +1179,7 @@ impl Shell {
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
+            avatar_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
             chart_viewer_focused_generation: 0,
             forward_message_focused_for: None,
@@ -1455,6 +1458,10 @@ impl Shell {
         }
         if state.chart_viewer.is_some() {
             return Some(self.viewer_focus.clone());
+        }
+        // Over Edit Agent the Name field under the picker must not type.
+        if self.avatar_picker.is_some() {
+            return Some(self.avatar_focus.clone());
         }
         // It opens by itself (no click put the keyboard in its field).
         if state.server_sheet == Some(ServerSheet::RestoreKeys) {
@@ -3337,6 +3344,11 @@ impl Shell {
                     Composer::focus(&self.composer, window, cx);
                 }
             }
+            return;
+        }
+        // The avatar picker is the top sheet (it opens over Edit Agent): Esc closes it alone.
+        if self.avatar_picker.is_some() {
+            self.close_avatar_picker(cx);
             return;
         }
         if self.state.read(cx).chat_search_open() {
@@ -5813,6 +5825,12 @@ impl Render for Shell {
         if self.skills.read(cx).is_floating() {
             root = root.child(self.skills.clone());
         }
+        // Under the pickers it opens: a later child paints over an earlier one.
+        if self.agent_edit_open {
+            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
+                root = root.child(sheet);
+            }
+        }
         if self.voice_picker_open {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
                 root = root.child(voicepicker::sheet(self, space, cx));
@@ -5820,10 +5838,15 @@ impl Render for Shell {
         }
         if let Some(picker) = self.avatar_picker.clone() {
             root = root.child(avatar_picker::sheet(self, &picker, cx));
-        }
-        if self.agent_edit_open {
-            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
-                root = root.child(sheet);
+        } else if self.avatar_focus.is_focused(window)
+            || self.avatar_focus.contains_focused(window, cx)
+        {
+            // Closed: the keyboard goes back to the sheet under it, else the composer.
+            if self.agent_edit_open {
+                let name = self.agent_name_input.read(cx).focus_handle(cx);
+                window.focus(&name, cx);
+            } else {
+                Composer::focus(&self.composer, window, cx);
             }
         }
         if new_chat_open {
