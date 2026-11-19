@@ -109,9 +109,11 @@ pub fn resolve_checked(state: &AppState, token: &str) -> Result<Principal, Refus
                     // "Seen" is stamped in memory and written with the presence stamps
                     // (`rooms::flush_presence`): a row write per authenticated request put
                     // every request in the writer's queue. A contended map skips one stamp.
+                    let now = arbos_core::ids::now_ms();
                     if let Ok(mut seen) = state.presence_seen.try_lock() {
-                        seen.insert(claims.device_id.clone(), arbos_core::ids::now_ms());
+                        seen.insert(claims.device_id.clone(), now);
                     }
+                    state.user_seen.lock().unwrap().insert(user_id.clone(), now);
                     Ok(Principal::Device {
                         id: claims.device_id,
                         token: token.to_owned(),
@@ -351,6 +353,13 @@ mod legacy_bucket_tests {
             Ok(Principal::Device { .. })
         ));
         assert_eq!(seen_in_db(), None, "no write on the request");
+        // `online` does not wait for the flush: it is answered from the stamp in memory.
+        let card = arbos_core::api::UserCardDto {
+            id: "gh_alice".into(),
+            ..Default::default()
+        };
+        let card = crate::people::with_presence(&state, card);
+        assert_eq!(card.online, Some(true), "online before any write");
         let stamp = state.presence_seen.lock().await.get(&id).copied();
         assert!(stamp.is_some(), "the device is stamped in memory");
         assert_eq!(crate::rooms::flush_presence(&state, 0).await, 1);
