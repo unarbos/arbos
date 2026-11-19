@@ -100,12 +100,15 @@ groups:
         expr: >
           max by (slot) (round(60 * sum by (box) (rate(arbos_relay_box_tokens_total[5m])), 1000)
           * on (box) group_left (slot) arbos_relay_box_slot)
-      # 0 unknown, 1 asleep, 2 awake and idle, 3 waking, 4 working, 5 error
+      # 0 unknown, 1 asleep, 2 awake and idle, 3 waking, 4 working, 5 error. Working: awake, and a
+      # turn is running or the box used tokens in the five minutes its dot's height is measured
+      # over, so that a dot off the floor is never coloured idle.
       - record: subnet:box_state
         expr: >
           max by (slot) (max by (box) (0 * arbos_relay_box_state{state="unknown"} or 1 * arbos_relay_box_state{state="asleep"}
           or 3 * arbos_relay_box_state{state="waking"} or 5 * arbos_relay_box_state{state="error"}
-          or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * arbos_relay_box_turn_running))
+          or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running
+          + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[5m])) > bool 0), 1)))
           * on (box) group_left (slot) arbos_relay_box_slot)
       # A sleeping box has no container, so nothing from cAdvisor: it reads 0.
       - record: subnet:box_cpu_cores

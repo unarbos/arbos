@@ -294,9 +294,14 @@ STATES = [(0, "unknown", "#8b949e"), (1, "asleep", "#57606a"), (2, "awake, idle"
 STATE_NAMES = [{"type": "value", "options": {str(n): {"text": text, "color": color} for n, text, color in STATES}}]
 STATE_STEPS = steps(*[(n or None, color) for n, _, color in STATES])
 INFO = 'label_replace(arbos_relay_box_info, "name", "$1", "container", "(.+)")'
+# Working: awake, and either a turn is running or the box used tokens in the last minute, the same
+# minute the swarm's height is measured over. The relay's turn flag alone would disagree with the
+# picture: it comes from keepalives and tokens land when a call ends, so a box can burn tokens
+# with the flag down (work outside a turn) and would then sit high in the swarm coloured idle.
+USED_TOKENS = "(sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0)"
 STATE_OF_BOX = ('max by (box) (0 * arbos_relay_box_state{state="unknown"} or 1 * arbos_relay_box_state{state="asleep"}'
                 ' or 3 * arbos_relay_box_state{state="waking"} or 5 * arbos_relay_box_state{state="error"}'
-                ' or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * arbos_relay_box_turn_running))')
+                f' or (2 * arbos_relay_box_state{{state="awake"}} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) {USED_TOKENS}, 1)))')
 RUNNING0 = f"max by (name) (0 * container_last_seen{{{BOX}}})"  # 0 for every running box
 KNOWN0 = f"max by (name) (0 * {INFO})"  # 0 for every box the relay lists, asleep ones included
 

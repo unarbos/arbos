@@ -102,6 +102,15 @@ tests:
         values: 0x20
       - series: 'arbos_relay_box_tokens_total{box="1b2c3d4e5f60", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
         values: 0x20
+      # a third box, slot 5: awake, no turn flagged, and using tokens all the same. It is working.
+      - series: 'arbos_relay_box_slot{box="2c3d4e5f6071", slot="5", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_state{box="2c3d4e5f6071", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="2c3d4e5f6071", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="2c3d4e5f6071", kind="output", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+2000x20
       - series: 'container_cpu_usage_seconds_total{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
         values: 0+7.4x20
       - series: 'container_memory_working_set_bytes{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
@@ -163,12 +172,16 @@ tests:
           # the dots: a slot and nothing else, values rounded
           - { labels: 'subnet:box_tokens_per_minute{slot="7"}', value: 2000 }
           - { labels: 'subnet:box_tokens_per_minute{slot="2"}', value: 0 }
+          - { labels: 'subnet:box_tokens_per_minute{slot="5"}', value: 4000 }
           - { labels: 'subnet:box_state{slot="7"}', value: 4 }
           - { labels: 'subnet:box_state{slot="2"}', value: 1 }
+          - { labels: 'subnet:box_state{slot="5"}', value: 4 }
           - { labels: 'subnet:box_cpu_cores{slot="7"}', value: 0.2 }
           - { labels: 'subnet:box_cpu_cores{slot="2"}', value: 0 }
+          - { labels: 'subnet:box_cpu_cores{slot="5"}', value: 0 }
           - { labels: 'subnet:box_memory_bytes{slot="7"}', value: 2684354560 }
           - { labels: 'subnet:box_memory_bytes{slot="2"}', value: 0 }
+          - { labels: 'subnet:box_memory_bytes{slot="5"}', value: 0 }
           - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
           - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
