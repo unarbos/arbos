@@ -462,8 +462,8 @@ swarm = dashboard("arbos-swarm", "Swarm", [
 
 # Arbos: the front page, one screen, for the team and for the partner alike. It is written twice
 # from one definition: `arbos.json` for the main organisation and `subnet.json` for the Subnet one.
-# Both read the same `subnet:*` aggregates (the main Prometheus evaluates them too), so the two
-# copies cannot disagree. They differ in the centre: the team sees the swarm, one dot per box with
+# The team's reads exact figures (`arbos:*`), the partner's the same figures made coarse
+# (`subnet:*`, see prometheus/subnet-rules.yml). They differ in the centre: the team sees the swarm, one dot per box with
 # its name on hover and a link to the Swarm dashboard; the partner sees the same fleet as counts
 # of machines by token rate, because a dot per machine can be followed by its values whatever it
 # is labelled with. The team also sees tokens by kind; the partner sees their total.
@@ -472,7 +472,8 @@ swarm = dashboard("arbos-swarm", "Swarm", [
 # A figure whose source is not reporting says so in grey (-1), never a blank or a NaN; a percentage
 # with nothing to divide by (no model call in five minutes) reads 100: nothing failed.
 QUIET_GREY = "#6e7681"
-PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": QUIET_GREY}}}]
+FEW = {"-5": {"text": "<5"}}  # a count of one to four machines, as the partner's rules pass it on
+PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": QUIET_GREY}, **FEW}}]
 NEUTRAL = steps((None, "text"))
 RELAY_REPORTS = "0 * subnet:box_start_failures:rate5m"  # present exactly while the relay reports
 # A relay that counts tokens but started under a minute ago has no rate yet: that is -2, "relay just
@@ -493,7 +494,7 @@ def bars(title, rows, unit, h, max_expr=None, thresholds=None, desc=""):
     """A short list of labelled bars. `rows` is (name, query, colour); with `thresholds` the colour is the value's."""
     p = {"type": "bargauge", "title": title, "description": desc, "w": 8, "h": h, "instant": True, "transparent": True,
          "exprs": [(q, name) for name, q, _ in rows],
-         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "decimals": 0, "noValue": "–",
+         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "decimals": 0, "noValue": "–", "mappings": [{"type": "value", "options": FEW}],
                                       "color": {"mode": "thresholds" if thresholds else "fixed"},
                                       "thresholds": {"mode": "absolute", "steps": thresholds or NEUTRAL}},
                          "overrides": [] if thresholds else [override(name, color={"mode": "fixed", "fixedColor": c}) for name, _, c in rows]},
@@ -519,18 +520,20 @@ def trend(title, lines, unit="short", stack=False, desc="", max_=None):
 
 
 def overview(partner):
+    # The team reads its own exact figures; the partner reads the coarse ones made from them.
+    ns = "subnet" if partner else "arbos"
     colors = {text: color for _, text, color in STATES}
     if partner:
         # No machine leaves the team's Prometheus as a series of its own, so the partner's centre
         # piece is the same fleet as counts: how many machines use how many tokens a minute.
-        hero = bars("Machines by tokens per minute", [(name, f'subnet:boxes_by_token_rate{{bucket="{name}"}}', color) for name, color in (
+        hero = bars("Machines by tokens per minute", [(name, f'{ns}:boxes_by_token_rate{{bucket="{name}"}}', color) for name, color in (
             ("idle", colors["awake, idle"]), ("under 10K", "#7a5a12"), ("10K to 100K", "#a06d0a"), ("100K to 1M", AMBER), ("over 1M", "#e59a0c"))],
             "short", 10, desc="Agent machines by how many tokens a minute their agents are using, averaged over five minutes. "
-                              "A group of one to four machines is shown as \"<5\", not as its number.")
+                              "Counts are rounded to the nearest five; one to four machines show as \"<5\".")
         hero.update(w=16)
         hero["options"].update(orientation="vertical", showUnfilled=False, text={"titleSize": 13, "valueSize": 28}, maxVizHeight=300,
                                minVizWidth=40, maxVizWidth=220)
-        hero["fieldConfig"]["defaults"].update(mappings=[{"type": "value", "options": {"-1": {"text": "<5", "color": QUIET_GREY}}}], min=0)
+        hero["fieldConfig"]["defaults"].update(min=0)
         del hero["fieldConfig"]["defaults"]["max"]
     else:
         hero = swarm_chart("Swarm", [*POINT, ("Tokens / min", "short", f"{TOKENS_MIN} or {RUNNING0}")], "CPU cores", "Tokens / min", "Memory", 16, 10,
@@ -540,44 +543,45 @@ def overview(partner):
         hero["fieldConfig"]["defaults"]["links"] = [{"title": "Open this box", "url": "/d/arbos-swarm/swarm?var-box=${__data.fields.Box}"}]
         hero.update(transparent=True)
     hero = later(hero)
-    idle = "clamp_min(subnet:boxes_awake - subnet:boxes_working, 0)"
     return dashboard("arbos-subnet" if partner else "arbos", "Arbos", [
         headline("Service", "subnet:relay_up * subnet:public_up", thresholds=steps((None, MAGENTA), (1, AQUA)),
                  mappings=[{"type": "value", "options": {"0": {"text": "Down"}, "1": {"text": "Up"}, "-1": {"text": "no data yet", "color": QUIET_GREY}}}],
                  desc="The relay answers, on the server and from outside through its public name."),
-        headline("Working now", "subnet:boxes_working", desc="Agent machines with a turn running in the last 3 minutes."),
-        headline("Tokens / min", f"60 * subnet:tokens:rate5m or {JUST_STARTED}", mappings=WAITING,
-                 desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes. "
-                      "While fewer than five machines are using any, it is rounded to one figure."),
-        headline("Tokens / 24 h", f"subnet:tokens:increase24h or {JUST_STARTED}", mappings=WAITING),
+        headline("Working now", f"{ns}:boxes_working", desc="Agent machines with a turn running in the last 3 minutes."
+                 + (" Rounded to the nearest five." if partner else "")),
+        headline("Tokens / min", f"60 * {ns}:tokens:rate5m or {JUST_STARTED}", mappings=WAITING,
+                 desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes."
+                 + (" Two significant figures; one while fewer than five machines are using any." if partner else "")),
+        headline("Tokens / 24 h", f"{ns}:tokens:increase24h or {JUST_STARTED}", mappings=WAITING),
         headline("Model calls OK", MODEL_OK, "percent", steps((None, MAGENTA), (90, AMBER), (98, "text")), decimals=1,
                  desc="Model calls answered successfully in the last five minutes."),
         headline("Spend of cap", "100 * subnet:spend_cap_ratio", "percent", steps((None, "text"), (60, AMBER), (85, MAGENTA)),
                  desc="Today's model spend against the daily cap. At 100% every agent stops until 00:00 UTC."),
 
         hero,
-        bars("Machines", [("working", "subnet:boxes_working", colors["working"]), ("awake, idle", idle, colors["awake, idle"]),
-                          ("waking", "subnet:boxes_waking", colors["waking"]), ("asleep", "subnet:boxes_asleep", colors["asleep"]),
-                          ("error", "subnet:boxes_error", colors["error"]), ("waiting for one", "subnet:boxes_waitlisted", MAGENTA)],
-             "short", 6, max_expr="subnet:boxes_max", desc="Agent machines by what they are doing, each bar against the limit of machines this host admits."),
+        bars("Machines", [("working", f"{ns}:boxes_working", colors["working"]), ("awake, idle", f"{ns}:boxes_idle", colors["awake, idle"]),
+                          ("waking", f"{ns}:boxes_waking", colors["waking"]), ("asleep", f"{ns}:boxes_asleep", colors["asleep"]),
+                          ("error", f"{ns}:boxes_error", colors["error"]), ("waiting for one", f"{ns}:boxes_waitlisted", MAGENTA)],
+             "short", 6, max_expr="subnet:boxes_max", desc="Agent machines by what they are doing, each bar against the limit of machines this host admits."
+             + (" Rounded to the nearest five; one to four show as \"<5\"." if partner else "")),
         {**bars("Host", [("CPU", "100 * subnet:host_cpu_used_ratio", None), ("memory", "100 * subnet:host_memory_used_ratio", None),
                          ("disk", "100 * (1 - subnet:host_disk_free_ratio)", None)], "percent", 4,
                 thresholds=steps((None, QUIET_GREY), (75, AMBER), (90, MAGENTA)), desc="How much of the server is in use."), "under": True},
 
         # By kind for the team only: with list prices the split would price the partner's view in dollars.
-        trend("Tokens per minute", [("60 * subnet:tokens:rate5m", "tokens", BLUE)]) if partner else
+        trend("Tokens per minute", [(f"60 * {ns}:tokens:rate5m", "tokens", BLUE)]) if partner else
         trend("Tokens per minute", [(f"60 * sum(rate({FLEET_TOKENS}{{kind=\"{k}\"}}[5m]))", name, c) for k, name, c in (
             ("cache_read", "cache read", BLUE), ("cache_write", "cache write", AQUA), ("input", "input", AMBER), ("output", "output", MAGENTA))], stack=True),
-        trend("Model calls per minute", [("60 * subnet:model_requests:rate5m", "calls", BLUE),
-                                         ("60 * subnet:model_requests:rate5m * subnet:model_error_ratio", "failed", MAGENTA)]),
+        trend("Model calls per minute", [(f"60 * {ns}:model_requests:rate5m", "calls", BLUE),
+                                         (f"60 * {ns}:model_requests:rate5m * subnet:model_error_ratio", "failed", MAGENTA)]),
         trend("Machine starts per minute", [("60 * subnet:box_starts:rate5m", "started", BLUE), ("60 * subnet:box_start_failures:rate5m", "failed", MAGENTA)]),
 
         trend("Spend of cap", [("100 * subnet:spend_cap_ratio", "today", BLUE)], "percent", max_=100,
               desc="Climbs through the day and returns to 0 at 00:00 UTC."),
         trend("Host in use", [("100 * subnet:host_cpu_used_ratio", "CPU", BLUE), ("100 * subnet:host_memory_used_ratio", "memory", AQUA),
                               ("100 * (1 - subnet:host_disk_free_ratio)", "disk", AMBER)], "percent", max_=100),
-        trend("Machines", [("subnet:boxes_running", "running", BLUE), ("subnet:boxes_working", "working", AMBER),
-                           ("subnet:boxes_asleep", "asleep", QUIET_GREY), ("subnet:boxes_max", "limit", "#c9d1d9")]),
+        trend("Machines", [(f"{ns}:boxes_running", "running", BLUE), (f"{ns}:boxes_working", "working", AMBER),
+                           (f"{ns}:boxes_asleep", "asleep", QUIET_GREY), ("subnet:boxes_max", "limit", "#c9d1d9")]),
     ], ds="prometheus-subnet" if partner else "prometheus", nav=not partner, refresh="10s", span="now-3h")
 
 

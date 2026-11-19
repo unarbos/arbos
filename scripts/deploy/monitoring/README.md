@@ -31,7 +31,7 @@ Files:
 | `prometheus/rules.yml` | alerts |
 | `prometheus/subnet-rules.yml`, `prometheus/subnet.yml` | the aggregates behind the Subnet view, and the Prometheus that holds only them |
 | `prometheus/rules_test.yml` | unit tests for both rule files |
-| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter, a per-box figure or a label other than `bucket` leave; the small-count numbers are named there |
+| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter or a label leave, or passes a count of machines or an amount of tokens or calls on uncoarsened; the rounding numbers are named there |
 | `alertmanager/alertmanager.yml`, `blackbox/blackbox.yml` | their configs |
 | `grafana/provisioning/` | datasource and dashboard loading for the main organisation |
 | `grafana/dashboards/*.json`, `grafana/dashboards-subnet/subnet.json` | the dashboards, written by `dashboards.py` |
@@ -45,12 +45,12 @@ Files:
 
 - **Arbos** (home, in both organisations): the front page, one screen. Six numbers (service,
   machines working, tokens per minute and in 24 hours, model calls succeeding, spend of the daily
-  cap), the swarm of every agent machine with machines by state and host use beside it, then
-  tokens by kind, model calls and machine starts over time; below the fold spend, host and
-  machines over time. It is generated once and written twice, `grafana/dashboards/arbos.json`
-  and `grafana/dashboards-subnet/subnet.json`, and both copies read the same `subnet:*`
-  aggregates, so they cannot disagree. They differ in the centre: the team has the swarm, one
-  dot per box; the partner has machines by tokens per minute, as counts. See
+  cap), the fleet in the centre with machines by state and host use beside it, then tokens,
+  model calls and machine starts over time; below the fold spend, host and machines over time.
+  It is generated once and written twice, `grafana/dashboards/arbos.json` and
+  `grafana/dashboards-subnet/subnet.json`. The team's copy reads exact figures and the partner's
+  the same figures rounded. They differ in the centre: the team has the swarm, one dot per
+  box; the partner has machines by tokens per minute, as counts. See
   [What the partner sees of the machines](#what-the-partner-sees-of-the-machines). The team's copy also splits tokens by
   kind and links to the dashboards below.
 - **Arbos fleet**, three rows of single stats then time series. Service: relay and public
@@ -312,35 +312,49 @@ and the dot with the same figures under another, 30 seconds later, are one machi
 nearest neighbours re-links every active machine at every draw, which makes it a per-machine
 history under a pseudonym. So no per-machine series is exported, under any label.
 
-What leaves instead:
+What leaves instead is coarse on purpose, so that comparing two samples does not show one
+machine arriving, leaving or changing what it does:
 
-- `subnet:boxes_by_token_rate{bucket}`: how many machines are idle, under 10K, 10K to 100K, 100K
-  to 1M and over 1M tokens a minute (five-minute average). `bucket` is the only label any
-  `subnet:*` series carries.
-- **Small counts.** A group of 1 to 4 machines leaves as "<5" (the value -1), never as its number;
-  an empty group is 0. The groups add up to the machines there are, so a single hidden group can
-  be worked out from the others; two or more cannot.
-- **The fleet's token rate** (`subnet:tokens:rate5m`) is exact only while at least 5 machines are
-  using tokens. Below that it is close to one machine's own figure, so it leaves rounded to one
-  significant figure.
+- **Every count of machines** leaves as 0, as "<5" for one to four, or rounded to the nearest
+  five. That covers machines by tokens per minute (`subnet:boxes_by_token_rate{bucket}`: idle,
+  under 10K, 10K to 100K, 100K to 1M, over 1M; five-minute average) and machines by state
+  (working, awake and idle, waking, asleep, error, waiting, running). No exact total is exported
+  beside them. `bucket` is the only label any `subnet:*` series carries.
+- **Every amount of tokens or calls** leaves at two significant figures: tokens per minute,
+  tokens in 24 hours, model calls per minute. An exact running total would let a reader take
+  differences and get back a fine-grained rate. While fewer than 5 machines are using tokens the
+  token rate has one significant figure.
 - **Tokens are a total**, not split by kind. With public list prices, input, output and cache
   tokens separately are a dollar figure; the split is on the team's copy only. The total still
   bounds the spend loosely, and that is accepted.
 - **Spend** is a share of the daily cap rounded to the whole percent (`subnet:spend_cap_ratio`),
   never an amount.
-- Machines by state (working, awake, waking, asleep, error, waiting) are exact counts, as they
-  were on the Subnet view before: they say what the fleet is doing, not what a machine uses.
+- The team's copy reads the exact figures behind these (`arbos:*` rules of the same names), which
+  the partner's Prometheus does not have.
 
-What the partner can and cannot do with it. They can see how busy the fleet is and how its load is
-spread. They cannot follow a machine over time, because there is no series per machine. Someone
-who knows from elsewhere that exactly one user's agents are working at a moment still learns that
-user's token range from the one non-empty group being "<5" in a known range, and the fleet rate to
-one figure; that is the floor of any live activity view and is accepted.
+What is hidden and what is not.
 
-`check-rules.py` holds the numbers (5, one percent) and fails if a rule could let a counter, a
-per-box step or a label other than `bucket` leave; `prometheus/rules_test.yml` proves the same on
+- Hidden: any machine's own series; which machine is which; exact counts and exact totals, and
+  so the single step of one machine moving between groups or states in most cases.
+- Not hidden: a count crossing a rounding boundary (7 to 8 machines shows as 5 to 10; 4 to 5 as
+  "<5" to 5; 0 to 1 as 0 to "<5"). One such step can coincide with one machine's move, and a
+  reader sees that some machine moved, never which.
+- Not hidden: when one machine is active alone, a reader sees which token band it is in ("<5" in
+  one group, 0 in the other active groups) and the fleet's token rate to one figure. That is that
+  machine's activity, coarsely. Nothing names it.
+- Not hidden: events of the fleet as rates (machine starts and failed starts per minute, the
+  share of model calls that failed). They say that something happened, not to whom.
+- This is rounding, not a formal privacy guarantee.
+
+`check-rules.py` holds the numbers (5, nearest 5, two figures, one percent) and the exact
+expression every such rule must have; it fails if a rule could let a counter or a label leave or
+passes a count or an amount on uncoarsened. `prometheus/rules_test.yml` proves the same on
 labelled input, and `local/check-dashboards.py` asserts the label set of the running Subnet
 datasource.
+
+Not covered here: `subnet:turns_active` and `subnet:queue_depth` are exact sums of what agentd
+reports. They are on no dashboard and have no data until boxes report (#3096); coarsen them the
+same way before they are shown to the partner.
 
 ## Decisions
 

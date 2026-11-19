@@ -23,7 +23,7 @@ EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_sec
 RELAY_ONLY = "--relay-only" in sys.argv
 # What a relay from before /metrics/boxes and the token counter cannot answer. With it, these must
 # have data like everything else; with --relay-only they are the only queries allowed to have none.
-NEEDS_DEPLOY = ("arbos_relay_box_", "arbos_relay_tokens_total", "subnet:tokens", "subnet:boxes_by_token_rate")
+NEEDS_DEPLOY = ("arbos_relay_box_", "arbos_relay_tokens_total", ":tokens:", ":boxes_by_token_rate")
 
 
 def post(path, body, org):
@@ -45,8 +45,7 @@ def query(expr, uid, org):
         return "no data"
     if any(v is None or v != v for v in values[-3:]):
         return "NaN"
-    # -1 from a count of machines is a value ("<5"), not a placeholder
-    if values[-1] == -1 and "boxes_by_token_rate" not in expr and (RELAY_ONLY or any(s in expr for s in NEEDS_DEPLOY)):
+    if values[-1] == -1 and (RELAY_ONLY or any(s in expr for s in NEEDS_DEPLOY)):
         return "placeholder (no data yet)"
 
 

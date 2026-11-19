@@ -99,7 +99,7 @@
   {
    "type": "stat",
    "title": "Working now",
-   "description": "Agent machines with a turn running in the last 3 minutes.",
+   "description": "Agent machines with a turn running in the last 3 minutes. Rounded to the nearest five.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -111,6 +111,9 @@
         "-1": {
          "text": "no data yet",
          "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
         }
        }
       }
@@ -168,7 +171,7 @@
   {
    "type": "stat",
    "title": "Tokens / min",
-   "description": "Tokens the agents' model calls use: input, output and cached, averaged over five minutes. While fewer than five machines are using any, it is rounded to one figure.",
+   "description": "Tokens the agents' model calls use: input, output and cached, averaged over five minutes. Two significant figures; one while fewer than five machines are using any.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -326,6 +329,9 @@
         "-1": {
          "text": "no data yet",
          "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
         }
        }
       }
@@ -403,6 +409,9 @@
         "-1": {
          "text": "no data yet",
          "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
         }
        }
       }
@@ -468,7 +477,7 @@
   {
    "type": "bargauge",
    "title": "Machines by tokens per minute",
-   "description": "Agent machines by how many tokens a minute their agents are using, averaged over five minutes. A group of one to four machines is shown as \"<5\", not as its number.",
+   "description": "Agent machines by how many tokens a minute their agents are using, averaged over five minutes. Counts are rounded to the nearest five; one to four machines show as \"<5\".",
    "transparent": true,
    "fieldConfig": {
     "defaults": {
@@ -476,6 +485,16 @@
      "min": 0,
      "decimals": 0,
      "noValue": "after the next relay update",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
      "color": {
       "mode": "fixed"
      },
@@ -487,18 +506,7 @@
         "color": "text"
        }
       ]
-     },
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "-1": {
-         "text": "<5",
-         "color": "#6e7681"
-        }
-       }
-      }
-     ]
+     }
     },
     "overrides": [
      {
@@ -670,7 +678,7 @@
   {
    "type": "bargauge",
    "title": "Machines",
-   "description": "Agent machines by what they are doing, each bar against the limit of machines this host admits.",
+   "description": "Agent machines by what they are doing, each bar against the limit of machines this host admits. Rounded to the nearest five; one to four show as \"<5\".",
    "transparent": true,
    "fieldConfig": {
     "defaults": {
@@ -678,6 +686,16 @@
      "min": 0,
      "decimals": 0,
      "noValue": "\u2013",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
      "color": {
       "mode": "fixed"
      },
@@ -849,7 +867,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "clamp_min(subnet:boxes_awake - subnet:boxes_working, 0)",
+     "expr": "subnet:boxes_idle",
      "legendFormat": "awake, idle",
      "instant": true,
      "range": false
@@ -922,6 +940,16 @@
      "min": 0,
      "decimals": 0,
      "noValue": "\u2013",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
      "color": {
       "mode": "thresholds"
      },

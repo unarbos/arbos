@@ -136,16 +136,18 @@ tests:
         exp_samples:
           - { labels: "subnet:relay_up", value: 1 }
           - { labels: "subnet:public_up", value: 1 }
-          - { labels: "subnet:boxes_running", value: 2 }
-          - { labels: "subnet:boxes_working", value: 21 }
-          - { labels: "subnet:boxes_asleep", value: 3 }
+          # counts of machines: 0, -5 for one to four ("<5"), otherwise the nearest five
+          - { labels: "subnet:boxes_running", value: -5 }
+          - { labels: "subnet:boxes_working", value: 20 }
+          - { labels: "subnet:boxes_asleep", value: -5 }
           - { labels: "subnet:boxes_awake", value: 30 }
-          - { labels: "subnet:boxes_waking", value: 1 }
+          - { labels: "subnet:boxes_idle", value: 10 }
+          - { labels: "subnet:boxes_waking", value: -5 }
           - { labels: "subnet:boxes_error", value: 0 }
           - { labels: "subnet:boxes_waitlisted", value: 0 }
           - { labels: "subnet:boxes_max", value: 100 }
-          - { labels: "subnet:boxes_reporting", value: 1 }
-          - { labels: "subnet:boxes_not_reporting", value: 1 }
+          - { labels: "subnet:boxes_reporting", value: -5 }
+          - { labels: "subnet:boxes_not_reporting", value: -5 }
           - { labels: "subnet:box_starts:rate5m", value: 1 }
           - { labels: "subnet:box_start_failures:rate5m", value: 0.1 }
           - { labels: "subnet:turns_started:rate5m", value: 2 }
@@ -156,13 +158,14 @@ tests:
           - { labels: "subnet:turn_duration_seconds:p50", value: 5 }
           - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
           - { labels: "subnet:model_error_ratio", value: 0.1 }
-          - { labels: "subnet:model_requests:rate5m", value: 3.3333333333333335 }
+          # amounts of tokens and calls: two significant figures
+          - { labels: "subnet:model_requests:rate5m", value: 3.3000000000000003 }
           # two machines are using tokens, fewer than 5: one significant figure (100 is already that)
           - { labels: "subnet:tokens:rate5m", value: 100 }
           - { labels: "subnet:relay_counts_tokens", value: 1 }
-          # three machines in all: every group that has any is "<5" (-1), an empty one is 0
-          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -1 }
-          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: -1 }
+          # three machines in all: every group that has any is "<5" (-5), an empty one is 0
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: -5 }
           - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 0 }
           - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
           - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: 0 }
@@ -174,8 +177,8 @@ tests:
           - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
           - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
 
-  # Groups of machines leave as a number only from five up, and the fleet's token rate is exact
-  # only while at least five machines are using tokens.
+  # Groups of machines leave as 0, "fewer than five" or the nearest five, and the fleet's token
+  # rate as two figures, one while fewer than five machines are using tokens.
   - name: small groups of machines are not counted out loud
     interval: 30s
     input_series:
@@ -201,13 +204,14 @@ tests:
       - expr: '{__name__=~"subnet:(boxes_by_token_rate|tokens:rate5m)"}'
         eval_time: 10m
         exp_samples:
-          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -1 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
           - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: 0 }
-          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 6 }
+          # six machines: the nearest five, so that a seventh joining does not show
+          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 5 }
           - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
-          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: -1 }
-          # seven machines are using tokens: the exact rate
-          - { labels: "subnet:tokens:rate5m", value: 35390.96666666667 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: -5 }
+          # seven machines are using tokens: 35,390.97 a second leaves as two figures
+          - { labels: "subnet:tokens:rate5m", value: 35000 }
 
   - name: with fewer than five machines at work the token rate is one figure
     interval: 30s
