@@ -99,12 +99,18 @@ def quantile(q, metric="arbos_agentd_turn_duration_seconds"):
     return f"histogram_quantile({q}, sum by (le) (rate({metric}_bucket[5m])))"
 
 
+# A counter with labels does not exist until its first event, so a healthy system has no "failed"
+# series. `x or R0` reads 0 while the relay reports (A0: while any agentd reports) and stays empty
+# when there is no data at all.
+R0 = "0 * max(arbos_relay_uptime_seconds)"
+A0 = "0 * count(arbos_agentd_uptime_seconds)"
+NOT_REPORTING = f'count(up{{job="arbos-agentd"}} == 0) or {R0}'
 ONOFF = [{"type": "value", "options": {"0": {"text": "OFF", "color": GREEN}, "1": {"text": "ON", "color": RED}}}]
 UP = dict(mappings=UPDOWN, thresholds=steps((None, RED), (1, GREEN)))
 PCT_ERRORS = steps((None, GREEN), (2, ORANGE), (10, RED))
 SLOTS_USED = '100 * sum(arbos_relay_boxes_registered{provider=~"gvisor|boxd|docker"}) / max(arbos_relay_boxes_max)'
 SPEND_PCT = "100 * max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0)"
-MODEL_ERR_PCT = '100 * sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))'
+MODEL_ERR_PCT = f'100 * (sum(rate(arbos_relay_model_requests_total{{class!="2xx"}}[5m])) or {R0}) / sum(rate(arbos_relay_model_requests_total[5m]))'
 MODEL = "arbos_relay_model_response_seconds"
 
 fleet = dashboard("arbos-fleet", "Arbos fleet", [
@@ -125,9 +131,9 @@ fleet = dashboard("arbos-fleet", "Arbos fleet", [
     stat("Boxes running", f"count(container_last_seen{{{BOX}}}) or vector(0)", desc="arbos-box-* containers Docker is running."),
     stat("Box slots used", SLOTS_USED, "percent", steps((None, GREEN), (80, ORANGE), (90, RED)), decimals=0,
          desc="Admitted boxes against max_boxes. At 100% new sign-ups go on the waitlist."),
-    stat("Boxes asleep", 'sum(arbos_relay_boxes{state="asleep"})'),
+    stat("Boxes asleep", f'sum(arbos_relay_boxes{{state="asleep"}}) or {R0}'),
     stat("Waitlisted", "sum(arbos_relay_waitlist_length)", thresholds=ANY_IS_BAD),
-    stat("Start fails (1h)", 'sum(increase(arbos_relay_box_starts_total{result="failed"}[1h]))', thresholds=ANY_IS_BAD, decimals=0,
+    stat("Start fails (1h)", f'sum(increase(arbos_relay_box_starts_total{{result="failed"}}[1h])) or {R0}', thresholds=ANY_IS_BAD, decimals=0,
          desc="Wake jobs whose box did not start."),
     stat("Wake queue", "sum(arbos_relay_wake_queue_depth)", thresholds=steps((None, GREEN), (5, ORANGE), (20, RED)),
          desc="Wake jobs queued or in flight."),
@@ -228,33 +234,36 @@ boxes = dashboard("arbos-boxes", "Boxes", [
 ])
 
 
-FAILED_PCT = '100 * sum(rate(arbos_agentd_turns_finished_total{result="error"}[5m])) / sum(rate(arbos_agentd_turns_finished_total[5m]))'
-BOX_MODEL_ERR_PCT = '100 * sum(rate(arbos_agentd_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_agentd_model_requests_total[5m]))'
+FAILED_PCT = f'100 * (sum(rate(arbos_agentd_turns_finished_total{{result="error"}}[5m])) or {A0}) / sum(rate(arbos_agentd_turns_finished_total[5m]))'
+BOX_MODEL_ERR_PCT = f'100 * (sum(rate(arbos_agentd_model_requests_total{{class!="2xx"}}[5m])) or {A0}) / sum(rate(arbos_agentd_model_requests_total[5m]))'
 
 agents = dashboard("arbos-agents", "Agents", [
+    stat("Boxes reporting", f'count(up{{job="arbos-agentd"}} == 1) or {R0}',
+         desc="Awake boxes whose agentd answers the scrape. Every number on this page covers these boxes only."),
+    stat("Not reporting", NOT_REPORTING, thresholds=steps((None, GREEN), (1, ORANGE)),
+         desc="Awake boxes whose agentd does not answer: still on an image from before agentd had /metrics, or unreachable. Their turns are not counted here."),
     stat("Turns started / min", "60 * sum(rate(arbos_agentd_turns_started_total[5m]))", decimals=1),
-    stat("Turns finished / min", "60 * sum(rate(arbos_agentd_turns_finished_total[5m]))", decimals=1),
     stat("Turns failed", FAILED_PCT, "percent", PCT_ERRORS, decimals=1),
     stat("Turn duration p95", quantile(0.95), "s", decimals=1),
     stat("Turns running", "sum(arbos_agentd_turns_running)"),
-    stat("Messages waiting", "sum(arbos_agentd_sends_waiting)", thresholds=steps((None, GREEN), (20, ORANGE), (100, RED)),
+    stat("Waiting", "sum(arbos_agentd_sends_waiting)", thresholds=steps((None, GREEN), (20, ORANGE), (100, RED)),
          desc="User messages waiting for a turn, over all boxes."),
-    stat("Crashes (1h)", "sum(increase(arbos_agentd_worker_crashes_total[1h]))", thresholds=ANY_IS_BAD, decimals=0,
+    stat("Crashes (1h)", f"sum(increase(arbos_agentd_worker_crashes_total[1h])) or {A0}", thresholds=ANY_IS_BAD, decimals=0,
          desc="Main agents respawned and job workers replaced."),
-    stat("Model errors", MODEL_ERR_PCT, "percent", PCT_ERRORS, decimals=1),
 
     ts("Turns per minute", [("60 * sum(rate(arbos_agentd_turns_started_total[5m]))", "started"),
                             ("60 * sum by (result) (rate(arbos_agentd_turns_finished_total[5m]))", "finished {{result}}")]),
     ts("Turn duration", [(quantile(0.5), "p50"), (quantile(0.95), "p95"), (quantile(0.99), "p99")], "s"),
     ts("Queue and running work", [("sum(arbos_agentd_sends_waiting)", "messages waiting"), ("sum(arbos_agentd_turns_running)", "turns running"),
                                   ("sum(arbos_agentd_workers_running)", "worker turns running"), ("sum by (state) (arbos_agentd_jobs)", "jobs {{state}}")]),
-    ts("Crashes per hour", [("sum by (kind) (increase(arbos_agentd_worker_crashes_total[1h]))", "{{kind}}")]),
+    ts("Crashes per hour", [(f"sum(increase(arbos_agentd_worker_crashes_total[1h])) or {A0}", "all"),
+                            ("sum by (kind) (increase(arbos_agentd_worker_crashes_total[1h]))", "{{kind}}")]),
     ts("Model calls per minute", [("60 * sum by (provider, class) (rate(arbos_relay_model_requests_total[5m]))", "{{provider}} {{class}}")],
        desc="Upstream calls as the relay made them."),
     ts("Model response time", [(quantile(0.5, MODEL), "p50"), (quantile(0.95, MODEL), "p95")], "s"),
     ts("Failure rates", [(FAILED_PCT, "turns failed"), (MODEL_ERR_PCT, "model errors (relay)"), (BOX_MODEL_ERR_PCT, "model errors (as boxes saw them)")], "percent"),
-    ts("Box health", [('count(up{job="arbos-agentd"} == 1)', "boxes reporting"), ('count(up{job="arbos-agentd"} == 0) or vector(0)', "awake but not answering"),
-                      ('sum(arbos_agentd_workspaces{health="unhealthy"})', "unhealthy workspaces"),
+    ts("Box health", [('count(up{job="arbos-agentd"} == 1)', "boxes reporting"), (NOT_REPORTING, "not reporting yet"),
+                      (f'sum(arbos_agentd_workspaces{{health="unhealthy"}}) or {A0}', "unhealthy workspaces"),
                       ("sum(arbos_agentd_rooms_open) - sum(arbos_agentd_rooms_connected)", "rooms not connected"),
                       ("sum(increase(arbos_agentd_relay_reconnects_total[1h]))", "relay reconnects (1h)")],
        desc="Only awake boxes are scraped; a sleeping box is absent, not down."),
@@ -262,7 +271,8 @@ agents = dashboard("arbos-agents", "Agents", [
 
 
 # The Subnet view lives in its own Grafana organisation whose only datasource holds `subnet:*`.
-SUCCESS = "100 * (1 - subnet:turns_failed:rate5m / subnet:turns_finished:rate5m)"
+# 100% while agents report and no turn has finished in the window, rather than a blank headline.
+SUCCESS = "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m"
 subnet = dashboard("arbos-subnet", "Subnet view", [
     stat("Service", "subnet:relay_up", mappings=UPDOWN, thresholds=steps((None, RED), (1, GREEN)), w=4),
     stat("Reachable from outside", "subnet:public_up", mappings=UPDOWN, thresholds=steps((None, RED), (1, GREEN)), w=4),
@@ -275,10 +285,11 @@ subnet = dashboard("arbos-subnet", "Subnet view", [
                                   ("60 * subnet:turns_failed:rate5m", "failed")]),
     ts("Turn duration", [("subnet:turn_duration_seconds:p50", "p50"), ("subnet:turn_duration_seconds:p95", "p95")], "s"),
     ts("Agent machines", [("subnet:boxes_running", "running"), ("subnet:boxes_asleep", "asleep"), ("subnet:boxes_waitlisted", "waiting"),
-                          ("subnet:boxes_max", "limit")]),
+                          ("subnet:boxes_max", "limit"), ("subnet:boxes_reporting", "reporting turn numbers")],
+       desc="Turn numbers come only from the machines that report them; the rest are being upgraded."),
     ts("Work in progress", [("subnet:turns_active", "turns running"), ("subnet:queue_depth", "queued")]),
     ts("Success rates", [(SUCCESS, "turns"), ("100 * (1 - subnet:model_error_ratio)", "model calls"),
-                         ("100 * (1 - subnet:box_start_failures:rate5m / subnet:box_starts:rate5m)", "machine starts")], "percent", max_=100),
+                         ("100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0))", "machine starts")], "percent", max_=100),
     ts("Host headroom", [("100 * subnet:host_cpu_used_ratio", "CPU used"), ("100 * subnet:host_memory_used_ratio", "memory used"),
                          ("100 * (1 - subnet:host_disk_free_ratio)", "disk used")], "percent", max_=100),
 ], ds="prometheus-subnet", nav=False)

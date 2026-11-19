@@ -16,6 +16,14 @@ tests:
         values: 1x20
       - series: 'probe_success{job="public-https", instance="https://relay.arbos.life/healthz"}'
         values: 1x20
+      - series: 'arbos_relay_uptime_seconds{instance="127.0.0.1:9108", job="relay"}'
+        values: 100x20
+      - series: 'arbos_agentd_uptime_seconds{box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
+        values: 100x20
+      - series: 'up{job="arbos-agentd", box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
+        values: 1x20
+      - series: 'up{job="arbos-agentd", box="1b2c3d4e5f60", instance="127.0.0.1:9108"}' # old image: answers 502
+        values: 0x20
       - series: 'container_last_seen{name="arbos-box-u_alice", id="/docker/aaa", image="arbos-agent:1", instance="host-1"}'
         values: 1x20
       - series: 'container_last_seen{name="arbos-box-u_bob", id="/docker/bbb", image="arbos-agent:1", instance="host-1"}'
@@ -72,6 +80,8 @@ tests:
           - { labels: "subnet:boxes_asleep", value: 3 }
           - { labels: "subnet:boxes_waitlisted", value: 0 }
           - { labels: "subnet:boxes_max", value: 100 }
+          - { labels: "subnet:boxes_reporting", value: 1 }
+          - { labels: "subnet:boxes_not_reporting", value: 1 }
           - { labels: "subnet:box_starts:rate5m", value: 1 }
           - { labels: "subnet:box_start_failures:rate5m", value: 0.1 }
           - { labels: "subnet:turns_started:rate5m", value: 2 }
@@ -85,6 +95,67 @@ tests:
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
           - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
           - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
+
+  # A healthy system has no "failed"/"error"/"5xx" series at all (a labelled counter appears with its
+  # first event). The Subnet view must then read 0 failures, not nothing.
+  - name: healthy system reads zero failures
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x20
+      - series: 'arbos_agentd_uptime_seconds{box="0a1b2c3d4e5f"}'
+        values: 100x20
+      - series: 'up{job="arbos-agentd", box="0a1b2c3d4e5f"}'
+        values: 1x20
+      - series: 'arbos_agentd_turns_finished_total{box="0a1b2c3d4e5f", result="done"}'
+        values: 0+60x20
+      - series: 'arbos_relay_box_starts_total{result="ok"}'
+        values: 0+30x20
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
+        values: 0+90x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(turns_failed:rate5m|box_start_failures:rate5m|model_error_ratio|boxes_not_reporting|boxes_asleep)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:turns_failed:rate5m", value: 0 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0 }
+          - { labels: "subnet:model_error_ratio", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:boxes_asleep", value: 0 }
+
+  # ...and with nothing reporting, there is no invented zero.
+  - name: no relay metrics means no data
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="x"}'
+        values: 1x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(turns_failed:rate5m|box_start_failures:rate5m|model_error_ratio|boxes_not_reporting|boxes_asleep)"}'
+        eval_time: 10m
+        exp_samples: []
+
+  - name: a waitlist warns, a growing waitlist pages
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_waitlist_length'
+        values: 2x80 3+1x10 13x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Waitlist
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: Waitlist
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "2 users are waiting for a box: the host is at its box limit." }
+      - eval_time: 60m
+        alertname: WaitlistGrowing
+        exp_alerts: []
+      - eval_time: 91m
+        alertname: WaitlistGrowing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "The waitlist grew by 11 in 30 minutes: sign-ups are arriving faster than box slots free up." }
 
   - name: relay down, low disk, and a target that never answered
     interval: 30s
@@ -122,27 +193,29 @@ tests:
       - eval_time: 4m
         alertname: RelayDown
         exp_alerts:
-          - exp_labels: { job: relay-health, instance: "http://127.0.0.1:7700/healthz" }
+          - exp_labels: { severity: critical, job: relay-health, instance: "http://127.0.0.1:7700/healthz" }
             exp_annotations: { summary: The relay does not answer /healthz on the host. }
       - eval_time: 8m
         alertname: ScrapeTargetDown
         exp_alerts:
-          - exp_labels: { job: node, instance: "127.0.0.1:9100" }
+          - exp_labels: { severity: warning, job: node, instance: "127.0.0.1:9100" }
             exp_annotations: { summary: Prometheus cannot scrape node. }
       - eval_time: 8m
         alertname: DiskFreeLow
         exp_alerts:
-          - exp_labels: { fstype: ext4, mountpoint: / }
+          - exp_labels: { severity: warning, fstype: ext4, mountpoint: / }
             exp_annotations: { summary: "/ has 14% free." }
       - eval_time: 6m
         alertname: BoxOOMKilled
         exp_alerts:
-          - exp_annotations: { summary: "The kernel OOM-killed 1 processes in the last 10 minutes (Boxes dashboard → OOM kills)." }
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "The kernel OOM-killed 1 processes in the last 10 minutes (Boxes dashboard → OOM kills)." }
       # 72 of 80 slots is exactly 90%: fires after its 5 minutes
       - eval_time: 8m
         alertname: BoxCapacityHigh
         exp_alerts:
-          - exp_annotations: { summary: "90% of the box slots are taken; new sign-ups go on the waitlist at 100%." }
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "90% of the box slots are taken; new sign-ups go on the waitlist at 100%." }
       # $290 of $500 is 58%: quiet. $310 is 62%: the first warning, not the second.
       - eval_time: 4m
         alertname: SpendAt60Percent
@@ -150,7 +223,8 @@ tests:
       - eval_time: 8m
         alertname: SpendAt60Percent
         exp_alerts:
-          - exp_annotations: { summary: "Today's spend is 62% of the daily cap that trips the kill switch." }
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Today's spend is 62% of the daily cap that trips the kill switch." }
       - eval_time: 8m
         alertname: SpendAt85Percent
         exp_alerts: []

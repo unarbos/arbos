@@ -1,4 +1,5 @@
-# Alerts. All go to the one Alertmanager receiver. Summaries carry no box or user names (the alert
+# Alerts. All go to the one Alertmanager receiver; `critical` repeats every 4 hours while it lasts,
+# `warning` every 12. Summaries carry no box or user names (the alert
 # channel is not the admin dashboard): they say what is wrong and which dashboard shows where.
 groups:
   - name: arbos
@@ -6,18 +7,24 @@ groups:
       - alert: RelayDown
         expr: probe_success{job="relay-health"} == 0
         for: 1m
+        labels:
+          severity: critical
         annotations:
           summary: The relay does not answer /healthz on the host.
 
       - alert: HealthProbeFailing
         expr: probe_success{job="public-https"} == 0
         for: 2m
+        labels:
+          severity: critical
         annotations:
           summary: "{{ $labels.instance }} fails from outside (DNS, Caddy, TLS or the service)."
 
       - alert: TLSExpirySoon
         expr: probe_ssl_earliest_cert_expiry - time() < 14 * 86400
         for: 10m
+        labels:
+          severity: warning
         annotations:
           summary: "The certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}."
 
@@ -27,42 +34,66 @@ groups:
         # alerted from the relay's own series (BoxStartFailures, Waitlist, BoxCapacityHigh).
         expr: up{job!="arbos-agentd"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
         for: 3m
+        labels:
+          severity: warning
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }}."
 
       - alert: DiskFreeLow
         expr: node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes < 0.15
         for: 5m
+        labels:
+          severity: warning
         annotations:
           summary: "{{ $labels.mountpoint }} has {{ $value | humanizePercentage }} free."
 
       - alert: DiskFullWithin24h
         expr: predict_linear(node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"}[6h], 24 * 3600) < 0
         for: 30m
+        labels:
+          severity: critical
         annotations:
           summary: "{{ $labels.mountpoint }} is on course to fill within 24 hours."
 
       - alert: HostMemoryLow
         expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
         for: 5m
+        labels:
+          severity: critical
         annotations:
           summary: "The host has {{ $value | humanizePercentage }} memory available."
 
       - alert: BoxStartFailures
         # Every wake goes through the wake runner; `fetching` (a cold box still coming back) is not a failure.
         expr: sum(increase(arbos_relay_box_starts_total{result="failed"}[10m])) > 0
+        labels:
+          severity: warning
         annotations:
           summary: "{{ $value | printf \"%.0f\" }} box starts (wake jobs) failed in the last 10 minutes."
 
+      # Someone waiting is worth knowing, not worth a page: it repeats twice a day at most.
+      # A waitlist that keeps growing is the page.
       - alert: Waitlist
         expr: arbos_relay_waitlist_length > 0
-        for: 5m
+        for: 15m
+        labels:
+          severity: warning
         annotations:
           summary: "{{ $value }} users are waiting for a box: the host is at its box limit."
+
+      - alert: WaitlistGrowing
+        expr: arbos_relay_waitlist_length - (arbos_relay_waitlist_length offset 30m) >= 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The waitlist grew by {{ $value }} in 30 minutes: sign-ups are arriving faster than box slots free up."
 
       - alert: BoxCapacityHigh
         expr: sum(arbos_relay_boxes_registered{provider=~"gvisor|boxd|docker"}) / max(arbos_relay_boxes_max) >= 0.9
         for: 5m
+        labels:
+          severity: warning
         annotations:
           summary: "{{ $value | humanizePercentage }} of the box slots are taken; new sign-ups go on the waitlist at 100%."
 
@@ -70,16 +101,22 @@ groups:
       # or until someone lifts it. Two warnings on the way there, then the switch itself.
       - alert: SpendAt60Percent
         expr: arbos_relay_spend_today_usd / (arbos_relay_spend_daily_cap_usd > 0) >= 0.6
+        labels:
+          severity: warning
         annotations:
           summary: "Today's spend is {{ $value | humanizePercentage }} of the daily cap that trips the kill switch."
 
       - alert: SpendAt85Percent
         expr: arbos_relay_spend_today_usd / (arbos_relay_spend_daily_cap_usd > 0) >= 0.85
+        labels:
+          severity: critical
         annotations:
           summary: "Today's spend is {{ $value | humanizePercentage }} of the daily cap: the kill switch is close. Raise the cap or expect every agent to stop."
 
       - alert: KillSwitchOn
         expr: arbos_relay_kill_switch == 1
+        labels:
+          severity: critical
         annotations:
           summary: The kill switch is on. Every model call is refused and no agent can work.
 
@@ -89,12 +126,16 @@ groups:
           sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
           and sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
         for: 5m
+        labels:
+          severity: critical
         annotations:
           summary: "{{ $value | humanizePercentage }} of model calls are failing."
 
       - alert: ModelSlow
         expr: histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m]))) > 30
         for: 10m
+        labels:
+          severity: warning
         annotations:
           summary: "Model providers take {{ $value | humanizeDuration }} (p95) to start answering."
 
@@ -102,6 +143,8 @@ groups:
         # A killed box's container can be gone before its own counter is scraped twice, so the
         # host-wide kernel counter is the trigger; the Boxes dashboard shows which one.
         expr: increase(node_vmstat_oom_kill[10m]) > 0
+        labels:
+          severity: critical
         annotations:
           summary: "The kernel OOM-killed {{ $value | printf \"%.0f\" }} processes in the last 10 minutes (Boxes dashboard → OOM kills)."
 
@@ -109,6 +152,8 @@ groups:
         expr: >
           changes(container_start_time_seconds{id="/system.slice/arbos-relay.service"}[15m]) > 0
           or resets(arbos_relay_uptime_seconds[15m]) > 0
+        labels:
+          severity: warning
         annotations:
           summary: The relay restarted in the last 15 minutes.
 
@@ -116,5 +161,7 @@ groups:
         # The relay sat at ~22 GB on 2026-11-18. Tune this number as the real ceiling becomes known.
         expr: container_memory_rss{id="/system.slice/arbos-relay.service"} > 40 * 1024^3
         for: 10m
+        labels:
+          severity: warning
         annotations:
           summary: "Relay memory is {{ $value | humanize1024 }}B and past 40 GiB."

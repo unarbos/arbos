@@ -10,10 +10,15 @@
 # Grafana cannot create an organisation from provisioning files (it refuses to start when a file
 # names one that does not exist), so this goes through its HTTP API on loopback as the admin.
 #
-#   usage: grafana-access.sh [env file]      default /etc/arbos/monitoring.env
+#   usage: grafana-access.sh [--check] [env file]      default /etc/arbos/monitoring.env
+#
+# --check only validates the env file and touches nothing: run it before the first `docker compose up`,
+# because Grafana takes its admin password once, when it creates its database.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+CHECK_ONLY=
+if [[ ${1:-} == --check ]]; then CHECK_ONLY=1; shift; fi
 ENV_FILE=${1:-/etc/arbos/monitoring.env}
 GRAFANA=${GRAFANA:-http://127.0.0.1:3300}
 ORG_NAME=Subnet
@@ -22,10 +27,26 @@ value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
 ADMIN_PASSWORD=$(value GF_SECURITY_ADMIN_PASSWORD)
 LOGIN=$(value SUBNET_VIEWER_LOGIN)
 PASSWORD=$(value SUBNET_VIEWER_PASSWORD)
-[[ -n $ADMIN_PASSWORD ]] || { echo "GF_SECURITY_ADMIN_PASSWORD is empty in $ENV_FILE" >&2; exit 1; }
-# Both values are placed inside JSON below, so only characters that need no escaping are accepted.
-[[ $LOGIN =~ ^[a-z0-9_-]{2,32}$ ]] || { echo "SUBNET_VIEWER_LOGIN must be 2-32 of a-z 0-9 _ -" >&2; exit 1; }
-[[ $PASSWORD =~ ^[A-Za-z0-9._~-]{16,128}$ ]] || { echo "SUBNET_VIEWER_PASSWORD must be 16-128 of A-Z a-z 0-9 . _ ~ -" >&2; exit 1; }
+WEBHOOK=$(value ALERT_WEBHOOK_URL)
+ROOT_URL=$(value GF_SERVER_ROOT_URL)
+bad() { echo "$ENV_FILE: $1" >&2; exit 1; }
+# The passwords and the login are placed inside JSON below, so only characters that need no escaping
+# are accepted; 16 characters of this alphabet is the floor for something generated, not chosen.
+STRONG='^[A-Za-z0-9._~-]{16,128}$'
+[[ $ADMIN_PASSWORD =~ $STRONG ]] || bad "GF_SECURITY_ADMIN_PASSWORD must be 16-128 of A-Z a-z 0-9 . _ ~ -"
+[[ $PASSWORD =~ $STRONG ]] || bad "SUBNET_VIEWER_PASSWORD must be 16-128 of A-Z a-z 0-9 . _ ~ -"
+[[ $PASSWORD != "$ADMIN_PASSWORD" ]] || bad "SUBNET_VIEWER_PASSWORD must differ from the admin password"
+shopt -s nocasematch
+for p in "$ADMIN_PASSWORD" "$PASSWORD"; do
+  # fewer than 8 different characters, or a word everyone tries first
+  [[ $(printf %s "$p" | fold -w 1 | sort -u | wc -l) -ge 8 && ! $p =~ (admin|password|grafana|arbos|changeme|123456) ]] || bad "a password is trivially guessable"
+done
+shopt -u nocasematch
+[[ $LOGIN =~ ^[a-z0-9_-]{2,32}$ && $LOGIN != admin ]] || bad "SUBNET_VIEWER_LOGIN must be 2-32 of a-z 0-9 _ - and not 'admin'"
+# https only, except a listener on this machine (the local run).
+[[ $WEBHOOK =~ ^https://[A-Za-z0-9.-]+/[^[:space:]\"]+$ || $WEBHOOK =~ ^http://127\.0\.0\.1:[0-9]+/ ]] || bad "ALERT_WEBHOOK_URL must be an https:// URL"
+[[ $ROOT_URL =~ ^https://[A-Za-z0-9.-]+/$ || $ROOT_URL =~ ^http://127\.0\.0\.1:[0-9]+/$ ]] || bad "GF_SERVER_ROOT_URL must be https://<host>/"
+if [[ -n $CHECK_ONLY ]]; then echo "$ENV_FILE: ok"; exit 0; fi
 
 # api METHOD PATH [ORG_ID] — JSON body on stdin; prints the response body, then the status on a last line.
 # The admin password goes to curl through a config on a file descriptor, never on its command line.

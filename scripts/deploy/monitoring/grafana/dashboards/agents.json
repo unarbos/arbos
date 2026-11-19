@@ -19,12 +19,12 @@
  "panels": [
   {
    "type": "stat",
-   "title": "Turns started / min",
-   "description": "",
+   "title": "Boxes reporting",
+   "description": "Awake boxes whose agentd answers the scrape. Every number on this page covers these boxes only.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "decimals": 1,
+     "decimals": null,
      "mappings": [],
      "thresholds": {
       "mode": "absolute",
@@ -67,7 +67,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum(rate(arbos_agentd_turns_started_total[5m]))",
+     "expr": "count(up{job=\"arbos-agentd\"} == 1) or 0 * max(arbos_relay_uptime_seconds)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -76,12 +76,12 @@
   },
   {
    "type": "stat",
-   "title": "Turns finished / min",
-   "description": "",
+   "title": "Not reporting",
+   "description": "Awake boxes whose agentd does not answer: still on an image from before agentd had /metrics, or unreachable. Their turns are not counted here.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "decimals": 1,
+     "decimals": null,
      "mappings": [],
      "thresholds": {
       "mode": "absolute",
@@ -89,6 +89,10 @@
        {
         "value": null,
         "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "orange"
        }
       ]
      },
@@ -124,7 +128,64 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum(rate(arbos_agentd_turns_finished_total[5m]))",
+     "expr": "count(up{job=\"arbos-agentd\"} == 0) or 0 * max(arbos_relay_uptime_seconds)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns started / min",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 1,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 3,
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_agentd_turns_started_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -171,9 +232,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 3,
+   "id": 4,
    "gridPos": {
-    "x": 6,
+    "x": 9,
     "y": 0,
     "w": 3,
     "h": 4
@@ -189,7 +250,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -228,9 +289,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 4,
+   "id": 5,
    "gridPos": {
-    "x": 9,
+    "x": 12,
     "y": 0,
     "w": 3,
     "h": 4
@@ -285,9 +346,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 5,
+   "id": 6,
    "gridPos": {
-    "x": 12,
+    "x": 15,
     "y": 0,
     "w": 3,
     "h": 4
@@ -312,7 +373,7 @@
   },
   {
    "type": "stat",
-   "title": "Messages waiting",
+   "title": "Waiting",
    "description": "User messages waiting for a turn, over all boxes.",
    "fieldConfig": {
     "defaults": {
@@ -350,9 +411,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 6,
+   "id": 7,
    "gridPos": {
-    "x": 15,
+    "x": 18,
     "y": 0,
     "w": 3,
     "h": 4
@@ -411,71 +472,6 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 7,
-   "gridPos": {
-    "x": 18,
-    "y": 0,
-    "w": 3,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "sum(increase(arbos_agentd_worker_crashes_total[1h]))",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Model errors",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "decimals": 1,
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       },
-       {
-        "value": 2,
-        "color": "orange"
-       },
-       {
-        "value": 10,
-        "color": "red"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
    "id": 8,
    "gridPos": {
     "x": 21,
@@ -494,7 +490,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))",
+     "expr": "sum(increase(arbos_agentd_worker_crashes_total[1h])) or 0 * count(arbos_agentd_uptime_seconds)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -761,12 +757,9 @@
    },
    "options": {
     "legend": {
-     "displayMode": "table",
+     "displayMode": "list",
      "placement": "bottom",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ]
+     "calcs": []
     },
     "tooltip": {
      "mode": "multi",
@@ -787,6 +780,17 @@
    "targets": [
     {
      "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(increase(arbos_agentd_worker_crashes_total[1h])) or 0 * count(arbos_agentd_uptime_seconds)",
+     "legendFormat": "all",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus"
@@ -976,7 +980,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "turns failed",
      "instant": false,
      "range": true
@@ -987,7 +991,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / sum(rate(arbos_relay_model_requests_total[5m]))",
      "legendFormat": "model errors (relay)",
      "instant": false,
      "range": true
@@ -998,7 +1002,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_agentd_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_agentd_model_requests_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_model_requests_total{class!=\"2xx\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_model_requests_total[5m]))",
      "legendFormat": "model errors (as boxes saw them)",
      "instant": false,
      "range": true
@@ -1066,8 +1070,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up{job=\"arbos-agentd\"} == 0) or vector(0)",
-     "legendFormat": "awake but not answering",
+     "expr": "count(up{job=\"arbos-agentd\"} == 0) or 0 * max(arbos_relay_uptime_seconds)",
+     "legendFormat": "not reporting yet",
      "instant": false,
      "range": true
     },
@@ -1077,7 +1081,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agentd_workspaces{health=\"unhealthy\"})",
+     "expr": "sum(arbos_agentd_workspaces{health=\"unhealthy\"}) or 0 * count(arbos_agentd_uptime_seconds)",
      "legendFormat": "unhealthy workspaces",
      "instant": false,
      "range": true

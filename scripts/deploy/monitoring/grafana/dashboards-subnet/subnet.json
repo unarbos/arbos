@@ -282,7 +282,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * (1 - subnet:turns_failed:rate5m / subnet:turns_finished:rate5m)",
+     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -557,7 +557,7 @@
   {
    "type": "timeseries",
    "title": "Agent machines",
-   "description": "",
+   "description": "Turn numbers come only from the machines that report them; the rest are being upgraded.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -639,6 +639,17 @@
      },
      "expr": "subnet:boxes_max",
      "legendFormat": "limit",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_reporting",
+     "legendFormat": "reporting turn numbers",
      "instant": false,
      "range": true
     }
@@ -762,7 +773,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * (1 - subnet:turns_failed:rate5m / subnet:turns_finished:rate5m)",
+     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
      "legendFormat": "turns",
      "instant": false,
      "range": true
@@ -784,7 +795,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * (1 - subnet:box_start_failures:rate5m / subnet:box_starts:rate5m)",
+     "expr": "100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0))",
      "legendFormat": "machine starts",
      "instant": false,
      "range": true

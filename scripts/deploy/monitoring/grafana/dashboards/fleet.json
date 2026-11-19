@@ -365,7 +365,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / sum(rate(arbos_relay_model_requests_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -731,7 +731,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_relay_boxes{state=\"asleep\"})",
+     "expr": "sum(arbos_relay_boxes{state=\"asleep\"}) or 0 * max(arbos_relay_uptime_seconds)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -853,7 +853,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(increase(arbos_relay_box_starts_total{result=\"failed\"}[1h]))",
+     "expr": "sum(increase(arbos_relay_box_starts_total{result=\"failed\"}[1h])) or 0 * max(arbos_relay_uptime_seconds)",
      "legendFormat": "",
      "instant": false,
      "range": true

@@ -6,7 +6,10 @@
                   /metrics/targets    http_sd: three awake "boxes"
                   /metrics/box/<id>   agentd series of one box
 
-Counters are computed from the clock, so rates and percentiles have something to show. /metrics also
+Counters are computed from the clock, so rates and percentiles have something to show. For its first
+five minutes the fake is a healthy system: like the real relay it has no "failed", "error" or "5xx"
+series until the first such event, so a panel that goes blank without them shows up here. A fourth
+box is listed but answers 502, as a box on an image from before agentd had /metrics does. /metrics also
 carries stand-ins for what cAdvisor reports about the relay's systemd service on the real host,
 which a laptop has no equivalent of.
 """
@@ -15,6 +18,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
 BOXES = ["0a1b2c3d4e5f", "1b2c3d4e5f60", "2c3d4e5f6071"]
+OLD_IMAGE_BOX = "3d4e5f607182"
+
+
+def failing(lines):
+    """Failure series appear with the first failure: none in the first five minutes."""
+    return lines if time.time() - START > 300 else []
+
 RELAY_BUCKETS = (0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
 TURN_BUCKETS = (1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800)
 
@@ -47,7 +57,6 @@ def relay_metrics():
         f'arbos_relay_boxes{{state="awake"}} {58 + wave // 4}',
         f'arbos_relay_boxes{{state="waking"}} {wave // 6}',
         f'arbos_relay_boxes{{state="asleep"}} {14 - wave // 4}',
-        'arbos_relay_boxes{state="error"} 0',
         'arbos_relay_boxes_registered{provider="gvisor"} 72',
         "arbos_relay_boxes_max 80",
         f"arbos_relay_boxes_turn_running {20 + wave}",
@@ -58,13 +67,13 @@ def relay_metrics():
         f"arbos_relay_wake_queue_depth {wave // 5}",
         f'arbos_relay_box_starts_total{{result="ok"}} {t // 30}',
         f'arbos_relay_box_starts_total{{result="fetching"}} {t // 400}',
-        f'arbos_relay_box_starts_total{{result="failed"}} {t // 3000}',
+        *failing([f'arbos_relay_box_starts_total{{result="failed"}} {t // 3000}']),
         *histogram("arbos_relay_box_start_duration_seconds", RELAY_BUCKETS, t // 30, 2.5),
         *histogram("arbos_relay_box_wake_duration_seconds", RELAY_BUCKETS, t // 30, 10),
         f'arbos_relay_model_requests_total{{provider="openrouter",class="2xx"}} {t * 6}',
-        f'arbos_relay_model_requests_total{{provider="openrouter",class="5xx"}} {t // 9}',
+        *failing([f'arbos_relay_model_requests_total{{provider="openrouter",class="5xx"}} {t // 9}',
+                  f'arbos_relay_model_requests_total{{provider="anthropic",class="unreachable"}} {t // 40}']),
         f'arbos_relay_model_requests_total{{provider="anthropic",class="2xx"}} {t * 2}',
-        f'arbos_relay_model_requests_total{{provider="anthropic",class="unreachable"}} {t // 40}',
         *histogram("arbos_relay_model_response_seconds", RELAY_BUCKETS, t * 8, 2.5),
         f"arbos_relay_spend_today_usd {int(time.time()) % 86400 / 86400 * 310:.2f}",
         "arbos_relay_spend_daily_cap_usd 500",
@@ -90,7 +99,6 @@ def box_metrics(n):
         'arbos_agentd_build_info{version="0.6.422"} 1',
         f"arbos_agentd_uptime_seconds {time.time() - START}",
         f'arbos_agentd_workspaces{{health="healthy"}} {n + 1}',
-        'arbos_agentd_workspaces{health="unhealthy"} 0',
         f"arbos_agentd_turns_running {n + wave // 5}",
         f"arbos_agentd_sends_waiting {wave // (4 - n)}",
         f"arbos_agentd_workers_running {n + 2}",
@@ -100,13 +108,13 @@ def box_metrics(n):
         f"arbos_agentd_rooms_connected {4 + n}",
         f"arbos_agentd_turns_started_total {t * (n + 1) // 4}",
         f'arbos_agentd_turns_finished_total{{result="done"}} {t * (n + 1) // 4 - t * (n + 1) // 90 - n}',
-        f'arbos_agentd_turns_finished_total{{result="error"}} {t * (n + 1) // 100}',
-        f'arbos_agentd_turns_finished_total{{result="cancelled"}} {t * (n + 1) // 900}',
+        *failing([f'arbos_agentd_turns_finished_total{{result="error"}} {t * (n + 1) // 100}',
+                  f'arbos_agentd_turns_finished_total{{result="cancelled"}} {t * (n + 1) // 900}']),
         *histogram("arbos_agentd_turn_duration_seconds", TURN_BUCKETS, t * (n + 1) // 4, 30),
-        f'arbos_agentd_worker_crashes_total{{kind="main"}} {t * (n + 1) // 5000}',
-        f'arbos_agentd_worker_crashes_total{{kind="job"}} {t * (n + 1) // 9000}',
+        *failing([f'arbos_agentd_worker_crashes_total{{kind="main"}} {t * (n + 1) // 5000}',
+                  f'arbos_agentd_worker_crashes_total{{kind="job"}} {t * (n + 1) // 9000}']),
         f'arbos_agentd_model_requests_total{{class="2xx"}} {t * (n + 1)}',
-        f'arbos_agentd_model_requests_total{{class="5xx"}} {t * (n + 1) // 60}',
+        *failing([f'arbos_agentd_model_requests_total{{class="5xx"}} {t * (n + 1) // 60}']),
         f"arbos_agentd_relay_reconnects_total {t * (n + 1) // 7000}",
     ]
 
@@ -120,9 +128,11 @@ class Handler(BaseHTTPRequestHandler):
             body = "\n".join(relay_metrics()) + "\n"
         elif path == "/metrics/targets":
             body, kind = json.dumps([{"targets": ["127.0.0.1:9108"], "labels": {"__metrics_path__": f"/metrics/box/{b}", "box": b}}
-                                     for b in BOXES]), "application/json"
+                                     for b in BOXES + [OLD_IMAGE_BOX]]), "application/json"
         elif path.startswith("/metrics/box/") and path.rsplit("/", 1)[1] in BOXES:
             body = "\n".join(box_metrics(BOXES.index(path.rsplit("/", 1)[1]))) + "\n"
+        elif path == f"/metrics/box/{OLD_IMAGE_BOX}":
+            return self.send_error(502)
         else:
             return self.send_error(404)
         self.send_response(200)

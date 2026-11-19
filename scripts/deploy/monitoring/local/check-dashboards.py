@@ -11,8 +11,10 @@ HERE = pathlib.Path(__file__).parent.parent
 ENV = dict(line.split("=", 1) for line in (HERE / "local/local.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
 GRAFANA = "http://127.0.0.1:3300"
 AUTH = "Basic " + base64.b64encode(f"admin:{ENV['GF_SECURITY_ADMIN_PASSWORD']}".encode()).decode()
-# Series that only exist after an event that the fake targets never produce.
-EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_seconds{name=~", "cfs_throttled")
+# Per-series breakdowns of events a healthy system has not had yet. Anything else that comes back
+# empty is a blank panel on a healthy system, and fails.
+EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_seconds{name=~", "cfs_throttled",
+                 "sum by (kind) (increase(arbos_agentd_worker_crashes_total")
 
 
 def post(path, body, org):
