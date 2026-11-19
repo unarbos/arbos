@@ -2254,13 +2254,25 @@ impl Db {
     pub fn wake_job_waiting(&self, user_id: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row(
-                "SELECT 1 FROM box_wake_jobs WHERE user_id = ?1 AND attempts = 0",
+                "SELECT 1 FROM box_wake_jobs WHERE user_id = ?1 AND attempts = 0 AND last_error IS NULL",
                 params![user_id],
                 |_| Ok(()),
             )
             .optional()
         })
         .map(|r| r.is_some())
+    }
+
+    /// The runner has started this job: it is not due again for `hold_ms` (the box's dial
+    /// finishes it) and is no longer waiting in line. Not a failed attempt, so not counted as one.
+    pub fn start_wake_job(&self, user_id: &str, hold_ms: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE box_wake_jobs SET due_at = ?2, last_error = 'in flight' WHERE user_id = ?1",
+                params![user_id, now_ms() + hold_ms],
+            )
+            .map(|_| ())
+        })
     }
 
     pub fn finish_wake_job(&self, user_id: &str) -> Result<()> {
