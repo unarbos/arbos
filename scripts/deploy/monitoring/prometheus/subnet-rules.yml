@@ -14,6 +14,8 @@ groups:
         expr: min(probe_success{job="public-https"})
       - record: subnet:boxes_running
         expr: count(container_last_seen{name=~"arbos-box-.+"}) or vector(0)
+      - record: subnet:boxes_working
+        expr: sum(arbos_relay_boxes_turn_running)
       - record: subnet:boxes_asleep
         expr: sum(arbos_relay_boxes{state="asleep"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:boxes_waitlisted
@@ -40,10 +42,12 @@ groups:
         expr: sum(arbos_agentd_turns_running)
       - record: subnet:queue_depth
         expr: sum(arbos_agentd_sends_waiting)
+      # `>= 0` drops the NaN a quantile gives when no turn finished in the window: the series is then
+      # absent, and the Subnet view shows its "no data yet" state instead of NaN.
       - record: subnet:turn_duration_seconds:p50
-        expr: max(histogram_quantile(0.5, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m]))))
+        expr: max(histogram_quantile(0.5, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))) >= 0
       - record: subnet:turn_duration_seconds:p95
-        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m]))))
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))) >= 0
       - record: subnet:model_error_ratio
         expr: (sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / sum(rate(arbos_relay_model_requests_total[5m]))
       - record: subnet:host_cpu_used_ratio
@@ -51,4 +55,4 @@ groups:
       - record: subnet:host_memory_used_ratio
         expr: 1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)
       - record: subnet:host_disk_free_ratio
-        expr: min(node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes)
+        expr: min(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes)

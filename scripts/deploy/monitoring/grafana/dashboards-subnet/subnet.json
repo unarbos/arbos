@@ -226,26 +226,28 @@
   },
   {
    "type": "stat",
-   "title": "Turns succeeding",
-   "description": "",
+   "title": "Machines working now",
+   "description": "Machines with an agent turn running in the last 3 minutes.",
    "fieldConfig": {
     "defaults": {
-     "unit": "percent",
-     "decimals": 1,
-     "mappings": [],
+     "unit": "short",
+     "decimals": null,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "value": null,
-        "color": "red"
-       },
-       {
-        "value": 90,
-        "color": "orange"
-       },
-       {
-        "value": 98,
         "color": "green"
        }
       ]
@@ -282,7 +284,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
+     "expr": "max(subnet:boxes_working) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -291,18 +293,36 @@
   },
   {
    "type": "stat",
-   "title": "Turn duration p95",
+   "title": "Model calls succeeding",
    "description": "",
    "fieldConfig": {
     "defaults": {
-     "unit": "s",
+     "unit": "percent",
      "decimals": 1,
-     "mappings": [],
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "value": null,
+        "color": "red"
+       },
+       {
+        "value": 90,
+        "color": "orange"
+       },
+       {
+        "value": 98,
         "color": "green"
        }
       ]
@@ -339,7 +359,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "subnet:turn_duration_seconds:p95",
+     "expr": "max(100 * (1 - subnet:model_error_ratio)) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -354,7 +374,17 @@
     "defaults": {
      "unit": "short",
      "decimals": null,
-     "mappings": [],
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -400,7 +430,433 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "subnet:boxes_waitlisted",
+     "expr": "max(subnet:boxes_waitlisted) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Machine starts succeeding",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "red"
+       },
+       {
+        "value": 90,
+        "color": "orange"
+       },
+       {
+        "value": 98,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 7,
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + 0 * subnet:box_start_failures:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Machines reporting turns",
+   "description": "How many machines the three turn figures on this row come from.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 8,
+   "gridPos": {
+    "x": 4,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:boxes_reporting) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns per minute",
+   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 9,
+   "gridPos": {
+    "x": 8,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(60 * subnet:turns_started:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turns succeeding",
+   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "red"
+       },
+       {
+        "value": 90,
+        "color": "orange"
+       },
+       {
+        "value": 98,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 10,
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Turn duration p95",
+   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it. Empty when no turn finished in the last 5 minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 11,
+   "gridPos": {
+    "x": 16,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:turn_duration_seconds:p95) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Host CPU used",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 75,
+        "color": "orange"
+       },
+       {
+        "value": 90,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 12,
+   "gridPos": {
+    "x": 20,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(100 * subnet:host_cpu_used_ratio) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -409,7 +865,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Agent turns per minute",
+   "title": "Agent machines",
    "description": "",
    "fieldConfig": {
     "defaults": {
@@ -439,10 +895,348 @@
      "sort": "desc"
     }
    },
-   "id": 7,
+   "id": 13,
    "gridPos": {
     "x": 0,
-    "y": 4,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_running",
+     "legendFormat": "running",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_working",
+     "legendFormat": "working",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_asleep",
+     "legendFormat": "asleep",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_waitlisted",
+     "legendFormat": "waiting",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_max",
+     "legendFormat": "limit",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "F",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_reporting",
+     "legendFormat": "reporting turn numbers",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Success rates",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 14,
+   "gridPos": {
+    "x": 12,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:model_error_ratio)",
+     "legendFormat": "model calls",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + 0 * subnet:box_start_failures:rate5m",
+     "legendFormat": "machine starts",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
+     "legendFormat": "turns",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Host headroom",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 15,
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * subnet:host_cpu_used_ratio",
+     "legendFormat": "CPU used",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * subnet:host_memory_used_ratio",
+     "legendFormat": "memory used",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk used",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Machine starts per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 16,
+   "gridPos": {
+    "x": 12,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:box_starts:rate5m",
+     "legendFormat": "started",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:box_start_failures:rate5m",
+     "legendFormat": "failed",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Agent turns per minute",
+   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 17,
+   "gridPos": {
+    "x": 0,
+    "y": 24,
     "w": 12,
     "h": 8
    },
@@ -489,7 +1283,7 @@
   {
    "type": "timeseries",
    "title": "Turn duration",
-   "description": "",
+   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
    "fieldConfig": {
     "defaults": {
      "unit": "s",
@@ -518,10 +1312,10 @@
      "sort": "desc"
     }
    },
-   "id": 8,
+   "id": 18,
    "gridPos": {
     "x": 12,
-    "y": 4,
+    "y": 24,
     "w": 12,
     "h": 8
    },
@@ -549,333 +1343,6 @@
      },
      "expr": "subnet:turn_duration_seconds:p95",
      "legendFormat": "p95",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Agent machines",
-   "description": "Turn numbers come only from the machines that report them; the rest are being upgraded.",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "min": 0,
-     "max": null,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 9,
-   "gridPos": {
-    "x": 0,
-    "y": 12,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_running",
-     "legendFormat": "running",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_asleep",
-     "legendFormat": "asleep",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_waitlisted",
-     "legendFormat": "waiting",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "D",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_max",
-     "legendFormat": "limit",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "E",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_reporting",
-     "legendFormat": "reporting turn numbers",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Work in progress",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "min": 0,
-     "max": null,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 10,
-   "gridPos": {
-    "x": 12,
-    "y": 12,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:turns_active",
-     "legendFormat": "turns running",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:queue_depth",
-     "legendFormat": "queued",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Success rates",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "min": 0,
-     "max": 100,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 11,
-   "gridPos": {
-    "x": 0,
-    "y": 20,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
-     "legendFormat": "turns",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:model_error_ratio)",
-     "legendFormat": "model calls",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0))",
-     "legendFormat": "machine starts",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Host headroom",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "min": 0,
-     "max": 100,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 12,
-   "gridPos": {
-    "x": 12,
-    "y": 20,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * subnet:host_cpu_used_ratio",
-     "legendFormat": "CPU used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * subnet:host_memory_used_ratio",
-     "legendFormat": "memory used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
-     "legendFormat": "disk used",
      "instant": false,
      "range": true
     }

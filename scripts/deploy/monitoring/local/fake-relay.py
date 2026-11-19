@@ -13,11 +13,13 @@ box is listed but answers 502, as a box on an image from before agentd had /metr
 carries stand-ins for what cAdvisor reports about the relay's systemd service on the real host,
 which a laptop has no equivalent of.
 """
-import json, threading, time
+import json, os, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
-BOXES = ["0a1b2c3d4e5f", "1b2c3d4e5f60", "2c3d4e5f6071"]
+# FAKE_BOXES=0: no box reports (every box still on an old image), as on the day the relay gets its
+# metrics before the boxes are re-imaged. The Subnet view has to read sensibly like that.
+BOXES = ["0a1b2c3d4e5f", "1b2c3d4e5f60", "2c3d4e5f6071"] if os.environ.get("FAKE_BOXES", "1") != "0" else []
 OLD_IMAGE_BOX = "3d4e5f607182"
 
 
@@ -62,7 +64,7 @@ def relay_metrics():
         f"arbos_relay_boxes_turn_running {20 + wave}",
         "arbos_relay_boxes_evicted 1",
         f'arbos_relay_box_scrapes{{result="ok"}} {len(BOXES)}',
-        'arbos_relay_box_scrapes{result="old_image"} 1',
+        f'arbos_relay_box_scrapes{{result="old_image"}} {1 if BOXES else 72}',
         'arbos_relay_box_scrapes{result="unreachable"} 0',
         'arbos_relay_box_scrapes{result="pending"} 0',
         "arbos_relay_boxes_upgrading 0",

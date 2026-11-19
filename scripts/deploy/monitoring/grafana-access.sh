@@ -73,6 +73,10 @@ api PUT /api/datasources/uid/prometheus-subnet "$ORG" <<<"$DATASOURCE" | expect 
 { printf '{"overwrite":true,"dashboard":'; cat "$HERE/grafana/dashboards-subnet/subnet.json"; printf '}'; } \
   | api POST /api/dashboards/db "$ORG" | expect "load dashboard" "200" >/dev/null
 api PUT /api/org/preferences "$ORG" <<<'{"homeDashboardUID":"arbos-subnet"}' | expect "set home dashboard" "200" >/dev/null
+# The main organisation's home is set the same way, per organisation. There is deliberately no
+# instance-wide default home dashboard: it would also be what the Subnet organisation falls back to
+# if its own preference were ever lost.
+api PUT /api/org/preferences 1 <<<'{"homeDashboardUID":"arbos-fleet"}' | expect "set the main home dashboard" "200" >/dev/null
 
 found=$(api GET "/api/users/lookup?loginOrEmail=$LOGIN" </dev/null | expect "look up viewer" "200 404")
 USER_ID=$(id_of <<<"$found")
@@ -96,4 +100,12 @@ for path in /api/dashboards/uid/arbos-fleet /api/dashboards/uid/arbos-boxes /api
   code=$(as_viewer "$path")
   [[ $code == 403 || $code == 404 ]] || { echo "viewer got HTTP $code on $path — it must be refused" >&2; exit 1; }
 done
+# A Viewer has no Explore (no free-form query page). That is Grafana's default; this fails if a
+# setting or an upgrade changes it.
+actions=$(curl -sS "$GRAFANA/api/access-control/user/actions" -K <(printf 'user = "%s:%s"\n' "$LOGIN" "$PASSWORD"))
+[[ $actions == *'"dashboards:read"'* ]] || { echo "could not read the viewer's permissions: $actions" >&2; exit 1; }
+[[ $actions != *'"datasources:explore"'* ]] || { echo "the viewer has Explore — it must not" >&2; exit 1; }
+# The viewer's home is the Subnet view, never an admin dashboard.
+home=$(curl -sS "$GRAFANA/api/dashboards/home" -K <(printf 'user = "%s:%s"\n' "$LOGIN" "$PASSWORD"))
+[[ $home == *arbos-subnet* && $home != *arbos-fleet* ]] || { echo "the viewer's home is not the Subnet view" >&2; exit 1; }
 echo "Subnet organisation $ORG ready; viewer '$LOGIN' can open the Subnet view and nothing else."

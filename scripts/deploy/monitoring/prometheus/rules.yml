@@ -12,11 +12,14 @@ groups:
         annotations:
           summary: The relay does not answer /healthz on the host.
 
-      - alert: HealthProbeFailing
+      # What a device outside sees. A warning, not a page: arbos.life is behind Cloudflare and the
+      # path crosses DNS and the internet, so it can fail while the relay is fine. RelayDown, asked on
+      # the host, is the page.
+      - alert: PublicProbeFailing
         expr: probe_success{job="public-https"} == 0
-        for: 2m
+        for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "{{ $labels.instance }} fails from outside (DNS, Caddy, TLS or the service)."
 
@@ -47,8 +50,9 @@ groups:
         annotations:
           summary: "{{ $value }} awake boxes do not answer the relay's metrics scrape (Agents dashboard → Box health)."
 
+      # Disk alerts watch the root filesystem and Docker's data, not /boot or an EFI partition.
       - alert: DiskFreeLow
-        expr: node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes < 0.15
+        expr: node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes < 0.15
         for: 5m
         labels:
           severity: warning
@@ -56,7 +60,11 @@ groups:
           summary: "{{ $labels.mountpoint }} has {{ $value | humanizePercentage }} free."
 
       - alert: DiskFullWithin24h
-        expr: predict_linear(node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"}[6h], 24 * 3600) < 0
+        # A trend over a few minutes of data is noise (an image pull looks like a full disk by
+        # tonight): only once the series has an hour of samples behind it (240 at 15 s).
+        expr: >
+          predict_linear(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"}[6h], 24 * 3600) < 0
+          and count_over_time(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"}[6h]) >= 240
         for: 30m
         labels:
           severity: critical

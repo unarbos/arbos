@@ -34,6 +34,12 @@ tests:
         values: 1x20
       - series: 'container_last_seen{name="postgres", id="/docker/ccc", instance="host-1"}'
         values: 1x20
+      - series: 'arbos_relay_boxes_turn_running{instance="host-1"}'
+        values: 21x20
+      - series: 'node_filesystem_avail_bytes{fstype="vfat", mountpoint="/boot/efi", device="/dev/sda15", instance="host-1"}' # nearly full, and not ours
+        values: 1x20
+      - series: 'node_filesystem_size_bytes{fstype="vfat", mountpoint="/boot/efi", device="/dev/sda15", instance="host-1"}'
+        values: 100x20
       - series: 'arbos_relay_boxes{state="asleep", instance="host-1"}'
         values: 3x20
       - series: 'arbos_relay_waitlist_length{instance="host-1"}'
@@ -81,6 +87,7 @@ tests:
           - { labels: "subnet:relay_up", value: 1 }
           - { labels: "subnet:public_up", value: 1 }
           - { labels: "subnet:boxes_running", value: 2 }
+          - { labels: "subnet:boxes_working", value: 21 }
           - { labels: "subnet:boxes_asleep", value: 3 }
           - { labels: "subnet:boxes_waitlisted", value: 0 }
           - { labels: "subnet:boxes_max", value: 100 }
@@ -115,11 +122,17 @@ tests:
         values: 0x20
       - series: 'arbos_agentd_turns_finished_total{box="0a1b2c3d4e5f", result="done"}'
         values: 0+60x20
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="+Inf"}'
+        values: 0x20
       - series: 'arbos_relay_box_starts_total{result="ok"}'
         values: 0+30x20
       - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
         values: 0+90x20
     promql_expr_test:
+      # the turn-duration histogram exists but no turn finished: no NaN, the series is simply absent
+      - expr: '{__name__=~"subnet:turn_duration_seconds:.+"}'
+        eval_time: 10m
+        exp_samples: []
       - expr: '{__name__=~"subnet:(turns_failed:rate5m|box_start_failures:rate5m|model_error_ratio|boxes_not_reporting|boxes_asleep)"}'
         eval_time: 10m
         exp_samples:
@@ -172,10 +185,16 @@ tests:
         values: 0x30
       - series: 'up{job="node", instance="127.0.0.1:9100"}' # was up, went down: must fire
         values: 1x4 0x20
-      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/"}'
-        values: 14x30
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/"}' # 14% free and falling fast, with 15 minutes of history
+        values: 14-0.01x30
       - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/"}'
         values: 100x30
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/boot"}' # 5% free: not a mount we alert on
+        values: 5x30
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/boot"}'
+        values: 100x30
+      - series: 'probe_success{job="public-https", instance="https://arbos.life/"}'
+        values: 1x4 0x26
       - series: 'up{job="arbos-agentd", instance="127.0.0.1:9108", box="0a1b2c3d4e5f"}' # a box target going down is not ScrapeTargetDown
         values: 1x4 0x20
       - series: 'arbos_relay_box_scrapes{result="old_image"}' # boxes on an old image are not unreachable: quiet
@@ -214,7 +233,17 @@ tests:
         alertname: DiskFreeLow
         exp_alerts:
           - exp_labels: { severity: warning, fstype: ext4, mountpoint: / }
-            exp_annotations: { summary: "/ has 14% free." }
+            exp_annotations: { summary: "/ has 13.84% free." }
+      # falling at a rate that would empty it in hours, but on 15 minutes of data: no page yet
+      - eval_time: 14m
+        alertname: DiskFullWithin24h
+        exp_alerts: []
+      # the public probe failing is a warning; nothing critical fires for it
+      - eval_time: 9m
+        alertname: PublicProbeFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, job: public-https, instance: "https://arbos.life/" }
+            exp_annotations: { summary: "https://arbos.life/ fails from outside (DNS, Caddy, TLS or the service)." }
       - eval_time: 6m
         alertname: BoxOOMKilled
         exp_alerts:

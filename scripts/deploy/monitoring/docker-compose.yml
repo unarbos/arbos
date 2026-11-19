@@ -101,7 +101,22 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_NEWS_NEWS_FEED_ENABLED: "false"
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet.json
+      GF_USERS_VIEWERS_CAN_EDIT: "false" # no Explore for a Viewer; grafana-access.sh tests it
+    # Grafana takes the admin password once, when it creates its database, so a weak one is refused
+    # here, before it can start. The same rule as `grafana-access.sh --check`: 16-128 of
+    # A-Z a-z 0-9 . _ ~ -, at least 8 different characters, none of the usual words.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        p=$$GF_SECURITY_ADMIN_PASSWORD
+        if ! printf %s "$$p" | grep -Eq '^[A-Za-z0-9._~-]{16,128}$$' \
+          || printf %s "$$p" | grep -Eiq 'admin|password|grafana|arbos|changeme|123456' \
+          || [ "$$(printf %s "$$p" | fold -w 1 | sort -u | wc -l)" -lt 8 ]; then
+          echo "GF_SECURITY_ADMIN_PASSWORD is too weak (run grafana-access.sh --check); not starting" >&2
+          exit 1
+        fi
+        exec /run.sh
     mem_limit: 1g
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

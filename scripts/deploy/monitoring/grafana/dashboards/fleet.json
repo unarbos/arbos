@@ -1172,7 +1172,7 @@
   {
    "type": "stat",
    "title": "Disk free",
-   "description": "The fullest filesystem.",
+   "description": "The fuller of the root filesystem and Docker's data.",
    "fieldConfig": {
     "defaults": {
      "unit": "percent",
@@ -1227,7 +1227,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * min(node_filesystem_avail_bytes{fstype=~\"ext4|xfs|btrfs\"} / node_filesystem_size_bytes)",
+     "expr": "100 * min(node_filesystem_avail_bytes{mountpoint=~\"/|/var/lib/docker\"} / node_filesystem_size_bytes)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -1248,6 +1248,10 @@
        "options": {
         "999": {
          "text": "not filling"
+        },
+        "-1": {
+         "text": "needs 1 h",
+         "color": "#6e7681"
         }
        }
       }
@@ -1301,7 +1305,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "clamp_max(min(node_filesystem_avail_bytes{fstype=~\"ext4|xfs|btrfs\"} / clamp_min(-deriv(node_filesystem_avail_bytes{fstype=~\"ext4|xfs|btrfs\"}[6h]), 1)) / 86400, 999)",
+     "expr": "(clamp_max(min(node_filesystem_avail_bytes{mountpoint=~\"/|/var/lib/docker\"} / clamp_min(-deriv(node_filesystem_avail_bytes{mountpoint=~\"/|/var/lib/docker\"}[6h]), 1)) / 86400, 999) and on() min(count_over_time(node_filesystem_avail_bytes{mountpoint=~\"/|/var/lib/docker\"}[6h])) >= 240) or on() vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -2218,7 +2222,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "node_filesystem_avail_bytes{fstype=~\"ext4|xfs|btrfs\"}",
+     "expr": "node_filesystem_avail_bytes{mountpoint=~\"/|/var/lib/docker\"}",
      "legendFormat": "{{mountpoint}}",
      "instant": false,
      "range": true

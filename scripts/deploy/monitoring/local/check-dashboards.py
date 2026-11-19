@@ -4,6 +4,8 @@ datasource reference is exercised too) and fails on an error or an empty result,
 nothing the Subnet datasource holds carries an identifying label.
 
     python3 local/check-dashboards.py        # after docker compose ... up -d and grafana-access.sh
+    python3 local/check-dashboards.py --relay-only   # stack started with FAKE_BOXES=0: only checks that
+                                                     # no Subnet tile is blank or NaN without box metrics
 """
 import base64, json, pathlib, sys, time, urllib.request
 
@@ -31,14 +33,22 @@ def query(expr, uid, org):
          "intervalMs": 30_000, "maxDataPoints": 100}]}, org)["results"]["A"]
     if out.get("error"):
         return out["error"]
-    if not any(f["data"]["values"] and f["data"]["values"][0] for f in out.get("frames", [])):
+    values = [v for f in out.get("frames", []) if len(f["data"]["values"]) > 1 for v in f["data"]["values"][1]]
+    if not values:
         return "no data"
+    if any(v is None or v != v for v in values[-3:]):
+        return "NaN"
 
 
+RELAY_ONLY = "--relay-only" in sys.argv
 failed = 0
 for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1),
                   ("grafana/dashboards/agents.json", 1), ("grafana/dashboards-subnet/subnet.json", 2)):
     dash = json.loads((HERE / path).read_text())
+    if RELAY_ONLY:
+        if org != 2:
+            continue
+        dash["panels"] = [p for p in dash["panels"] if p["type"] == "stat"]
     for panel in dash["panels"]:
         for t in panel.get("targets", []):
             problem = query(t["expr"], t["datasource"]["uid"], org)

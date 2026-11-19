@@ -21,6 +21,8 @@ services:
     image: python:3.13-alpine
     container_name: arbos-mon-fake-relay
     command: ["python3", "-u", "/fake-relay.py"]
+    environment:
+      FAKE_BOXES: ${FAKE_BOXES:-1} # FAKE_BOXES=0 docker compose ... up: relay metrics only, no box reports
     volumes:
       - ./local/fake-relay.py:/fake-relay.py:ro
     ports:
