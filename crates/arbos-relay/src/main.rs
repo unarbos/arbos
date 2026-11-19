@@ -14,6 +14,8 @@ mod avatar;
 mod avatar_image;
 mod blobs;
 #[cfg(test)]
+mod box_bearer_tests;
+#[cfg(test)]
 mod box_row_tests;
 mod boxd;
 mod boxes;
