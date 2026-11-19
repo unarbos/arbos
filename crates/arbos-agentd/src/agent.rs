@@ -13309,6 +13309,17 @@ impl Agent {
             .await
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         drop(waiting);
+        // Before this worker adds a child of its own. The timed pass that enforces
+        // `WORKER_RETAINED_MAX` runs every five minutes, and a box that finishes a job every few
+        // seconds holds one idle child per finished job until then: thirty short jobs are thirty
+        // processes, against a pid limit the whole box shares.
+        //
+        // On a task of its own: closing a child waits for it to exit, seconds for a slow one,
+        // and this worker is holding its slot, the box's slot and its job's locks.
+        let me = self.clone();
+        tokio::spawn(async move {
+            me.retire_idle_workers().await;
+        });
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
