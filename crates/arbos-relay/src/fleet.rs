@@ -174,7 +174,9 @@ pub struct Pressure {
 }
 
 fn parse_meminfo(text: &str) -> (f64, f64) {
-    let mut avail = 0.0;
+    // No `MemAvailable` line, or one that is not a number, is "unknown", as an unreadable file
+    // is: read as 0 it would refuse every sign-up and evict every idle sandbox.
+    let mut avail = None;
     let mut swap_total = 0.0;
     let mut swap_free = 0.0;
     for line in text.lines() {
@@ -184,14 +186,14 @@ fn parse_meminfo(text: &str) -> (f64, f64) {
         };
         let kb: f64 = v.parse().unwrap_or(0.0);
         match k {
-            "MemAvailable:" => avail = kb,
+            "MemAvailable:" => avail = v.parse::<f64>().ok(),
             "SwapTotal:" => swap_total = kb,
             "SwapFree:" => swap_free = kb,
             _ => {}
         }
     }
     let gb = |kb: f64| kb / 1024.0 / 1024.0;
-    (gb(avail), gb(swap_total - swap_free))
+    (avail.map_or(f64::MAX, gb), gb(swap_total - swap_free))
 }
 
 fn parse_loadavg(text: &str) -> (f64, f64) {
@@ -269,8 +271,12 @@ pub struct Capacity {
     pub waitlist: usize,
     pub disk_free_gb: f64,
     pub min_free_disk_gb: f64,
+    pub mem_available_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
+    /// Which gate is shut when it may not, for the log and the fleet event.
+    #[serde(skip)]
+    pub shut: Option<&'static str>,
     /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
     /// box needs only disk. Absent when the provider is off, and nothing above counts its boxes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,26 +301,52 @@ pub async fn capacity(state: &AppState) -> Capacity {
         .count_boxes_of_provider(Provider::Gvisor.as_str())
         .unwrap_or(usize::MAX);
     let waitlist = state.db.waitlist().map(|w| w.len()).unwrap_or(0);
-    let disk_free_gb = disk_free_gb(&state.cfg.data_dir).await;
+    let p = sample_pressure(state).await;
     Capacity {
         max_boxes: max,
         resident,
         waitlist,
-        disk_free_gb,
+        disk_free_gb: p.disk_free_gb,
         min_free_disk_gb: state.cfg.fleet.min_free_disk_gb,
-        has_room: room_for_one(
-            max,
-            resident,
-            disk_free_gb,
-            state.cfg.fleet.min_free_disk_gb,
-        ),
+        mem_available_gb: p.mem_available_gb,
+        has_room: room_for_one(max, resident, &p, &state.cfg.fleet),
+        shut: shut_gate(max, resident, &p, &state.cfg.fleet),
         boxd: crate::boxd::capacity(state).await,
     }
 }
 
-/// The gate itself, kept pure for the tests.
-pub fn room_for_one(max: usize, resident: usize, disk_free_gb: f64, min_free_gb: f64) -> bool {
-    resident < max && disk_free_gb >= min_free_gb
+/// The gate itself, kept pure for the tests: a free slot, disk above its floor, and available
+/// memory above the eviction floor. A host that is stopping sandboxes for memory does not make
+/// new ones, whatever the count says.
+pub fn room_for_one(max: usize, resident: usize, p: &Pressure, cfg: &FleetCfg) -> bool {
+    shut_gate(max, resident, p, cfg).is_none()
+}
+
+/// The first gate that is shut, by name; `None` when a sandbox may be made.
+pub fn shut_gate(
+    max: usize,
+    resident: usize,
+    p: &Pressure,
+    cfg: &FleetCfg,
+) -> Option<&'static str> {
+    if resident >= max {
+        Some("the cap is reached")
+    } else if p.disk_free_gb < cfg.min_free_disk_gb {
+        Some("free disk is under its floor")
+    } else if p.mem_available_gb < cfg.evict_min_available_gb {
+        Some("available memory is under its floor")
+    } else {
+        None
+    }
+}
+
+/// Available memory for a log line; "unknown" where it could not be read.
+fn mem_gb_text(gb: f64) -> String {
+    if gb < 1e9 {
+        format!("{gb:.0} GB")
+    } else {
+        "unknown".into()
+    }
 }
 
 /// Admit a user who needs a sandbox: `Ok(true)` = go ahead and create it; `Ok(false)` = the host
@@ -330,12 +362,14 @@ pub async fn try_admit(state: &AppState, user_id: &str) -> Result<bool> {
     if !state.db.is_waitlisted(user_id)? {
         state.db.waitlist_add(user_id)?;
         let pos = state.db.waitlist_position(user_id)?.unwrap_or(0);
-        tracing::info!(%user_id, pos, resident = cap.resident, max = cap.max_boxes, disk_free_gb = cap.disk_free_gb, "host full; user waitlisted");
+        let gate = cap.shut.unwrap_or("the gate is shut");
+        let mem = mem_gb_text(cap.mem_available_gb);
+        tracing::info!(%user_id, pos, gate, resident = cap.resident, max = cap.max_boxes, disk_free_gb = cap.disk_free_gb, mem_available = %mem, "host full; user waitlisted");
         let _ = state.db.fleet_event(
             "waitlisted",
             Some(user_id),
             &format!(
-                "position {pos}; resident {}/{}; disk {:.0} GB free",
+                "position {pos}; {gate}; resident {}/{}; disk {:.0} GB free; memory {mem} available",
                 cap.resident, cap.max_boxes, cap.disk_free_gb
             ),
         );
@@ -501,9 +535,23 @@ fn s(v: &[&str]) -> Vec<String> {
 async fn helper(state: &AppState, script: &str) -> Result<String> {
     let dir = boxes_dir(state);
     std::fs::create_dir_all(&dir)?;
-    let args: Vec<String> = vec![
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = format!(
+        "arbos-helper-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let args = helper_args(&dir, &state.cfg.fleet.helper_image, &name, script);
+    run_helper("docker", &args, &name, HELPER_LIMIT).await
+}
+
+/// The `docker run` argument list for one helper. It has a name so that it can be killed.
+fn helper_args(dir: &Path, image: &str, name: &str, script: &str) -> Vec<String> {
+    vec![
         "run".into(),
         "--rm".into(),
+        "--name".into(),
+        name.into(),
         "--privileged".into(),
         "--network".into(),
         "none".into(),
@@ -512,14 +560,38 @@ async fn helper(state: &AppState, script: &str) -> Result<String> {
             "type=bind,src={},dst=/boxes,bind-propagation=rshared",
             dir.display()
         ),
-        state.cfg.fleet.helper_image.clone(),
+        image.into(),
         "sh".into(),
         "-c".into(),
         script.into(),
-    ];
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.args(&args);
-    docker_output(&args, output_within(cmd, HELPER_LIMIT).await)
+    ]
+}
+
+/// Run one helper and, if it is given up on, kill its container too. Killing only the `docker
+/// run` client leaves the container alive: one hung inside the loop-device claim would go on
+/// holding the shared lock, and every later attach would fail after its 20 s wait until
+/// someone removed it by hand. `docker` is a parameter for the test.
+async fn run_helper(docker: &str, args: &[String], name: &str, limit: Duration) -> Result<String> {
+    let mut cmd = tokio::process::Command::new(docker);
+    cmd.args(args);
+    let out = output_within(cmd, limit).await;
+    if out
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
+    {
+        let mut kill = tokio::process::Command::new(docker);
+        kill.args(["kill", name]);
+        match output_within(kill, Duration::from_secs(20)).await {
+            Ok(k) if k.status.success() => {
+                tracing::warn!(name, "privileged helper hung; its container was killed")
+            }
+            _ => tracing::error!(
+                name,
+                "privileged helper hung and could not be killed; `docker rm -f` it by hand"
+            ),
+        }
+    }
+    docker_output(args, out)
 }
 
 fn safe_user_segment(user_id: &str) -> Result<()> {
@@ -1534,10 +1606,38 @@ mod tests {
 
     #[test]
     fn gate_counts_residents_and_disk() {
-        assert!(room_for_one(80, 79, 200.0, 40.0));
-        assert!(!room_for_one(80, 80, 200.0, 40.0), "N reached");
-        assert!(!room_for_one(80, 10, 39.9, 40.0), "disk floor");
-        assert!(room_for_one(80, 10, 40.0, 40.0));
+        let cfg = FleetCfg::default();
+        let host = |disk_free_gb, mem_available_gb| Pressure {
+            disk_free_gb,
+            mem_available_gb,
+            ..Pressure::default()
+        };
+        assert!(room_for_one(80, 79, &host(200.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 80, &host(200.0, 400.0), &cfg),
+            "N reached"
+        );
+        assert!(
+            !room_for_one(80, 10, &host(39.9, 400.0), &cfg),
+            "disk floor"
+        );
+        assert!(room_for_one(80, 10, &host(40.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 10, &host(200.0, 63.9), &cfg),
+            "a host short of memory is evicting; it makes no new sandbox"
+        );
+        assert!(room_for_one(80, 10, &host(200.0, 64.0), &cfg));
+        // The waitlisted event names the gate: "host full" at 72 of 150 was unreadable.
+        let gate = |resident, disk, mem| shut_gate(80, resident, &host(disk, mem), &cfg);
+        assert_eq!(gate(80, 200.0, 400.0), Some("the cap is reached"));
+        assert_eq!(gate(10, 39.9, 400.0), Some("free disk is under its floor"));
+        assert_eq!(
+            gate(10, 200.0, 63.9),
+            Some("available memory is under its floor")
+        );
+        assert_eq!(gate(10, 200.0, 64.0), None);
+        assert_eq!(mem_gb_text(63.9), "64 GB");
+        assert_eq!(mem_gb_text(f64::MAX), "unknown");
     }
 
     #[test]
@@ -1872,6 +1972,21 @@ mod tests {
         assert!((avail - 2.0).abs() < 1e-9);
         assert!((swap - 1.0).abs() < 1e-9);
         assert_eq!(parse_loadavg("1.5 2.5 3.5 1/100 42"), (1.5, 2.5));
+        // A file with no usable MemAvailable is "unknown", not "none left".
+        for text in ["MemTotal: 100 kB\n", "MemAvailable: lots kB\n", ""] {
+            let (avail, _) = parse_meminfo(text);
+            assert!(avail > 1e9, "{text:?} read as {avail}");
+            assert!(room_for_one(
+                80,
+                10,
+                &Pressure {
+                    disk_free_gb: 200.0,
+                    mem_available_gb: avail,
+                    ..Pressure::default()
+                },
+                &FleetCfg::default()
+            ));
+        }
     }
 
     /// The one command that claims a loop device runs under the shared lock, with a bound on
@@ -1900,5 +2015,44 @@ mod tests {
         let quick = tokio::process::Command::new("true");
         let out = output_within(quick, Duration::from_secs(5)).await;
         assert!(out.unwrap().status.success());
+    }
+
+    /// A helper that hangs is killed by name, not only abandoned: the container, were it left
+    /// alive, could go on holding the loop-device lock.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_helper_container_is_killed_by_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("arbos-helper-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A stand-in for `docker`: `run` hangs, `kill <name>` records the name.
+        let fake = dir.join("docker");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = kill ]; then echo \"$2\" > {}/killed; exit 0; fi\nexec sleep 30\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = helper_args(&dir, "img", "arbos-helper-t-1", "true");
+        let named = args
+            .windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "arbos-helper-t-1");
+        assert!(named, "{args:?}");
+        let err = run_helper(
+            fake.to_str().unwrap(),
+            &args,
+            "arbos-helper-t-1",
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("gave up"), "{err}");
+        let killed = std::fs::read_to_string(dir.join("killed")).unwrap();
+        assert_eq!(killed.trim(), "arbos-helper-t-1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
