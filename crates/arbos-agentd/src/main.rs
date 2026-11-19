@@ -47,6 +47,8 @@ mod job_cancel_unconfirmed_tests;
 mod job_cancel_window_tests;
 #[cfg(test)]
 mod job_correction_routing_tests;
+#[cfg(test)]
+mod job_deadline_tests;
 mod job_delivery;
 #[cfg(test)]
 mod job_failure_report_tests;
