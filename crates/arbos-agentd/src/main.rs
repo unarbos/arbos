@@ -130,6 +130,8 @@ mod truncate;
 #[cfg(test)]
 mod turn_end_race_tests;
 #[cfg(test)]
+mod turn_hung_tests;
+#[cfg(test)]
 mod turn_marks_tests;
 mod vault;
 mod voice;
