@@ -60,6 +60,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_kill_switch` | gauge | | 1 while the kill switch is on and every spend is refused. Read only: an automatic trip from an earlier UTC day reads 0 without the stored switch being touched |
 | `arbos_relay_http_requests_total` | counter | `route`, `class` = `1xx`…`5xx` | HTTP requests. A websocket upgrade is `1xx` |
 | `arbos_relay_http_request_seconds_total` | counter | `route`, `class` | seconds spent until the response headers; divide by the request rate for a mean. An upgrade or a stream counts only its start |
+| `arbos_relay_db_bytes` | gauge | `file` = `db` `wal` | size of `relay.db` and its write-ahead log on disk. The WAL sits near 4 MB in normal running; one that stays well above 64 MB means a read is being held open across many commits |
 | `arbos_relay_db_writer_wait_seconds` | histogram | | how long a caller waits for the database writer lock, probed every 10 s |
 | `process_resident_memory_bytes` | gauge | | resident memory (Linux) |
 | `process_open_fds` | gauge | | open file descriptors (Linux) |
