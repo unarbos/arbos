@@ -51,6 +51,8 @@ mod job_delivery;
 #[cfg(test)]
 mod job_failure_report_tests;
 #[cfg(test)]
+mod job_deadline_tests;
+#[cfg(test)]
 mod job_finished_sweep_tests;
 #[cfg(test)]
 mod job_handoff_leak_tests;

@@ -2187,6 +2187,9 @@ pub struct Agent {
     pub turn_running: AtomicBool,
     /// Subagent turns in flight (keep-alive must cover them too, design §4.6).
     pub subagent_turns: std::sync::atomic::AtomicU32,
+    /// How long one worker run may last before it is failed and stopped. A field so a test can
+    /// shorten it without touching the other tests' boxes.
+    pub(crate) worker_deadline_ms: std::sync::atomic::AtomicU64,
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     /// Set by `shutdown`: the pi supervisor must not respawn a child we are stopping (an orphaned
@@ -2514,6 +2517,7 @@ impl Agent {
             adapters,
             turn_running: AtomicBool::new(false),
             subagent_turns: std::sync::atomic::AtomicU32::new(0),
+            worker_deadline_ms: std::sync::atomic::AtomicU64::new(60 * 60 * 1000),
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
@@ -13442,11 +13446,13 @@ impl Agent {
         // How the provider declined or failed this worker's last model call, if it did (bug AR).
         let mut model_err: Option<ModelError> = None;
         let mut tool_calls: u32 = 0;
-        let deadline = Instant::now() + Duration::from_secs(60 * 60);
+        let deadline =
+            Instant::now() + Duration::from_millis(self.worker_deadline_ms.load(Ordering::SeqCst));
+        let mut timed_out = false;
         loop {
             let ev = tokio::select! {
                 e = stream.recv() => e,
-                _ = tokio::time::sleep_until(deadline.into()) => { done_err = Some("subagent exceeded 60 minutes".into()); break; }
+                _ = tokio::time::sleep_until(deadline.into()) => { done_err = Some("subagent exceeded 60 minutes".into()); timed_out = true; break; }
             };
             let ev = match ev {
                 Ok(e) => e,
@@ -13625,6 +13631,13 @@ impl Agent {
             }
         }
         keepalive.abort();
+        if timed_out {
+            // The cap ends the wait, not the work: without this the worker and whatever its
+            // tool call started keep running outside every concurrency gate, holding pids and
+            // memory and spending tokens, after the chat was told the job failed.
+            let job_id = job.as_ref().map_or("", |j| j.id.as_str());
+            self.end_cancelled_worker(job_id, &subagent_id).await;
+        }
         self.subagent_turns.fetch_sub(1, Ordering::SeqCst);
         {
             let h = host.lock().await;
