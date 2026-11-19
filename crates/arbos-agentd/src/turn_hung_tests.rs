@@ -10,18 +10,22 @@ use std::time::Duration;
 
 use arbos_core::doc::{CommandView, UserMessageOpts};
 use arbos_core::ids::{now_ms, ulid};
+use arbos_core::route::ValidRoute;
 use serde_json::{json, Value};
 
-use crate::agent::TURN_HUNG_NOTICE;
+use crate::agent::{helper_follows, TurnState, TURN_HUNG_NOTICE, TURN_LIMIT_NOTICE};
 use crate::status::tests::test_agent_with_pi;
 use crate::sync::SharedHost;
 
 const CHAT: &str = "01TESTCHATTURNHUNG00000001";
 
-/// The first child starts a run on its first prompt and never ends it, whatever it is told.
-/// Every later child answers.
+/// What the first child does with its first prompt is in `mode`, beside the script. `hang`: it
+/// starts a tool of its own (a `sleep` in a process group of its own, the way a tool runner
+/// starts a command it means to time out; pid recorded) and never ends the run, whatever
+/// it is told. `busy`: it reports tool output five times a second for longer than the deadline
+/// and the grace together, then answers. Every later child answers at once.
 const STUB_PI: &str = r#"#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 counter = os.path.join(here, "starts")
@@ -59,8 +63,22 @@ for line in sys.stdin:
     if t != "prompt":
         continue
     out({"type": "agent_start"})
-    if n == 1:
+    mode = open(os.path.join(here, "mode")).read().strip()
+    if n == 1 and mode == "hang":
         hung = True
+        tool = subprocess.Popen(["sleep", "600"], process_group=0,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(os.path.join(here, "tool.tmp"), "w") as f:
+            f.write(str(tool.pid))
+        os.replace(os.path.join(here, "tool.tmp"), os.path.join(here, "tool"))
+        continue
+    if n == 1 and mode == "busy":
+        for _ in range(18):
+            out({"type": "tool_execution_update", "toolCallId": "t1", "toolName": "bash", "partialResult": {}})
+            time.sleep(0.2)
+        out({"type": "message_update",
+             "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "the long build finished"}})
+        out({"type": "agent_settled", "aborted": False})
         continue
     out({"type": "message_update",
          "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "a fresh child answered"}})
@@ -102,10 +120,18 @@ async fn replies(host: &SharedHost, user_msg: &str) -> String {
         .join("\n")
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message_is_answered() {
+/// A box whose turns have a one-second deadline and a one-second grace, on the stub above.
+async fn a_box(
+    mode: &str,
+) -> (
+    std::sync::Arc<crate::agent::Agent>,
+    SharedHost,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
     let dir = std::env::temp_dir().join(format!("arbos-turn-hung-{}", ulid()));
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mode"), mode).unwrap();
     let pi_bin = dir.join("stub-pi.py");
     std::fs::write(&pi_bin, STUB_PI).unwrap();
     std::fs::set_permissions(&pi_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -124,6 +150,24 @@ async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message
         .unwrap();
     let host = agent.sync.open_room(CHAT).await.unwrap();
     agent.start_pi(CHAT).await.expect("the first child boots");
+    (agent, host, dir, root)
+}
+
+/// Running, as opposed to gone or killed and waiting for whoever inherited it to reap it.
+fn alive(pid: i32) -> bool {
+    let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false);
+    !zombie && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message_is_answered() {
+    let (agent, host, dir, root) = a_box("hang").await;
 
     let (first, cmd) = send_cmd(&host, "do the thing that never returns").await;
     let ended = tokio::time::timeout(Duration::from_secs(30), agent.handle_command(CHAT, cmd))
@@ -158,4 +202,107 @@ async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message
         answer.contains("a fresh child answered"),
         "the next message is answered by a fresh child: {answer:?}"
     );
+}
+
+/// The tool that hung the turn is a process of its own, in a group of its own. Closing the
+/// child does not reach it; the sweep of the child's session does.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_that_hung_the_turn_dies_with_it() {
+    let (agent, host, dir, root) = a_box("hang").await;
+
+    let (_, cmd) = send_cmd(&host, "do the thing that never returns").await;
+    let ended = tokio::time::timeout(Duration::from_secs(30), agent.handle_command(CHAT, cmd))
+        .await
+        .is_ok();
+    let tool: i32 = std::fs::read_to_string(dir.join("tool"))
+        .expect("the hung child started its tool")
+        .parse()
+        .unwrap();
+    let mut gone = false;
+    for _ in 0..100 {
+        gone = !alive(tool);
+        if gone {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !gone {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(tool),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(ended, "the turn was still held 30 s after a 1 s deadline");
+    assert!(gone, "tool {tool} of the hung turn outlived it");
+}
+
+/// A turn that is still reporting is working, and none of the limits apply to it: not the
+/// deadline's notice and abort, and not the grace that follows. They are read only in a full
+/// second of silence, as they always were, so a long build that streams its output runs to its
+/// end on the child it started on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_that_keeps_reporting_runs_past_the_deadline_to_its_answer() {
+    let (agent, host, dir, root) = a_box("busy").await;
+
+    let (ask, cmd) = send_cmd(&host, "run the long build").await;
+    let ended = tokio::time::timeout(Duration::from_secs(30), agent.handle_command(CHAT, cmd))
+        .await
+        .is_ok();
+    let said = replies(&host, &ask).await;
+    let starts = std::fs::read_to_string(dir.join("starts")).unwrap_or_default();
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(ended, "the turn did not end");
+    assert!(
+        said.contains("the long build finished"),
+        "the turn ran to its own answer: {said:?}"
+    );
+    assert!(
+        !said.contains(TURN_LIMIT_NOTICE) && !said.contains(TURN_HUNG_NOTICE),
+        "a turn that was reporting was treated as over its limit: {said:?}"
+    );
+    assert_eq!(
+        starts.trim(),
+        "1",
+        "the child was replaced under a working turn"
+    );
+}
+
+/// The hung notice is held back only when a helper really follows the turn. A reply, or a turn
+/// that never chose a route, has nobody behind it even when the deadline set `escalate`.
+#[test]
+fn only_a_turn_with_a_helper_behind_it_is_handed_off() {
+    let turn = |route: Option<ValidRoute>, escalate: bool, act_to_job: bool| {
+        let mut t = TurnState::claim(CHAT, "user-msg", false);
+        t.route = route;
+        t.escalate = escalate;
+        t.act_to_job = act_to_job;
+        t
+    };
+    let act = || {
+        Some(ValidRoute::Act {
+            plan: "run it".into(),
+        })
+    };
+    let reply = || Some(ValidRoute::Reply { reply: None });
+    let wake = || {
+        Some(ValidRoute::Wake {
+            subagent_id: "s1".into(),
+            brief: "go on".into(),
+        })
+    };
+    assert!(helper_follows(&turn(act(), true, false)));
+    assert!(helper_follows(&turn(act(), false, true)));
+    assert!(helper_follows(&turn(wake(), false, false)));
+    assert!(!helper_follows(&turn(act(), false, false)));
+    assert!(!helper_follows(&turn(reply(), true, false)));
+    assert!(!helper_follows(&turn(None, true, false)));
+    let mut stopped = turn(act(), true, false);
+    stopped.stopped = true;
+    assert!(!helper_follows(&stopped));
 }
