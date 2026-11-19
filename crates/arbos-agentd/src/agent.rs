@@ -1785,6 +1785,16 @@ pub(crate) const RELAY_TURN_MARK: &str = "[Arbos relay turn]";
 pub(crate) const MODEL_CALL_RETRIES: u8 = 2;
 pub(crate) const MODEL_CALL_BACKOFF_S: [u64; 2] = [2, 5];
 
+/// The wait before retry `attempt` (0-based): the backoff above plus up to half as much again,
+/// drawn at random. Every box talks to the same providers, so a rate limit or an overload reaches
+/// many turns in the same second; without the spread they would all come back in the same second
+/// too.
+pub(crate) fn model_retry_wait(attempt: u8) -> Duration {
+    let base_ms =
+        MODEL_CALL_BACKOFF_S[usize::from(attempt).min(MODEL_CALL_BACKOFF_S.len() - 1)] * 1000;
+    Duration::from_millis(base_ms + rand::random::<u64>() % (base_ms / 2))
+}
+
 /// The direct tool call a turn is inside right now.
 #[derive(Clone, Debug)]
 pub struct RunningTool {
@@ -8607,10 +8617,9 @@ impl Agent {
             let Some((attempt, m)) = self.transient_model_error().await else {
                 break;
             };
-            let wait =
-                MODEL_CALL_BACKOFF_S[usize::from(attempt).min(MODEL_CALL_BACKOFF_S.len() - 1)];
-            tracing::warn!(chat_id, attempt = attempt + 1, wait_s = wait, detail = %m.detail, "transient model failure; retrying in the same turn");
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            let wait = model_retry_wait(attempt);
+            tracing::warn!(chat_id, attempt = attempt + 1, wait_ms = wait.as_millis() as u64, detail = %m.detail, "transient model failure; retrying in the same turn");
+            tokio::time::sleep(wait).await;
             if self.turn.lock().await.as_ref().is_none_or(|t| t.stopped) {
                 break;
             }
@@ -17081,6 +17090,14 @@ mod tests {
     fn model_call_retry_shape() {
         assert_eq!(MODEL_CALL_RETRIES, 2);
         assert_eq!(MODEL_CALL_BACKOFF_S, [2, 5]);
+        // Each wait is its backoff plus less than half as much again, and the draws differ.
+        for (attempt, base) in [(0u8, 2_000u128), (1, 5_000), (9, 5_000)] {
+            let waits: Vec<u128> = (0..50)
+                .map(|_| model_retry_wait(attempt).as_millis())
+                .collect();
+            assert!(waits.iter().all(|w| (base..base + base / 2).contains(w)));
+            assert!(waits.iter().any(|w| *w != waits[0]), "no spread: {waits:?}");
+        }
         let p = model_retry_prompt(
             "Search them online",
             Some("Searching the web for Hezbola now."),
@@ -18944,7 +18961,8 @@ from pathlib import Path
 marker = Path(@MARKER@)
 release = Path(@RELEASE@)
 exited = Path(@EXITED@)
-Path(@PID@).write_text(str(os.getpid()))
+Path(@PID@ + '.tmp').write_text(str(os.getpid()))
+os.replace(@PID@ + '.tmp', @PID@)
 try:
     for line in sys.stdin:
         cmd = json.loads(line)
