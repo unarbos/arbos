@@ -1659,7 +1659,7 @@ impl Db {
 
     /// The user's box, if one was created.
     pub fn user_box(&self, user_id: &str) -> Result<Option<Sandbox>> {
-        self.read(|c| {
+        self.with(|c| {
             c.query_row(
                 &format!("SELECT {} FROM boxes WHERE user_id = ?1", Self::BOX_COLS),
                 params![user_id],
@@ -4115,7 +4115,6 @@ mod reader_tests {
         );
         assert!(db.user_by_box_token_hash("none").unwrap().is_none());
         assert!(db.user("u1").unwrap().is_none());
-        assert!(db.user_box("u1").unwrap().is_none());
         assert!(db.project("p").unwrap().is_none());
         assert!(!db.chat_exists("p", "c").unwrap());
         assert!(db.people_chat("c").unwrap().is_none());
