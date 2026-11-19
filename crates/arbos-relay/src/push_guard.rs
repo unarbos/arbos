@@ -243,8 +243,12 @@ pub fn check_push(
     // `(Some(a), s)` arm reads it as a heal of attested history and attests nothing new.
     for (id, _) in &changes.inserted {
         // An entry the relay cannot name is one it cannot attribute, gate or later protect.
-        // Every writer gives a message its id as it creates it, so nothing honest sends one.
+        // A device writes a message whole. A box may cut a backlog between a row and its id,
+        // so its row waits unnamed and is judged below when the id arrives.
         if id.is_empty() {
+            if matches!(me, Pusher::BoxOf(_)) {
+                continue;
+            }
             return PushCheck::Refuse {
                 code: "bad_message",
                 detail: "every entry in a chat's messages is a message with an id".to_owned(),
@@ -262,7 +266,7 @@ pub fn check_push(
 
     let mut carries_new_message = false;
     let mut attributed = Vec::new();
-    for (id, sender) in &changes.inserted {
+    for (id, sender) in changes.inserted.iter().filter(|(id, _)| !id.is_empty()) {
         let mut attest = || {
             if let Some(who) = me.attribution(state, sender.as_deref()) {
                 attributed.push((id.clone(), who));
@@ -488,6 +492,79 @@ mod tests {
                 .unwrap();
         }
         (chat, alice, bob, alice_dev, bob_dev)
+    }
+
+    /// A box sends a backlog too big for one push as a run of pushes, cut wherever its own
+    /// history reaches the size limit. A message's first fields can therefore arrive in one
+    /// push and the rest in the next. Wherever the cut falls, both pushes are taken, and the
+    /// message ends up named as it was written.
+    #[test]
+    fn a_boxs_message_cut_across_two_pushes_at_any_op_is_taken() {
+        use arbos_core::doc::ChatDoc;
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 101);
+        let the_box = Principal::Box { user_id: alice };
+        let src = ChatDoc::new(Some(9), false);
+        src.init_meta("c", "p", 1);
+        let from = src.oplog_vv().get(&9).copied().unwrap();
+        src.start_assistant_message("m_reply", "", "box:test");
+        let end = src.oplog_vv().get(&9).copied().unwrap();
+        let span = |a, b| {
+            src.doc
+                .export(loro::ExportMode::UpdatesInRange {
+                    spans: std::borrow::Cow::Owned(vec![loro::IdSpan::new(9, a, b)]),
+                })
+                .unwrap()
+        };
+        for cut in from + 1..end {
+            let mut room = ChatDoc::new(Some(1), false);
+            room.import(&span(0, from)).unwrap();
+            let mut mirror = room.message_identities();
+            for (a, b) in [(from, cut), (cut, end)] {
+                let before = room.frontiers();
+                assert!(room.import_exactly(&span(a, b)).unwrap(), "ops {a}..{b}");
+                let changes = room.messages_changed(&before, &room.frontiers(), &mirror);
+                let check = check_push(&state, &the_box, "p", "c", false, &changes);
+                assert!(!refused(&check), "cut at {cut}, ops {a}..{b}: {check:?}");
+                mirror = changes.ids_after;
+            }
+            assert_eq!(mirror, [("m_reply".to_owned(), Some("agent".to_owned()))]);
+        }
+    }
+
+    /// The fields a message is created with may arrive after its row only while the row lacks
+    /// them, and the row is then judged as an insert by whoever sent them. A device writes a
+    /// message whole, so its row never arrives unnamed.
+    #[test]
+    fn a_row_missing_its_first_fields_is_judged_as_an_insert_when_they_arrive() {
+        use arbos_core::doc::ChatDoc;
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
+        let room = ChatDoc::new(Some(1), false);
+        let row = room
+            .messages_list()
+            .push_container(loro::LoroMap::new())
+            .unwrap();
+        row.insert("id", "m_alice").unwrap();
+        room.doc.commit();
+        for (field, value) in [("sender", "user:someone"), ("role", "user")] {
+            let mut d = ChatDoc::new(Some(2), false);
+            d.import(&room.snapshot()).unwrap();
+            let (before, mirror) = (d.frontiers(), d.message_identities());
+            d.set_message_fields("m_alice", &[(field, serde_json::json!(value))]);
+            let c = d.messages_changed(&before, &d.frontiers(), &mirror);
+            assert!(
+                refused(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                "{field} written on {alice}'s row by another member"
+            );
+        }
     }
 
     /// The long path through this check. A member who writes a *new* id is recorded under their

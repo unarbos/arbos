@@ -570,6 +570,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "image",
+ "loro",
  "nix 0.29.0",
  "rand 0.8.8",
  "reqwest 0.12.28",

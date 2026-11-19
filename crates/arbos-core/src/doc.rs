@@ -90,6 +90,8 @@ pub struct MessageChanges {
     pub removed: Vec<MessageIdentity>,
     /// Entries the update added, each with the `sender` written on it (`None` when absent).
     /// One with no readable `id` is reported under the empty id.
+    /// A row that was missing `id` or `sender` and gained one is reported here again, under
+    /// the id and sender it now has: that is the message still arriving.
     pub inserted: Vec<(String, Option<String>)>,
     /// `(message id, field)` for each field written onto a message that was already in the
     /// list. Only messages are reported: an edit inside a message's `parts` is not a field on
@@ -2295,7 +2297,11 @@ impl ChatDoc {
             // `messages` list, and it is the message at that place: the `id` it carries is a
             // field like any other, which this very update may have written. A row that
             // arrived with the update is reported whole above.
-            let path = self.doc.get_path_to_container(cid).unwrap_or_default();
+            // A map the doc cannot place could be a message: nothing can be said about it.
+            let Some(path) = self.doc.get_path_to_container(cid) else {
+                out.unreadable = true;
+                continue;
+            };
             let [(root, _), (_, Index::Seq(i))] = path.as_slice() else {
                 continue;
             };
@@ -2308,14 +2314,33 @@ impl ChatDoc {
                 }
                 continue;
             };
-            let id = after[*i].0.clone();
+            let (id, sender) = after[*i].clone();
+            let now = (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"));
+            // Every writer creates the row and then sets `id`, `role` and `sender`, in that
+            // order, and an update may end between any two of them (a box cuts a backlog by
+            // size). A header field the row did not have yet is therefore the message still
+            // arriving, not a rewrite: once the row has its id it is reported as inserted,
+            // to be judged as one, under the name it now carries.
+            let mut arrived = false;
             for key in delta.updated.keys() {
-                out.rewritten.push((id.clone(), key.to_string()));
+                let missing = match key.as_ref() {
+                    "id" => id.is_empty(),
+                    "role" | "sender" => sender.is_none(),
+                    _ => false,
+                };
+                if missing {
+                    arrived = true;
+                } else {
+                    out.rewritten.push((id.clone(), key.to_string()));
+                }
+            }
+            if arrived && !now.0.is_empty() {
+                out.inserted.push(now.clone());
             }
             if delta.updated.keys().any(|k| is_poll_key(k)) {
                 out.polls.push((id, poll_fields(&m)));
             }
-            after[*i] = (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"));
+            after[*i] = now;
         }
         out.ids_after = after;
         out
@@ -3020,6 +3045,32 @@ mod message_change_tests {
     }
 
     /// The import of a payload is exact when it applied all of the payload and nothing else.
+    /// A write to a message that is no longer in the list has no place in it, and that is an
+    /// ordinary thing to read: someone removed the message while the write was on its way.
+    #[test]
+    fn a_write_to_a_message_removed_meanwhile_is_readable() {
+        let mut room = ChatDoc::new(Some(1), false);
+        room.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let mut late = ChatDoc::new(Some(2), false);
+        late.import(&room.snapshot()).unwrap();
+        room.delete_message("m1").unwrap();
+        room.commit_now();
+        let mark = late.oplog_vv();
+        late.set_message_fields("m1", &[("preview", json!("x"))]);
+        late.set_reaction("m1", "👍", "user:a", true).unwrap();
+        late.append_user_message("m2", "yo", "dev", &UserMessageOpts::default())
+            .unwrap();
+        late.delete_message("m2").unwrap();
+        let update = late.export_updates_since(&mark);
+
+        let (before, mirror) = (room.frontiers(), room.message_identities());
+        assert!(room.import_exactly(&update).unwrap());
+        let c = room.messages_changed(&before, &room.frontiers(), &mirror);
+        assert!(!c.unreadable);
+        assert!(c.ids_after.is_empty());
+    }
+
     #[test]
     fn an_import_is_exact_only_when_it_is_the_payload_and_nothing_else() {
         let a = ChatDoc::new(Some(1), false);
