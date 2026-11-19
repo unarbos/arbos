@@ -291,7 +291,7 @@ impl Db {
     }
 
     pub fn people_chat(&self, id: &str) -> Result<Option<PeopleChat>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color, description FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
@@ -367,7 +367,7 @@ impl Db {
 
     /// True when this person was banned from the chat (they cannot rejoin).
     pub fn member_is_banned(&self, chat_id: &str, member: &str) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             let banned: Option<i64> = c
                 .query_row(
                     "SELECT banned_at FROM people_members WHERE chat_id = ?1 AND member = ?2",
@@ -505,7 +505,7 @@ impl Db {
     /// people, and `agent:` would otherwise sort first. `member` settles the rest: it is stored
     /// on the row and already covered by the `(chat_id, member)` unique index.
     pub fn members_of(&self, chat_id: &str) -> Result<Vec<Membership>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(&format!(
                 "SELECT {MEMBER_COLS} FROM people_members WHERE chat_id = ?1 AND left_at IS NULL
                  ORDER BY joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
@@ -516,7 +516,7 @@ impl Db {
     }
 
     pub fn membership(&self, chat_id: &str, member: &str) -> Result<Option<Membership>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 &format!("SELECT {MEMBER_COLS} FROM people_members WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL"),
                 params![chat_id, member],
@@ -658,7 +658,7 @@ impl Db {
 
     /// `(head_seq, last_row_at)` of a room; zeros when it has no rows.
     pub fn room_activity(&self, room: &str) -> Result<(i64, i64)> {
-        self.with(|c| {
+        self.read(|c| {
             let head: i64 = c
                 .query_row(
                     "SELECT head FROM room_seq WHERE room = ?1",
@@ -703,7 +703,7 @@ impl Db {
 
     /// Does `blocker` block `blocked`?
     pub fn blocks(&self, blocker: &str, blocked: &str) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COUNT(*) FROM blocks WHERE blocker = ?1 AND blocked = ?2",
                 params![blocker, blocked],
@@ -715,7 +715,7 @@ impl Db {
 
     /// Is either of the two blocking the other?
     pub fn blocked_either_way(&self, a: &str, b: &str) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COUNT(*) FROM blocks WHERE (blocker = ?1 AND blocked = ?2) OR (blocker = ?2 AND blocked = ?1)",
                 params![a, b],
@@ -1266,7 +1266,7 @@ impl Db {
     }
 
     pub fn is_project_member(&self, project_id: &str, user_id: &str) -> Result<bool> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COUNT(*) FROM project_members WHERE project_id = ?1 AND user_id = ?2 AND left_at IS NULL",
                 params![project_id, user_id],

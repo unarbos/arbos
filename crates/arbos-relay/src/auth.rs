@@ -106,7 +106,12 @@ pub fn resolve_checked(state: &AppState, token: &str) -> Result<Principal, Refus
         return match crate::signin::verify_access(&state.jwt_key, token) {
             Ok(claims) => match state.db.device_status(&claims.device_id) {
                 Ok(Some((user_id, false))) if user_id == claims.user_id => {
-                    let _ = state.db.touch_device(&claims.device_id);
+                    // "Seen" is stamped in memory and written with the presence stamps
+                    // (`rooms::flush_presence`): a row write per authenticated request put
+                    // every request in the writer's queue. A contended map skips one stamp.
+                    if let Ok(mut seen) = state.presence_seen.try_lock() {
+                        seen.insert(claims.device_id.clone(), arbos_core::ids::now_ms());
+                    }
                     Ok(Principal::Device {
                         id: claims.device_id,
                         token: token.to_owned(),
@@ -320,5 +325,35 @@ mod legacy_bucket_tests {
             resolve_legacy(&state, &token).is_none(),
             "a device whose owner cannot be read is refused, not promoted into the bucket"
         );
+    }
+
+    /// An authenticated request marks its device seen without a database write of its own: the
+    /// stamp waits in memory for the presence flush, which writes every device's in one go.
+    #[tokio::test]
+    async fn a_request_stamps_its_device_in_memory_and_the_flush_writes_it() {
+        let state = test_state(AuthMode::Github);
+        let id = ulid();
+        state
+            .db
+            .insert_device(&id, "Alice's Mac", "hash", "gh_alice", "github")
+            .expect("device");
+        let access = crate::signin::mint_access(&state.jwt_key, "gh_alice", &id, 60);
+        let seen_in_db = || -> Option<i64> {
+            let sql = "SELECT last_seen_at FROM devices WHERE id = ?1";
+            state
+                .db
+                .read(|c| c.query_row(sql, [&id], |r| r.get(0)))
+                .unwrap()
+        };
+
+        assert!(matches!(
+            resolve_checked(&state, &access),
+            Ok(Principal::Device { .. })
+        ));
+        assert_eq!(seen_in_db(), None, "no write on the request");
+        let stamp = state.presence_seen.lock().await.get(&id).copied();
+        assert!(stamp.is_some(), "the device is stamped in memory");
+        assert_eq!(crate::rooms::flush_presence(&state, 0).await, 1);
+        assert_eq!(seen_in_db(), stamp);
     }
 }

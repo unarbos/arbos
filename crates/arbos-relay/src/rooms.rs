@@ -25,13 +25,22 @@ const ROWS_BATCH: i64 = 256;
 /// How long live rows are held for a socket that has not finished (or started) its catch-up.
 const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 
+/// Longest device name a HELLO may carry (`dev:<ulid>` is 30 bytes, `box:<sandbox id>` under 80).
+const DEVICE_NAME_MAX: usize = 128;
+
 /// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
 const HEALS_PER_CONNECTION: u32 = 1;
+
+/// Rooms rebuilt in full, in order (tests count them).
+#[cfg(test)]
+static BUILDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Full rebuild of the room's stored doc (checkpoint ∪ every row). Runs off the socket task via
 /// `spawn_blocking` on a cold cache.
 fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::state::RoomDocCache> {
     use arbos_core::doc::ChatDoc;
+    #[cfg(test)]
+    BUILDS.lock().unwrap().push(room_name.to_owned());
     let key = state.db.room_position(room_name)?;
     let mut doc = match state.db.checkpoint_bytes(room_name)? {
         Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
@@ -207,29 +216,51 @@ fn diff_pushed_row(
     changes
 }
 
-/// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
-/// room: head moves import only new rows; the first build runs in `spawn_blocking`.
-async fn room_version_vector(
+/// Read the room's stored doc (checkpoint ∪ rows) from the cache the room keeps: head moves
+/// import only new rows, and a cold cache is rebuilt in `spawn_blocking`.
+///
+/// One rebuild per room at a time. Every socket of a room asks for the doc as it catches up, so
+/// after a relay restart a 500-member chat used to be rebuilt 500 times at once, each on its own
+/// blocking thread with its own copy of the doc. The others now wait and read what the first built.
+async fn read_room_doc<T>(
     state: &AppState,
     room: &crate::state::Room,
     room_name: &str,
-) -> anyhow::Result<Vec<u8>> {
-    use arbos_core::doc::encode_vv;
-    {
+    read: impl Fn(&crate::state::RoomDocCache) -> T,
+) -> anyhow::Result<T> {
+    let warm = || -> anyhow::Result<Option<T>> {
         let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(encode_vv(&cached.doc.oplog_vv()));
-        }
+        let Some(cached) = guard.as_mut() else {
+            return Ok(None);
+        };
+        advance_room_doc(state, room_name, cached)?;
+        Ok(Some(read(cached)))
+    };
+    if let Some(v) = warm()? {
+        return Ok(v);
+    }
+    let _building = room.doc_build.lock().await;
+    if let Some(v) = warm()? {
+        return Ok(v);
     }
     let state_c = state.clone();
     let name = room_name.to_owned();
     let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
         .await
         .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, room, room_name, built, |cached| {
-        encode_vv(&cached.doc.oplog_vv())
+    publish_room_doc(state, room, room_name, built, read)
+}
+
+/// Encoded version vector of the room's stored doc.
+async fn room_version_vector(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    read_room_doc(state, room, room_name, |cached| {
+        arbos_core::doc::encode_vv(&cached.doc.oplog_vv())
     })
+    .await
 }
 
 /// Version vector of the room's stored doc (same cache as [`room_version_vector`]).
@@ -238,21 +269,7 @@ async fn room_oplog_vv(
     room: &crate::state::Room,
     room_name: &str,
 ) -> anyhow::Result<arbos_core::doc::VersionVector> {
-    {
-        let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(cached.doc.oplog_vv());
-        }
-    }
-    let state_c = state.clone();
-    let name = room_name.to_owned();
-    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
-        .await
-        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, room, room_name, built, |cached| {
-        cached.doc.oplog_vv()
-    })
+    read_room_doc(state, room, room_name, |cached| cached.doc.oplog_vv()).await
 }
 
 /// The newest `n` message rows of a room's stored doc (projected JSON, oldest first), from the
@@ -264,26 +281,14 @@ pub async fn room_tail_rows(
     n: usize,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let room = state.room(room_name).await;
-    let tail = |doc: &arbos_core::doc::ChatDoc| {
-        let list = doc.messages_list();
+    read_room_doc(state, &room, room_name, |cached| {
+        let list = cached.doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| doc.projected_row(i))
-            .collect::<Vec<_>>()
-    };
-    {
-        let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(tail(&cached.doc));
-        }
-    }
-    let state_c = state.clone();
-    let name = room_name.to_owned();
-    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
-        .await
-        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, &room, room_name, built, |cached| tail(&cached.doc))
+            .filter_map(|i| cached.doc.projected_row(i))
+            .collect()
+    })
+    .await
 }
 
 /// Per-socket row ordering (see `run`).
@@ -309,10 +314,35 @@ impl Default for Delivery {
     }
 }
 
-async fn flush_held(
-    d: &mut Delivery,
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
-) -> Result<(), axum::Error> {
+/// How long one frame may wait for its socket to take it.
+const SEND_STALL: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+
+/// The sending half of a room socket. A peer that has stopped reading (a phone that left the
+/// network without closing, a client that hung) lets the kernel's buffers fill, and then a
+/// plain `send` waits for as long as the connection exists: the task, its socket and its place
+/// in the room were kept for good. A frame that cannot be handed over within [`SEND_STALL`]
+/// ends the socket instead; a client that is alive redials and catches up from its cursor.
+struct Out {
+    sink: futures::stream::SplitSink<WebSocket, Message>,
+    stalled: bool,
+}
+
+impl Out {
+    async fn send(&mut self, m: Message) -> Result<(), axum::Error> {
+        match tokio::time::timeout(SEND_STALL, self.sink.send(m)).await {
+            Ok(sent) => sent,
+            Err(_) => {
+                self.stalled = true;
+                Err(axum::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the socket took no frame for too long",
+                )))
+            }
+        }
+    }
+}
+
+async fn flush_held(d: &mut Delivery, sink: &mut Out) -> Result<(), axum::Error> {
     let held = std::mem::take(&mut d.held);
     for b in held {
         if b.seq > d.last_sent_seq {
@@ -481,7 +511,11 @@ async fn run(
     // Before subscribe: Drop runs after `rx` is gone, so receiver_count excludes this socket.
     let _clear_doc = LastSocketDocCacheClear(room.clone());
     let mut rx = room.tx.subscribe();
-    let (mut sink, mut stream) = socket.split();
+    let (sink, mut stream) = socket.split();
+    let mut sink = Out {
+        sink,
+        stalled: false,
+    };
     // A planned restart (restart.rs): the socket closes with 1012 so the client redials at once
     // instead of backing off. A socket that arrives mid-drain is told the same thing right away.
     let mut closing = state.restart.closing.subscribe();
@@ -564,6 +598,9 @@ async fn run(
                     Ok(()) => {}
                     Err(e) => {
                         tracing::warn!(%room_name, error = %e, "room frame error");
+                        if sink.stalled {
+                            break;
+                        }
                         let _ = sink.send(error_frame("internal", &e.to_string())).await;
                     }
                 }
@@ -658,7 +695,7 @@ async fn handle_frame(
     device: &mut String,
     principal: &Principal,
     f: Frame,
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    sink: &mut Out,
     delivery: &mut Delivery,
 ) -> anyhow::Result<()> {
     let is_box = principal.is_box();
@@ -668,6 +705,13 @@ async fn handle_frame(
             let h: wire::Hello = serde_json::from_value(f.header)?;
             if h.proto != arbos_core::PROTO_VERSION {
                 sink.send(error_frame("proto", "unsupported protocol version"))
+                    .await?;
+                return Ok(());
+            }
+            // The name is the client's own and is kept per room (`room_health`) and on every
+            // row it pushes: a frame-sized one is refused, not stored.
+            if h.device.len() > DEVICE_NAME_MAX {
+                sink.send(error_frame("bad_hello", "device name too long"))
                     .await?;
                 return Ok(());
             }
@@ -1052,7 +1096,7 @@ async fn send_state(
     state: &AppState,
     project_id: &str,
     room_name: &str,
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    sink: &mut Out,
 ) -> anyhow::Result<()> {
     let st = state.db.room_state(room_name)?;
     let (box_state, _) = state.project_box_state(project_id).await;
@@ -2942,6 +2986,33 @@ mod covered_push_tests {
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
     }
+    /// A room's sockets all ask for its doc as they catch up; a cold room is rebuilt once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cold_room_is_rebuilt_once_however_many_sockets_ask() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 11);
+        let (bob, _) = person(&state, 12);
+        let chat = dm(&state, &alice, &bob);
+        let room_name = format!("people/{chat}");
+        let room = state.room(&room_name).await;
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.append_user_message("m0", "x", "dev", &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(&room_name, "dev", "b0", &doc.export_updates_since(&base))
+            .unwrap();
+
+        let asks = (0..64).map(|_| super::room_version_vector(&state, &room, &room_name));
+        let vvs = futures::future::join_all(asks).await;
+        assert!(vvs
+            .iter()
+            .all(|vv| vv.as_ref().unwrap() == &encode_vv(&doc.oplog_vv())));
+        let builds = super::BUILDS.lock().unwrap();
+        assert_eq!(builds.iter().filter(|r| **r == room_name).count(), 1);
+    }
+
     async fn prepare_push<'a>(
         state: &AppState,
         room: &'a crate::state::Room,
@@ -4202,5 +4273,136 @@ mod jam_recovery_tests {
             stored.doc.message("m_wordless").is_none(),
             "and the row the box retired is gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod socket_bound_tests {
+    //! One client must not be able to hold the relay's memory or a socket for good: a peer that
+    //! stops reading is dropped, and the device name a HELLO carries is bounded.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::people::tests_support::{dm, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    type Ws = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn hello(room: &str, device: &str) -> TMsg {
+        let header = json!({ "cursor": 0, "device": device, "room": room,
+                             "proto": arbos_core::PROTO_VERSION });
+        TMsg::Binary(Frame::new(FrameType::Hello, header, bytes::Bytes::new()).encode())
+    }
+
+    /// A DM between two people and one socket for each of them on it.
+    async fn two_sockets(state: &AppState) -> (String, String, Ws, Ws) {
+        let (alice, _) = person(state, 4701);
+        let (bob, _) = person(state, 4702);
+        let chat = dm(state, &alice, &bob);
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut sockets = Vec::new();
+        for user in [&alice, &bob] {
+            let token = format!("adv_{}", ulid().to_ascii_lowercase());
+            let hash = arbos_core::auth::hash(&token);
+            state
+                .db
+                .insert_device(&ulid(), "t", &hash, user, "paircode")
+                .unwrap();
+            let url = format!("ws://{addr}/room/people/{chat}?token={token}");
+            sockets.push(tokio_tungstenite::connect_async(url).await.unwrap().0);
+        }
+        let bob_ws = sockets.pop().unwrap();
+        (
+            chat.clone(),
+            format!("people/{chat}"),
+            sockets.pop().unwrap(),
+            bob_ws,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_socket_whose_peer_stops_reading_is_dropped() {
+        let state = test_state(AuthMode::Github);
+        let (chat, room, mut idle, mut busy) = two_sockets(&state).await;
+        // Alice says hello and never reads again. Her socket stays open on her side.
+        idle.send(hello(&room, "dev:idle")).await.unwrap();
+        busy.send(hello(&room, "dev:busy")).await.unwrap();
+        while state.restart.open_sockets.load(Ordering::Relaxed) < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Bob sends more than the connection to Alice can buffer.
+        let doc = ChatDoc::new(Some(9), false);
+        doc.init_meta(&chat, "people", 1);
+        let big = "x".repeat(900_000);
+        for i in 0..40 {
+            let base = doc.oplog_vv();
+            doc.append_user_message(
+                &format!("m{i}"),
+                &big,
+                "dev:busy",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+            let push = Frame::new(
+                FrameType::Push,
+                json!({ "batchId": format!("b{i}") }),
+                bytes::Bytes::from(doc.export_updates_since(&base)),
+            );
+            busy.send(TMsg::Binary(push.encode())).await.unwrap();
+        }
+        let reader = tokio::spawn(async move { while busy.next().await.is_some() {} });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while state.restart.open_sockets.load(Ordering::Relaxed) > 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the socket nobody reads is still held"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        reader.abort();
+        drop(idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hello_with_an_oversized_device_name_is_refused_and_not_remembered() {
+        let state = test_state(AuthMode::Github);
+        let (_, room, mut ws, _other) = two_sockets(&state).await;
+        ws.send(hello(&room, &"d".repeat(super::DEVICE_NAME_MAX + 1)))
+            .await
+            .unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(30), ws.next())
+            .await
+            .expect("the relay answers")
+            .unwrap()
+            .unwrap();
+        let TMsg::Binary(b) = answer else {
+            panic!("a frame")
+        };
+        let f = Frame::decode(b).unwrap().unwrap();
+        assert_eq!(
+            (f.ty, f.header["code"].as_str()),
+            (FrameType::Error, Some("bad_hello"))
+        );
+        assert!(state.room(&room).await.replicas.lock().unwrap().is_empty());
     }
 }

@@ -45,14 +45,19 @@ pub async fn browser_stream(
     );
     ws.max_message_size(32 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = pipe(socket, &upstream).await {
+            if let Err(e) = pipe(socket, &upstream, &sb.mcp_token).await {
                 tracing::debug!(error = %e, project = %project.id, "browser stream proxy closed");
             }
         })
 }
 
-async fn pipe(client: WebSocket, upstream: &str) -> anyhow::Result<()> {
-    let req = upstream.into_client_request()?;
+async fn pipe(client: WebSocket, upstream: &str, box_bearer: &str) -> anyhow::Result<()> {
+    let mut req = upstream.into_client_request()?;
+    // The box asks for its bearer on this route; an older box ignores the header.
+    req.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {box_bearer}").parse()?,
+    );
     let (up, _) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio_tungstenite::connect_async(req),

@@ -372,6 +372,14 @@ RestartSec=2
 # the relay hit it on 2026-10-25 02:00 UTC (975 ESTAB + db + listener) and accept() failed with EMFILE for
 # 12 min — new sessions 502, chats empty, healthz still 200 on kept-alive connections. 65536 soft+hard.
 LimitNOFILE=65536
+# The host sells its sandboxes more memory than it has. If it runs out, the kernel must take a sandbox
+# (started with --oom-score-adj=500, files safe on its /work image), never the relay every user is on.
+OOMScoreAdjust=-900
+# glibc gives every thread its own malloc arena, up to 8 per core (1,024 on the 128-core host), and
+# memory freed in one arena is neither reused by another nor handed back. With 128 runtime workers
+# and the blocking threads that rebuild room docs, the relay held 24.1 GB resident on 2026-11-18
+# after five days: 660 arenas with 22.8 GB between them, over about 100 MB of stored docs.
+Environment=MALLOC_ARENA_MAX=4
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
