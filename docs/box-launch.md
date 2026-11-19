@@ -91,7 +91,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
 ## 5. What to watch
 
-`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, `has_room`), `pressure` (available memory, swap, load, free disk), every machine with its live CPU and memory, and the last 50 fleet events.
+`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, `has_room`), `pressure` (available memory, swap, load, free disk), every machine with its live CPU and memory, and the last 50 fleet events. The same signs over time, with alerts, are on the Grafana dashboards of the monitoring stack; [`scripts/deploy/monitoring/README.md`](../scripts/deploy/monitoring/README.md) is its runbook.
 
 | Sign | Where | Meaning |
 |---|---|---|
