@@ -49,13 +49,20 @@ Files:
   sockets, database writer wait.
 - **Boxes**: top-N boxes by CPU, memory, pids, disk IO and network; every box against its memory
   and pids limit; OOM kills and restarts; a drill-down by the `Box` variable.
+- **Swarm**: every box at once, refreshed every 5 s. One bubble per box: up is tokens per minute
+  its agents are using, right is CPU, area is memory, colour is state (working a turn, awake and
+  idle, waking, asleep, error). A busy fleet rises off the floor and an idle one sits along it.
+  Around it: tokens per second, per minute and per 24 hours, model calls, spend against the cap,
+  boxes by state, token rate by kind, the busiest boxes, a table of every box with tokens, calls
+  and spend beside CPU, memory, pids and network, and a drill-down by the `Box` variable. See
+  [Swarm and the relay](#swarm-and-the-relay) for what it shows on which relay.
 - **Agents**: turns started / finished / failed, turn duration percentiles, messages waiting,
   crashes, model calls, errors and response time, and how many awake boxes are reporting.
 - **Subnet view** (separate organisation), aggregates only, and only what the relay, the host and
   the probes feed, which is what exists today: service up, reachable from outside (the relay's own
   public name), machines running, machines working now, model calls succeeding and per minute,
-  model response time, machine starts succeeding, machine wake time, waiting for a machine, host
-  CPU and memory. A percentage with nothing to divide by reads 100 (nothing failed); a tile whose
+  model response time, tokens per minute and in 24 hours, machine starts succeeding, machine wake
+  time, waiting for a machine, host CPU and memory. A percentage with nothing to divide by reads 100 (nothing failed); a tile whose
   source is not reporting says "no data yet" in grey, never a blank or a NaN. Turn counts and turn
   duration can only come from the machines themselves; the rules for them exist and are tested, and
   the panels are added when boxes run an image that reports them (#3096).
@@ -138,8 +145,10 @@ It arrives within 30 seconds and resolves itself after five minutes.
   `prometheus/rules_test.yml` feeds the rules labelled input and fails if a label comes out;
   `grafana-access.sh` ends by logging in as the viewer and failing unless the admin dashboards
   and datasource refuse it.
-- Container names contain user ids. They appear on the Boxes dashboard only: not in the Subnet
-  view and not in alert messages. (The `box` label on agent metrics is an opaque id.)
+- Container names contain user ids. They appear on the Boxes and Swarm dashboards only: not in
+  the Subnet view and not in alert messages. (The `box` label on agent and relay metrics is an
+  opaque id; `arbos_relay_box_info` is the one series that ties it to a container, and it exists
+  only in the main Prometheus, which scrapes it from a path of its own.)
 
 ## What cAdvisor is given
 
@@ -212,6 +221,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 | job | scrapes |
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
+| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend), ten series per box |
 | `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
@@ -232,6 +242,38 @@ A counter with labels does not exist until its first event, so a healthy relay h
 series. Failure panels and the Subnet view read 0 in that case while the relay (or any agentd) is
 reporting, and stay empty when there is no data at all. Relay up,
 memory, CPU and restarts, and every host and container panel, do not depend on it.
+
+## Swarm and the relay
+
+The Swarm dashboard joins two sources per box: cAdvisor (CPU, memory, pids, network; there today)
+and the relay's `/metrics/boxes` (state, tokens, calls, spend; there once the relay runs a release
+with it, #3129). `arbos_relay_box_info{box, container}` is the join: `container` is the name
+cAdvisor reports.
+
+| | relay as deployed today | relay with `/metrics/boxes` |
+|---|---|---|
+| Swarm | every running box by CPU and memory, grey (state unknown), on the floor | tokens per minute on the vertical axis, colour by state, sleeping boxes at the origin |
+| Network against CPU | live | live |
+| Working, Running, Calls / min, Spend, Boxes by state | live (the relay's fleet gauges) | live |
+| Tokens / s, / min, / 24 h; token charts; table columns Tokens, Calls, Spend | "after the next relay deploy" | live |
+| Subnet view: Tokens per minute, Tokens in 24 hours | "no data yet" | live |
+
+Nothing is configured when the relay changes: the `relay-boxes` job answers 404 until then, alerts
+on nothing (`ScrapeTargetDown` leaves out the relay's jobs; `RelayMetricsOff` is the alert for the
+listener), and the panels fill by themselves.
+
+A model call is counted when it ends, because the provider reports usage last. Token rates
+therefore move in steps, one per finished call, not with the stream.
+
+"Tokens / 24 h" is the last 24 hours, not the calendar day, and counts from the relay's start if
+that is more recent: the counters live in the relay's memory and restart at zero with it.
+
+**Cost of the 5 s scrape.** Ten series per registered box: about 720 series for 72 boxes and 1,500
+at the cap of 150, roughly 60–120 KB per scrape, written by the relay from memory with no
+database read. In Prometheus that is 12–26 million samples a day; most are constants, so expect
+under 0.5 GB over the 15 days of retention. The scrape is the only thing here faster than 15 s;
+if it has to be slower, change `scrape_interval` of `relay-boxes` and the windows that are shorter
+than four scrapes (`[20s]` in `dashboards.py`).
 
 ## Decisions
 
@@ -278,8 +320,12 @@ one network namespace instead of the host's; the public probes hit the real `rel
 `arbos.life` (two GETs every 30 s); the relay's systemd-service series are faked, since a Mac has
 no such cgroup; and the test boxes run on `runc`, so nothing here exercises gVisor.
 
-To see the Subnet view as it is before any box reports (relay metrics only), start with no boxes
-in the fake and check that no tile is blank:
+The fake also stands in for a fleet: 40 more boxes as cAdvisor and the relay would report them
+(`/metrics/boxes`), so the Swarm dashboard has a swarm to show.
+
+`FAKE_BOXES=0` makes the fake the relay production runs today: no box reports, no `/metrics/boxes`,
+no token counter. The Subnet view and the Swarm must then have data everywhere except the token
+figures, which say so:
 
 ```bash
 FAKE_BOXES=0 docker compose --env-file local/local.env -f docker-compose.yml -f docker-compose.local.yml up -d
@@ -556,6 +602,29 @@ the viewer the address and their login, over a private channel.
 
 It does not show agent turns: those figures can only come from the machines, which do not report
 them yet (#3096 and an image roll). Say so when handing over; the panels are added then.
+
+## Updating a running stack — interrupts nobody
+
+For a change to dashboards, rules or scrape jobs (nothing in `docker-compose.yml`). On the relay
+host, as root, from a checkout of `main` at the merged commit:
+
+```bash
+REPO=/path/to/the/arbos/checkout
+git -c safe.directory="$REPO" -C "$REPO" archive HEAD scripts/deploy/monitoring | tar -x -C /etc/arbos-monitoring --strip-components=3
+docker exec arbos-mon-prometheus promtool check config /etc/prometheus/prometheus.yml
+docker kill -s HUP arbos-mon-prometheus
+/etc/arbos-monitoring/grafana-access.sh
+```
+
+`promtool` must end in `SUCCESS` before the next line; `HUP` makes Prometheus re-read its
+configuration and rules without restarting (no gap in the data). Grafana loads new and changed
+admin dashboards from the files within a minute. `grafana-access.sh` reloads the Subnet view; it
+is safe to run again. No container restarts, and nothing outside the stack is touched.
+
+If `docker-compose.yml` itself changed, `cd /etc/arbos-monitoring && docker compose --env-file
+/etc/arbos/monitoring.env up -d` re-creates only the services whose definition changed.
+
+Undo: the same commands from the previous commit.
 
 ## Rolling back everything
 

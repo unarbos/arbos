@@ -78,6 +78,15 @@ tests:
         values: 0+90x20
       - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx", instance="host-1"}'
         values: 0+10x20
+      - series: 'arbos_relay_tokens_total{kind="input", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+300x20
+      - series: 'arbos_relay_tokens_total{kind="cache_read", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+2700x20
+      # per-box series live in the same Prometheus: none of them may reach a subnet rule
+      - series: 'arbos_relay_box_tokens_total{box="0a1b2c3d4e5f", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+999x20
+      - series: 'arbos_relay_box_info{box="0a1b2c3d4e5f", container="arbos-box-u_alice", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
       - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
         values: 0+15x20
       - series: 'node_cpu_seconds_total{mode="user", cpu="0", instance="host-1"}'
@@ -114,6 +123,8 @@ tests:
           - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
           - { labels: "subnet:model_error_ratio", value: 0.1 }
           - { labels: "subnet:model_requests:rate5m", value: 3.3333333333333335 }
+          - { labels: "subnet:tokens:rate5m", value: 100 }
+          - { labels: "subnet:tokens:increase24h", value: 60000 }
           - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
           - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
@@ -169,7 +180,8 @@ tests:
       - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf"}'
         values: 0x20
     promql_expr_test:
-      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+)"}'
+      # no token counter either (it comes with a later release): absent, never an invented 0
+      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+|tokens:.+)"}'
         eval_time: 10m
         exp_samples: []
       - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_starts:rate5m|box_start_failures:rate5m)"}'

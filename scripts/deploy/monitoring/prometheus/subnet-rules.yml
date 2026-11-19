@@ -57,6 +57,13 @@ groups:
       # the first start: 0 per minute then, not "no data".
       - record: subnet:model_requests:rate5m
         expr: sum(rate(arbos_relay_model_requests_total[5m])) or 0 * max(arbos_relay_uptime_seconds)
+      # Every token the proxy metered, all kinds and all callers together. No fallback to 0: the
+      # counter is there from the relay's start, so its absence means a relay from before it had
+      # one, and "no data yet" is then the true reading.
+      - record: subnet:tokens:rate5m
+        expr: sum(rate(arbos_relay_tokens_total[5m]))
+      - record: subnet:tokens:increase24h
+        expr: sum(increase(arbos_relay_tokens_total[24h]))
       - record: subnet:model_response_seconds:p95
         expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
       - record: subnet:box_wake_seconds:p95

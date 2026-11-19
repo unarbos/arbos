@@ -4,8 +4,9 @@ datasource reference is exercised too) and fails on an error or an empty result,
 nothing the Subnet datasource holds carries an identifying label.
 
     python3 local/check-dashboards.py        # after docker compose ... up -d and grafana-access.sh
-    python3 local/check-dashboards.py --relay-only   # stack started with FAKE_BOXES=0: every panel of the
-                                                     # Subnet view has real data from relay metrics alone
+    python3 local/check-dashboards.py --relay-only   # stack started with FAKE_BOXES=0, today's relay: the Subnet
+                                                     # view and the Swarm have real data everywhere except the
+                                                     # token figures, which must be the only thing missing
 """
 import base64, json, pathlib, sys, time, urllib.request
 
@@ -20,6 +21,9 @@ EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_sec
 
 
 RELAY_ONLY = "--relay-only" in sys.argv
+# What a relay from before /metrics/boxes and the token counter cannot answer. With it, these must
+# have data like everything else; with --relay-only they are the only queries allowed to have none.
+NEEDS_DEPLOY = ("arbos_relay_box_", "arbos_relay_tokens_total", "subnet:tokens")
 
 
 def post(path, body, org):
@@ -41,20 +45,21 @@ def query(expr, uid, org):
         return "no data"
     if any(v is None or v != v for v in values[-3:]):
         return "NaN"
-    if RELAY_ONLY and values[-1] == -1:
+    if values[-1] == -1 and (RELAY_ONLY or any(s in expr for s in NEEDS_DEPLOY)):
         return "placeholder (no data yet)"
 
 
 failed = 0
-for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1),
+for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1), ("grafana/dashboards/swarm.json", 1),
                   ("grafana/dashboards/agents.json", 1), ("grafana/dashboards-subnet/subnet.json", 2)):
     dash = json.loads((HERE / path).read_text())
-    if RELAY_ONLY:
-        if org != 2:
-            continue
+    if RELAY_ONLY and "swarm" not in path and org != 2:
+        continue
     for panel in dash["panels"]:
         for t in panel.get("targets", []):
             problem = query(t["expr"], t["datasource"]["uid"], org)
+            if RELAY_ONLY and problem in ("no data", "placeholder (no data yet)") and any(s in t["expr"] for s in NEEDS_DEPLOY):
+                continue
             if problem and not (problem == "no data" and any(s in t["expr"] for s in EMPTY_IS_FINE)):
                 failed += 1
                 print(f"FAIL {dash['title']} / {panel['title']} [{t['refId']}]: {problem}\n     {t['expr']}")

@@ -648,6 +648,140 @@
   },
   {
    "type": "stat",
+   "title": "Tokens per minute",
+   "description": "Tokens the agents' model calls use: input, output and cached, averaged over five minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 10,
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(60 * subnet:tokens:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens in 24 hours",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 11,
+   "gridPos": {
+    "x": 16,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:tokens:increase24h) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
    "title": "Model response p95",
    "description": "Time until the model provider starts answering. Reads 0 when there was none in the last five minutes.",
    "fieldConfig": {
@@ -688,9 +822,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 10,
+   "id": 12,
    "gridPos": {
-    "x": 12,
+    "x": 20,
     "y": 4,
     "w": 4,
     "h": 4
@@ -753,11 +887,11 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 11,
+   "id": 13,
    "gridPos": {
-    "x": 16,
-    "y": 4,
-    "w": 4,
+    "x": 0,
+    "y": 8,
+    "w": 12,
     "h": 4
    },
    "datasource": {
@@ -818,11 +952,11 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 12,
+   "id": 14,
    "gridPos": {
-    "x": 20,
-    "y": 4,
-    "w": 4,
+    "x": 12,
+    "y": 8,
+    "w": 12,
     "h": 4
    },
    "datasource": {
@@ -875,10 +1009,10 @@
      "sort": "desc"
     }
    },
-   "id": 13,
+   "id": 15,
    "gridPos": {
     "x": 0,
-    "y": 8,
+    "y": 12,
     "w": 12,
     "h": 8
    },
@@ -976,10 +1110,10 @@
      "sort": "desc"
     }
    },
-   "id": 14,
+   "id": 16,
    "gridPos": {
     "x": 12,
-    "y": 8,
+    "y": 12,
     "w": 12,
     "h": 8
    },
@@ -1047,10 +1181,10 @@
      "sort": "desc"
     }
    },
-   "id": 15,
+   "id": 17,
    "gridPos": {
     "x": 0,
-    "y": 16,
+    "y": 20,
     "w": 12,
     "h": 8
    },
@@ -1104,10 +1238,10 @@
      "sort": "desc"
     }
    },
-   "id": 16,
+   "id": 18,
    "gridPos": {
     "x": 12,
-    "y": 16,
+    "y": 20,
     "w": 12,
     "h": 8
    },
@@ -1172,10 +1306,10 @@
      "sort": "desc"
     }
    },
-   "id": 17,
+   "id": 19,
    "gridPos": {
     "x": 0,
-    "y": 24,
+    "y": 28,
     "w": 12,
     "h": 8
    },
@@ -1240,10 +1374,10 @@
      "sort": "desc"
     }
    },
-   "id": 18,
+   "id": 20,
    "gridPos": {
     "x": 12,
-    "y": 24,
+    "y": 28,
     "w": 12,
     "h": 8
    },
