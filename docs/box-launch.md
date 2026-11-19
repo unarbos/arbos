@@ -68,6 +68,8 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
    A user who needs more is given it by hand; nothing grows an image by itself yet.
 
+   Production runs `ARBOS_BOX_WORK_GB=64` since 2026-11-19 (Doug's setting): machines made from then on get 64 GB, and five people who fill theirs take the 342 GB that was free.
+
 4. **[production]** Keep the kernel away from the databases. Once the relay built from a commit after 2026-11-18 is deployed (#3090), the relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
 
    ```bash
@@ -142,6 +144,8 @@ Read where it stands (cap, spend today, whether the switch is on):
 curl -sS -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" http://127.0.0.1:7700/admin/killswitch
 ```
 
+Production runs `ARBOS_GLOBAL_DAILY_CAP_USD=2500` since 2026-11-19 (Doug's setting); the 500 above is the default of a relay with no value set.
+
 **[production]** To change the cap, set `ARBOS_GLOBAL_DAILY_CAP_USD=<number>` in `/etc/arbos/relay.env` and restart the relay (`systemctl restart arbos-relay`, or a deploy). The restart closes every app's connection for a few seconds, the apps reconnect by themselves, and machines keep running with their turns. If the switch had already tripped that day, the first request after the restart clears nothing by itself: turn it off once with `PUT /admin/killswitch {"on":false}`; with spend now under the new cap it stays off.
 
 One account, at once and without a restart: `PUT /admin/users/{id}/credits` with `{"grant_usd": n}`, `{"daily_cap_usd": n}` (`0` freezes the account, `null` removes the cap).
@@ -149,3 +153,5 @@ One account, at once and without a restart: `PUT /admin/users/{id}/credits` with
 ## 8. What a deploy does to running machines
 
 A relay deploy restarts the relay, not the machines: containers keep running, their agents reconnect within seconds, turns in flight continue. Changes to how a machine is started (its limits, flags, image) reach a machine only when it is next created or re-created by an image roll.
+
+A deploy run by hand through the lane (`deploy_lane_run`, the monitoring README's window step) answers 75 while another deploy or a canary smoke holds the lane. If it keeps answering 75 and `/var/lib/arbos-deploy` has no `relay.deploying`, `agentd.canary` or `www.reloading` file, a process left behind by an earlier lane command is holding the lock (an `op daemon` did for 1 h 53 min on 2026-11-19, with a helper older than this fix): `find /proc/[0-9]*/fd -lname /var/lib/arbos-deploy/.lane.lock` names it, and the lane is free once that process ends.
