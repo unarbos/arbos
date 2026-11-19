@@ -41,7 +41,8 @@ each scrape, because only the relay knows a box's port and token:
 user id and no other label identifies a box. Use the listener's IP address in the discovery URL
 (`127.0.0.1`, not `localhost`): the relay hands that address back as the scrape target. Only awake
 boxes are listed, so a sleeping box is absent, not down. A listed box that answers `502` is
-unreachable, or runs an image from before agentd had `/metrics`.
+unreachable, or runs an image from before agentd had `/metrics`; `arbos_relay_box_scrapes` on the
+relay says which, and how many.
 
 A scrape never waits on the relay: gauges are read from memory with `try_lock` (a busy map leaves its
 series out of that one scrape), and the database numbers come from a sampler that runs every 10 s.
@@ -62,6 +63,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_rooms_open` | gauge | | sync rooms held in memory |
 | `arbos_relay_sockets` | gauge | `kind` = `client` `box` | open room websockets |
 | `arbos_relay_boxes` | gauge | `state` = `awake` `waking` `asleep` `error` | boxes by the state the relay believes. A box the relay has not heard of since it started is in no state yet |
+| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `pending`: awake, not scraped yet |
 | `arbos_relay_boxes_registered` | gauge | `provider` | box rows in the database |
 | `arbos_relay_boxes_max` | gauge | | resident box cap (`max_boxes`) |
 | `arbos_relay_boxes_turn_running` | gauge | | boxes whose keepalive said a turn is running in the last 3 min |

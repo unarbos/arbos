@@ -10,7 +10,8 @@
 //!
 //! Most series are gauges read at scrape time from state the relay already holds. A scrape never
 //! waits: in-memory maps are read with `try_lock` (a busy one leaves its series out of that
-//! scrape) and the database is asked by a sampler every [`SAMPLE_EVERY`], not by the scrape. The
+//! scrape) and the database is asked by a sampler every [`SAMPLE_EVERY`], not by the scrape. A
+//! box scrape reads that box's one row on a read connection, never through the writer lock. The
 //! few counters and histograms are where a scrape-time read cannot answer.
 //!
 //! Labels are bounded sets (route template, status class, state, result, refusal code). Never a
@@ -54,6 +55,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_rooms_open", "gauge", "Sync rooms held in memory."),
     ("arbos_relay_sockets", "gauge", "Open room websockets, by kind (client, box)."),
     ("arbos_relay_boxes", "gauge", "Boxes by the state the relay believes (awake, waking, asleep, error)."),
+    ("arbos_relay_box_scrapes", "gauge", "Awake boxes by how their last metrics scrape ended (ok, old_image, unreachable, pending)."),
     ("arbos_relay_boxes_registered", "gauge", "Box rows by provider."),
     ("arbos_relay_boxes_max", "gauge", "Resident box cap on this host."),
     ("arbos_relay_boxes_turn_running", "gauge", "Boxes whose last keepalive said a turn is running."),
@@ -97,6 +99,9 @@ static COUNTERS: Mutex<BTreeMap<(&'static str, String), f64>> = Mutex::new(BTree
 /// Per-bucket counts (the last slot is +Inf) and the sum.
 static HISTOGRAMS: Mutex<BTreeMap<&'static str, ([u64; BOUNDS.len() + 1], f64)>> =
     Mutex::new(BTreeMap::new());
+/// Box id → how its last scrape through this relay ended. One short entry per box ever scraped;
+/// only the awake ones are counted.
+static BOX_SCRAPES: Mutex<BTreeMap<String, &'static str>> = Mutex::new(BTreeMap::new());
 /// What the sampler last read from the database.
 static SAMPLED: Mutex<Vec<Series>> = Mutex::new(Vec::new());
 
@@ -268,26 +273,40 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
         let boxes = state.box_states.read().await;
         boxes.keys().find(|u| box_id(u) == id).cloned()
     };
-    let sb = user_id.and_then(|u| state.db.user_box(&u).ok().flatten());
-    let Some((sb, url)) = sb.and_then(|sb| sb.box_url.clone().map(|url| (sb, url))) else {
+    // One row on a read connection: this runs once per awake box per scrape interval, and must
+    // not stand in the queue for the writer lock.
+    let row = user_id.and_then(|u| {
+        let read = state.db.read(|c| {
+            c.query_row(
+                "SELECT box_url, mcp_token FROM boxes WHERE user_id = ?1",
+                [&u],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+            )
+        });
+        read.ok()
+    });
+    let Some((Some(url), token)) = row else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
-    let sent = crate::boxes::send_to_box(&state, &sb, || {
-        state
-            .http
-            .get(format!("{url}/metrics"))
-            .bearer_auth(&sb.mcp_token)
-            .timeout(BOX_SCRAPE_TIMEOUT)
-    })
-    .await;
-    // Unreachable, or an image from before agentd had `/metrics`: the target reads as down.
-    match sent {
+    let sent = state
+        .http
+        .get(format!("{url}/metrics"))
+        .bearer_auth(token)
+        .timeout(BOX_SCRAPE_TIMEOUT)
+        .send()
+        .await;
+    let down = || axum::http::StatusCode::BAD_GATEWAY.into_response();
+    let (result, res) = match sent {
         Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(body) => exposition(body),
-            Err(_) => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+            Ok(body) => ("ok", exposition(body)),
+            Err(_) => ("unreachable", down()),
         },
-        _ => axum::http::StatusCode::BAD_GATEWAY.into_response(),
-    }
+        // agentd answers 404 for a route it does not have: an image from before `/metrics`.
+        Ok(r) if r.status() == axum::http::StatusCode::NOT_FOUND => ("old_image", down()),
+        _ => ("unreachable", down()),
+    };
+    BOX_SCRAPES.lock().expect("metrics lock").insert(id, result);
+    res
 }
 
 async fn scrape(State(state): State<AppState>) -> Response {
@@ -409,6 +428,21 @@ fn gauges(state: &AppState) -> Vec<Series> {
         ] {
             let n = states.values().filter(|(s, _)| *s == st).count();
             g.push(("arbos_relay_boxes", label("state", name), n as f64));
+        }
+        // The awake boxes by how their last scrape ended, so "not on a metrics image yet" is a
+        // number on the dashboard instead of an empty panel.
+        let awake: std::collections::BTreeSet<String> = states
+            .iter()
+            .filter(|(_, (st, _))| *st == BoxState::Awake)
+            .map(|(user_id, _)| box_id(user_id))
+            .collect();
+        let last = BOX_SCRAPES.lock().expect("metrics lock");
+        for result in ["ok", "old_image", "unreachable", "pending"] {
+            let n = awake
+                .iter()
+                .filter(|id| last.get(*id).copied().unwrap_or("pending") == result)
+                .count();
+            g.push(("arbos_relay_box_scrapes", label("result", result), n as f64));
         }
     }
     if let Ok(turns) = state.turn_running.try_lock() {
@@ -759,7 +793,10 @@ mod tests {
         );
         assert!(!listed.contains(&awake), "a target must not name the user");
 
+        assert_eq!(last_scrapes(&state)["pending"], 1.0);
         let scraped = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        let last = last_scrapes(&state);
+        assert_eq!((last["ok"], last["pending"]), (1.0, 0.0));
         assert_eq!(
             scraped.headers()["content-type"],
             "text/plain; version=0.0.4"
@@ -781,6 +818,30 @@ mod tests {
         state.db.upsert_box(&gone).unwrap();
         let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(down.status(), 502);
+        assert_eq!(last_scrapes(&state)["unreachable"], 1.0);
+        // A box that answers but has no `/metrics` runs an image from before agentd had it.
+        let old = serve_on_loopback(Router::new()).await;
+        gone.box_url = Some(format!("http://{old}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
+        let last = last_scrapes(&state);
+        assert_eq!((last["old_image"], last["unreachable"]), (1.0, 0.0));
+    }
+
+    /// `arbos_relay_box_scrapes` by result, as a scrape of the relay reads it.
+    fn last_scrapes(state: &AppState) -> BTreeMap<String, f64> {
+        let prefix = "arbos_relay_box_scrapes{result=\"";
+        parse(&render(state))
+            .into_iter()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.strip_prefix(prefix)?.trim_end_matches("\"}").to_owned(),
+                    v,
+                ))
+            })
+            .collect()
+    }
 
     /// Yesterday's automatic trip is over at 00:00 UTC. The stored row still says `on` until
     /// something asks the gate, and on an idle relay the sampler is the only thing that asks.

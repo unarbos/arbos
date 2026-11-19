@@ -47,6 +47,11 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     (RELAY_RECONNECTS, "counter", "Room sessions dialled again after the first."),
 ];
 
+/// Open jobs by state. Answered from the `jobs_state` index alone, so the store lock is held for
+/// the open rows and not for a walk over every job the workspace ever ran.
+const JOBS_BY_STATE: &str =
+    "SELECT state, COUNT(*) FROM jobs WHERE state IN ('queued','running') GROUP BY state";
+
 /// Upper bounds in seconds: a turn is seconds to half an hour.
 const BOUNDS: [f64; 10] = [1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0];
 
@@ -123,9 +128,8 @@ pub async fn render(sup: &Supervisor) -> String {
         turns += usize::from(w.agent.turn_running.load(Ordering::SeqCst));
         waiting += w.agent.sends_waiting();
         workers += w.agent.subagent_turns.load(Ordering::SeqCst);
-        // Open jobs are a handful of rows per workspace; the store lock is held per query.
         let by_state = w.store.with(|c| {
-            c.prepare("SELECT state, COUNT(*) FROM jobs WHERE state IN ('queued','running') GROUP BY state")?
+            c.prepare(JOBS_BY_STATE)?
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()
         });
@@ -284,6 +288,23 @@ mod tests {
             after[&format!("{hist}_bucket{{le=\"60\"}}")]
                 > after[&format!("{hist}_bucket{{le=\"30\"}}")]
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_jobs_are_counted_from_the_index_not_the_table() {
+        let root = std::env::temp_dir().join(format!("arbos-metrics-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = crate::store::Store::open(&root.join("store.db")).unwrap();
+        let plan = store
+            .with(|c| {
+                c.prepare(&format!("EXPLAIN QUERY PLAN {JOBS_BY_STATE}"))?
+                    .query_map([], |r| r.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .join("; ");
+        assert!(plan.contains("USING COVERING INDEX jobs_state"), "{plan}");
         let _ = std::fs::remove_dir_all(root);
     }
 
