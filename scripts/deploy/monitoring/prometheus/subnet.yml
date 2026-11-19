@@ -1,0 +1,14 @@
+# The Subnet view's Prometheus: pulls only the `subnet:*` aggregates from the main one.
+global:
+  scrape_interval: 30s
+
+scrape_configs:
+  - job_name: subnet
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      "match[]": ['{__name__=~"subnet:.+"}']
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+        labels:
+          instance: arbos

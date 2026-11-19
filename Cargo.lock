@@ -556,7 +556,6 @@ version = "0.6.422"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "arbos-client",
  "arbos-core",
  "axum",
  "base64 0.22.1",

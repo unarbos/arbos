@@ -29,6 +29,8 @@ mod goals;
 mod groups;
 mod handoff;
 mod harness;
+#[cfg(test)]
+mod helper_start_failure_tests;
 mod hooks;
 mod http;
 mod identity;
@@ -47,15 +49,17 @@ mod job_cancel_unconfirmed_tests;
 mod job_cancel_window_tests;
 #[cfg(test)]
 mod job_correction_routing_tests;
+#[cfg(test)]
+mod job_deadline_tests;
 mod job_delivery;
 #[cfg(test)]
 mod job_failure_report_tests;
 #[cfg(test)]
-mod job_deadline_tests;
-#[cfg(test)]
 mod job_finished_sweep_tests;
 #[cfg(test)]
 mod job_handoff_leak_tests;
+#[cfg(test)]
+mod job_kill_unlock_probe_tests;
 #[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
@@ -148,6 +152,8 @@ mod worker_lifetime;
 mod worker_model_refusal_tests;
 #[cfg(test)]
 mod worker_retention_tests;
+#[cfg(test)]
+mod worker_trim_tests;
 mod workspace;
 
 use std::time::{Duration, Instant};

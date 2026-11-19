@@ -2385,6 +2385,7 @@ mod tests {
                 "disk_free_gb",
                 "has_room",
                 "max_boxes",
+                "mem_available_gb",
                 "min_free_disk_gb",
                 "resident",
                 "waitlist"
