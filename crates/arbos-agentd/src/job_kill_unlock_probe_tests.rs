@@ -190,7 +190,10 @@ fn spawn_root(script: &str, mark: &str) -> std::process::Child {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(script)
-        .env(MARK_ENV, mark)
+        // The value a real `pi` worker's children carry: its harness and its session id, as
+        // `RpcChild` is told to spawn them. The bare session id was the spelling before bug AI,
+        // which the cancel no longer looks for.
+        .env(MARK_ENV, crate::harness::worker_name("pi", mark))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -229,6 +232,19 @@ fn wait_until(budget: Duration, mut ready: impl FnMut() -> bool) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// How long a signalled tree is given to be gone from `/proc`. A budget that is polled, not a
+/// pause: a loaded runner takes longer than a fixed wait allows, and an idle one should not
+/// wait at all.
+const DEATH_BUDGET: Duration = Duration::from_secs(10);
+
+/// Wait until nothing of `worker` is alive, or the budget runs out; the caller asserts.
+async fn dead_within(budget: Duration, worker: &DeepWorker) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < budget && !worker.still_alive().is_empty() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -321,13 +337,13 @@ async fn a_cancel_leaves_nothing_alive_that_the_guard_will_not_let_the_agent_kil
         "#2779's half must still hold"
     );
 
-    // Give what the cancel signalled a moment to die, then read the kernel rather than the
+    // Give what the cancel signalled time to die, then read the kernel rather than the
     // cancel's own opinion of what it did.
-    std::thread::sleep(SETTLE);
+    dead_within(DEATH_BUDGET, &worker).await;
     let alive_now = worker.still_alive();
     if alive_now.is_empty() {
         let at_cancel = worker.total_lines();
-        std::thread::sleep(SETTLE);
+        tokio::time::sleep(SETTLE).await;
         assert_eq!(
             worker.total_lines(),
             at_cancel,
@@ -365,7 +381,7 @@ async fn a_cancel_leaves_nothing_alive_that_the_guard_will_not_let_the_agent_kil
 /// note for that branch says reaches it.
 ///
 /// A restart loses `worker_pgids`, which is an in-memory map, so the recorded session and group
-/// are gone. It loses nothing else the sweep needs: the mark is the subagent id, read from the
+/// are gone. It loses nothing else the sweep needs: the mark is built from the subagent row (harness and id), read from the
 /// file-backed store, and `marked_procs` finds the tree by scanning `/proc/<pid>/environ` for
 /// it. So the tree is not empty, the kill runs, and the sweep is `checked: true`.
 ///
@@ -384,11 +400,11 @@ async fn an_agentd_restart_still_checks_because_the_mark_outlives_the_memory() {
 
     let stopped = agent.stop_jobs(CHAT, Some(JOB)).await;
     assert!(
-        stopped[0].sweep.checked,
+        stopped[0].sweep.checked() == Some(true),
         "a restart left the cancel unable to check, so the note's case is real: {:?}",
         stopped[0].sweep
     );
-    std::thread::sleep(SETTLE);
+    dead_within(DEATH_BUDGET, &worker).await;
     assert_eq!(
         worker.still_alive(),
         Vec::<u32>::new(),
