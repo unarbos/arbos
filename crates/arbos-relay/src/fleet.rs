@@ -412,6 +412,18 @@ pub fn run_args(
         format!("--memory={}g", cfg.box_mem_gb),
         format!("--memory-swap={}g", cfg.box_mem_gb),
         "--memory-reservation=512m".into(),
+        // Sandboxes are sold more memory than the host has. When the host itself runs out, the
+        // kernel picks its victim by this score: a sandbox goes before the relay, the databases
+        // or Docker (all at 0 or below), and its user's files are on the `/work` image.
+        "--oom-score-adj=500".into(),
+        // A box's stdout is the Docker daemon's file on the host disk every box shares; without
+        // a cap one box printing in a loop fills it for all of them. Driver named so the
+        // options hold whatever the daemon's default is.
+        "--log-driver=json-file".into(),
+        "--log-opt".into(),
+        "max-size=10m".into(),
+        "--log-opt".into(),
+        "max-file=3".into(),
         format!("--pids-limit={}", cfg.box_pids),
         "--cap-drop=NET_RAW".into(),
         "--cap-drop=NET_ADMIN".into(),
@@ -1636,6 +1648,8 @@ mod tests {
             "--memory=3g",
             "--memory-swap=3g",
             "--pids-limit=512",
+            "--oom-score-adj=500",
+            "--log-driver=json-file --log-opt max-size=10m --log-opt max-file=3",
             "--security-opt=no-new-privileges",
             "--no-healthcheck",
             "--cap-drop=NET_RAW",
