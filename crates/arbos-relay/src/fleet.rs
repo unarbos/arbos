@@ -412,6 +412,18 @@ pub fn run_args(
         format!("--memory={}g", cfg.box_mem_gb),
         format!("--memory-swap={}g", cfg.box_mem_gb),
         "--memory-reservation=512m".into(),
+        // Sandboxes are sold more memory than the host has. When the host itself runs out, the
+        // kernel picks its victim by this score: a sandbox goes before the relay, the databases
+        // or Docker (all at 0 or below), and its user's files are on the `/work` image.
+        "--oom-score-adj=500".into(),
+        // A box's stdout is the Docker daemon's file on the host disk every box shares; without
+        // a cap one box printing in a loop fills it for all of them. Driver named so the
+        // options hold whatever the daemon's default is.
+        "--log-driver=json-file".into(),
+        "--log-opt".into(),
+        "max-size=10m".into(),
+        "--log-opt".into(),
+        "max-file=3".into(),
         format!("--pids-limit={}", cfg.box_pids),
         "--cap-drop=NET_RAW".into(),
         "--cap-drop=NET_ADMIN".into(),
@@ -419,6 +431,11 @@ pub fn run_args(
         "--cap-drop=AUDIT_WRITE".into(),
         "--security-opt=no-new-privileges".into(),
         "--restart=no".into(),
+        // The image's HEALTHCHECK is a `curl` every 10 s. Under gVisor each one is a `runsc exec`
+        // into the sandbox, six a minute for every box on the host whether it is in use or not,
+        // and nothing reads the result: the relay knows a box is alive by its 3 s poll
+        // (`box_seen_http`) and by `watch_containers`.
+        "--no-healthcheck".into(),
         "--label".into(),
         "arbos.fleet=gvisor".into(),
         "-p".into(),
@@ -829,22 +846,18 @@ pub fn pick_eviction(cands: &[Candidate]) -> Option<String> {
 /// A keepalive said a turn is running this recently → the sandbox is busy.
 pub(crate) const TURN_FRESH_MS: i64 = 3 * 60_000;
 
-/// When a box was last in use. `last_seen_at` is stamped by every request the box itself makes,
-/// its 3 s poll included, so on `boxd`, where this picks the box that sleeps at the resident cap,
-/// only what its user did counts: a client's row, a turn, a start.
+/// When a box was last in use: the newest of a client's row, a turn and a start. Never
+/// `last_seen_at`: every request the box itself makes stamps it, its 3 s poll included, so by it
+/// every running box was active three seconds ago and the one evicted under pressure was picked
+/// by chance, a person mid-conversation as likely as a box nobody had touched in a week. The
+/// turn and client stamps live in memory: after a relay restart boxes rank by their start until
+/// they are used again.
 pub fn last_active_ms(
-    provider: Provider,
-    last_seen_at: Option<i64>,
     last_started_at: Option<i64>,
     last_client_push: Option<i64>,
     last_turn: Option<i64>,
 ) -> i64 {
-    let own = if provider == Provider::Boxd {
-        last_turn
-    } else {
-        last_seen_at
-    };
-    [own, last_started_at, last_client_push]
+    [last_turn, last_started_at, last_client_push]
         .into_iter()
         .flatten()
         .max()
@@ -863,8 +876,6 @@ pub(crate) async fn candidates(state: &AppState, provider: Provider) -> Vec<Cand
     {
         let (st, _) = state.box_state(&b.user_id).await;
         let last_active_ms = last_active_ms(
-            provider,
-            b.last_seen_at,
             b.last_started_at,
             pushes.get(&b.user_id).copied(),
             last_turns.get(&b.user_id).copied(),
@@ -1405,6 +1416,48 @@ pub async fn admin_fleet_update(
     Json(json!({ "capacity": capacity(&state).await })).into_response()
 }
 
+/// The most sandboxes one `POST /admin/fleet/evict` stops. Each stop may take its 30 s grace.
+const EVICT_MAX: usize = 20;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvictRequest {
+    pub count: usize,
+}
+
+/// `POST /admin/fleet/evict {count}`: the operator's lever on a filling host. Stops up to `count`
+/// sandboxes, least recently used first and never one mid-turn, exactly as memory pressure
+/// would: the `/work` image stays, the user's next message starts the sandbox again, and
+/// always-on leaves it down until then.
+pub async fn admin_fleet_evict(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<EvictRequest>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    if b.count == 0 || b.count > EVICT_MAX {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_count",
+            format!("count must be 1..={EVICT_MAX}"),
+        );
+    }
+    let mut evicted = Vec::new();
+    for _ in 0..b.count {
+        let Some(victim) = pick_eviction(&candidates(&state, Provider::Gvisor).await) else {
+            break;
+        };
+        if let Err(e) = evict(&state, &victim, "operator").await {
+            tracing::warn!(user_id = %victim, error = %e, "operator evict failed");
+            break;
+        }
+        evicted.push(victim);
+    }
+    Json(json!({ "evicted": evicted, "capacity": capacity(&state).await })).into_response()
+}
+
 /// `POST /admin/waitlist/{id}/admit`: let one user through regardless of their place in line
 /// (the gate still applies: a full host refuses).
 pub async fn admin_waitlist_admit(
@@ -1466,22 +1519,49 @@ mod tests {
         assert!(!state.db.is_waitlisted("u_b").unwrap());
     }
 
-    /// A box that polls is not a box in use: on `boxd` the newest of a client's row, a turn and
-    /// a start ranks it, and `last_seen_at` does not. The gVisor fleet ranks as it did.
-    #[test]
-    fn a_boxd_box_is_ranked_by_its_user_and_not_by_its_own_poll() {
-        let at = |p, seen, started, push, turn| last_active_ms(p, seen, started, push, turn);
-        assert_eq!(at(Provider::Boxd, Some(900), Some(10), Some(20), None), 20);
-        assert_eq!(at(Provider::Boxd, Some(900), Some(10), None, Some(30)), 30);
-        assert_eq!(
-            at(Provider::Boxd, Some(900), Some(40), Some(20), Some(30)),
-            40
-        );
-        assert_eq!(at(Provider::Boxd, Some(900), None, None, None), 0);
-        assert_eq!(
-            at(Provider::Gvisor, Some(900), Some(10), Some(20), Some(950)),
-            900
-        );
+    /// A box that polls is not a box in use: the newest of a client's row, a turn and a start
+    /// ranks it, on the host fleet as on `boxd`.
+    #[tokio::test]
+    async fn a_box_is_ranked_by_its_user_and_not_by_its_own_poll() {
+        let at = |started, push, turn| last_active_ms(started, push, turn);
+        assert_eq!(at(Some(10), Some(20), None), 20);
+        assert_eq!(at(Some(10), None, Some(30)), 30);
+        assert_eq!(at(Some(40), Some(20), Some(30)), 40);
+        assert_eq!(at(None, None, None), 0);
+        // On the host fleet: the box that polled a moment ago but whose user is long gone is the
+        // one to go, not the box whose user just wrote.
+        let state = test_state(AuthMode::Github);
+        for (user, seen) in [("u_idle", now_ms()), ("u_busy", now_ms() - 60_000)] {
+            state
+                .db
+                .upsert_box(&Sandbox {
+                    user_id: user.into(),
+                    provider: "gvisor".into(),
+                    sandbox_id: Some(container_name(user)),
+                    daytona_state: None,
+                    device_id: format!("box:{user}"),
+                    box_token_hash: "h".into(),
+                    mcp_token: "m".into(),
+                    snapshot: None,
+                    last_started_at: Some(1),
+                    last_stopped_at: None,
+                    last_seen_at: Some(seen),
+                    box_url: None,
+                    preview_token: None,
+                    local_pid: None,
+                    migrated_from: Vec::new(),
+                })
+                .unwrap();
+            state.set_box_state(user, BoxState::Awake, None).await;
+        }
+        state
+            .last_client_push
+            .lock()
+            .await
+            .insert("u_busy".into(), now_ms() - 10_000);
+        let cands = candidates(&state, Provider::Gvisor).await;
+        assert_eq!(pick_eviction(&cands).as_deref(), Some("u_idle"));
+
         // The box whose user wrote last stays up, whichever box polled last.
         let c = |u: &str, t| Candidate {
             user_id: u.into(),
@@ -1490,14 +1570,8 @@ mod tests {
             last_active_ms: t,
         };
         let cands = [
-            c(
-                "polled_now",
-                at(Provider::Boxd, Some(999), Some(1), Some(5), None),
-            ),
-            c(
-                "used_now",
-                at(Provider::Boxd, Some(100), Some(1), Some(50), None),
-            ),
+            c("polled_now", at(Some(1), Some(5), None)),
+            c("used_now", at(Some(1), Some(50), None)),
         ];
         assert_eq!(pick_eviction(&cands).as_deref(), Some("polled_now"));
     }
@@ -1574,7 +1648,10 @@ mod tests {
             "--memory=3g",
             "--memory-swap=3g",
             "--pids-limit=512",
+            "--oom-score-adj=500",
+            "--log-driver=json-file --log-opt max-size=10m --log-opt max-file=3",
             "--security-opt=no-new-privileges",
+            "--no-healthcheck",
             "--cap-drop=NET_RAW",
             "type=bind,src=/d/boxes/u/mnt,dst=/work",
             "type=bind,src=/d/boxes/u/mnt/.home,dst=/home/daytona",
