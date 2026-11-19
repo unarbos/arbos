@@ -92,6 +92,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
 #[rustfmt::skip]
 const BOX_FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_box_info", "gauge", "Always 1; joins a box to its container."),
+    ("arbos_relay_box_slot", "gauge", "Always 1; the slot label is a random number the box holds for a few minutes."),
     ("arbos_relay_box_state", "gauge", "Always 1; the state label is what the relay believes (awake, waking, asleep, error, unknown)."),
     ("arbos_relay_box_turn_running", "gauge", "1 while the box's last keepalive said a turn is running."),
     ("arbos_relay_box_sockets", "gauge", "Open room websockets of the box."),
@@ -130,6 +131,31 @@ struct BoxUse {
 static BOX_USE: Mutex<BTreeMap<String, BoxUse>> = Mutex::new(BTreeMap::new());
 /// The registered boxes as the sampler last read them: user id and container name.
 static BOXES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// User id → slot, and when the slots were drawn.
+static SLOTS: Mutex<(BTreeMap<String, usize>, Option<Instant>)> =
+    Mutex::new((BTreeMap::new(), None));
+
+/// How long a box keeps its slot. Short on purpose: a slot lets a reader outside the team see a
+/// box as an anonymous dot, and must not become a name the dot can be followed by.
+const SLOTS_EVERY: Duration = Duration::from_secs(300);
+
+/// Give every box a slot, 1..=n, by a random permutation: drawn anew every [`SLOTS_EVERY`] and
+/// whenever a box comes or goes. Nothing about a box goes into its slot, so neither its user id
+/// nor its `box` id can be worked out from it, and a slot means a different box each time.
+fn draw_slots(users: &[String], redraw: bool) {
+    use rand::seq::SliceRandom;
+    let mut slots = SLOTS.lock().expect("metrics lock");
+    let same = slots.0.len() == users.len() && users.iter().all(|u| slots.0.contains_key(u));
+    if same && !redraw && slots.1.is_some_and(|at| at.elapsed() < SLOTS_EVERY) {
+        return;
+    }
+    let mut order: Vec<usize> = (1..=users.len()).collect();
+    order.shuffle(&mut rand::thread_rng());
+    *slots = (
+        users.iter().cloned().zip(order).collect(),
+        Some(Instant::now()),
+    );
+}
 
 fn add(name: &'static str, labels: String, v: f64) {
     *COUNTERS
@@ -398,6 +424,8 @@ fn sample_boxes(state: &AppState) {
         .lock()
         .expect("metrics lock")
         .retain(|user, _| boxes.iter().any(|(u, _)| u == user));
+    let users: Vec<String> = boxes.iter().map(|(user, _)| user.clone()).collect();
+    draw_slots(&users, false);
     *BOXES.lock().expect("metrics lock") = boxes;
 }
 
@@ -576,6 +604,7 @@ pub fn render(state: &AppState) -> String {
 fn render_boxes(state: &AppState) -> String {
     let boxes = BOXES.lock().expect("metrics lock").clone();
     let used = BOX_USE.lock().expect("metrics lock").clone();
+    let slots = SLOTS.lock().expect("metrics lock").0.clone();
     let states = state.box_states.try_read().ok();
     let turns = state.turn_running.try_lock().ok();
     let conns = state.box_conns.try_lock().ok();
@@ -587,6 +616,10 @@ fn render_boxes(state: &AppState) -> String {
         if !container.is_empty() {
             let labels = format!("{id},{}", label("container", container));
             series.push(("arbos_relay_box_info", labels, 1.0));
+        }
+        if let Some(slot) = slots.get(user) {
+            let labels = format!("{id},{}", label("slot", &slot.to_string()));
+            series.push(("arbos_relay_box_slot", labels, 1.0));
         }
         if let Some(states) = &states {
             let st = match states.get(user).map(|(st, _)| *st) {
@@ -948,6 +981,30 @@ mod tests {
         let fleet_text = fetch(addr, "/metrics").await;
         assert!(!fleet_text.contains("box=\"") && !fleet_text.contains("arbos_relay_box_info"));
         assert!(!fleet_text.contains(&busy) && !fleet_text.contains(&id));
+
+        // Each box holds one slot of 1..=n, and a new draw is not the old one. With 40 boxes two
+        // draws agree by chance once in 40!.
+        let users: Vec<String> = (0..40).map(|i| format!("gh_{i}")).collect();
+        let draw = |redraw| {
+            draw_slots(&users, redraw);
+            SLOTS.lock().unwrap().0.clone()
+        };
+        let first = draw(true);
+        let mut held: Vec<usize> = first.values().copied().collect();
+        held.sort_unstable();
+        assert_eq!(held, (1..=40).collect::<Vec<_>>());
+        assert_eq!(draw(false), first, "kept until it is due");
+        assert_ne!(draw(true), first);
+        sample_boxes(&state);
+        let text = fetch(addr, "/metrics/boxes").await;
+        let slot = |id: &str| {
+            let series = format!("arbos_relay_box_slot{{box=\"{id}\",slot=\"");
+            let rest = text.split_once(&series).expect("a slot").1;
+            rest.split_once('"').unwrap().0.to_owned()
+        };
+        let mut two = [slot(&id), slot(&other)];
+        two.sort();
+        assert_eq!(two, ["1", "2"]);
 
         // A deleted box leaves with the next sample, its counters with it.
         state.db.delete_box_row(&busy).unwrap();
