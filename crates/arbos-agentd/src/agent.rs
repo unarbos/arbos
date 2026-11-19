@@ -12836,6 +12836,24 @@ impl Agent {
             me.jobs_running.fetch_sub(1, Ordering::SeqCst);
             if let Err(e) = r {
                 tracing::warn!(chat_id = %chat, error = %e, "job failed");
+                // The helper's own progress row was opened before it started. This task is the
+                // only thing that would ever close it, and it is ending here: left streaming,
+                // the row reads as work in progress until the orphan sweep finds it.
+                {
+                    let h = host2.lock().await;
+                    for m in h.doc.messages() {
+                        if m.role == "assistant"
+                            && m.status == "streaming"
+                            && m.rest.get("worker").and_then(Value::as_bool) == Some(true)
+                            && m.rest.get("inReplyTo").and_then(Value::as_str)
+                                == Some(user_msg_id.as_str())
+                        {
+                            h.doc.set_activity(&m.id, None);
+                            h.doc.add_status_part(&m.id, "failed", "Failed");
+                            h.doc.finish_message(&m.id, MessageStatus::Error);
+                        }
+                    }
+                }
                 // `write_job_result` already told the user when the job ran; only a start
                 // failure (no result row at all) needs a line here.
                 let has_row = host2.lock().await.doc.messages().iter().any(|m| {

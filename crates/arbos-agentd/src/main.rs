@@ -124,6 +124,8 @@ mod silence;
 mod sites;
 mod skills;
 mod sleep;
+#[cfg(test)]
+mod soak_tests;
 mod status;
 mod steer_gate;
 mod store;
