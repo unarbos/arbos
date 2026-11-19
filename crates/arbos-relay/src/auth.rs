@@ -340,6 +340,12 @@ mod legacy_bucket_tests {
             .insert_device(&id, "Alice's Mac", "hash", "gh_alice", "github")
             .expect("device");
         let access = crate::signin::mint_access(&state.jwt_key, "gh_alice", &id, 60);
+        // Signing in wrote a stamp, as `issue_tokens` does; here it is ten minutes old.
+        let signed_in = arbos_core::ids::now_ms() - 600_000;
+        state
+            .db
+            .with(|c| c.execute("UPDATE devices SET last_seen_at = ?1", [signed_in]))
+            .unwrap();
         let seen_in_db = || -> Option<i64> {
             let sql = "SELECT last_seen_at FROM devices WHERE id = ?1";
             state
@@ -352,7 +358,7 @@ mod legacy_bucket_tests {
             resolve_checked(&state, &access),
             Ok(Principal::Device { .. })
         ));
-        assert_eq!(seen_in_db(), None, "no write on the request");
+        assert_eq!(seen_in_db(), Some(signed_in), "no write on the request");
         // `online` does not wait for the flush: it is answered from the stamp in memory.
         let card = arbos_core::api::UserCardDto {
             id: "gh_alice".into(),
@@ -364,5 +370,20 @@ mod legacy_bucket_tests {
         assert!(stamp.is_some(), "the device is stamped in memory");
         assert_eq!(crate::rooms::flush_presence(&state, 0).await, 1);
         assert_eq!(seen_in_db(), stamp);
+
+        // Signing out is a request too, and leaves a stamp behind. With no device left signed
+        // in, that stamp must not keep the person online.
+        assert!(resolve_checked(&state, &access).is_ok());
+        assert!(state.db.revoke_device_fully(&id).unwrap());
+        let card = arbos_core::api::UserCardDto {
+            id: "gh_alice".into(),
+            ..Default::default()
+        };
+        let card = crate::people::with_presence(&state, card);
+        assert_eq!(
+            card.online,
+            Some(false),
+            "offline as soon as the last device signs out"
+        );
     }
 }
