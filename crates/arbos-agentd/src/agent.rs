@@ -1453,6 +1453,20 @@ impl std::fmt::Display for JobWorkerFailed {
 
 impl std::error::Error for JobWorkerFailed {}
 
+/// A job's run ended in an error and its result row, saying so, is already in the chat. An error
+/// so the caller knows the job did not succeed, and a type of its own so the worker task can
+/// tell it from a worker that never started: this one is answered, and nothing runs it again.
+#[derive(Debug)]
+pub(crate) struct JobAnsweredFailed(pub String);
+
+impl std::fmt::Display for JobAnsweredFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "job {} ended with an error", self.0)
+    }
+}
+
+impl std::error::Error for JobAnsweredFailed {}
+
 /// Why a worker's run counts as failed once its stream closed, and whether a fresh worker is
 /// worth a try. `text` is what the worker wrote, `tool_calls` how many tools it ran.
 ///
@@ -7613,6 +7627,14 @@ impl Agent {
                 )
                 .await
             {
+                if e.downcast_ref::<JobAnsweredFailed>().is_some() {
+                    // The run reached its end and the chat has read how it ended (the cap, a
+                    // refusal). Everything below treats an error as a worker that never started
+                    // and gives the same brief to a fresh worker, or to the main agent inline:
+                    // the user would read a failure while the work quietly ran again.
+                    tracing::info!(error = %e, "the job's failure is already in the chat; not run again");
+                    return;
+                }
                 let label = if name.is_empty() {
                     existing.clone().unwrap_or_else(|| "subagent".into())
                 } else {
@@ -14455,7 +14477,7 @@ impl Agent {
             Some(&json!({ "message_id": row_id, "job": name, "status": status })),
         );
         if error.is_some() {
-            return Err(anyhow!("job {name} ended with an error"));
+            return Err(JobAnsweredFailed(name.to_owned()).into());
         }
         Ok(())
     }
