@@ -138,7 +138,7 @@
   {
    "type": "stat",
    "title": "Unreachable",
-   "description": "Awake boxes whose agentd did not answer the relay: timeout, refused, 401 or 5xx.",
+   "description": "Awake boxes whose agentd did not answer the relay (timeout, refused, 401 or 5xx), or whose answer the relay rejected.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -189,7 +189,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_relay_box_scrapes{result=\"unreachable\"})",
+     "expr": "sum(arbos_relay_box_scrapes{result=~\"unreachable|rejected\"})",
      "legendFormat": "",
      "instant": false,
      "range": true

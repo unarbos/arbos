@@ -32,15 +32,38 @@ groups:
           summary: "The certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}."
 
       - alert: ScrapeTargetDown
-        # A target that has never answered (the relay before it serves /metrics) stays quiet. Boxes are
-        # left out: one on an image from before agentd had /metrics also reads down. BoxesUnreachable
-        # is the alert for a box that should answer and does not.
-        expr: up{job!="arbos-agentd"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
+        # A target that has never answered stays quiet. Boxes are left out: one on an image from
+        # before agentd had /metrics also reads down, and BoxesUnreachable is the alert for a box that
+        # should answer and does not. The relay has its own alert, RelayMetricsOff.
+        expr: up{job!~"arbos-agentd|relay"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
         for: 3m
         labels:
           severity: warning
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }}."
+
+      # The relay runs without its metrics endpoint when ARBOS_RELAY_METRICS_LISTEN is unset, wrong or
+      # its port is taken: it only logs "metrics listener is off". Healthy relay, no metrics: every
+      # relay panel and every relay alert is blind. Expected, once, between starting this stack and
+      # the relay deploy that turns the listener on.
+      - alert: RelayMetricsOff
+        expr: up{job="relay"} == 0 and on () probe_success{job="relay-health"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The relay is up but its metrics endpoint (127.0.0.1:9108) does not answer; relay dashboards and alerts are blind.
+
+      # A box answered the metrics scrape with something that is not agentd's exposition.
+      - alert: BoxMetricsRejected
+        expr: >
+          sum(arbos_relay_box_scrapes{result="rejected"}) > 0
+          or sum(increase(arbos_relay_box_scrape_dropped_lines_total[15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A box's metrics answer was rejected or had lines dropped by the relay (oversized, not text, or not agentd's own series).
 
       - alert: BoxesUnreachable
         expr: sum(arbos_relay_box_scrapes{result="unreachable"}) > 0

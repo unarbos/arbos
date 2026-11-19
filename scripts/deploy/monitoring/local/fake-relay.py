@@ -66,6 +66,8 @@ def relay_metrics():
         f'arbos_relay_box_scrapes{{result="ok"}} {len(BOXES)}',
         f'arbos_relay_box_scrapes{{result="old_image"}} {1 if BOXES else 72}',
         'arbos_relay_box_scrapes{result="unreachable"} 0',
+        'arbos_relay_box_scrapes{result="rejected"} 0',
+        "arbos_relay_box_scrape_dropped_lines_total 0",
         'arbos_relay_box_scrapes{result="pending"} 0',
         "arbos_relay_boxes_upgrading 0",
         "arbos_relay_boxes_creating 0",

@@ -153,6 +153,38 @@ tests:
         eval_time: 10m
         exp_samples: []
 
+  - name: a healthy relay without its metrics endpoint warns; junk from a box warns
+    interval: 1m
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x30
+      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # never answered: ScrapeTargetDown would stay quiet
+        values: 0x30
+      - series: 'arbos_relay_box_scrapes{result="rejected"}'
+        values: 0x30
+      - series: 'arbos_relay_box_scrape_dropped_lines_total'
+        values: 0x10 3x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RelayMetricsOff
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RelayMetricsOff
+        exp_alerts:
+          - exp_labels: { severity: warning, job: relay, instance: "127.0.0.1:9108" }
+            exp_annotations: { summary: "The relay is up but its metrics endpoint (127.0.0.1:9108) does not answer; relay dashboards and alerts are blind." }
+      - eval_time: 12m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BoxMetricsRejected
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: BoxMetricsRejected
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "A box's metrics answer was rejected or had lines dropped by the relay (oversized, not text, or not agentd's own series)." }
+
   - name: a waitlist warns, a growing waitlist pages
     interval: 1m
     input_series:
@@ -181,7 +213,7 @@ tests:
     input_series:
       - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
         values: 1x4 0x20
-      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # /metrics not served yet: must stay quiet
+      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # relay healthy for 2 minutes, metrics never on: not long enough to warn
         values: 0x30
       - series: 'up{job="node", instance="127.0.0.1:9100"}' # was up, went down: must fire
         values: 1x4 0x20

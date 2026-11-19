@@ -42,8 +42,13 @@ scrape_configs:
 
   # One target per awake box, listed by the relay, which proxies each scrape to that box's agentd.
   # The `box` label is an opaque id, not a user id. A sleeping box is absent, not down.
+  # A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own
+  # lines and cuts off at 256 KB, and these limits fail the scrape of anything larger (a real answer
+  # is ~40 samples, ~3 KB).
   - job_name: arbos-agentd
     scrape_interval: 30s
+    sample_limit: 500
+    body_size_limit: 512KB
     http_sd_configs:
       - url: http://127.0.0.1:9108/metrics/targets
 

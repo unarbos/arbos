@@ -70,8 +70,10 @@ Grafana reloads the files within a minute; the Subnet view is reloaded by `grafa
 | `RelayDown` | the relay's `/healthz` on `127.0.0.1:7700` fails for 1 min | critical |
 | `PublicProbeFailing` | `relay.arbos.life/healthz` or `arbos.life` fails from the host for 5 min (through DNS and, for the site, Cloudflare: it can fail while the relay is fine) | warning |
 | `TLSExpirySoon` | a probed certificate has under 14 days left | warning |
-| `ScrapeTargetDown` | a target that used to answer does not (box targets excluded) | warning |
+| `ScrapeTargetDown` | a target that used to answer does not (the relay and box targets have their own alerts) | warning |
+| `RelayMetricsOff` | the relay is healthy but its metrics endpoint does not answer for 10 min (the relay starts without it when the variable is unset or wrong, or the port is taken). Fires once between step 4 and step 9; expected then | warning |
 | `BoxesUnreachable` | awake boxes do not answer the relay's metrics scrape for 5 min | warning |
+| `BoxMetricsRejected` | a box's metrics answer was rejected by the relay or had lines dropped | warning |
 | `DiskFreeLow` | `/` or `/var/lib/docker` under 15 % free | warning |
 | `DiskFullWithin24h` | the same mounts on course to fill within a day, judged only once there is an hour of history | critical |
 | `HostMemoryLow` | under 10 % memory available | critical |
@@ -206,7 +208,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 | job | scrapes |
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
-| `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque id, not a user id. A sleeping box is absent, not down. |
+| `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
 `/etc/arbos/relay.env` (`scripts/deploy/relay-server.sh` keeps the variable across deploys). The
@@ -424,7 +426,9 @@ container, probe and relay-process panels have data now; the relay's own and the
 docker exec arbos-mon-alertmanager amtool alert add Test severity=warning --annotation='summary="test alert"' --alertmanager.url=http://127.0.0.1:9093
 ```
 
-The message arrives within 30 seconds and resolves itself after five minutes. If nothing arrives,
+The message arrives within 30 seconds and resolves itself after five minutes. A second message,
+`RelayMetricsOff`, arrives on its own about ten minutes after step 4: the relay has no metrics
+endpoint until step 9. It is expected, repeats every 12 hours at most, and resolves in step 9. If nothing arrives,
 `docker logs arbos-mon-alertmanager` shows the refusal; fix `ALERT_WEBHOOK_URL` and run
 `docker compose --env-file /etc/arbos/monitoring.env up -d alertmanager`.
 
