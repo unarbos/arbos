@@ -104,7 +104,6 @@ def quantile(q, metric="arbos_agentd_turn_duration_seconds"):
 # when there is no data at all.
 R0 = "0 * max(arbos_relay_uptime_seconds)"
 A0 = "0 * count(arbos_agentd_uptime_seconds)"
-NOT_REPORTING = f'count(up{{job="arbos-agentd"}} == 0) or {R0}'
 ONOFF = [{"type": "value", "options": {"0": {"text": "OFF", "color": GREEN}, "1": {"text": "ON", "color": RED}}}]
 UP = dict(mappings=UPDOWN, thresholds=steps((None, RED), (1, GREEN)))
 PCT_ERRORS = steps((None, GREEN), (2, ORANGE), (10, RED))
@@ -238,14 +237,15 @@ FAILED_PCT = f'100 * (sum(rate(arbos_agentd_turns_finished_total{{result="error"
 BOX_MODEL_ERR_PCT = f'100 * (sum(rate(arbos_agentd_model_requests_total{{class!="2xx"}}[5m])) or {A0}) / sum(rate(arbos_agentd_model_requests_total[5m]))'
 
 agents = dashboard("arbos-agents", "Agents", [
-    stat("Boxes reporting", f'count(up{{job="arbos-agentd"}} == 1) or {R0}',
+    stat("Boxes reporting", 'sum(arbos_relay_box_scrapes{result="ok"})',
          desc="Awake boxes whose agentd answers the scrape. Every number on this page covers these boxes only."),
-    stat("Not reporting", NOT_REPORTING, thresholds=steps((None, GREEN), (1, ORANGE)),
-         desc="Awake boxes whose agentd does not answer: still on an image from before agentd had /metrics, or unreachable. Their turns are not counted here."),
+    stat("On old image", 'sum(arbos_relay_box_scrapes{result="old_image"})', thresholds=steps((None, GREEN), (1, ORANGE)),
+         desc="Awake boxes on an image from before agentd had /metrics. They work; their turns are not counted here until they are rolled."),
+    stat("Unreachable", 'sum(arbos_relay_box_scrapes{result="unreachable"})', thresholds=ANY_IS_BAD,
+         desc="Awake boxes whose agentd did not answer the relay: timeout, refused, 401 or 5xx."),
     stat("Turns started / min", "60 * sum(rate(arbos_agentd_turns_started_total[5m]))", decimals=1),
     stat("Turns failed", FAILED_PCT, "percent", PCT_ERRORS, decimals=1),
     stat("Turn duration p95", quantile(0.95), "s", decimals=1),
-    stat("Turns running", "sum(arbos_agentd_turns_running)"),
     stat("Waiting", "sum(arbos_agentd_sends_waiting)", thresholds=steps((None, GREEN), (20, ORANGE), (100, RED)),
          desc="User messages waiting for a turn, over all boxes."),
     stat("Crashes (1h)", f"sum(increase(arbos_agentd_worker_crashes_total[1h])) or {A0}", thresholds=ANY_IS_BAD, decimals=0,
@@ -262,11 +262,11 @@ agents = dashboard("arbos-agents", "Agents", [
        desc="Upstream calls as the relay made them."),
     ts("Model response time", [(quantile(0.5, MODEL), "p50"), (quantile(0.95, MODEL), "p95")], "s"),
     ts("Failure rates", [(FAILED_PCT, "turns failed"), (MODEL_ERR_PCT, "model errors (relay)"), (BOX_MODEL_ERR_PCT, "model errors (as boxes saw them)")], "percent"),
-    ts("Box health", [('count(up{job="arbos-agentd"} == 1)', "boxes reporting"), (NOT_REPORTING, "not reporting yet"),
+    ts("Box health", [("sum by (result) (arbos_relay_box_scrapes)", "scrape {{result}}"),
                       (f'sum(arbos_agentd_workspaces{{health="unhealthy"}}) or {A0}', "unhealthy workspaces"),
                       ("sum(arbos_agentd_rooms_open) - sum(arbos_agentd_rooms_connected)", "rooms not connected"),
                       ("sum(increase(arbos_agentd_relay_reconnects_total[1h]))", "relay reconnects (1h)")],
-       desc="Only awake boxes are scraped; a sleeping box is absent, not down."),
+       desc="Awake boxes by how their last metrics scrape ended; a sleeping box is not counted."),
 ])
 
 

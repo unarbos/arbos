@@ -64,7 +64,8 @@ available), `BoxStartFailures` (failed wake jobs), `Waitlist` (anyone waiting fo
 `WaitlistGrowing` (three more in 30 minutes), `BoxCapacityHigh` (90 % of
 `max_boxes` admitted), `SpendAt60Percent` and `SpendAt85Percent` (of the global daily cap, which
 trips the kill switch and stops every agent), `KillSwitchOn`, `ModelErrorsHigh` (> 10 % of calls),
-`ModelSlow` (p95 > 30 s to first byte), `BoxOOMKilled`, `RelayRestarted`, `RelayMemoryHigh`
+`ModelSlow` (p95 > 30 s to first byte), `BoxesUnreachable` (awake boxes not answering the relay's
+metrics scrape), `BoxOOMKilled`, `RelayRestarted`, `RelayMemoryHigh`
 (> 40 GiB; the relay sat at ~22 GB when this was written — tune the number in the rule).
 
 All go to one receiver. Each carries a severity, shown in the message title: `critical` (relay
@@ -79,7 +80,7 @@ Webhooks → New Webhook → Copy Webhook URL. Put it in the env file as `ALERT_
 channel); it lives only in the env file. Send a test:
 
 ```bash
-docker exec arbos-mon-alertmanager amtool alert add Test --annotation=summary='test alert' --alertmanager.url=http://127.0.0.1:9093
+docker exec arbos-mon-alertmanager amtool alert add Test severity=warning --annotation='summary="test alert"' --alertmanager.url=http://127.0.0.1:9093
 ```
 
 It arrives within 30 seconds and resolves itself after five minutes.
@@ -188,9 +189,11 @@ to this stack, and the restart drops every open WebSocket (see step 9). Until th
 agent panels show "–", the two jobs are down or empty, and nothing alerts on them
 (`ScrapeTargetDown` ignores a target that has never answered).
 
-A box on an image from before agentd had `/metrics` is listed but answers 502. The Agents dashboard
-counts those as "Not reporting" next to "Boxes reporting"; turn numbers cover only the boxes
-that report, and no alert fires on a box target.
+A box on an image from before agentd had `/metrics` is listed but cannot be scraped. The relay
+counts awake boxes by how their last scrape ended (`arbos_relay_box_scrapes`), and the Agents
+dashboard shows that as "Boxes reporting", "On old image" and "Unreachable"; turn numbers cover only
+the boxes that report. `BoxesUnreachable` warns about a box that should answer and does not; a box
+on an old image raises nothing.
 
 A counter with labels does not exist until its first event, so a healthy relay has no "failed"
 series. Failure panels and the Subnet view read 0 in that case while the relay (or any agentd) is
@@ -360,7 +363,7 @@ Undo: not needed on its own; the account lives in Grafana's volume and goes with
 ### 7. Send a test alert — posts one message to the Discord channel
 
 ```bash
-docker exec arbos-mon-alertmanager amtool alert add Test severity=warning --annotation=summary='test alert' --alertmanager.url=http://127.0.0.1:9093
+docker exec arbos-mon-alertmanager amtool alert add Test severity=warning --annotation='summary="test alert"' --alertmanager.url=http://127.0.0.1:9093
 ```
 
 It arrives within 30 seconds and resolves itself after five minutes. If nothing arrives,
@@ -407,7 +410,7 @@ curl -s 127.0.0.1:9108/metrics/targets | python3 -c 'import json,sys; print(len(
 ```
 
 The relay panels fill within a minute. Agent panels fill box by box as boxes move to an image whose
-agentd serves `/metrics`; until then "Not reporting" on the Agents dashboard counts the rest.
+agentd serves `/metrics`; until then "On old image" on the Agents dashboard counts the rest.
 
 Undo: remove the variable and restart the relay again (a second interruption), or leave it: the
 listener is loopback-only.

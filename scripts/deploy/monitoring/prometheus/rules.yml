@@ -30,14 +30,22 @@ groups:
 
       - alert: ScrapeTargetDown
         # A target that has never answered (the relay before it serves /metrics) stays quiet. Boxes are
-        # left out: one on an image from before agentd had /metrics answers 502, and box health is
-        # alerted from the relay's own series (BoxStartFailures, Waitlist, BoxCapacityHigh).
+        # left out: one on an image from before agentd had /metrics also reads down. BoxesUnreachable
+        # is the alert for a box that should answer and does not.
         expr: up{job!="arbos-agentd"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
         for: 3m
         labels:
           severity: warning
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }}."
+
+      - alert: BoxesUnreachable
+        expr: sum(arbos_relay_box_scrapes{result="unreachable"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} awake boxes do not answer the relay's metrics scrape (Agents dashboard → Box health)."
 
       - alert: DiskFreeLow
         expr: node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes < 0.15

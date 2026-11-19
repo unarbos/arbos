@@ -67,7 +67,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up{job=\"arbos-agentd\"} == 1) or 0 * max(arbos_relay_uptime_seconds)",
+     "expr": "sum(arbos_relay_box_scrapes{result=\"ok\"})",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -76,8 +76,8 @@
   },
   {
    "type": "stat",
-   "title": "Not reporting",
-   "description": "Awake boxes whose agentd does not answer: still on an image from before agentd had /metrics, or unreachable. Their turns are not counted here.",
+   "title": "On old image",
+   "description": "Awake boxes on an image from before agentd had /metrics. They work; their turns are not counted here until they are rolled.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -128,7 +128,68 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up{job=\"arbos-agentd\"} == 0) or 0 * max(arbos_relay_uptime_seconds)",
+     "expr": "sum(arbos_relay_box_scrapes{result=\"old_image\"})",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Unreachable",
+   "description": "Awake boxes whose agentd did not answer the relay: timeout, refused, 401 or 5xx.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 3,
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_box_scrapes{result=\"unreachable\"})",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -167,9 +228,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 3,
+   "id": 4,
    "gridPos": {
-    "x": 6,
+    "x": 9,
     "y": 0,
     "w": 3,
     "h": 4
@@ -232,9 +293,9 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 4,
+   "id": 5,
    "gridPos": {
-    "x": 9,
+    "x": 12,
     "y": 0,
     "w": 3,
     "h": 4
@@ -289,63 +350,6 @@
     "graphMode": "none",
     "textMode": "value"
    },
-   "id": 5,
-   "gridPos": {
-    "x": 12,
-    "y": 0,
-    "w": 3,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Turns running",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": null,
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
    "id": 6,
    "gridPos": {
     "x": 15,
@@ -364,7 +368,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agentd_turns_running)",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -1012,7 +1016,7 @@
   {
    "type": "timeseries",
    "title": "Box health",
-   "description": "Only awake boxes are scraped; a sleeping box is absent, not down.",
+   "description": "Awake boxes by how their last metrics scrape ended; a sleeping box is not counted.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -1059,24 +1063,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up{job=\"arbos-agentd\"} == 1)",
-     "legendFormat": "boxes reporting",
+     "expr": "sum by (result) (arbos_relay_box_scrapes)",
+     "legendFormat": "scrape {{result}}",
      "instant": false,
      "range": true
     },
     {
      "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "count(up{job=\"arbos-agentd\"} == 0) or 0 * max(arbos_relay_uptime_seconds)",
-     "legendFormat": "not reporting yet",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus"
@@ -1087,7 +1080,7 @@
      "range": true
     },
     {
-     "refId": "D",
+     "refId": "C",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus"
@@ -1098,7 +1091,7 @@
      "range": true
     },
     {
-     "refId": "E",
+     "refId": "D",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus"
