@@ -53,23 +53,37 @@ pub struct ReplicaInfo {
 /// Replica facts per room, in memory (reset by a relay restart; the next HELLO refills them).
 pub type Replicas = std::sync::Mutex<HashMap<String, ReplicaInfo>>;
 
+/// Most replicas remembered per room. The key is a name the client chose, so without a bound a
+/// member could grow the map for as long as the relay runs; past it the stalest entry goes.
+const REPLICAS_MAX: usize = 256;
+
+fn replica<'a>(r: &'a mut HashMap<String, ReplicaInfo>, device: &str) -> &'a mut ReplicaInfo {
+    if r.len() >= REPLICAS_MAX && !r.contains_key(device) {
+        let stalest = r.iter().min_by_key(|(_, i)| i.last_seen_at);
+        if let Some(name) = stalest.map(|(name, _)| name.clone()) {
+            r.remove(&name);
+        }
+    }
+    r.entry(device.to_owned()).or_default()
+}
+
 pub fn note_hello(room: &crate::state::Room, device: &str, cursor: i64) {
     let mut r = room.replicas.lock().unwrap();
-    let e = r.entry(device.to_owned()).or_default();
+    let e = replica(&mut r, device);
     e.hello_cursor = cursor;
     e.last_seen_at = now_ms();
 }
 
 pub fn note_caught_up(room: &crate::state::Room, device: &str, seq: i64) {
     let mut r = room.replicas.lock().unwrap();
-    let e = r.entry(device.to_owned()).or_default();
+    let e = replica(&mut r, device);
     e.caught_up_to = e.caught_up_to.max(seq);
     e.last_seen_at = now_ms();
 }
 
 pub fn note_heal(room: &crate::state::Room, device: &str, bytes: usize) {
     let mut r = room.replicas.lock().unwrap();
-    let e = r.entry(device.to_owned()).or_default();
+    let e = replica(&mut r, device);
     e.heals += 1;
     e.heal_bytes += bytes as u64;
     e.last_heal_at = now_ms();
@@ -657,5 +671,17 @@ mod tests {
         assert_eq!(h["rows"]["pending"], 0);
         assert_eq!(h["messages"]["projected"], 300);
         assert_eq!(h["divergent"], false, "{h}");
+    }
+
+    #[tokio::test]
+    async fn a_room_remembers_a_bounded_number_of_replicas() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let room = state.room("people/c").await;
+        for n in 0..super::REPLICAS_MAX + 50 {
+            super::note_hello(&room, &format!("dev:{n}"), 0);
+        }
+        let r = room.replicas.lock().unwrap();
+        assert_eq!(r.len(), super::REPLICAS_MAX);
+        assert!(r.contains_key(&format!("dev:{}", super::REPLICAS_MAX + 49)));
     }
 }
