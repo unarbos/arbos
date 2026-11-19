@@ -782,18 +782,7 @@ async fn forward(
         };
         let tokens = record.tokens;
         let recorded = db.record_model_usage(record);
-        if matches!(recorded, Ok(true)) {
-            let agent = match &payer {
-                Principal::Box { user_id } => Some(user_id.as_str()),
-                _ => None,
-            };
-            let charged = if status.is_success() {
-                meter.usd()
-            } else {
-                0.0
-            };
-            crate::metrics::model_usage(agent, tokens, charged);
-        }
+        let counted = matches!(recorded, Ok(true));
         match recorded {
             // Observing a failed response must preserve the existing charging policy: only
             // successful responses are debited, even when an error contains usage metadata.
@@ -813,6 +802,19 @@ async fn forward(
             }
             Ok(_) => {}
             Err(e) => tracing::error!(req_id, error = %e, "model usage not recorded"),
+        }
+        // Last, after the charge: counting a call must never be what leaves it uncharged.
+        if counted {
+            let agent = match &payer {
+                Principal::Box { user_id } => Some(user_id.as_str()),
+                _ => None,
+            };
+            let charged = if status.is_success() {
+                meter.usd()
+            } else {
+                0.0
+            };
+            crate::metrics::model_usage(agent, tokens, charged);
         }
     });
     let body = Body::from_stream(tokio_stream_wrap(rx));

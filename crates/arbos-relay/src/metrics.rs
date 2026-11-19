@@ -92,7 +92,6 @@ const FAMILIES: &[(&str, &str, &str)] = &[
 #[rustfmt::skip]
 const BOX_FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_box_info", "gauge", "Always 1; joins a box to its container."),
-    ("arbos_relay_box_slot", "gauge", "Always 1; the slot label is a random number the box holds for a few minutes."),
     ("arbos_relay_box_state", "gauge", "Always 1; the state label is what the relay believes (awake, waking, asleep, error, unknown)."),
     ("arbos_relay_box_turn_running", "gauge", "1 while the box's last keepalive said a turn is running."),
     ("arbos_relay_box_sockets", "gauge", "Open room websockets of the box."),
@@ -131,38 +130,26 @@ struct BoxUse {
 static BOX_USE: Mutex<BTreeMap<String, BoxUse>> = Mutex::new(BTreeMap::new());
 /// The registered boxes as the sampler last read them: user id and container name.
 static BOXES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-/// User id → slot, and when the slots were drawn.
-static SLOTS: Mutex<(BTreeMap<String, usize>, Option<Instant>)> =
-    Mutex::new((BTreeMap::new(), None));
-
-/// How long a box keeps its slot. Short on purpose: a slot lets a reader outside the team see a
-/// box as an anonymous dot, and must not become a name the dot can be followed by.
-const SLOTS_EVERY: Duration = Duration::from_secs(300);
-
-/// Give every box a slot, 1..=n, by a random permutation: drawn anew every [`SLOTS_EVERY`] and
-/// whenever a box comes or goes. Nothing about a box goes into its slot, so neither its user id
-/// nor its `box` id can be worked out from it, and a slot means a different box each time.
-fn draw_slots(users: &[String], redraw: bool) {
-    use rand::seq::SliceRandom;
-    let mut slots = SLOTS.lock().expect("metrics lock");
-    let same = slots.0.len() == users.len() && users.iter().all(|u| slots.0.contains_key(u));
-    if same && !redraw && slots.1.is_some_and(|at| at.elapsed() < SLOTS_EVERY) {
-        return;
-    }
-    let mut order: Vec<usize> = (1..=users.len()).collect();
-    order.shuffle(&mut rand::thread_rng());
-    *slots = (
-        users.iter().cloned().zip(order).collect(),
-        Some(Instant::now()),
-    );
+/// A metrics map, whatever happened to the last thread that held it. These maps are counters and
+/// samples that stay usable after a panic mid-update, and the proxy counts a call on its way out:
+/// a poisoned lock must cost a number, never the call.
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// What a scrape last read of each box from the relay's live maps: state, the last "turn
+/// running" stamp, open sockets. A scrape never waits for those maps; when one is busy its boxes
+/// keep what the scrape before saw instead of losing their series.
+#[derive(Clone, Default)]
+struct Live {
+    states: BTreeMap<String, BoxState>,
+    turns: BTreeMap<String, i64>,
+    sockets: BTreeMap<String, u32>,
+}
+static LIVE: Mutex<Option<Live>> = Mutex::new(None);
+
 fn add(name: &'static str, labels: String, v: f64) {
-    *COUNTERS
-        .lock()
-        .expect("metrics lock")
-        .entry((name, labels))
-        .or_default() += v;
+    *locked(&COUNTERS).entry((name, labels)).or_default() += v;
 }
 
 fn observe(name: &'static str, seconds: f64) {
@@ -240,7 +227,7 @@ pub fn model_usage(box_user: Option<&str>, tokens: [i64; 4], usd: f64) {
         add(TOKENS, label("kind", kind), n);
     }
     let Some(user) = box_user else { return };
-    let mut all = BOX_USE.lock().expect("metrics lock");
+    let mut all = locked(&BOX_USE);
     let u = all.entry(user.to_owned()).or_default();
     for (have, n) in u.tokens.iter_mut().zip(tokens) {
         *have += n;
@@ -420,13 +407,8 @@ fn sample_boxes(state: &AppState) {
         .into_iter()
         .map(|(user, container)| (user, container.unwrap_or_default()))
         .collect();
-    BOX_USE
-        .lock()
-        .expect("metrics lock")
-        .retain(|user, _| boxes.iter().any(|(u, _)| u == user));
-    let users: Vec<String> = boxes.iter().map(|(user, _)| user.clone()).collect();
-    draw_slots(&users, false);
-    *BOXES.lock().expect("metrics lock") = boxes;
+    locked(&BOX_USE).retain(|user, _| boxes.iter().any(|(u, _)| u == user));
+    *locked(&BOXES) = boxes;
 }
 
 /// The gauges read at scrape time. Nothing here waits on a lock or touches the database.
@@ -602,12 +584,22 @@ pub fn render(state: &AppState) -> String {
 
 /// The exposition of `/metrics/boxes`. Like [`render`], it reads memory only and never waits.
 fn render_boxes(state: &AppState) -> String {
-    let boxes = BOXES.lock().expect("metrics lock").clone();
-    let used = BOX_USE.lock().expect("metrics lock").clone();
-    let slots = SLOTS.lock().expect("metrics lock").0.clone();
-    let states = state.box_states.try_read().ok();
-    let turns = state.turn_running.try_lock().ok();
-    let conns = state.box_conns.try_lock().ok();
+    let boxes = locked(&BOXES).clone();
+    let used = locked(&BOX_USE).clone();
+    let live = {
+        let mut live = locked(&LIVE);
+        let seen = live.get_or_insert_with(Live::default);
+        if let Ok(states) = state.box_states.try_read() {
+            seen.states = states.iter().map(|(u, (st, _))| (u.clone(), *st)).collect();
+        }
+        if let Ok(turns) = state.turn_running.try_lock() {
+            seen.turns = turns.iter().map(|(u, at)| (u.clone(), *at)).collect();
+        }
+        if let Ok(conns) = state.box_conns.try_lock() {
+            seen.sockets = conns.iter().map(|(u, (n, _))| (u.clone(), *n)).collect();
+        }
+        seen.clone()
+    };
     let fresh = arbos_core::ids::now_ms() - crate::fleet::TURN_FRESH_MS;
 
     let mut series: Vec<Series> = Vec::new();
@@ -617,31 +609,21 @@ fn render_boxes(state: &AppState) -> String {
             let labels = format!("{id},{}", label("container", container));
             series.push(("arbos_relay_box_info", labels, 1.0));
         }
-        if let Some(slot) = slots.get(user) {
-            let labels = format!("{id},{}", label("slot", &slot.to_string()));
-            series.push(("arbos_relay_box_slot", labels, 1.0));
-        }
-        if let Some(states) = &states {
-            let st = match states.get(user).map(|(st, _)| *st) {
-                Some(BoxState::Awake) => "awake",
-                Some(BoxState::Waking) => "waking",
-                Some(BoxState::Asleep) => "asleep",
-                Some(BoxState::Error) => "error",
-                // Not heard of since the relay started.
-                None => "unknown",
-            };
-            let labels = format!("{id},{}", label("state", st));
-            series.push(("arbos_relay_box_state", labels, 1.0));
-        }
-        if let Some(turns) = &turns {
-            let running = turns.get(user).is_some_and(|at| *at >= fresh);
-            let v = f64::from(u8::from(running));
-            series.push(("arbos_relay_box_turn_running", id.clone(), v));
-        }
-        if let Some(conns) = &conns {
-            let n = conns.get(user).map_or(0, |(n, _)| *n);
-            series.push(("arbos_relay_box_sockets", id.clone(), f64::from(n)));
-        }
+        let st = match live.states.get(user) {
+            Some(BoxState::Awake) => "awake",
+            Some(BoxState::Waking) => "waking",
+            Some(BoxState::Asleep) => "asleep",
+            Some(BoxState::Error) => "error",
+            // Not heard of since the relay started.
+            None => "unknown",
+        };
+        let labels = format!("{id},{}", label("state", st));
+        series.push(("arbos_relay_box_state", labels, 1.0));
+        let running = live.turns.get(user).is_some_and(|at| *at >= fresh);
+        let v = f64::from(u8::from(running));
+        series.push(("arbos_relay_box_turn_running", id.clone(), v));
+        let n = live.sockets.get(user).copied().unwrap_or(0);
+        series.push(("arbos_relay_box_sockets", id.clone(), f64::from(n)));
         // A box that has called nothing reads 0, so every box has a rate to plot.
         let u = used.get(user).copied().unwrap_or_default();
         for (kind, n) in TOKEN_KINDS.iter().zip(u.tokens) {
@@ -982,36 +964,33 @@ mod tests {
         assert!(!fleet_text.contains("box=\"") && !fleet_text.contains("arbos_relay_box_info"));
         assert!(!fleet_text.contains(&busy) && !fleet_text.contains(&id));
 
-        // Each box holds one slot of 1..=n, and a new draw is not the old one. With 40 boxes two
-        // draws agree by chance once in 40!.
-        let users: Vec<String> = (0..40).map(|i| format!("gh_{i}")).collect();
-        let draw = |redraw| {
-            draw_slots(&users, redraw);
-            SLOTS.lock().unwrap().0.clone()
-        };
-        let first = draw(true);
-        let mut held: Vec<usize> = first.values().copied().collect();
-        held.sort_unstable();
-        assert_eq!(held, (1..=40).collect::<Vec<_>>());
-        assert_eq!(draw(false), first, "kept until it is due");
-        assert_ne!(draw(true), first);
-        sample_boxes(&state);
-        let text = fetch(addr, "/metrics/boxes").await;
-        let slot = |id: &str| {
-            let series = format!("arbos_relay_box_slot{{box=\"{id}\",slot=\"");
-            let rest = text.split_once(&series).expect("a slot").1;
-            rest.split_once('"').unwrap().0.to_owned()
-        };
-        let mut two = [slot(&id), slot(&other)];
-        two.sort();
-        assert_eq!(two, ["1", "2"]);
+        // A scrape that finds the state map busy serves what the last one read.
+        let writer = state.box_states.write().await;
+        let held = fetch(addr, "/metrics/boxes").await;
+        drop(writer);
+        let awake = format!("arbos_relay_box_state{{box=\"{id}\",state=\"awake\"}} 1");
+        assert!(held.contains(&awake), "state kept while the map is locked");
 
         // A deleted box leaves with the next sample, its counters with it.
         state.db.delete_box_row(&busy).unwrap();
         sample_boxes(&state);
         let gone = fetch(addr, "/metrics/boxes").await;
         assert!(!gone.contains(&id) && gone.contains(&other));
-        assert!(!BOX_USE.lock().unwrap().contains_key(&busy));
+        assert!(!locked(&BOX_USE).contains_key(&busy));
+    }
+
+    /// The proxy counts a call on its way out. A panic that poisoned a metrics lock must not make
+    /// the next count panic too.
+    #[test]
+    fn counting_survives_a_poisoned_lock() {
+        let _ = std::thread::spawn(|| {
+            let _held = BOX_USE.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(BOX_USE.is_poisoned());
+        model_usage(Some("gh_poison"), [1, 2, 3, 4], 0.5);
+        assert_eq!(locked(&BOX_USE)["gh_poison"].calls, 1.0);
     }
 
     /// A listener that cannot start is an error for `main` to log, never a panic: a taken port

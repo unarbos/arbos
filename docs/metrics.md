@@ -91,7 +91,6 @@ cAdvisor's. Scrape this path only into a Prometheus whose readers may see user i
 | name | type | labels | meaning |
 |---|---|---|---|
 | `arbos_relay_box_info` | gauge | `box`, `container` | always 1; absent for a box that has no container yet |
-| `arbos_relay_box_slot` | gauge | `box`, `slot` | always 1. `slot` is a number from 1 to the number of boxes, given by a random permutation that is drawn again every 5 minutes, at relay start and whenever a box is added or removed. Nothing about the box goes into it. It exists so that a Prometheus rule can pass a box's numbers on as an anonymous dot: aggregate `by (slot)` and the result names no box and cannot be followed past the next draw |
 | `arbos_relay_box_state` | gauge | `box`, `state` = `awake` `waking` `asleep` `error` `unknown` | always 1, one series per box. `unknown`: the relay has not heard of the box since it started |
 | `arbos_relay_box_turn_running` | gauge | `box` | 1 while the box's keepalive said a turn is running in the last 3 min |
 | `arbos_relay_box_sockets` | gauge | `box` | open room websockets of the box |
@@ -100,6 +99,8 @@ cAdvisor's. Scrape this path only into a Prometheus whose readers may see user i
 | `arbos_relay_box_spend_usd_total` | counter | `box` | metered cost of the box's successful model calls: the amount passed to the ledger for inference, before any clamp at the balance. Voice and images are not in it |
 
 A box's series exist while its row does: every registered box is listed, a box that has called
-nothing reads 0, and a deleted box leaves within 10 s. That bounds the page at eleven series per box.
+nothing reads 0, and a deleted box leaves within 10 s. That bounds the page at ten series per box.
 The counters start at zero with the relay and are counted in memory where the proxy already meters
-the call; nothing is read from or written to the database for them.
+the call, after the call has been charged; nothing is read from or written to the database for
+them. State, turn running and sockets are read from the relay's live maps without waiting: when
+one is busy, a box keeps what the scrape before read.
