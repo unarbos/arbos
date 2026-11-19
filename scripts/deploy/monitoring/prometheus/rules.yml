@@ -35,7 +35,7 @@ groups:
         # A target that has never answered stays quiet. Boxes are left out: one on an image from
         # before agentd had /metrics also reads down, and BoxesUnreachable is the alert for a box that
         # should answer and does not. The relay has its own alert, RelayMetricsOff.
-        expr: up{job!~"arbos-agentd|relay"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
+        expr: up{job!~"arbos-agentd|relay|relay-boxes"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
         for: 3m
         labels:
           severity: warning

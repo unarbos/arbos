@@ -78,6 +78,46 @@ tests:
         values: 0+90x20
       - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx", instance="host-1"}'
         values: 0+10x20
+      - series: 'arbos_relay_tokens_total{kind="input", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+300x20
+      - series: 'arbos_relay_tokens_total{kind="cache_read", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+2700x20
+      # per-box series live in the same Prometheus: none of them may reach a subnet rule
+      - series: 'arbos_relay_box_tokens_total{box="0a1b2c3d4e5f", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+999x20
+      - series: 'arbos_relay_box_info{box="0a1b2c3d4e5f", container="arbos-box-u_alice", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      # three boxes: alice's working, bob's asleep, and one using tokens with no turn flagged
+      - series: 'arbos_relay_box_state{box="0a1b2c3d4e5f", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="0a1b2c3d4e5f", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_state{box="1b2c3d4e5f60", state="asleep", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="1b2c3d4e5f60", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="1b2c3d4e5f60", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_state{box="2c3d4e5f6071", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="2c3d4e5f6071", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="2c3d4e5f6071", kind="output", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+2000x20
+      - series: 'container_cpu_usage_seconds_total{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 0+7.4x20
+      - series: 'container_memory_working_set_bytes{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 2900000000x20
+      - series: 'arbos_relay_boxes{state="awake", instance="host-1"}'
+        values: 30x20
+      - series: 'arbos_relay_boxes{state="waking", instance="host-1"}'
+        values: 1x20
+      - series: 'arbos_relay_boxes{state="error", instance="host-1"}'
+        values: 0x20
+      - series: 'arbos_relay_spend_today_usd{instance="host-1"}'
+        values: 125x20
+      - series: 'arbos_relay_spend_daily_cap_usd{instance="host-1"}'
+        values: 500x20
       - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
         values: 0+15x20
       - series: 'node_cpu_seconds_total{mode="user", cpu="0", instance="host-1"}'
@@ -96,13 +136,18 @@ tests:
         exp_samples:
           - { labels: "subnet:relay_up", value: 1 }
           - { labels: "subnet:public_up", value: 1 }
-          - { labels: "subnet:boxes_running", value: 2 }
-          - { labels: "subnet:boxes_working", value: 21 }
-          - { labels: "subnet:boxes_asleep", value: 3 }
+          # counts of machines: 0, -5 for one to four ("<5"), otherwise the nearest five
+          - { labels: "subnet:boxes_running", value: -5 }
+          - { labels: "subnet:boxes_working", value: 20 }
+          - { labels: "subnet:boxes_asleep", value: -5 }
+          - { labels: "subnet:boxes_awake", value: 30 }
+          - { labels: "subnet:boxes_idle", value: 10 }
+          - { labels: "subnet:boxes_waking", value: -5 }
+          - { labels: "subnet:boxes_error", value: 0 }
           - { labels: "subnet:boxes_waitlisted", value: 0 }
           - { labels: "subnet:boxes_max", value: 100 }
-          - { labels: "subnet:boxes_reporting", value: 1 }
-          - { labels: "subnet:boxes_not_reporting", value: 1 }
+          - { labels: "subnet:boxes_reporting", value: -5 }
+          - { labels: "subnet:boxes_not_reporting", value: -5 }
           - { labels: "subnet:box_starts:rate5m", value: 1 }
           - { labels: "subnet:box_start_failures:rate5m", value: 0.1 }
           - { labels: "subnet:turns_started:rate5m", value: 2 }
@@ -113,12 +158,75 @@ tests:
           - { labels: "subnet:turn_duration_seconds:p50", value: 5 }
           - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
           - { labels: "subnet:model_error_ratio", value: 0.1 }
-          - { labels: "subnet:model_requests:rate5m", value: 3.3333333333333335 }
+          # amounts of tokens and calls: two significant figures
+          - { labels: "subnet:model_requests:rate5m", value: 3.3000000000000003 }
+          # two machines are using tokens, fewer than 5: one significant figure (100 is already that)
+          - { labels: "subnet:tokens:rate5m", value: 100 }
+          - { labels: "subnet:relay_counts_tokens", value: 1 }
+          # three machines in all: every group that has any is "<5" (-5), an empty one is 0
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: 0 }
+          - { labels: "subnet:tokens:increase24h", value: 60000 }
+          - { labels: "subnet:spend_cap_ratio", value: 0.25 }
           - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
           - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
           - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
           - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
+
+  # Groups of machines leave as 0, "fewer than five" or the nearest five, and the fleet's token
+  # rate as two figures, one while fewer than five machines are using tokens.
+  - name: small groups of machines are not counted out loud
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_box_tokens_total{box="a1", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+10000x20 # 20,000 a minute
+      - series: 'arbos_relay_box_tokens_total{box="a2", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a3", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a4", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a5", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a6", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="b1", kind="input"}'
+        values: 0+1000000x20 # 2,000,000 a minute
+      - series: 'arbos_relay_box_tokens_total{box="c1", kind="input"}'
+        values: 0x20
+      - series: 'arbos_relay_tokens_total{kind="input"}'
+        values: 0+1061729x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(boxes_by_token_rate|tokens:rate5m)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: 0 }
+          # six machines: the nearest five, so that a seventh joining does not show
+          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: -5 }
+          # seven machines are using tokens: 35,390.97 a second leaves as two figures
+          - { labels: "subnet:tokens:rate5m", value: 35000 }
+
+  - name: with fewer than five machines at work the token rate is one figure
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_box_tokens_total{box="a1", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="c1", kind="input"}'
+        values: 0x20
+      - series: 'arbos_relay_tokens_total{kind="input"}'
+        values: 0+1061729x20
+    promql_expr_test:
+      - expr: 'subnet:tokens:rate5m'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:tokens:rate5m", value: 40000 }
 
   # A healthy system has no "failed"/"error"/"5xx" series at all (a labelled counter appears with its
   # first event). The Subnet view must then read 0 failures, not nothing.
@@ -169,7 +277,8 @@ tests:
       - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf"}'
         values: 0x20
     promql_expr_test:
-      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+)"}'
+      # no token counter either (it comes with a later release): absent, never an invented 0
+      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+|tokens:.+)"}'
         eval_time: 10m
         exp_samples: []
       - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_starts:rate5m|box_start_failures:rate5m)"}'

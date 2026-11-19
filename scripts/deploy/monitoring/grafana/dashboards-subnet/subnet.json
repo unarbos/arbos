@@ -1,13 +1,13 @@
 {
  "uid": "arbos-subnet",
- "title": "Subnet view",
+ "title": "Arbos",
  "tags": [
   "arbos"
  ],
  "editable": false,
  "schemaVersion": 39,
  "timezone": "browser",
- "refresh": "30s",
+ "refresh": "10s",
  "time": {
   "from": "now-3h",
   "to": "now"
@@ -20,222 +20,21 @@
   {
    "type": "stat",
    "title": "Service",
-   "description": "",
+   "description": "The relay answers, on the server and from outside through its public name.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "decimals": null,
+     "decimals": 0,
      "mappings": [
       {
        "type": "value",
        "options": {
         "0": {
-         "text": "DOWN",
-         "color": "red"
+         "text": "Down"
         },
         "1": {
-         "text": "UP",
-         "color": "green"
-        }
-       }
-      }
-     ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "red"
-       },
-       {
-        "value": 1,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 1,
-   "gridPos": {
-    "x": 0,
-    "y": 0,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:relay_up",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Reachable from outside",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": null,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "0": {
-         "text": "DOWN",
-         "color": "red"
+         "text": "Up"
         },
-        "1": {
-         "text": "UP",
-         "color": "green"
-        }
-       }
-      }
-     ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "red"
-       },
-       {
-        "value": 1,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 2,
-   "gridPos": {
-    "x": 4,
-    "y": 0,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:public_up",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Agent machines running",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": null,
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 3,
-   "gridPos": {
-    "x": 8,
-    "y": 0,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_running",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Machines working now",
-   "description": "Machines with an agent turn running in the last 3 minutes.",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "decimals": null,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
         "-1": {
          "text": "no data yet",
          "color": "#6e7681"
@@ -248,7 +47,11 @@
       "steps": [
        {
         "value": null,
-        "color": "green"
+        "color": "#d55181"
+       },
+       {
+        "value": 1,
+        "color": "#199e70"
        }
       ]
      },
@@ -262,16 +65,90 @@
       "lastNotNull"
      ]
     },
-    "colorMode": "background",
+    "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "justifyMode": "center"
    },
-   "id": 4,
+   "transparent": true,
+   "id": 1,
    "gridPos": {
-    "x": 12,
+    "x": 0,
     "y": 0,
     "w": 4,
-    "h": 4
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:relay_up * subnet:public_up) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Working now",
+   "description": "Agent machines with a turn running in the last 3 minutes. Rounded to the nearest five.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 2,
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 3
    },
    "datasource": {
     "type": "prometheus",
@@ -293,18 +170,22 @@
   },
   {
    "type": "stat",
-   "title": "Model calls succeeding",
-   "description": "",
+   "title": "Tokens / min",
+   "description": "Tokens the agents' model calls use: input, output and cached, averaged over five minutes. Two significant figures; one while fewer than five machines are using any.",
    "fieldConfig": {
     "defaults": {
-     "unit": "percent",
-     "decimals": 1,
+     "unit": "short",
+     "decimals": 0,
      "mappings": [
       {
        "type": "value",
        "options": {
         "-1": {
-         "text": "no data yet",
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
          "color": "#6e7681"
         }
        }
@@ -315,15 +196,7 @@
       "steps": [
        {
         "value": null,
-        "color": "red"
-       },
-       {
-        "value": 90,
-        "color": "orange"
-       },
-       {
-        "value": 98,
-        "color": "green"
+        "color": "text"
        }
       ]
      },
@@ -337,16 +210,171 @@
       "lastNotNull"
      ]
     },
-    "colorMode": "background",
+    "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "justifyMode": "center"
    },
+   "transparent": true,
+   "id": 3,
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(60 * subnet:tokens:rate5m or (0 * subnet:relay_counts_tokens - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / 24 h",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 4,
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:tokens:increase24h or (0 * subnet:relay_counts_tokens - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Model calls OK",
+   "description": "Model calls answered successfully in the last five minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "#d55181"
+       },
+       {
+        "value": 90,
+        "color": "#c98500"
+       },
+       {
+        "value": 98,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
    "id": 5,
    "gridPos": {
     "x": 16,
     "y": 0,
     "w": 4,
-    "h": 4
+    "h": 3
    },
    "datasource": {
     "type": "prometheus",
@@ -368,12 +396,12 @@
   },
   {
    "type": "stat",
-   "title": "Waiting for a machine",
-   "description": "",
+   "title": "Spend of cap",
+   "description": "Today's model spend against the daily cap. At 100% every agent stops until 00:00 UTC.",
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
-     "decimals": null,
+     "unit": "percent",
+     "decimals": 0,
      "mappings": [
       {
        "type": "value",
@@ -381,6 +409,9 @@
         "-1": {
          "text": "no data yet",
          "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
         }
        }
       }
@@ -390,11 +421,15 @@
       "steps": [
        {
         "value": null,
-        "color": "green"
+        "color": "text"
        },
        {
-        "value": 1,
-        "color": "red"
+        "value": 60,
+        "color": "#c98500"
+       },
+       {
+        "value": 85,
+        "color": "#d55181"
        }
       ]
      },
@@ -408,16 +443,18 @@
       "lastNotNull"
      ]
     },
-    "colorMode": "background",
+    "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value"
+    "textMode": "value",
+    "justifyMode": "center"
    },
+   "transparent": true,
    "id": 6,
    "gridPos": {
     "x": 20,
     "y": 0,
     "w": 4,
-    "h": 4
+    "h": 3
    },
    "datasource": {
     "type": "prometheus",
@@ -430,7 +467,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(subnet:boxes_waitlisted) or vector(-1)",
+     "expr": "max(100 * subnet:spend_cap_ratio) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -438,61 +475,143 @@
    ]
   },
   {
-   "type": "stat",
-   "title": "Machine starts succeeding",
-   "description": "",
+   "type": "bargauge",
+   "title": "Machines by tokens per minute",
+   "description": "Agent machines by how many tokens a minute their agents are using, averaged over five minutes. Counts are rounded to the nearest five; one to four machines show as \"<5\".",
+   "transparent": true,
    "fieldConfig": {
     "defaults": {
-     "unit": "percent",
-     "decimals": 1,
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "noValue": "after the next relay update",
      "mappings": [
       {
        "type": "value",
        "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
+        "-5": {
+         "text": "<5"
         }
        }
       }
      ],
+     "color": {
+      "mode": "fixed"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "value": null,
-        "color": "red"
-       },
+        "color": "text"
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "idle"
+      },
+      "properties": [
        {
-        "value": 90,
-        "color": "orange"
-       },
-       {
-        "value": 98,
-        "color": "green"
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
        }
       ]
      },
-     "noValue": "\u2013"
-    },
-    "overrides": []
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "under 10K"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7a5a12"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "10K to 100K"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#a06d0a"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "100K to 1M"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "over 1M"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#e59a0c"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
+    "orientation": "vertical",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": false,
+    "namePlacement": "left",
+    "minVizHeight": 12,
+    "maxVizHeight": 300,
+    "text": {
+     "titleSize": 13,
+     "valueSize": 28
+    },
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
      ]
     },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
+    "minVizWidth": 40,
+    "maxVizWidth": 220
    },
    "id": 7,
    "gridPos": {
     "x": 0,
-    "y": 4,
-    "w": 4,
-    "h": 4
+    "y": 3,
+    "w": 16,
+    "h": 10
    },
    "datasource": {
     "type": "prometheus",
@@ -505,128 +624,226 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + 0 * subnet:box_start_failures:rate5m) or vector(-1)",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Machine wake time p95",
-   "description": "From waking a sleeping machine to it being connected. Reads 0 when there was none in the last five minutes.",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "s",
-     "decimals": 1,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
-        }
-       }
-      }
-     ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
+     "expr": "subnet:boxes_by_token_rate{bucket=\"idle\"}",
+     "legendFormat": "idle",
+     "instant": true,
+     "range": false
     },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 8,
-   "gridPos": {
-    "x": 4,
-    "y": 4,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
     {
-     "refId": "A",
+     "refId": "B",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(subnet:box_wake_seconds:p95 or 0 * subnet:box_start_failures:rate5m) or vector(-1)",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
+     "expr": "subnet:boxes_by_token_rate{bucket=\"under 10K\"}",
+     "legendFormat": "under 10K",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_by_token_rate{bucket=\"10K to 100K\"}",
+     "legendFormat": "10K to 100K",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_by_token_rate{bucket=\"100K to 1M\"}",
+     "legendFormat": "100K to 1M",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_by_token_rate{bucket=\"over 1M\"}",
+     "legendFormat": "over 1M",
+     "instant": true,
+     "range": false
     }
    ]
   },
   {
-   "type": "stat",
-   "title": "Model calls per minute",
-   "description": "",
+   "type": "bargauge",
+   "title": "Machines",
+   "description": "Agent machines by what they are doing, each bar against the limit of machines this host admits. Rounded to the nearest five; one to four show as \"<5\".",
+   "transparent": true,
    "fieldConfig": {
     "defaults": {
      "unit": "short",
+     "min": 0,
      "decimals": 0,
+     "noValue": "\u2013",
      "mappings": [
       {
        "type": "value",
        "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
+        "-5": {
+         "text": "<5"
         }
        }
       }
      ],
+     "color": {
+      "mode": "fixed"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "value": null,
-        "color": "green"
+        "color": "text"
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
        }
       ]
      },
-     "noValue": "\u2013"
-    },
-    "overrides": []
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "awake, idle"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "waking"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d1d9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "asleep"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#57606a"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "error"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "waiting for one"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
+    "orientation": "horizontal",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": true,
+    "namePlacement": "left",
+    "minVizHeight": 12,
+    "maxVizHeight": 22,
+    "text": {
+     "titleSize": 12,
+     "valueSize": 16
+    },
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
      ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
+    }
    },
-   "id": 9,
+   "transformations": [
+    {
+     "id": "configFromData",
+     "options": {
+      "configRefId": "G",
+      "mappings": [
+       {
+        "fieldName": "max",
+        "handlerKey": "max"
+       },
+       {
+        "fieldName": "Time",
+        "handlerKey": "__ignore"
+       }
+      ]
+     }
+    }
+   ],
+   "id": 8,
    "gridPos": {
-    "x": 8,
-    "y": 4,
-    "w": 4,
-    "h": 4
+    "x": 16,
+    "y": 3,
+    "w": 8,
+    "h": 6
    },
    "datasource": {
     "type": "prometheus",
@@ -639,125 +856,147 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(60 * subnet:model_requests:rate5m) or vector(-1)",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Model response p95",
-   "description": "Time until the model provider starts answering. Reads 0 when there was none in the last five minutes.",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "s",
-     "decimals": 1,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
-        }
-       }
-      }
-     ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
+     "expr": "subnet:boxes_working",
+     "legendFormat": "working",
+     "instant": true,
+     "range": false
     },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 10,
-   "gridPos": {
-    "x": 12,
-    "y": 4,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
     {
-     "refId": "A",
+     "refId": "B",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(subnet:model_response_seconds:p95 or 0 * subnet:box_start_failures:rate5m) or vector(-1)",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
+     "expr": "subnet:boxes_idle",
+     "legendFormat": "awake, idle",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_waking",
+     "legendFormat": "waking",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_asleep",
+     "legendFormat": "asleep",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_error",
+     "legendFormat": "error",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "F",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_waitlisted",
+     "legendFormat": "waiting for one",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "G",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "subnet:boxes_max",
+     "legendFormat": "max",
+     "instant": true,
+     "range": false
     }
    ]
   },
   {
-   "type": "stat",
-   "title": "Host CPU used",
-   "description": "",
+   "type": "bargauge",
+   "title": "Host",
+   "description": "How much of the server is in use.",
+   "transparent": true,
    "fieldConfig": {
     "defaults": {
      "unit": "percent",
+     "min": 0,
      "decimals": 0,
-     "mappings": [],
+     "noValue": "\u2013",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "value": null,
-        "color": "green"
+        "color": "#6e7681"
        },
        {
         "value": 75,
-        "color": "orange"
+        "color": "#c98500"
        },
        {
         "value": 90,
-        "color": "red"
+        "color": "#d55181"
        }
       ]
      },
-     "noValue": "\u2013"
+     "max": 100
     },
     "overrides": []
    },
    "options": {
+    "orientation": "horizontal",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": true,
+    "namePlacement": "left",
+    "minVizHeight": 12,
+    "maxVizHeight": 22,
+    "text": {
+     "titleSize": 12,
+     "valueSize": 16
+    },
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
      ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
+    }
    },
-   "id": 11,
+   "id": 9,
    "gridPos": {
     "x": 16,
-    "y": 4,
-    "w": 4,
+    "y": 9,
+    "w": 8,
     "h": 4
    },
    "datasource": {
@@ -772,80 +1011,37 @@
       "uid": "prometheus-subnet"
      },
      "expr": "100 * subnet:host_cpu_used_ratio",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Host memory used",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "decimals": 0,
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "green"
-       },
-       {
-        "value": 75,
-        "color": "orange"
-       },
-       {
-        "value": 90,
-        "color": "red"
-       }
-      ]
-     },
-     "noValue": "\u2013"
+     "legendFormat": "CPU",
+     "instant": true,
+     "range": false
     },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 12,
-   "gridPos": {
-    "x": 20,
-    "y": 4,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
     {
-     "refId": "A",
+     "refId": "B",
      "datasource": {
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
      "expr": "100 * subnet:host_memory_used_ratio",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
+     "legendFormat": "memory",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk",
+     "instant": true,
+     "range": false
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Agent machines",
+   "title": "Tokens per minute",
    "description": "",
    "fieldConfig": {
     "defaults": {
@@ -860,9 +1056,26 @@
       "stacking": {
        "mode": "none"
       }
-     }
+     },
+     "noValue": "after the next relay update"
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "tokens"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
@@ -875,12 +1088,537 @@
      "sort": "desc"
     }
    },
+   "transparent": true,
+   "id": 10,
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:tokens:rate5m",
+     "legendFormat": "tokens",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Model calls per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "calls"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 11,
+   "gridPos": {
+    "x": 8,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:model_requests:rate5m",
+     "legendFormat": "calls",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:model_requests:rate5m * subnet:model_error_ratio",
+     "legendFormat": "failed",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Machine starts per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "started"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 12,
+   "gridPos": {
+    "x": 16,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:box_starts:rate5m",
+     "legendFormat": "started",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "60 * subnet:box_start_failures:rate5m",
+     "legendFormat": "failed",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Spend of cap",
+   "description": "Climbs through the day and returns to 0 at 00:00 UTC.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "today"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
    "id": 13,
    "gridPos": {
     "x": 0,
-    "y": 8,
-    "w": 12,
-    "h": 8
+    "y": 19,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * subnet:spend_cap_ratio",
+     "legendFormat": "today",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Host in use",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "memory"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#199e70"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "disk"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 14,
+   "gridPos": {
+    "x": 8,
+    "y": 19,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * subnet:host_cpu_used_ratio",
+     "legendFormat": "CPU",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * subnet:host_memory_used_ratio",
+     "legendFormat": "memory",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Machines",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "running"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "asleep"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#6e7681"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "limit"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d1d9"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 15,
+   "gridPos": {
+    "x": 16,
+    "y": 19,
+    "w": 8,
+    "h": 6
    },
    "datasource": {
     "type": "prometheus",
@@ -926,362 +1664,8 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "subnet:boxes_waitlisted",
-     "legendFormat": "waiting",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "E",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
      "expr": "subnet:boxes_max",
      "legendFormat": "limit",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Success rates",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "min": 0,
-     "max": 100,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 14,
-   "gridPos": {
-    "x": 12,
-    "y": 8,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:model_error_ratio) or 100 + 0 * subnet:box_start_failures:rate5m",
-     "legendFormat": "model calls",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + 0 * subnet:box_start_failures:rate5m",
-     "legendFormat": "machine starts",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Model calls per minute",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "min": 0,
-     "max": null,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "table",
-     "placement": "bottom",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ]
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 15,
-   "gridPos": {
-    "x": 0,
-    "y": 16,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "60 * subnet:model_requests:rate5m",
-     "legendFormat": "calls",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Machine starts per minute",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "min": 0,
-     "max": null,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 16,
-   "gridPos": {
-    "x": 12,
-    "y": 16,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "60 * subnet:box_starts:rate5m",
-     "legendFormat": "started",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "60 * subnet:box_start_failures:rate5m",
-     "legendFormat": "failed",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Response and wake time (p95)",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "s",
-     "min": 0,
-     "max": null,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 17,
-   "gridPos": {
-    "x": 0,
-    "y": 24,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:model_response_seconds:p95 or 0 * subnet:box_start_failures:rate5m",
-     "legendFormat": "model response",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:box_wake_seconds:p95 or 0 * subnet:box_start_failures:rate5m",
-     "legendFormat": "machine wake",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Host headroom",
-   "description": "",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "min": 0,
-     "max": 100,
-     "custom": {
-      "lineWidth": 1,
-      "fillOpacity": 5,
-      "showPoints": "never",
-      "spanNulls": false,
-      "stacking": {
-       "mode": "none"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "id": 18,
-   "gridPos": {
-    "x": 12,
-    "y": 24,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * subnet:host_cpu_used_ratio",
-     "legendFormat": "CPU used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * subnet:host_memory_used_ratio",
-     "legendFormat": "memory used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
-     "legendFormat": "disk used",
      "instant": false,
      "range": true
     }
