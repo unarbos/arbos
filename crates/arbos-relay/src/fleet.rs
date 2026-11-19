@@ -269,6 +269,7 @@ pub struct Capacity {
     pub waitlist: usize,
     pub disk_free_gb: f64,
     pub min_free_disk_gb: f64,
+    pub mem_available_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
     /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
@@ -295,26 +296,26 @@ pub async fn capacity(state: &AppState) -> Capacity {
         .count_boxes_of_provider(Provider::Gvisor.as_str())
         .unwrap_or(usize::MAX);
     let waitlist = state.db.waitlist().map(|w| w.len()).unwrap_or(0);
-    let disk_free_gb = disk_free_gb(&state.cfg.data_dir).await;
+    let p = sample_pressure(state).await;
     Capacity {
         max_boxes: max,
         resident,
         waitlist,
-        disk_free_gb,
+        disk_free_gb: p.disk_free_gb,
         min_free_disk_gb: state.cfg.fleet.min_free_disk_gb,
-        has_room: room_for_one(
-            max,
-            resident,
-            disk_free_gb,
-            state.cfg.fleet.min_free_disk_gb,
-        ),
+        mem_available_gb: p.mem_available_gb,
+        has_room: room_for_one(max, resident, &p, &state.cfg.fleet),
         boxd: crate::boxd::capacity(state).await,
     }
 }
 
-/// The gate itself, kept pure for the tests.
-pub fn room_for_one(max: usize, resident: usize, disk_free_gb: f64, min_free_gb: f64) -> bool {
-    resident < max && disk_free_gb >= min_free_gb
+/// The gate itself, kept pure for the tests: a free slot, disk above its floor, and available
+/// memory above the eviction floor. A host that is stopping sandboxes for memory does not make
+/// new ones, whatever the count says.
+pub fn room_for_one(max: usize, resident: usize, p: &Pressure, cfg: &FleetCfg) -> bool {
+    resident < max
+        && p.disk_free_gb >= cfg.min_free_disk_gb
+        && p.mem_available_gb >= cfg.evict_min_available_gb
 }
 
 /// Admit a user who needs a sandbox: `Ok(true)` = go ahead and create it; `Ok(false)` = the host
@@ -1495,10 +1496,27 @@ mod tests {
 
     #[test]
     fn gate_counts_residents_and_disk() {
-        assert!(room_for_one(80, 79, 200.0, 40.0));
-        assert!(!room_for_one(80, 80, 200.0, 40.0), "N reached");
-        assert!(!room_for_one(80, 10, 39.9, 40.0), "disk floor");
-        assert!(room_for_one(80, 10, 40.0, 40.0));
+        let cfg = FleetCfg::default();
+        let host = |disk_free_gb, mem_available_gb| Pressure {
+            disk_free_gb,
+            mem_available_gb,
+            ..Pressure::default()
+        };
+        assert!(room_for_one(80, 79, &host(200.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 80, &host(200.0, 400.0), &cfg),
+            "N reached"
+        );
+        assert!(
+            !room_for_one(80, 10, &host(39.9, 400.0), &cfg),
+            "disk floor"
+        );
+        assert!(room_for_one(80, 10, &host(40.0, 400.0), &cfg));
+        assert!(
+            !room_for_one(80, 10, &host(200.0, 63.9), &cfg),
+            "a host short of memory is evicting; it makes no new sandbox"
+        );
+        assert!(room_for_one(80, 10, &host(200.0, 64.0), &cfg));
     }
 
     #[test]
