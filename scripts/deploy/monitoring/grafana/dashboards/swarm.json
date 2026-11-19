@@ -194,7 +194,7 @@
        "type": "value",
        "options": {
         "-1": {
-         "text": "after the next relay deploy",
+         "text": "after the next relay update",
          "color": "#6e7681"
         }
        }
@@ -261,7 +261,7 @@
        "type": "value",
        "options": {
         "-1": {
-         "text": "after the next relay deploy",
+         "text": "after the next relay update",
          "color": "#6e7681"
         }
        }
@@ -328,7 +328,7 @@
        "type": "value",
        "options": {
         "-1": {
-         "text": "after the next relay deploy",
+         "text": "after the next relay update",
          "color": "#6e7681"
         }
        }
@@ -584,17 +584,51 @@
       },
       "excludeByName": {
        "Time": true,
+       "slot": true,
        "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
        "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
        "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
        "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
        "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
        "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
        "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
        "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
        "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
        "Time 10": true,
-       "Time 11": true
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
       }
      }
     }
@@ -1080,17 +1114,51 @@
       },
       "excludeByName": {
        "Time": true,
+       "slot": true,
        "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
        "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
        "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
        "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
        "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
        "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
        "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
        "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
        "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
        "Time 10": true,
-       "Time 11": true
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
       }
      }
     }
@@ -1398,7 +1466,7 @@
        "mode": "normal"
       }
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },
@@ -1459,7 +1527,7 @@
        "mode": "none"
       }
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },
@@ -1529,17 +1597,51 @@
       },
       "excludeByName": {
        "Time": true,
+       "slot": true,
        "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
        "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
        "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
        "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
        "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
        "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
        "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
        "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
        "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
        "Time 10": true,
-       "Time 11": true
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
       }
      }
     }
@@ -1869,7 +1971,7 @@
        "mode": "normal"
       }
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },
@@ -1930,7 +2032,7 @@
        "mode": "none"
       }
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },
@@ -1991,7 +2093,7 @@
        "mode": "none"
       }
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },
@@ -2227,7 +2329,7 @@
       "fillOpacity": 80,
       "lineWidth": 0
      },
-     "noValue": "after the next relay deploy"
+     "noValue": "after the next relay update"
     },
     "overrides": []
    },

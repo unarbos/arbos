@@ -1,6 +1,8 @@
-# Aggregates for the Subnet view. Every expression ends in an aggregation with no `by`, so the
-# result has no labels: nothing here can name a box, a user, a container or the host.
-# rules_test.yml feeds these rules labelled series and fails if any label comes out.
+# Aggregates for the Arbos front page, which the partner's organisation reads too. Every expression
+# ends in an aggregation, and all but two groups of them have no `by`, so the result has no labels:
+# nothing here can name a box, a user, a container or the host. The exceptions are `kind` (which of
+# four kinds of token) and `slot` (see the end of this file).
+# rules_test.yml feeds these rules labelled series and fails if any other label comes out.
 #
 # A counter with labels does not exist until its first event, so a healthy system has no "failed"
 # series at all. The failure rules fall back to 0 while the relay (or any agentd) is reporting, so
@@ -20,6 +22,12 @@ groups:
         expr: sum(arbos_relay_boxes_turn_running)
       - record: subnet:boxes_asleep
         expr: sum(arbos_relay_boxes{state="asleep"}) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:boxes_awake
+        expr: sum(arbos_relay_boxes{state="awake"})
+      - record: subnet:boxes_waking
+        expr: sum(arbos_relay_boxes{state="waking"})
+      - record: subnet:boxes_error
+        expr: sum(arbos_relay_boxes{state="error"})
       - record: subnet:boxes_waitlisted
         expr: sum(arbos_relay_waitlist_length)
       - record: subnet:boxes_max
@@ -64,6 +72,11 @@ groups:
         expr: sum(rate(arbos_relay_tokens_total[5m]))
       - record: subnet:tokens:increase24h
         expr: sum(increase(arbos_relay_tokens_total[24h]))
+      - record: subnet:tokens_by_kind:rate5m
+        expr: sum by (kind) (rate(arbos_relay_tokens_total[5m]))
+      # A share, not an amount: how much is spent is the team's own figure.
+      - record: subnet:spend_cap_ratio
+        expr: max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0)
       - record: subnet:model_response_seconds:p95
         expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
       - record: subnet:box_wake_seconds:p95
@@ -74,3 +87,34 @@ groups:
         expr: 1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)
       - record: subnet:host_disk_free_ratio
         expr: min(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes)
+
+  # One anonymous dot per box, for the swarm. `slot` is a number the relay gives each box by a
+  # random permutation and draws again every five minutes (docs/metrics.md): it names no box, is
+  # derived from nothing about one, and means another box after the next draw. It is the only
+  # label that leaves. What a dot carries is blunted so that a box is hard to recognise by its
+  # numbers across a draw: a five-minute rate rounded to 1000 tokens, CPU to a tenth of a core,
+  # memory to half a GiB. No counter leaves: a running total would tie a box to its past.
+  - name: subnet-swarm
+    rules:
+      - record: subnet:box_tokens_per_minute
+        expr: >
+          max by (slot) (round(60 * sum by (box) (rate(arbos_relay_box_tokens_total[5m])), 1000)
+          * on (box) group_left (slot) arbos_relay_box_slot)
+      # 0 unknown, 1 asleep, 2 awake and idle, 3 waking, 4 working, 5 error
+      - record: subnet:box_state
+        expr: >
+          max by (slot) (max by (box) (0 * arbos_relay_box_state{state="unknown"} or 1 * arbos_relay_box_state{state="asleep"}
+          or 3 * arbos_relay_box_state{state="waking"} or 5 * arbos_relay_box_state{state="error"}
+          or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * arbos_relay_box_turn_running))
+          * on (box) group_left (slot) arbos_relay_box_slot)
+      # A sleeping box has no container, so nothing from cAdvisor: it reads 0.
+      - record: subnet:box_cpu_cores
+        expr: >
+          max by (slot) (round(max by (name) (rate(container_cpu_usage_seconds_total{name=~"arbos-box-.+"}[5m])), 0.1)
+          * on (name) group_left (slot) label_replace(arbos_relay_box_info * on (box) group_left (slot) arbos_relay_box_slot, "name", "$1", "container", "(.+)"))
+          or max by (slot) (0 * arbos_relay_box_slot)
+      - record: subnet:box_memory_bytes
+        expr: >
+          max by (slot) (round(max by (name) (container_memory_working_set_bytes{name=~"arbos-box-.+"}), 536870912)
+          * on (name) group_left (slot) label_replace(arbos_relay_box_info * on (box) group_left (slot) arbos_relay_box_slot, "name", "$1", "container", "(.+)"))
+          or max by (slot) (0 * arbos_relay_box_slot)

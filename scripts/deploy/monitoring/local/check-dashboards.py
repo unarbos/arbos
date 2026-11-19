@@ -23,7 +23,7 @@ EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_sec
 RELAY_ONLY = "--relay-only" in sys.argv
 # What a relay from before /metrics/boxes and the token counter cannot answer. With it, these must
 # have data like everything else; with --relay-only they are the only queries allowed to have none.
-NEEDS_DEPLOY = ("arbos_relay_box_", "arbos_relay_tokens_total", "subnet:tokens")
+NEEDS_DEPLOY = ("arbos_relay_box_", "arbos_relay_tokens_total", "subnet:tokens", "subnet:box_")
 
 
 def post(path, body, org):
@@ -50,10 +50,10 @@ def query(expr, uid, org):
 
 
 failed = 0
-for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1), ("grafana/dashboards/swarm.json", 1),
+for path, org in (("grafana/dashboards/arbos.json", 1), ("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1), ("grafana/dashboards/swarm.json", 1),
                   ("grafana/dashboards/agents.json", 1), ("grafana/dashboards-subnet/subnet.json", 2)):
     dash = json.loads((HERE / path).read_text())
-    if RELAY_ONLY and "swarm" not in path and org != 2:
+    if RELAY_ONLY and "swarm" not in path and "arbos.json" not in path and org != 2:
         continue
     for panel in dash["panels"]:
         for t in panel.get("targets", []):
@@ -71,7 +71,8 @@ series = post("/api/ds/query", {"from": str((now - 300) * 1000), "to": str(now *
     {"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus-subnet"}, "expr": '{__name__=~".+"}', "instant": True}]}, 2)
 labels = {k for f in series["results"]["A"]["frames"] for field in f["schema"]["fields"] for k in (field.get("labels") or {})}
 print("labels in the Subnet datasource:", sorted(labels))
-if labels - {"__name__", "instance", "job"}:
+# `kind` is one of four kinds of token; `slot` is a random number a box holds for five minutes.
+if labels - {"__name__", "instance", "job", "kind", "slot"}:
     failed += 1
-    print("FAIL: the Subnet datasource holds labels beyond __name__/instance/job")
+    print("FAIL: the Subnet datasource holds labels beyond __name__/instance/job/kind/slot")
 sys.exit(1 if failed else 0)

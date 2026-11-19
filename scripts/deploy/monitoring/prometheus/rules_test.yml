@@ -87,6 +87,35 @@ tests:
         values: 0+999x20
       - series: 'arbos_relay_box_info{box="0a1b2c3d4e5f", container="arbos-box-u_alice", instance="127.0.0.1:9108", job="relay-boxes"}'
         values: 1x20
+      # alice's box is slot 7 and working; bob's is slot 2, asleep, and has no container figures
+      - series: 'arbos_relay_box_slot{box="0a1b2c3d4e5f", slot="7", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_state{box="0a1b2c3d4e5f", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="0a1b2c3d4e5f", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_slot{box="1b2c3d4e5f60", slot="2", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_state{box="1b2c3d4e5f60", state="asleep", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="1b2c3d4e5f60", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="1b2c3d4e5f60", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'container_cpu_usage_seconds_total{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 0+7.4x20
+      - series: 'container_memory_working_set_bytes{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 2900000000x20
+      - series: 'arbos_relay_boxes{state="awake", instance="host-1"}'
+        values: 30x20
+      - series: 'arbos_relay_boxes{state="waking", instance="host-1"}'
+        values: 1x20
+      - series: 'arbos_relay_boxes{state="error", instance="host-1"}'
+        values: 0x20
+      - series: 'arbos_relay_spend_today_usd{instance="host-1"}'
+        values: 125x20
+      - series: 'arbos_relay_spend_daily_cap_usd{instance="host-1"}'
+        values: 500x20
       - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
         values: 0+15x20
       - series: 'node_cpu_seconds_total{mode="user", cpu="0", instance="host-1"}'
@@ -108,6 +137,9 @@ tests:
           - { labels: "subnet:boxes_running", value: 2 }
           - { labels: "subnet:boxes_working", value: 21 }
           - { labels: "subnet:boxes_asleep", value: 3 }
+          - { labels: "subnet:boxes_awake", value: 30 }
+          - { labels: "subnet:boxes_waking", value: 1 }
+          - { labels: "subnet:boxes_error", value: 0 }
           - { labels: "subnet:boxes_waitlisted", value: 0 }
           - { labels: "subnet:boxes_max", value: 100 }
           - { labels: "subnet:boxes_reporting", value: 1 }
@@ -125,6 +157,18 @@ tests:
           - { labels: "subnet:model_requests:rate5m", value: 3.3333333333333335 }
           - { labels: "subnet:tokens:rate5m", value: 100 }
           - { labels: "subnet:tokens:increase24h", value: 60000 }
+          - { labels: 'subnet:tokens_by_kind:rate5m{kind="input"}', value: 10 }
+          - { labels: 'subnet:tokens_by_kind:rate5m{kind="cache_read"}', value: 90 }
+          - { labels: "subnet:spend_cap_ratio", value: 0.25 }
+          # the dots: a slot and nothing else, values rounded
+          - { labels: 'subnet:box_tokens_per_minute{slot="7"}', value: 2000 }
+          - { labels: 'subnet:box_tokens_per_minute{slot="2"}', value: 0 }
+          - { labels: 'subnet:box_state{slot="7"}', value: 4 }
+          - { labels: 'subnet:box_state{slot="2"}', value: 1 }
+          - { labels: 'subnet:box_cpu_cores{slot="7"}', value: 0.2 }
+          - { labels: 'subnet:box_cpu_cores{slot="2"}', value: 0 }
+          - { labels: 'subnet:box_memory_bytes{slot="7"}', value: 2684354560 }
+          - { labels: 'subnet:box_memory_bytes{slot="2"}', value: 0 }
           - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
           - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }

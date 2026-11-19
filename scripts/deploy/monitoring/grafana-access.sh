@@ -76,7 +76,7 @@ api PUT /api/org/preferences "$ORG" <<<'{"homeDashboardUID":"arbos-subnet"}' | e
 # The main organisation's home is set the same way, per organisation. There is deliberately no
 # instance-wide default home dashboard: it would also be what the Subnet organisation falls back to
 # if its own preference were ever lost.
-api PUT /api/org/preferences 1 <<<'{"homeDashboardUID":"arbos-fleet"}' | expect "set the main home dashboard" "200" >/dev/null
+api PUT /api/org/preferences 1 <<<'{"homeDashboardUID":"arbos"}' | expect "set the main home dashboard" "200" >/dev/null
 
 found=$(api GET "/api/users/lookup?loginOrEmail=$LOGIN" </dev/null | expect "look up viewer" "200 404")
 USER_ID=$(id_of <<<"$found")
@@ -95,7 +95,8 @@ api DELETE "/api/orgs/1/users/$USER_ID" </dev/null | expect "remove viewer from 
 # not be reachable, and the Subnet dashboard must be.
 as_viewer() { curl -sS -o /dev/null -w '%{http_code}' "$GRAFANA$1" -K <(printf 'user = "%s:%s"\n' "$LOGIN" "$PASSWORD"); }
 [[ $(as_viewer /api/dashboards/uid/arbos-subnet) == 200 ]] || { echo "viewer cannot open the Subnet view" >&2; exit 1; }
-for path in /api/dashboards/uid/arbos-fleet /api/dashboards/uid/arbos-boxes /api/dashboards/uid/arbos-agents \
+for path in /api/dashboards/uid/arbos /api/dashboards/uid/arbos-fleet /api/dashboards/uid/arbos-boxes /api/dashboards/uid/arbos-agents \
+            /api/dashboards/uid/arbos-swarm \
             /api/datasources/uid/prometheus "/api/datasources/proxy/uid/prometheus/api/v1/query?query=up"; do
   code=$(as_viewer "$path")
   [[ $code == 403 || $code == 404 ]] || { echo "viewer got HTTP $code on $path — it must be refused" >&2; exit 1; }

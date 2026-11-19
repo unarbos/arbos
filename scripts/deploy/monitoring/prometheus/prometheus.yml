@@ -41,7 +41,7 @@ scrape_configs:
       - targets: ["127.0.0.1:9108"]
 
   # The relay's own view of every registered box (state, turn running, tokens), for the Swarm
-  # dashboard: ten series per box, read from the relay's memory. `box` is an opaque id, but the
+  # dashboard: eleven series per box, read from the relay's memory. `box` is an opaque id, but the
   # info series names each box's container, so this job belongs to this Prometheus only; the
   # Subnet one receives `subnet:*` aggregates and nothing from here. 404 until the relay serves it.
   - job_name: relay-boxes

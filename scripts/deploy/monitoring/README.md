@@ -42,7 +42,15 @@ Files:
 
 ## Dashboards
 
-- **Arbos fleet** (home), three rows of single stats then time series. Service: relay and public
+- **Arbos** (home, in both organisations): the front page, one screen. Six numbers (service,
+  machines working, tokens per minute and in 24 hours, model calls succeeding, spend of the daily
+  cap), the swarm of every agent machine with machines by state and host use beside it, then
+  tokens by kind, model calls and machine starts over time; below the fold spend, host and
+  machines over time. It is generated once and written twice, `grafana/dashboards/arbos.json`
+  and `grafana/dashboards-subnet/subnet.json`, and both copies read the same `subnet:*`
+  aggregates, so they cannot disagree. They differ in the swarm only: see
+  [The partner's swarm](#the-partners-swarm). The team's copy links to the dashboards below.
+- **Arbos fleet**, three rows of single stats then time series. Service: relay and public
   probes, kill switch, today's spend against the daily cap, model errors and response time, relay
   restarts, targets down. Boxes: running, slots used against `max_boxes`, asleep, waitlisted, start
   failures, wake queue. Host: CPU, memory, disk free and days until full, load, relay memory,
@@ -58,14 +66,11 @@ Files:
   [Swarm and the relay](#swarm-and-the-relay) for what it shows on which relay.
 - **Agents**: turns started / finished / failed, turn duration percentiles, messages waiting,
   crashes, model calls, errors and response time, and how many awake boxes are reporting.
-- **Subnet view** (separate organisation), aggregates only, and only what the relay, the host and
-  the probes feed, which is what exists today: service up, reachable from outside (the relay's own
-  public name), machines running, machines working now, model calls succeeding and per minute,
-  model response time, tokens per minute and in 24 hours, machine starts succeeding, machine wake
-  time, waiting for a machine, host CPU and memory. A percentage with nothing to divide by reads 100 (nothing failed); a tile whose
-  source is not reporting says "no data yet" in grey, never a blank or a NaN. Turn counts and turn
-  duration can only come from the machines themselves; the rules for them exist and are tested, and
-  the panels are added when boxes run an image that reports them (#3096).
+- **Subnet view** is what this page calls the partner's copy of Arbos: the one dashboard of the
+  Subnet organisation and its home. A percentage with nothing to divide by reads 100 (nothing
+  failed); a figure whose source is not reporting says so in grey, never a blank or a NaN. Turn
+  counts and turn duration can only come from the machines themselves; the rules for them exist
+  and are tested, and the panels are added when boxes run an image that reports them (#3096).
 
 To change a panel: edit the query in `dashboards.py`, run `python3 dashboards.py`, commit both.
 Grafana reloads the files within a minute; the Subnet view is reloaded by `grafana-access.sh`.
@@ -140,9 +145,12 @@ It arrives within 30 seconds and resolves itself after five minutes.
 - **Why a second Prometheus.** A Grafana Viewer can send any query to any datasource of their
   organisation, whatever dashboards they are allowed to open; hiding a dashboard is not a
   boundary. So the Subnet organisation's datasource is an instance that only ever receives the
-  `subnet:*` recording rules, each of which aggregates every label away. There is no query that
-  returns a user id, a container name or a hostname, because that data is not there.
-  `prometheus/rules_test.yml` feeds the rules labelled input and fails if a label comes out;
+  `subnet:*` recording rules, each of which aggregates the identifying labels away. There is no
+  query that returns a user id, a container name, a box id or a hostname, because that data is
+  not there. Two labels do leave: `kind` (which of four kinds of token) and `slot`
+  ([The partner's swarm](#the-partners-swarm)). It has no scrape job for the relay at all, so it
+  cannot be pointed at `/metrics/boxes` by changing a path; it federates and nothing else.
+  `prometheus/rules_test.yml` feeds the rules labelled input and lists their complete output;
   `grafana-access.sh` ends by logging in as the viewer and failing unless the admin dashboards
   and datasource refuse it.
 - Container names contain user ids. They appear on the Boxes and Swarm dashboards only: not in
@@ -221,7 +229,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 | job | scrapes |
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
-| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend), ten series per box |
+| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend, slot), eleven series per box |
 | `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
@@ -255,8 +263,11 @@ cAdvisor reports.
 | Swarm | every running box by CPU and memory, grey (state unknown), on the floor | tokens per minute on the vertical axis, colour by state, sleeping boxes at the origin |
 | Network against CPU | live | live |
 | Working, Running, Calls / min, Spend, Boxes by state | live (the relay's fleet gauges) | live |
-| Tokens / s, / min, / 24 h; token charts; table columns Tokens, Calls, Spend | "after the next relay deploy" | live |
-| Subnet view: Tokens per minute, Tokens in 24 hours | "no data yet" | live |
+| Tokens / s, / min, / 24 h; token charts; table columns Tokens, Calls, Spend | "after the next relay update" | live |
+| Arbos, both copies: token numbers and token chart | "after the next relay update" | live |
+| Arbos, the team's swarm | as Swarm above | as Swarm above |
+| Arbos, the partner's swarm | "after the next relay update" (no slots yet) | anonymous dots |
+| Arbos, everything else | live | live |
 
 Nothing is configured when the relay changes: the `relay-boxes` job answers 404 until then, alerts
 on nothing (`ScrapeTargetDown` leaves out the relay's jobs; `RelayMetricsOff` is the alert for the
@@ -268,12 +279,41 @@ therefore move in steps, one per finished call, not with the stream.
 "Tokens / 24 h" is the last 24 hours, not the calendar day, and counts from the relay's start if
 that is more recent: the counters live in the relay's memory and restart at zero with it.
 
-**Cost of the 5 s scrape.** Ten series per registered box: about 720 series for 72 boxes and 1,500
+**Cost of the 5 s scrape.** Eleven series per registered box: about 800 series for 72 boxes and 1,650
 at the cap of 150, roughly 60–120 KB per scrape, written by the relay from memory with no
-database read. In Prometheus that is 12–26 million samples a day; most are constants, so expect
+database read. In Prometheus that is 14–29 million samples a day; most are constants, so expect
 under 0.5 GB over the 15 days of retention. The scrape is the only thing here faster than 15 s;
 if it has to be slower, change `scrape_interval` of `relay-boxes` and the windows that are shorter
 than four scrapes (`[20s]` in `dashboards.py`).
+
+## The partner's swarm
+
+The partner sees the same swarm as the team, as anonymous dots: each machine's tokens per minute,
+CPU, memory and state, and nothing that says which machine it is.
+
+- The relay gives every box a `slot`, a number from 1 to the number of boxes, by a random
+  permutation that it draws again every five minutes, at its start, and whenever a box is added
+  or removed (`arbos_relay_box_slot`, [`docs/metrics.md`](../../../docs/metrics.md)). Nothing about a
+  box goes into its slot: not the user id, not the `box` id.
+- The rules in the `subnet-swarm` group join each box's numbers to its slot and aggregate
+  `by (slot)`. `slot` is the only label that leaves; the rule test lists the complete output.
+- What a dot carries is blunted: a five-minute token rate rounded to 1,000, CPU to a tenth of a
+  core, memory to half a GiB. No counter leaves, because a running total would tie a box to its
+  past across a draw.
+- The partner's panel is joined on `slot` and does not show it. There is no table of machines, no
+  drill-down and no Explore on that side.
+
+What this does and does not give. No label can be followed for more than five minutes, and
+nothing in the data says who a machine belongs to. It cannot stop two things, and no per-machine
+feed can: a machine with an unusual size can often be found again after a draw by its numbers, as
+an anonymous object; and someone who knows from elsewhere when a particular user's agents are
+working can guess which dot that is while few machines are busy, and so learn roughly how many
+tokens and how much CPU that user is using. If that is ever too much, replace the partner's
+swarm with a distribution (machines by tokens-per-minute bucket and by state): delete the
+`subnet-swarm` rules and the partner branch of `overview()` in `dashboards.py`.
+
+Spend reaches the partner as a share of the daily cap (`subnet:spend_cap_ratio`), never as an
+amount.
 
 ## Decisions
 
@@ -493,7 +533,7 @@ Safari does not):
 ssh -N -L 3300:127.0.0.1:3300 <the relay host>
 ```
 
-then open `http://localhost:3300` and log in as `admin`: Arbos fleet is the home page. Host,
+then open `http://localhost:3300` and log in as `admin`: Arbos is the home page. Host,
 container, probe and relay-process panels have data now; the relay's own and the agent panels show
 "–" until step 9.
 

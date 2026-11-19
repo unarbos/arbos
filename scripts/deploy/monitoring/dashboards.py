@@ -285,7 +285,7 @@ agents = dashboard("arbos-agents", "Agents", [
 # A relay from before `/metrics/boxes` has none of those series. The dashboard then still plots
 # every running box from cAdvisor (state unknown, no tokens), the counts come from the relay's
 # fleet gauges, and each token figure says when it arrives instead of "No data".
-AFTER_DEPLOY = "after the next relay deploy"
+AFTER_DEPLOY = "after the next relay update"
 WAITING = [{"type": "value", "options": {"-1": {"text": AFTER_DEPLOY, "color": "#6e7681"}}}]
 # Colour is the box's state. Three hues that stay apart for colour-blind readers on the dark panel
 # (checked pairwise), and greys for the states in which a box is not doing anything.
@@ -318,14 +318,15 @@ def token_tile(title, expr, desc, decimals=0):
     return stat(title, pending(expr), "short", OK, WAITING, decimals, desc=desc)
 
 
-def per_box(title, fields, w, desc):
-    """A panel with one row per box: instant queries joined on `name`. `fields` is a list of
-    (column name, unit, query)."""
+def per_box(title, fields, w, desc, key="name"):
+    """A panel with one row per box: instant queries joined on `key`. `fields` is a list of
+    (column name, unit, query). Joined on anything but the name, the key itself is not shown."""
     renames = {f"Value #{chr(65 + i)}": head for i, (head, _, _) in enumerate(fields)}
     return {"title": title, "description": desc, "w": w, "instant": True, "exprs": [(q, "") for _, _, q in fields],
-            "transformations": [{"id": "joinByField", "options": {"byField": "name", "mode": "outer"}},
+            "transformations": [{"id": "joinByField", "options": {"byField": key, "mode": "outer"}},
                                 {"id": "organize", "options": {"renameByName": {**renames, "name": "Box"},
-                                                               "excludeByName": {"Time": True, **{f"Time {i}": True for i in range(1, 12)}}}}],
+                                                               "excludeByName": {"Time": True, "slot": True, **{
+                                                                   f"{label} {i}": True for i in range(1, 12) for label in ("Time", "__name__", "job", "instance")}}}}],
             "fieldConfig": {"defaults": {}, "overrides": [
                 {"matcher": {"id": "byName", "options": head}, "properties": [{"id": "unit", "value": unit}]} for head, unit, _ in fields]}}
 
@@ -334,14 +335,14 @@ def override(name, **props):
     return {"matcher": {"id": "byName", "options": name}, "properties": [{"id": k, "value": v} for k, v in props.items()]}
 
 
-def swarm_chart(title, fields, x, y, size, w, h, desc):
+def swarm_chart(title, fields, x, y, size, w, h, desc, key="name"):
     """One bubble per box: position from two measures, area from a third, colour from its state."""
-    p = per_box(title, fields, w, desc)
+    p = per_box(title, fields, w, desc, key)
     by = lambda name: {"matcher": {"id": "byName", "options": name}}
     # pluginVersion: without one Grafana takes the options for the pre-11.1 format and rewrites them
     p.update(type="xychart", pluginVersion="13.2.6", h=h, options={
         "mapping": "manual", "series": [{"frame": {"matcher": {"id": "byIndex", "options": 0}}, "x": by(x), "y": by(y),
-                                         "size": by(size), "color": by("State"), "name": {"fixed": "box"}}],
+                                         "size": by(size), "color": by("State"), "name": {"fixed": "machine" if key == "slot" else "box"}}],
         "legend": {"showLegend": False}, "tooltip": {"mode": "single", "sort": "none"}})
     p["fieldConfig"]["defaults"] = {"min": 0, "custom": {
         "show": "points", "pointSize": {"fixed": 8, "min": 6, "max": 44}, "pointShape": "circle", "pointStrokeWidth": 1,
@@ -450,66 +451,124 @@ swarm = dashboard("arbos-swarm", "Swarm", [
 ], refresh="5s", span="now-30m")
 
 
-# The Subnet view lives in its own Grafana organisation whose only datasource holds `subnet:*`.
-# Everything on it is fed by the relay, the host and the probes, which is what exists today. The
-# turn figures that only the machines themselves can report (`subnet:turns_*`,
-# `subnet:turn_duration_seconds:*`) are recorded and tested but not shown: boxes are not on an image
-# that reports them yet, and a row of empty panels is not something to hand a partner. Add them here
-# when they have data.
+# Arbos: the front page, one screen, for the team and for the partner alike. It is written twice
+# from one definition: `arbos.json` for the main organisation and `subnet.json` for the Subnet one.
+# Both read the same label-free `subnet:*` aggregates (the main Prometheus evaluates them too), so
+# the two copies cannot disagree. They differ in one panel: the team's swarm is keyed by container
+# name, shows it on hover and links to the Swarm dashboard; the partner's is keyed by `slot`, a
+# random number each box holds for five minutes, and shows nothing that names a box.
 #
-# A percentage with nothing to divide by (no model call, no machine start in five minutes) reads
-# 100: nothing failed. A tile whose source is not reporting at all says "no data yet" (-1) in grey,
-# never a blank or a NaN.
-PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": "#6e7681"}}}]
+# Calm on purpose: numbers in the text colour, colour only for a crossed threshold or a box's state.
+# A figure whose source is not reporting says so in grey (-1), never a blank or a NaN; a percentage
+# with nothing to divide by (no model call in five minutes) reads 100: nothing failed.
+QUIET_GREY = "#6e7681"
+PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": QUIET_GREY}}}]
+NEUTRAL = steps((None, "text"))
 RELAY_REPORTS = "0 * subnet:box_start_failures:rate5m"  # present exactly while the relay reports
-
-
-def or_pending(expr):
-    # max() strips the labels, so the value and the placeholder are one series and the tile shows one of them
-    return f"max({expr}) or vector(-1)"
-
-
-def tile(title, expr, unit="short", thresholds=OK, decimals=None, desc=""):
-    return stat(title, or_pending(expr), unit, thresholds, PENDING, decimals, w=4, desc=desc)
-
-
 MODEL_OK = f"100 * (1 - subnet:model_error_ratio) or 100 + {RELAY_REPORTS}"
-STARTS_OK = f"100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + {RELAY_REPORTS}"
-GOOD_PCT = steps((None, RED), (90, ORANGE), (98, GREEN))
-QUIET = " Reads 0 when there was none in the last five minutes."
-subnet = dashboard("arbos-subnet", "Subnet view", [
-    stat("Service", "subnet:relay_up", **UP, w=4),
-    stat("Reachable from outside", "subnet:public_up", **UP, w=4),
-    stat("Agent machines running", "subnet:boxes_running", w=4),
-    tile("Machines working now", "subnet:boxes_working", desc="Machines with an agent turn running in the last 3 minutes."),
-    tile("Model calls succeeding", MODEL_OK, "percent", GOOD_PCT, 1),
-    tile("Waiting for a machine", "subnet:boxes_waitlisted", thresholds=ANY_IS_BAD),
+BLUE, AMBER, MAGENTA, AQUA = "#3987e5", "#c98500", "#d55181", "#199e70"
 
-    tile("Machine starts succeeding", STARTS_OK, "percent", GOOD_PCT, 1),
-    tile("Machine wake time p95", f"subnet:box_wake_seconds:p95 or {RELAY_REPORTS}", "s", decimals=1,
-         desc="From waking a sleeping machine to it being connected." + QUIET),
-    tile("Model calls per minute", "60 * subnet:model_requests:rate5m", decimals=0),
-    tile("Tokens per minute", "60 * subnet:tokens:rate5m", decimals=0,
-         desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes."),
-    tile("Tokens in 24 hours", "subnet:tokens:increase24h", decimals=0),
-    tile("Model response p95", f"subnet:model_response_seconds:p95 or {RELAY_REPORTS}", "s", decimals=1,
-         desc="Time until the model provider starts answering." + QUIET),
-    stat("Host CPU used", "100 * subnet:host_cpu_used_ratio", "percent", PCT_HIGH_BAD, decimals=0, w=12),
-    stat("Host memory used", "100 * subnet:host_memory_used_ratio", "percent", PCT_HIGH_BAD, decimals=0, w=12),
 
-    ts("Agent machines", [("subnet:boxes_running", "running"), ("subnet:boxes_working", "working"), ("subnet:boxes_asleep", "asleep"),
-                          ("subnet:boxes_waitlisted", "waiting"), ("subnet:boxes_max", "limit")]),
-    ts("Success rates", [(MODEL_OK, "model calls"), (STARTS_OK, "machine starts")], "percent", max_=100),
-    ts("Model calls per minute", [("60 * subnet:model_requests:rate5m", "calls")]),
-    ts("Machine starts per minute", [("60 * subnet:box_starts:rate5m", "started"), ("60 * subnet:box_start_failures:rate5m", "failed")]),
-    ts("Response and wake time (p95)", [(f"subnet:model_response_seconds:p95 or {RELAY_REPORTS}", "model response"),
-                                         (f"subnet:box_wake_seconds:p95 or {RELAY_REPORTS}", "machine wake")], "s"),
-    ts("Host headroom", [("100 * subnet:host_cpu_used_ratio", "CPU used"), ("100 * subnet:host_memory_used_ratio", "memory used"),
-                         ("100 * (1 - subnet:host_disk_free_ratio)", "disk used")], "percent", max_=100),
-], ds="prometheus-subnet", nav=False)
+def headline(title, expr, unit="short", thresholds=NEUTRAL, mappings=PENDING, decimals=0, desc=""):
+    p = stat(title, pending(expr), unit, thresholds, mappings, decimals, w=4, desc=desc)
+    p.update(h=3, transparent=True)
+    p["options"].update(colorMode="value", justifyMode="center")
+    return p
 
-FILES = {"grafana/dashboards/fleet.json": fleet, "grafana/dashboards/boxes.json": boxes, "grafana/dashboards/swarm.json": swarm,
-         "grafana/dashboards/agents.json": agents, "grafana/dashboards-subnet/subnet.json": subnet}
+
+def bars(title, rows, unit, h, max_expr=None, thresholds=None, desc=""):
+    """A short list of labelled bars. `rows` is (name, query, colour); with `thresholds` the colour is the value's."""
+    p = {"type": "bargauge", "title": title, "description": desc, "w": 8, "h": h, "instant": True, "transparent": True,
+         "exprs": [(q, name) for name, q, _ in rows],
+         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "decimals": 0, "noValue": "–",
+                                      "color": {"mode": "thresholds" if thresholds else "fixed"},
+                                      "thresholds": {"mode": "absolute", "steps": thresholds or NEUTRAL}},
+                         "overrides": [] if thresholds else [override(name, color={"mode": "fixed", "fixedColor": c}) for name, _, c in rows]},
+         "options": {"orientation": "horizontal", "displayMode": "basic", "valueMode": "color", "showUnfilled": True,
+                     "namePlacement": "left", "minVizHeight": 12, "maxVizHeight": 22, "text": {"titleSize": 12, "valueSize": 16},
+                     "reduceOptions": {"calcs": ["lastNotNull"]}}}
+    if max_expr:  # every bar against the same ceiling, read from a query
+        p["exprs"].append((max_expr, "max"))
+        p["transformations"] = [{"id": "configFromData", "options": {"configRefId": chr(65 + len(rows)), "mappings": [
+            {"fieldName": "max", "handlerKey": "max"}, {"fieldName": "Time", "handlerKey": "__ignore"}]}}]
+    else:
+        p["fieldConfig"]["defaults"]["max"] = 100
+    return p
+
+
+def trend(title, lines, unit="short", stack=False, desc="", max_=None):
+    """A time series in fixed colours. `lines` is (query, legend, colour)."""
+    p = ts(title, [(q, name) for q, name, _ in lines], unit, w=8, stack=stack, desc=desc, max_=max_)
+    p.update(h=6, transparent=True)
+    p["fieldConfig"]["overrides"] = [override(name, color={"mode": "fixed", "fixedColor": c}) for _, name, c in lines]
+    p["options"]["legend"] = {"displayMode": "list", "placement": "bottom", "calcs": []}
+    return later(p)
+
+
+def overview(partner):
+    if partner:
+        hero = swarm_chart("Swarm", [("CPU cores", "short", "subnet:box_cpu_cores"), ("Memory", "bytes", "subnet:box_memory_bytes"),
+                                     ("State", "short", "subnet:box_state"), ("Tokens / min", "short", "subnet:box_tokens_per_minute")],
+                           "CPU cores", "Tokens / min", "Memory", 16, 10, "", key="slot")
+        # An XY chart with nothing to plot can only say "No data", so the title says why: $note is
+        # that sentence while no dot is reported, and a space once there is one.
+        hero["title"] = "Swarm$note"
+        note = (f'label_replace(vector(1) unless on () count(subnet:box_state), "note", " · {AFTER_DEPLOY}", "", "")'
+                ' or on () label_replace(vector(1), "note", " ", "", "")')
+        variables = [{"name": "note", "type": "query", "hide": 2, "refresh": 2, "datasource": {"type": "prometheus", "uid": "prometheus-subnet"},
+                      "query": {"query": f"query_result({note})", "refId": "note"}, "regex": '/note="(.*?)"/'}]
+    else:
+        hero = swarm_chart("Swarm", [*POINT, ("Tokens / min", "short", f"{TOKENS_MIN} or {RUNNING0}")], "CPU cores", "Tokens / min", "Memory", 16, 10, "")
+        variables = []
+        hero["fieldConfig"]["defaults"]["links"] = [{"title": "Open this box", "url": "/d/arbos-swarm/swarm?var-box=${__data.fields.Box}"}]
+    hero.update(transparent=True, description=(
+        "Every agent machine is one dot. Up: tokens per minute its agents are using. Right: CPU cores. Area: memory. Colour: what it is doing, "
+        "as in the list on the right. A busy fleet rises off the floor; an idle one sits along it; sleeping machines are at the origin."
+        + (" The dots carry no identity: which dot is which machine is drawn again at random every five minutes." if partner else
+           " Hover for the box; click to open it. Until the relay reports per box, every dot is grey and on the floor.")))
+    hero = later(hero)
+    colors = {text: color for _, text, color in STATES}
+    idle = "clamp_min(subnet:boxes_awake - subnet:boxes_working, 0)"
+    return dashboard("arbos-subnet" if partner else "arbos", "Arbos", [
+        headline("Service", "subnet:relay_up * subnet:public_up", thresholds=steps((None, MAGENTA), (1, AQUA)),
+                 mappings=[{"type": "value", "options": {"0": {"text": "Down"}, "1": {"text": "Up"}, "-1": {"text": "no data yet", "color": QUIET_GREY}}}],
+                 desc="The relay answers, on the server and from outside through its public name."),
+        headline("Working now", "subnet:boxes_working", desc="Agent machines with a turn running in the last 3 minutes."),
+        headline("Tokens / min", "60 * subnet:tokens:rate5m", mappings=WAITING,
+                 desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes."),
+        headline("Tokens / 24 h", "subnet:tokens:increase24h", mappings=WAITING),
+        headline("Model calls OK", MODEL_OK, "percent", steps((None, MAGENTA), (90, AMBER), (98, "text")), decimals=1,
+                 desc="Model calls answered successfully in the last five minutes."),
+        headline("Spend of cap", "100 * subnet:spend_cap_ratio", "percent", steps((None, "text"), (60, AMBER), (85, MAGENTA)),
+                 desc="Today's model spend against the daily cap. At 100% every agent stops until 00:00 UTC."),
+
+        hero,
+        bars("Machines", [("working", "subnet:boxes_working", colors["working"]), ("awake, idle", idle, colors["awake, idle"]),
+                          ("waking", "subnet:boxes_waking", colors["waking"]), ("asleep", "subnet:boxes_asleep", colors["asleep"]),
+                          ("error", "subnet:boxes_error", colors["error"]), ("waiting for one", "subnet:boxes_waitlisted", MAGENTA)],
+             "short", 6, max_expr="subnet:boxes_max", desc="Agent machines by what they are doing, each bar against the limit of machines this host admits."),
+        {**bars("Host", [("CPU", "100 * subnet:host_cpu_used_ratio", None), ("memory", "100 * subnet:host_memory_used_ratio", None),
+                         ("disk", "100 * (1 - subnet:host_disk_free_ratio)", None)], "percent", 4,
+                thresholds=steps((None, QUIET_GREY), (75, AMBER), (90, MAGENTA)), desc="How much of the server is in use."), "under": True},
+
+        trend("Tokens per minute", [(f"60 * subnet:tokens_by_kind:rate5m{{kind=\"{k}\"}}", name, c) for k, name, c in (
+            ("cache_read", "cache read", BLUE), ("cache_write", "cache write", AQUA), ("input", "input", AMBER), ("output", "output", MAGENTA))], stack=True),
+        trend("Model calls per minute", [("60 * subnet:model_requests:rate5m", "calls", BLUE),
+                                         ("60 * subnet:model_requests:rate5m * subnet:model_error_ratio", "failed", MAGENTA)]),
+        trend("Machine starts per minute", [("60 * subnet:box_starts:rate5m", "started", BLUE), ("60 * subnet:box_start_failures:rate5m", "failed", MAGENTA)]),
+
+        trend("Spend of cap", [("100 * subnet:spend_cap_ratio", "today", BLUE)], "percent", max_=100,
+              desc="Climbs through the day and returns to 0 at 00:00 UTC."),
+        trend("Host in use", [("100 * subnet:host_cpu_used_ratio", "CPU", BLUE), ("100 * subnet:host_memory_used_ratio", "memory", AQUA),
+                              ("100 * (1 - subnet:host_disk_free_ratio)", "disk", AMBER)], "percent", max_=100),
+        trend("Machines", [("subnet:boxes_running", "running", BLUE), ("subnet:boxes_working", "working", AMBER),
+                           ("subnet:boxes_asleep", "asleep", QUIET_GREY), ("subnet:boxes_max", "limit", "#c9d1d9")]),
+    ], ds="prometheus-subnet" if partner else "prometheus", variables=variables, nav=not partner, refresh="10s", span="now-3h")
+
+
+FILES = {"grafana/dashboards/arbos.json": overview(partner=False), "grafana/dashboards/fleet.json": fleet,
+         "grafana/dashboards/boxes.json": boxes, "grafana/dashboards/swarm.json": swarm,
+         "grafana/dashboards/agents.json": agents, "grafana/dashboards-subnet/subnet.json": overview(partner=True)}
 
 if __name__ == "__main__":
     stale = []

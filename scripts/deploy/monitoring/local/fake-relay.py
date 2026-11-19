@@ -18,7 +18,7 @@ which a laptop has no equivalent of, and for a fleet of SWARM boxes as cAdvisor 
 FAKE_BOXES=0 is the relay production runs today: no box discovery, no /metrics/boxes and no token
 counters. Every dashboard has to read honestly like that.
 """
-import json, os, threading, time
+import json, os, random, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
@@ -27,13 +27,14 @@ START = time.time()
 BOXES = ["0a1b2c3d4e5f", "1b2c3d4e5f60", "2c3d4e5f6071"] if os.environ.get("FAKE_BOXES", "1") != "0" else []
 OLD_IMAGE_BOX = "3d4e5f607182"
 SWARM = 40
+TURN = 180  # seconds a fake box works, or rests, at a stretch
 KINDS = (("input", 6), ("output", 3), ("cache_read", 60), ("cache_write", 9))
 
 
 def swarm():
     """(container, box id, state, working) for each box: the three test containers, then the fleet
-    cAdvisor is faked for. Most are awake; which of those work a turn changes every minute."""
-    minute = int(time.time()) // 60
+    cAdvisor is faked for. Most are awake; which of those work a turn changes every three minutes."""
+    minute = int(time.time()) // TURN
     out = []
     for i in range(SWARM + 3):
         state = "awake"
@@ -45,12 +46,12 @@ def swarm():
 
 
 def work(i, state):
-    """Seconds box i has spent in turns: an awake box works one minute in three, as swarm() says."""
+    """Seconds box i has spent in turns: an awake box works one stretch in three, as swarm() says."""
     if state != "awake":
         return 0
-    minute, phase = int(time.time()) // 60, i * 7 % 3
+    minute, phase = int(time.time()) // TURN, i * 7 % 3
     done = (minute + phase + 2) // 3 - (phase + 2) // 3
-    return 60 * done + (time.time() % 60 if (i * 7 + minute) % 3 == 0 else 0)
+    return TURN * done + (time.time() % TURN if (i * 7 + minute) % 3 == 0 else 0)
 
 
 def size(i):
@@ -68,7 +69,7 @@ def cadvisor_boxes():
         lines += [
             f"container_last_seen{{{box}}} {time.time()}",
             f"container_start_time_seconds{{{box}}} {START - 3600}",
-            f"container_cpu_usage_seconds_total{{{box}}} {t * 0.02 * (1 + i % 3) + work(i, state) * (0.3 + i * 53 % 23 / 12)}",
+            f"container_cpu_usage_seconds_total{{{box}}} {t * (0.02 + i * 29 % 19 / 50) + work(i, state) * (0.3 + i * 53 % 23 / 12)}",
             f"container_memory_working_set_bytes{{{box}}} {(0.6 + i % 9 * 0.45 + (1.5 if working else 0)) * 2**30}",
             f"container_spec_memory_limit_bytes{{{box}}} {16 * 2**30}",
             f"container_threads{{{box}}} {60 + i % 11 * 9}",
@@ -81,10 +82,13 @@ def cadvisor_boxes():
 
 def swarm_metrics():
     lines = []
+    slots = list(range(1, SWARM + 4))
+    random.Random(int(time.time()) // 300).shuffle(slots)  # a new draw every five minutes, like the relay
     for i, (name, box, state, working) in enumerate(swarm()):
         calls = work(i, state) / 6
         lines += [
             f'arbos_relay_box_info{{box="{box}",container="{name}"}} 1',
+            f'arbos_relay_box_slot{{box="{box}",slot="{slots[i]}"}} 1',
             f'arbos_relay_box_state{{box="{box}",state="{state}"}} 1',
             f'arbos_relay_box_turn_running{{box="{box}"}} {int(working)}',
             f'arbos_relay_box_sockets{{box="{box}"}} {3 if state == "awake" else 0}',
