@@ -186,6 +186,9 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Held while a cold `doc_cache` is rebuilt, so the room's other readers wait for that
+    /// build and do not each start their own.
+    pub(crate) doc_build: tokio::sync::Mutex<()>,
     /// One speculative push owns the message preimage through durable admission.
     pub(crate) push_admission: tokio::sync::Mutex<()>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
@@ -464,6 +467,10 @@ pub struct AppState {
     /// device_id → its last presence frame; `rooms::flush_presence` writes these to
     /// `devices.last_seen_at` in batches.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// user_id → when a device of theirs last talked to the relay (a presence frame or an
+    /// authenticated request). `online` is answered from here first: the same stamps reach
+    /// `devices.last_seen_at` only with the next presence flush, up to a minute later.
+    pub user_seen: Arc<std::sync::Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
@@ -571,6 +578,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    doc_build: tokio::sync::Mutex::new(()),
                     push_admission: tokio::sync::Mutex::new(()),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
@@ -582,6 +590,17 @@ impl AppState {
     /// `device_status` and closes if it was the device in question (see [`AppState::revocations`]).
     pub fn note_device_revoked(&self) {
         self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// When this user was last seen: the stored stamp, moved forward by the one in memory.
+    ///
+    /// The stored stamp is over the user's live devices only and every sign-in writes one, so
+    /// `None` means no device of theirs is signed in. The stamp in memory cannot say that (it
+    /// outlives the device that made it, and signing out is itself a request), so alone it
+    /// counts for nothing: a person whose last device signed out is offline at once.
+    pub fn seen_at(&self, user_id: &str, stored: Option<i64>) -> Option<i64> {
+        let live = self.user_seen.lock().unwrap().get(user_id).copied();
+        stored.map(|at| at.max(live.unwrap_or(at)))
     }
 
     /// Is this device still a live session? `false` for a revoked row and for a row that is
@@ -834,6 +853,7 @@ pub(crate) mod test_support {
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
+            user_seen: Arc::default(),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),

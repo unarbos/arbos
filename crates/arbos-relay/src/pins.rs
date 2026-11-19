@@ -100,7 +100,7 @@ impl crate::db::Db {
     /// Replace the user's list; `pins[0]` is the top.
     pub fn set_pins(&self, user_id: &str, pins: &[String]) -> anyhow::Result<()> {
         self.with(|c| {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             tx.execute("DELETE FROM user_pins WHERE user_id = ?1", params![user_id])?;
             for (i, key) in pins.iter().enumerate() {
                 tx.execute(

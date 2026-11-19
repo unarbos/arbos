@@ -30,6 +30,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | ask | asked | platform | what it must do | guard |
 | --- | --- | --- | --- | --- |
 | `agent-bubble-inset-2026-10-22` | 2026-10-22 | iPhone | An agent's bubble leaves 76 pt on the far side, the measured Grok number, not the old 71. | `JacobAskGuardTests.testTheAgentBubbleKeepsItsSeventySixPointInset` |
+| `iphone-first-login-recovery-2026-11-18` | 2026-11-18 | iPhone | Sign-out then sign-in treats an existing Home agent as a returning account; provisioning failure also offers Sign out. | `FirstLoginTests` |
 | `typing-indicator-left-2026-10-23` | 2026-10-23 | iPhone | The presence row over the composer names who is typing and which agents are working, one mark per handle, newest first. | `PresenceRowTests` |
 | `group-library-links-2026-10-23` | 2026-10-23 | iPhone | A group's Library lists links the way the agent pane does, through the one shared list builder. | `JacobAskGuardTests.testAGroupsLibraryListsLinksThroughTheSharedBuilder` |
 | `mention-chip-hover-2026-10-24` | 2026-10-24 | iPhone | A mention chip is accent on accent at 14 %, 30 % under the finger, so it visibly answers a touch. | `JacobAskGuardTests.testTheMentionChipStillAnswersTheFinger` |

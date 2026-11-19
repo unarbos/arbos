@@ -14,6 +14,8 @@ mod avatar;
 mod avatar_image;
 mod blobs;
 #[cfg(test)]
+mod box_bearer_tests;
+#[cfg(test)]
 mod box_row_tests;
 mod boxd;
 mod boxes;
@@ -54,6 +56,7 @@ mod livekit;
 mod load_gate;
 mod local;
 mod matrix;
+mod metrics;
 mod moderation;
 #[cfg(test)]
 mod module_lookup_tests;
@@ -129,6 +132,9 @@ struct Args {
     /// Data directory (SQLite + blobs + local boxes).
     #[arg(long, env = "ARBOS_RELAY_DATA", default_value = "./.arbos-local/relay")]
     data: PathBuf,
+    /// Loopback address for Prometheus `GET /metrics` (`127.0.0.1:9108`); unset = no endpoint.
+    #[arg(long, env = "ARBOS_RELAY_METRICS_LISTEN")]
+    metrics_listen: Option<String>,
     /// Admin token for `POST /pair/new`; generated and printed when absent.
     #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
     admin_token: Option<String>,
@@ -351,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
+        user_seen: Arc::default(),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
@@ -422,7 +429,25 @@ async fn main() -> anyhow::Result<()> {
     matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
-    let app = Router::new()
+    let app = app(state.clone());
+    if let Some(listen) = &args.metrics_listen {
+        // Monitoring never takes the relay down: a bad address or a taken port costs the
+        // dashboards, not the service.
+        if let Err(e) = metrics::serve(state.clone(), listen).await {
+            tracing::error!(error = %e, "metrics listener is off");
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
+    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
+    restart::install_sigterm_handler(state);
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
+}
+
+/// Everything the public listener serves. Caddy proxies all of it, so `/metrics` is not here.
+fn app(state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(api::healthz))
         .route("/pair/new", post(api::pair_new))
         .route("/pair", post(api::pair))
@@ -856,6 +881,7 @@ async fn main() -> anyhow::Result<()> {
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
         )
+        .route("/admin/fleet/evict", post(fleet::admin_fleet_evict))
         .route(
             "/admin/waitlist/{id}/admit",
             post(fleet::admin_waitlist_admit),
@@ -1135,14 +1161,8 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
-        .with_state(state.clone());
-    let state_for_restart = state;
-
-    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
-    restart::install_sigterm_handler(state_for_restart);
-    axum::serve(listener, app).await?;
-    Ok(())
+        .layer(axum::middleware::from_fn(metrics::track_http))
+        .with_state(state)
 }
 
 fn env_nonempty(name: &str) -> Option<String> {

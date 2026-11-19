@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Arbos feedback loop: TestFlight screenshot feedback -> Cursor cloud agent -> main -> TestFlight.
+"""Arbos feedback loop: TestFlight screenshot feedback -> GitHub issue -> bb fast lane -> main -> TestFlight.
 
 Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop.sh). One tick:
 
@@ -11,31 +11,27 @@ Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop
      priority list (Jacob) go first and skip the per-tester cap; a blocklist drops abusers. Near-duplicate
      feedback (same text, or the same screenshot) is folded into the earlier item's issue.
   4. Move every open item one step along its state machine:
-       queued  -> running   malicious-intent screen (heuristics + a small model) → open the GitHub issue,
-                            upload the screenshot, start a Cursor agent. Limits: one launch per
+       queued  -> handed_off malicious-intent screen (heuristics + a small model) → open the GitHub issue,
+                            upload the screenshot, wait for the bb fast lane to fix it. Limits: one issue per
                             FEEDBACK_MIN_INTERVAL_S, FEEDBACK_MAX_PER_DAY a day, FEEDBACK_TESTER_MAX_PER_DAY
                             per tester (priority testers exempt).
-               -> rejected  the screen said "obviously malicious": issue opened with label `flagged`, no agent
-               -> deferred  the comment matches a deferred product area: issue + label `deferred` + comment, no agent
-       running -> pushed    the agent's run finished and a commit tagged [feedback <id>] is on main
-               -> rejected  the agent answered REFUSED (malicious request)
-               -> no_change the agent answered PUSHED: no (nothing to fix, needs a decision)
-               -> failed    the run errored, timed out, or finished without a push
+               -> rejected  the screen said "obviously malicious": issue opened with label `flagged`, no fix
+               -> deferred  the comment matches a deferred product area: issue + label `deferred` + comment, no fix
+       handed_off -> pushed  the bb fast lane's branch passed the gate and merged, or its tagged commit reached main
        pushed  -> shipped   ios.yml / CI+release.yml succeeded for that commit and the TestFlight build is
                             processed; the issue gets build number / edge version + elapsed time
-               -> running   ios.yml or CI failed: one follow-up run with the errors (once)
+               -> handed_off ios.yml or CI failed: the bb fast lane gets the errors on the issue
                -> failed    a second failure, or nothing shipped within the wait budget
   5. Append one JSON line per transition to <state>/log.jsonl.
   6. Hourly: the newest VALID build in the public TestFlight group that is still READY_FOR_BETA_SUBMISSION
      is submitted for Beta App Review (TESTFLIGHT_PUBLIC_GROUP, default "Arbos public").
 
-Feedback text is data that describes the wanted change; the agent prompt says so. Tester identity in the
+Feedback text is data that describes the wanted change for the fast lane. Tester identity in the
 public issue is a short tag (and the Apple first name / GitHub login when known), never an email — and
 never a live GitHub mention: every issue body and comment leaves through `plain()`, which defuses them.
 
 Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.env, root only):
   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_B64 (base64 of the .p8), ASC_APP_ID
-  CURSOR_API_KEY, FEEDBACK_AGENT_MODEL (optional Cursor model id)
   GITHUB_TOKEN, GITHUB_REPO (owner/name)
   FEEDBACK_PRIORITY (comma-separated emails / @handles) + FEEDBACK_PRIORITY_FILE (one per line): go first,
       no per-tester cap. FEEDBACK_BLOCKLIST_FILE (one email / @handle per line): dropped, logged.
@@ -47,11 +43,11 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   FEEDBACK_MIN_INTERVAL_S (90), FEEDBACK_MAX_PER_DAY (120), FEEDBACK_TESTER_MAX_PER_DAY (20)
   FEEDBACK_TESTER_MAX_WAIT_MIN (30): after this wait a tester item is ordered with the priority ones
   FEEDBACK_TOPICS_FILE (/etc/arbos/feedback-topics.txt): "<issue> <regex>" lines; matching feedback is folded
-      into that issue (a feature already being built) instead of starting an agent
+      into that issue (a feature already being built) instead of filing another fix request
   FEEDBACK_DEFERRED_FILE (/etc/arbos/feedback-deferred.txt): "<regex> :: <comment>" lines; matching feedback gets
-      its issue + label `deferred` + the comment, no agent (a product area intentionally off for now).
+      its issue + label `deferred` + the comment, no fix (a product area intentionally off for now).
       "ios: <regex>" / "mac: <regex>" limits a rule to feedback aimed at that app.
-  FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
+  FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_SHIP_TIMEOUT_MIN (90)
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
@@ -108,7 +104,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 ASC_API = "https://api.appstoreconnect.apple.com/v1"
-CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
@@ -226,8 +221,6 @@ class Config:
     asc_issuer_id: str
     asc_key_pem: bytes
     asc_app_id: str
-    cursor_api_key: str
-    agent_model: str
     github_token: str
     github_repo: str
     priority: set[str]
@@ -250,7 +243,6 @@ class Config:
     deferred: list[tuple[str, str]]
     public_group_name: str
     public_group_id: str
-    agent_timeout_min: int
     ship_timeout_min: int
     operator: str  # the one identity whose gate-next pins stand (FEEDBACK_OPERATOR); other pins need [hotfix] + P0
     ios_gate_ssh: str
@@ -316,8 +308,6 @@ class Config:
             asc_issuer_id=env.get("ASC_ISSUER_ID", ""),
             asc_key_pem=pem,
             asc_app_id=env.get("ASC_APP_ID", "6812503407"),
-            cursor_api_key=env.get("CURSOR_API_KEY", ""),
-            agent_model=env.get("FEEDBACK_AGENT_MODEL", ""),
             github_token=env.get("GITHUB_TOKEN", ""),
             github_repo=env.get("GITHUB_REPO", "unarbos/arbos"),
             priority=priority,
@@ -338,7 +328,6 @@ class Config:
             public_group_name=env.get("TESTFLIGHT_PUBLIC_GROUP", "Arbos public"),
             public_group_id=env.get("TESTFLIGHT_PUBLIC_GROUP_ID", ""),
             dedupe_days=int(env.get("FEEDBACK_DEDUPE_DAYS", "7")),
-            agent_timeout_min=int(env.get("FEEDBACK_AGENT_TIMEOUT_MIN", "75")),
             ios_gate_ssh=env.get("IOS_GATE_SSH", ""),
             ios_gate_key=env.get("IOS_GATE_KEY", "/etc/arbos/ec2-mac.pem"),
             ios_gate_timeout_s=int(env.get("IOS_GATE_TIMEOUT_S", "900")),
@@ -891,40 +880,6 @@ class GitHub:
         return None
 
 
-# ---------------------------------------------------------------- Cursor
-
-
-class Cursor:
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        tok = base64.b64encode(f"{cfg.cursor_api_key}:".encode()).decode()
-        self.h = {"Authorization": f"Basic {tok}"}
-
-    def create_agent(self, name: str, prompt: str, images: list[dict]) -> dict:
-        body: dict[str, Any] = {
-            "prompt": {"text": prompt, "images": images},
-            "name": name[:100],
-            "repos": [{"url": f"https://github.com/{self.cfg.github_repo}", "startingRef": "main"}],
-            "workOnCurrentBranch": True,
-            "autoCreatePR": False,
-        }
-        if self.cfg.agent_model:
-            body["model"] = {"id": self.cfg.agent_model}
-        return http_json("POST", f"{CURSOR_API}/agents", headers=self.h, json_body=body, timeout=120)
-
-    def followup(self, agent_id: str, prompt: str) -> dict:
-        doc = http_json("POST", f"{CURSOR_API}/agents/{agent_id}/runs", headers=self.h,
-                        json_body={"prompt": {"text": prompt}}, timeout=120)
-        return doc.get("run", doc)
-
-    def run(self, agent_id: str, run_id: str) -> dict:
-        return http_json("GET", f"{CURSOR_API}/agents/{agent_id}/runs/{run_id}", headers=self.h)
-
-    def cancel(self, agent_id: str, run_id: str) -> None:
-        with contextlib.suppress(HttpError):
-            http_json("POST", f"{CURSOR_API}/agents/{agent_id}/runs/{run_id}/cancel", headers=self.h)
-
-
 # ---------------------------------------------------------------- images
 
 
@@ -1057,8 +1012,6 @@ class Loop:
         self.store = Store(cfg)
         self.asc = Asc(cfg)
         self.gh = GitHub(cfg)
-        self.cursor = Cursor(cfg)
-        self.prompt_template = (Path(__file__).resolve().parent / "agent-prompt.md").read_text()
 
     # ---- intake -------------------------------------------------------------------------------
 
@@ -1847,44 +1800,6 @@ class Loop:
             http_json("POST", f"{self.cfg.relay_url}/admin/feedback/{fid[4:]}/issue", headers=hdrs,
                       json_body={"number": issue["number"], "url": issue["html_url"]})
 
-    def build_prompt(self, fid: str, info: dict, st: dict, issue_url: str) -> str:
-        t = self.target_info(st["target"])
-        dims = ", ".join(f"{s.get('width')}x{s.get('height')}" for s in info.get("screenshots", []) if s.get("width"))
-        src = {"testflight": "TestFlight screenshot feedback", "mac": "the Mac app's Send feedback sheet",
-               "app": f"the {info.get('device') or 'app'} app's in-app Send feedback sheet"}.get(
-            info["source"], info.get("origin") or "synthetic item placed in the poller inbox")
-        if info.get("submitted_by") == "agent":
-            src = (f"the user's agent `{info.get('agent_name') or 'agent'}` (submit_feedback tool) on the user's behalf — "
-                   "the words are the agent's summary of what the user reported in chat")
-        if info.get("submitted_by") == "app":
-            src = (f"the {info.get('device') or 'app'} app itself: an automatic diagnostic after a background error "
-                   "(no user wrote this; the `context` block carries the error kind and detail)")
-        if info.get("screenshots"):
-            shot_line = f"{dims or 'unknown size'} (attached)"
-        else:
-            shot_line = ("none — a text-only report (TestFlight without a screenshot, or words relayed from a chat); "
-                         "the comment is all the evidence, so find the screen it describes in the code")
-        comment = info["comment"].strip() or "(no comment)"
-        if info.get("operator_note"):
-            # A decision the owner / coordinator made after reading the item (scope, constraints, proof wanted).
-            comment += "\n\n  **Owner decision, relayed by the operator (this is the scope to build):** " + info["operator_note"].strip()
-        if info.get("submitted_by") == "agent":
-            ctx = info.get("context") or {}
-            facts = ", ".join(f"{k} {ctx[k]}" for k in ("platform", "app_version", "os", "device", "box_image_version", "talking_model") if ctx.get(k))
-            comment += ("\n\n  The issue body carries a collapsed **Context** table and the chat **Rollout** (recent turns, the agent's "
-                        "tool calls, errors and timings, scrubbed of secrets) — read them on the issue page before deciding the target."
-                        + (f" Facts: {facts}." if facts else ""))
-        repl = {
-            "FEEDBACK_ID": fid, "COMMENT": comment, "SOURCE": src,
-            "DEVICE": info.get("device") or "?", "OS_VERSION": info.get("os") or "?", "TESTER": st.get("tester", "tester"),
-            "APP_BUILD": info.get("build") or "?", "SCREENSHOT_DIMS": shot_line,
-            "TARGET_NAME": t["name"], "TARGET_PATH": t["path"], "CHECKS": t["checks"], "ISSUE_URL": issue_url,
-        }
-        out = self.prompt_template
-        for k, v in repl.items():
-            out = out.replace("{{" + k + "}}", str(v))
-        return out
-
     def issue_title(self, fid: str, info: dict) -> str:
         summary = re.sub(r"\s+", " ", info["comment"]).strip() or "screenshot feedback"
         if len(summary) > 70:
@@ -1893,7 +1808,7 @@ class Loop:
 
     def open_issue(self, fid: str, st: dict, info: dict, deferral: str | None, shots: list[Path]) -> bool:
         """Screenshots to the release assets, intent screen, GitHub issue (labels, agent evidence). False = the
-        item stops here (screened as malicious, or deferred by rule); True = ready for an agent."""
+        item stops here (screened as malicious, or deferred by rule); True = ready for the bb fast lane."""
         asset_urls = []
         for n, p in enumerate(shots, start=1):
             asset_urls.append(self.gh.upload_asset(p, f"{fid}-{n}{p.suffix.lower()}", mime_for(p)))
@@ -1993,7 +1908,7 @@ class Loop:
             self.store.event(fid, "failed", error="no screenshot and no comment")
             return
         # 1. The issue is opened as soon as the item is admitted (dedupe already happened), so every report is
-        # visible and claimable at once; only the agent launch waits for the launch rate limits.
+        # visible and claimable at once; the fast-lane handoff waits for the admission rate limits.
         if not st.get("issue") or not st.get("screen") or (st.get("screen_override") and "operator override" not in (st.get("screen") or "")):
             if not self.open_issue(fid, st, info, deferral, shots):
                 return
@@ -2004,113 +1919,13 @@ class Loop:
                 self.store.save_state(fid, st)
                 log(f"[{fid}] deferred: {reason}")
             return
-        issue = {"number": st["issue"], "html_url": st["issue_url"]}
-        t = self.target_info(st["target"])
-
-        # 2. Cursor agent
-        images = []
-        for p in shots[:5]:
-            images.append({"data": base64.b64encode(p.read_bytes()).decode(), "mimeType": mime_for(p)})
-        prompt = self.build_prompt(fid, info, st, issue["html_url"])
-        (self.store.item_dir(fid) / "prompt.md").write_text(prompt)
+        # 2. The separate bb fast lane reads the filed issue and supplies the fix.
         self.store.record_launch(st.get("tester_key", ""))
-        try:
-            created = self.cursor.create_agent(f"feedback {fid}: {info['comment'][:60]}", prompt, images)
-        except HttpError as e:
-            st.update(status="failed", error=f"cursor create failed: HTTP {e.status} {e.body[:200]}")
-            self.store.save_state(fid, st)
-            self.store.event(fid, "failed", error=st["error"])
-            self.gh.comment(issue["number"], f"Could not start the Cursor agent: `HTTP {e.status}` {e.body[:300]}\n\n"
-                            "This item needs a human. Label `needs-human` set.")
-            self.gh.set_labels(issue["number"], ["needs-human"], [])
-            return
-        agent, run = created["agent"], created["run"]
-        st.update(status="running", agent_id=agent["id"], agent_url=agent["url"], run_id=run["id"],
-                  launched=iso(), model=self.cfg.agent_model or "default")
-        st.pop("deferred_reason", None)
-        self.store.save_state(fid, st)
-        self.store.event(fid, "agent_started", agent=agent["url"], issue=issue["html_url"], target=st["target"])
-        self.gh.comment(issue["number"], f"Cursor agent started: {agent['url']} (target `{t['path']}`).")
+        self.hand_off(fid, st, "bb fast lane", label="in-progress", by="issue filed")
 
     def check_agent(self, fid: str, st: dict) -> None:
-        run = self.cursor.run(st["agent_id"], st["run_id"])
-        status = run.get("status")
-        st["run_status"] = status
-        if status in ("CREATING", "RUNNING", "PENDING", "QUEUED"):
-            if minutes_between(st["launched"], iso()) > self.cfg.agent_timeout_min:
-                self.cursor.cancel(st["agent_id"], st["run_id"])
-                self.fail(fid, st, f"agent run exceeded {self.cfg.agent_timeout_min} min; cancelled")
-            else:
-                self.store.save_state(fid, st)
-            return
-        result = (run.get("result") or "").strip()
-        st["agent_result"] = result[:4000]
-        if status != "FINISHED":
-            self.fail(fid, st, f"agent run ended with {status}", extra=result)
-            return
-        refused = re.search(r"^REFUSED:\s*(.+)$", result, re.M)
-        if refused:
-            st.update(status="rejected", error=f"agent refused: {refused.group(1)[:300]}")
-            self.store.save_state(fid, st)
-            self.store.event(fid, "rejected", reason=refused.group(1)[:300], agent=st.get("agent_url"))
-            self.gh.comment(st["issue"], f"Not built: the fix agent refused this request as malicious — {refused.group(1)[:500]}\n\n"
-                            f"Agent: {st.get('agent_url')}. Jacob, say so here if this is wrong.")
-            self.gh.set_labels(st["issue"], ["flagged"], [])
-            return
-        # The fix lives on `feedback/<id>` until the iOS gate has passed; the poller merges it.
-        branch = f"feedback/{fid}"
-        head = self.gh.branch_head(branch)
-        if head and head != st.get("gated_head"):
-            cmp = self.gh.compare("main", head)
-            tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
-            if cmp.get("status") in ("ahead", "diverged") and tagged:
-                files = [f["filename"] for f in cmp.get("files", [])]
-                if not files:
-                    # Seen once the branch head is a merge of main: the compare lists no files. Take them
-                    # from the tagged commits themselves so the ship checks know what to wait for.
-                    seen: list[str] = []
-                    for c in cmp.get("commits", []):
-                        if f"[feedback {fid}]" in c["commit"]["message"]:
-                            for f in self.gh.commit(c["sha"]).get("files", []):
-                                if f["filename"] not in seen:
-                                    seen.append(f["filename"])
-                    files = seen
-                st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=touches_ios(files),
-                          expects_rust=bool(self.rust_crates(files)),
-                          expects_ci=any(not f.startswith("apps/ios/") for f in files),
-                          agent_summary=self.summary_line(result))
-                self.store.save_state(fid, st)
-                self.store.event(fid, "branch_pushed", branch=branch, head=head, files=files)
-                self.gate(fid, st)
-                return
-        commit = self.find_commit(fid, st["launched"])
-        if not commit:
-            if re.search(r"^PUSHED:\s*no\b", result, re.M | re.I):
-                # The agent looked and decided there is nothing to change (not a bug, needs a decision, …).
-                st.update(status="no_change", error=self.summary_line(result))
-                self.store.save_state(fid, st)
-                self.store.event(fid, "no_change", summary=st["error"])
-                self.gh.ensure_label("no-change", "C5DEF5", "The agent looked and found nothing to change")
-                self.gh.comment(st["issue"], f"No change: {self.summary_line(result)}\n\nAgent: {st.get('agent_url')}")
-                self.gh.set_labels(st["issue"], ["no-change"], [])
-                self.close_not_planned(fid, st, f"no change — {self.summary_line(result)}")
-                return
-            self.fail(fid, st, "agent finished without pushing a [feedback] commit (branch feedback/<id> or main)", extra=result)
-            return
-        # Pushed straight to main (older prompt, or the agent ignored the branch rule): track it as before.
-        files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
-        st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
-                  commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
-                  expects_ios=touches_ios(files),
-                  expects_ci=any(not f.startswith("apps/ios/") for f in files))
-        self.store.save_state(fid, st)
-        self.store.event(fid, "pushed", commit=commit["sha"], files=files)
-        summary = self.summary_line(result)
-        self.gh.comment(st["issue"], f"Pushed to `main`: {commit['html_url']} — `{st['commit_message']}`\n\n"
-                        f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\n"
-                        f"Agent summary: {summary}")
-        self.note_fixed_on_main(st)
+        """Move a pre-migration Cursor item to the bb fast lane without contacting its old agent."""
+        self.hand_off(fid, st, st.get("handed_off_to") or "bb fast lane", label="in-progress", by="Cursor backend removed")
 
     # ---- pre-merge gates: Rust-touching fixes must pass fmt/clippy/test (+ the arbos-mac release build) and
     # ---- iOS-touching fixes must compile with Xcode, both on the EC2 Mac, before they reach main ------
@@ -2143,8 +1958,8 @@ class Loop:
         """`gating`: a Rust-touching branch is built on the Mac (merged with current main: cargo fmt --check,
         clippy --all-targets -D warnings, test, and the release build of arbos-mac when it is touched); an
         iOS-touching branch is built with Xcode (Release + Debug, simulator, no signing). Green → merge
-        commit on main → `pushed`. Red → the diagnostics go back to the agent as a follow-up (new commit on
-        the same branch), at most 2 retries. Rust-touching branches are never merged without the gate
+        commit on main → `pushed`. Red → the diagnostics go to the fix owner's issue (new commit on
+        the same branch re-gates). Rust-touching branches are never merged without the gate
         (2026-10-19: #1058 merged with header.rs not compiling and blocked every Mac release)."""
         head = self.refresh_branch_head(fid, st)
         if st.get("expects_rust") is None:
@@ -2242,52 +2057,19 @@ class Loop:
         return head
 
     def gate_followup(self, fid: str, st: dict, which: str, output: str) -> None:
-        """A gate went red: send the diagnostics back to the agent (at most 2 retries), never merge."""
+        """A red gate goes to the fix owner's issue; their next commit re-gates."""
         head = st["branch_head"]
         st["gated_head"] = head
-        retries = st.get("gate_retries", 0)
         label = {"ios": "iOS build", "rust": "Rust gate (CI on the integration tree + arbos-mac release build)"}[which]
-        if st.get("handed_off_to"):
-            # Not the loop's agent: the owner reads the issue and pushes a new commit, which re-gates.
-            st["status"] = "handed_off"
-            self.store.save_state(fid, st)
-            self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}`@{head[:8]} is red — not merged. "
-                            f"{st['handed_off_to']}: fix and push a new commit to the same branch (no force-push) to re-gate.\n\n```\n"
-                            + "\n".join(output.splitlines()[-40:]) + "\n```")
-            return
-        if retries >= 2:
-            self.fail(fid, st, f"the {label} of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
-            return
-        if which == "ios":
-            what = ("The iPhone app does not compile with your change (built on a Mac with Xcode, Release and Debug, "
-                    "simulator). ")
-        else:
-            what = ("Your change does not pass the Rust gate (your branch merged with current `main`: CI on Linux — "
-                    "`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, "
-                    "`cargo test --workspace --locked` — and `cargo build --release --locked -p arbos-mac` on a Mac when "
-                    "crates/arbos-mac is touched). Run the same commands locally until they pass. ")
-        followup = (what + f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
-                    f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
-                    "Diagnostics:\n\n```\n" + output[-6000:] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
-        try:
-            run = self.cursor.followup(st["agent_id"], followup)
-        except HttpError as e:
-            if e.status == 409:
-                log(f"[{fid}] agent busy; gate follow-up deferred")
-                st.pop("gated_head", None)
-                self.store.save_state(fid, st)
-                return
-            self.fail(fid, st, f"{label} failed; follow-up could not start (HTTP {e.status})", extra=output)
-            return
-        self.store.record_launch(st.get("tester_key", ""))
-        st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+        owner = st.get("handed_off_to") or "bb fast lane"
+        st.update(status="handed_off", handed_off_to=owner, handed_off_at=iso(), track_commit=True)
         self.store.save_state(fid, st)
-        self.store.event(fid, "retry", gate=which, head=head)
-        self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}` is red — sent the diagnostics back to the agent "
-                        f"(retry {retries + 1}/2). Not merged.\n\n```\n" + "\n".join(output.splitlines()[-25:]) + "\n```")
+        self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}`@{head[:8]} is red — not merged. "
+                        f"{owner}: fix and push a new commit to the same branch (no force-push) to re-gate.\n\n```\n"
+                        + "\n".join(output.splitlines()[-40:]) + "\n```")
 
     def conflict_followup(self, fid: str, st: dict, detail: str = "") -> None:
-        """The branch no longer merges cleanly into main: the agent merges main into it (a merge, never a rebase)."""
+        """The fast lane merges main into a conflicting branch (a merge, never a rebase)."""
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
@@ -2296,8 +2078,7 @@ class Loop:
         if st.get("awaiting") and st.get("status") in ("awaiting_jacob", "gating") and not st.get("approved_by_jacob"):
             # A held item (release-approval gate) never fails for a conflict: Jacob's per-item yes is still pending and
             # the branch is his to approve or decline. It stays `awaiting_jacob` as "conflict — owner merging main";
-            # the owner is told once (agent follow-up while retries remain, then the issue), and the next push on the
-            # branch re-gates. 13:37 Oct 27: #1551/#1853/#1888/#1948 fell to `failed` here minutes after being restored.
+            # the owner is told once on the issue, and the next push on the branch re-gates.
             aw = st["awaiting"]
             aw.update(conflict=True, ready=False)
             st.update(status="awaiting_jacob", awaiting=aw)
@@ -2306,49 +2087,21 @@ class Loop:
                 aw["conflict_noted"] = iso()
                 self.store.save_state(fid, st)
                 self.store.event(fid, "awaiting_conflict_held", head=head[:8], retries=retries)
-                who = st.get("handed_off_to") or "owner"
+                who = st.get("handed_off_to") or "bb fast lane"
                 self.gh.comment(st["issue"], f"Conflict — owner merging main. `{st['branch']}`@{head[:8]} no longer merges with `main`. {who}: merge "
                                 "`origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates. The branch is kept and "
                                 "the item stays held for Jacob's approval." + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
-                if st.get("agent_id") and not st.get("handed_off_to") and retries < 2:
-                    with contextlib.suppress(HttpError):
-                        self.cursor.followup(st["agent_id"], (
-                            f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
-                            f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
-                            "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
-                        st["gate_retries"] = retries + 1
-                        self.store.save_state(fid, st)
+                self.store.save_state(fid, st)
             log(f"[{fid}] held item conflicts with main at {head[:8]}; stays awaiting_jacob (conflict — owner merging main)")
             return
-        if st.get("handed_off_to"):
-            st["status"] = "handed_off"
-            self.store.save_state(fid, st)
-            solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
-                    "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
-            self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
-                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
-                            + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
-            return
-        if retries >= 2:
-            self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra=detail)
-            return
-        try:
-            run = self.cursor.followup(st["agent_id"], (
-                f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
-                f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
-                "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."
-                + (f"\n\n```\n{detail[-2000:]}\n```" if detail else "")))
-        except HttpError as e:
-            if e.status == 409:
-                st.pop("gated_head", None)
-                self.store.save_state(fid, st)
-                return
-            self.fail(fid, st, f"merge conflict; follow-up could not start (HTTP {e.status})")
-            return
-        self.store.record_launch(st.get("tester_key", ""))
-        st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+        owner = st.get("handed_off_to") or "bb fast lane"
+        st.update(status="handed_off", handed_off_to=owner, handed_off_at=iso(), track_commit=True)
         self.store.save_state(fid, st)
-        self.gh.comment(st["issue"], f"`{st['branch']}` conflicts with `main`; asked the agent to merge main into the branch.")
+        solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
+                "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
+        self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {owner}: "
+                        "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
+                        + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
 
     def rust_gate_ssh(self, *args: str) -> str:
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new",
@@ -3759,19 +3512,6 @@ class Loop:
                 pass
         return candidates[0]
 
-    @staticmethod
-    def summary_line(result: str) -> str:
-        m = re.search(r"^SUMMARY:\s*(.+)$", result, re.M)
-        return m.group(1).strip() if m else (result.splitlines()[0][:300] if result else "(no reply text)")
-
-    def find_commit(self, fid: str, since_iso: str) -> dict | None:
-        since = (parse_iso(since_iso) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        tag = f"[feedback {fid}]"
-        for c in self.gh.commits_since(since):
-            if tag in c["commit"]["message"]:
-                return c
-        return None
-
     def adopt_later_testflight(self, fid: str, st: dict, sha: str, since: str) -> bool:
         """Apple never listed the item's own build (two uploads minutes apart: the earlier one is sometimes dropped —
         2026-10-20 19:16 / 20:02). A later VALID TestFlight build whose commit contains the fix is just as
@@ -3889,40 +3629,12 @@ class Loop:
             else:
                 errors = self.gh.run_error_lines(ios["id"])
                 if st.get("handed_off_to"):
-                    # No agent to send the errors to: the owner repairs on the branch; the item goes back to
-                    # handed_off so watch_handoffs gates and merges the re-push (05:48 Oct 22: this path raised
-                    # KeyError 'agent_id' every tick and the item ignored the owner's follow-up pushes).
                     self.red_after_merge_to_owner(fid, st, "iOS build", ios["html_url"], errors)
                     return
                 if st.get("retries", 0) < 1:
                     st["retries"] = st.get("retries", 0) + 1
-                    reason = self.rate_limit_reason()
-                    if reason and "launches already today" in reason:
-                        self.fail(fid, st, f"iOS build failed and the daily launch cap is reached: {ios['html_url']}")
-                        return
-                    followup = ("The iOS build on `main` failed after your push "
-                                f"({ios['html_url']}). Fix the build with the smallest change, keep the same commit message "
-                                f"shape (`fix(feedback): <summary> [feedback {fid}]`), and push it as a new commit on the branch "
-                                f"`feedback/{fid}` created from `origin/main` (the loop gates and merges it; no rebase, no force-push). "
-                                "Compiler output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
-                                "End with the SUMMARY:/PUSHED: lines again.")
-                    try:
-                        run = self.cursor.followup(st["agent_id"], followup)
-                    except HttpError as e:
-                        if e.status == 409:
-                            # The agent is still finishing its last run; ask again next tick.
-                            st["retries"] -= 1
-                            self.store.save_state(fid, st)
-                            log(f"[{fid}] agent busy; iOS follow-up deferred")
-                            return
-                        self.fail(fid, st, f"iOS build failed; follow-up could not start (HTTP {e.status})", extra="\n".join(errors))
-                        return
-                    self.store.record_launch(st.get("tester_key", ""))
-                    st.update(status="running", run_id=run["id"], launched=iso(), ios_failed_run=ios["html_url"])
-                    self.store.save_state(fid, st)
-                    self.store.event(fid, "retry", run=ios["html_url"])
-                    self.gh.comment(st["issue"], f"iOS build failed: {ios['html_url']}. Sent the errors back to the agent for one retry.\n\n"
-                                    "```\n" + "\n".join(errors[:20]) + "\n```")
+                    st["handed_off_to"] = "bb fast lane"
+                    self.red_after_merge_to_owner(fid, st, "iOS build", ios["html_url"], errors)
                     return
                 # Fixed forward? A later green main build that contains the commit means the tree
                 # is fine now (the follow-up or someone else repaired it); ship with that build.
@@ -4012,29 +3724,11 @@ class Loop:
             if st.get("handed_off_to"):
                 self.red_after_merge_to_owner(fid, st, "CI", ci["html_url"], errors)
                 return
-            elif st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
-                followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
-                            "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
-                            f"and `cargo test --workspace --locked` before pushing, keep the commit message shape (`fix(feedback): <summary> [feedback {fid}]`), "
-                            f"push it as a new commit on the branch `feedback/{fid}` created from `origin/main` (the loop merges it; no rebase, no force-push). Output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
-                            "End with the SUMMARY:/PUSHED: lines again.")
-                try:
-                    run = self.cursor.followup(st["agent_id"], followup)
-                except HttpError as e:
-                    if e.status == 409:
-                        self.store.save_state(fid, st)
-                        log(f"[{fid}] agent busy; CI follow-up deferred")
-                        return
-                    log(f"[{fid}] CI follow-up could not start: {e}")
-                    run = None
-                if run:
-                    st["retries"] = st.get("retries", 0) + 1
-                    self.store.record_launch(st.get("tester_key", ""))
-                    st.update(status="running", run_id=run["id"], launched=iso(), ci_failed_run=ci["html_url"])
-                    self.store.save_state(fid, st)
-                    self.store.event(fid, "retry", run=ci["html_url"])
-                    self.gh.comment(st["issue"], f"CI failed: {ci['html_url']}. Sent the errors back to the agent for one retry.\n\n```\n" + "\n".join(errors[:20]) + "\n```")
-                    return
+            elif st.get("retries", 0) < 1:
+                st["retries"] = st.get("retries", 0) + 1
+                st["handed_off_to"] = "bb fast lane"
+                self.red_after_merge_to_owner(fid, st, "CI", ci["html_url"], errors)
+                return
             st["ci_failed_noted"] = True
             self.store.event(fid, "ci_failed", run=ci["html_url"])
             self.fail(fid, st, f"CI failed on the pushed commit: {ci['html_url']} (no edge release from it)", extra="\n".join(errors))
@@ -4837,13 +4531,12 @@ class Loop:
         self.store.save_cursor(cur)
 
     def hand_off(self, fid: str, st: dict, owner: str, label: str = "handed-off", by: str = "operator") -> None:
-        """A dedicated worker owns this item: cancel the loop's agent run, track the branch/commit, label the issue."""
-        if st.get("status") in ("running", "gating") and st.get("agent_id") and st.get("run_id"):
-            self.cursor.cancel(st["agent_id"], st["run_id"])
+        """A fix lane owns this item: track its branch/commit and label the issue."""
         if st.get("status") == "gating" and (self.store.cursor().get("rust_gate") or {}).get("fid") == fid:
             # Its Rust gate run, if any, finishes on its own; the result is simply not consumed.
             cur = self.store.cursor(); cur.pop("rust_gate", None); self.store.save_cursor(cur)
         st.update(status="handed_off", handed_off_to=owner, handed_off_at=iso(), track_commit=True)
+        st.pop("deferred_reason", None)
         for k in ("branch_head", "gated_head", "gate", "rust_gate"):
             st.pop(k, None)
         self.store.save_state(fid, st)
@@ -4851,7 +4544,7 @@ class Loop:
         if st.get("issue"):
             self.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
             self.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
-            self.gh.comment(st["issue"], f"Handed off to {owner}: the loop's agent stops here. To land the fix push a branch `feedback/{fid}` "
+            self.gh.comment(st["issue"], f"Handed off to {owner}: this issue is the fix request. To land the fix push a branch `feedback/{fid}` "
                             f"(commit message `fix(feedback): <summary> [feedback {fid}]`, no force-push): the loop runs the Rust gate "
                             "(fmt, clippy -D warnings, test, arbos-mac release build; branch merged with current main) and the iOS gate on it, "
                             "merges it into `main` when green and tracks it to the builds — a red gate is posted here with the diagnostics, "
@@ -5510,13 +5203,13 @@ def main(argv: list[str]) -> int:
                   "tester_key": loop.tester_key(info), "target": loop.pick_target(info)}
             store.save_state(fid, st)
             store.event(fid, "requeued", tier=tier, tester=st["tester"])
-            loop.gh.delete_branch(f"feedback/{fid}")  # a fresh agent starts its branch from main again
+            loop.gh.delete_branch(f"feedback/{fid}")  # the fast lane starts its branch from main again
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
                     if loop.gh.issue(st["issue"]).get("state") == "closed":
-                        loop.gh.reopen_issue(st["issue"], "Reopened: the audit found the fix missing or regressed in the current build; a new agent run follows.")
+                        loop.gh.reopen_issue(st["issue"], "Reopened: the audit found the fix missing or regressed in the current build; the bb fast lane takes it again.")
                     else:
-                        loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
+                        loop.gh.comment(st["issue"], "Requeued by the operator; the bb fast lane takes it again.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
@@ -5753,7 +5446,7 @@ def main(argv: list[str]) -> int:
         print(f"{run_id}: tree {tree[:8]} on {branch}; CI started; the Mac build starts when the gate slot is free; members {len(members)}")
         return 0
     if cmd == "handoff":
-        # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
+        # A dedicated fix owner takes this item; the poller tracks its branch/commit and labels the issue.
         store = Store(cfg)
         loop = Loop(cfg)
         fid, label = argv[2], (argv[3] if len(argv) > 3 else "in-progress")
@@ -5786,7 +5479,7 @@ def main(argv: list[str]) -> int:
         store.save_cursor(cur)
         print(f"cursor since={cur['since']}")
         return 0
-    missing = [k for k in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8_B64", "CURSOR_API_KEY", "GITHUB_TOKEN") if not os.environ.get(k)]
+    missing = [k for k in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8_B64", "GITHUB_TOKEN") if not os.environ.get(k)]
     if missing and cmd != "status":
         print(f"missing env: {', '.join(missing)}", file=sys.stderr)
         return 2
@@ -5874,8 +5567,7 @@ def main(argv: list[str]) -> int:
         # neither, so its owner's push went unseen (#2049). `follow_pushes` is the right flag: `track_commit` also
         # means "coordinator-registered" to the approval gate (`freeze_allows`), and setting it on a tester item let
         # #2049 (class-b, awaiting Jacob) merge from an operator batch at 06:17 Oct 28 without his per-item approve.
-        # The push itself went unseen on 2026-10-27 (#2049: pushed 21:27, found by hand 23:36). `handed_off_to` stays
-        # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
+        # The push itself went unseen on 2026-10-27 (#2049: pushed 21:27, found by hand 23:36).
         if len(argv) < 4:
             print("park <id> <note…>")
             return 2
