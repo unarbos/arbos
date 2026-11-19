@@ -17,6 +17,8 @@ and with the variable unset there is no endpoint at all. Caddy proxies only to t
 the internet cannot reach it, and a box is on a bridge network, so a box cannot either. Prometheus
 has to run on the relay host itself (a host service, or a container with host networking).
 
+`scripts/deploy/relay-server.sh` keeps the variable from `/etc/arbos/relay.env` across deploys.
+
 A scrape never waits on the relay: gauges are read from memory with `try_lock` (a busy map leaves its
 series out of that one scrape), and the database numbers come from a sampler that runs every 10 s.
 
