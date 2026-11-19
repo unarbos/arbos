@@ -373,7 +373,7 @@ impl Db {
     }
 
     pub fn chat_archived_at(&self, user_id: &str, chat_id: &str) -> Result<Option<i64>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT archived_at FROM chat_user_archive WHERE user_id = ?1 AND chat_id = ?2",
                 params![user_id, chat_id],
