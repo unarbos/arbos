@@ -501,9 +501,23 @@ fn s(v: &[&str]) -> Vec<String> {
 async fn helper(state: &AppState, script: &str) -> Result<String> {
     let dir = boxes_dir(state);
     std::fs::create_dir_all(&dir)?;
-    let args: Vec<String> = vec![
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = format!(
+        "arbos-helper-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let args = helper_args(&dir, &state.cfg.fleet.helper_image, &name, script);
+    run_helper("docker", &args, &name, HELPER_LIMIT).await
+}
+
+/// The `docker run` argument list for one helper. It has a name so that it can be killed.
+fn helper_args(dir: &Path, image: &str, name: &str, script: &str) -> Vec<String> {
+    vec![
         "run".into(),
         "--rm".into(),
+        "--name".into(),
+        name.into(),
         "--privileged".into(),
         "--network".into(),
         "none".into(),
@@ -512,14 +526,38 @@ async fn helper(state: &AppState, script: &str) -> Result<String> {
             "type=bind,src={},dst=/boxes,bind-propagation=rshared",
             dir.display()
         ),
-        state.cfg.fleet.helper_image.clone(),
+        image.into(),
         "sh".into(),
         "-c".into(),
         script.into(),
-    ];
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.args(&args);
-    docker_output(&args, output_within(cmd, HELPER_LIMIT).await)
+    ]
+}
+
+/// Run one helper and, if it is given up on, kill its container too. Killing only the `docker
+/// run` client leaves the container alive: one hung inside the loop-device claim would go on
+/// holding the shared lock, and every later attach would fail after its 20 s wait until
+/// someone removed it by hand. `docker` is a parameter for the test.
+async fn run_helper(docker: &str, args: &[String], name: &str, limit: Duration) -> Result<String> {
+    let mut cmd = tokio::process::Command::new(docker);
+    cmd.args(args);
+    let out = output_within(cmd, limit).await;
+    if out
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
+    {
+        let mut kill = tokio::process::Command::new(docker);
+        kill.args(["kill", name]);
+        match output_within(kill, Duration::from_secs(20)).await {
+            Ok(k) if k.status.success() => {
+                tracing::warn!(name, "privileged helper hung; its container was killed")
+            }
+            _ => tracing::error!(
+                name,
+                "privileged helper hung and could not be killed; `docker rm -f` it by hand"
+            ),
+        }
+    }
+    docker_output(args, out)
 }
 
 fn safe_user_segment(user_id: &str) -> Result<()> {
@@ -1900,5 +1938,44 @@ mod tests {
         let quick = tokio::process::Command::new("true");
         let out = output_within(quick, Duration::from_secs(5)).await;
         assert!(out.unwrap().status.success());
+    }
+
+    /// A helper that hangs is killed by name, not only abandoned: the container, were it left
+    /// alive, could go on holding the loop-device lock.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_helper_container_is_killed_by_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("arbos-helper-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A stand-in for `docker`: `run` hangs, `kill <name>` records the name.
+        let fake = dir.join("docker");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = kill ]; then echo \"$2\" > {}/killed; exit 0; fi\nexec sleep 30\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = helper_args(&dir, "img", "arbos-helper-t-1", "true");
+        let named = args
+            .windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "arbos-helper-t-1");
+        assert!(named, "{args:?}");
+        let err = run_helper(
+            fake.to_str().unwrap(),
+            &args,
+            "arbos-helper-t-1",
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("gave up"), "{err}");
+        let killed = std::fs::read_to_string(dir.join("killed")).unwrap();
+        assert_eq!(killed.trim(), "arbos-helper-t-1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
