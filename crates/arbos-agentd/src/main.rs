@@ -29,6 +29,8 @@ mod goals;
 mod groups;
 mod handoff;
 mod harness;
+#[cfg(test)]
+mod helper_start_failure_tests;
 mod hooks;
 mod http;
 mod identity;
