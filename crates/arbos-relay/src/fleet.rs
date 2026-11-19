@@ -174,7 +174,9 @@ pub struct Pressure {
 }
 
 fn parse_meminfo(text: &str) -> (f64, f64) {
-    let mut avail = 0.0;
+    // No `MemAvailable` line, or one that is not a number, is "unknown", as an unreadable file
+    // is: read as 0 it would refuse every sign-up and evict every idle sandbox.
+    let mut avail = None;
     let mut swap_total = 0.0;
     let mut swap_free = 0.0;
     for line in text.lines() {
@@ -184,14 +186,14 @@ fn parse_meminfo(text: &str) -> (f64, f64) {
         };
         let kb: f64 = v.parse().unwrap_or(0.0);
         match k {
-            "MemAvailable:" => avail = kb,
+            "MemAvailable:" => avail = v.parse::<f64>().ok(),
             "SwapTotal:" => swap_total = kb,
             "SwapFree:" => swap_free = kb,
             _ => {}
         }
     }
     let gb = |kb: f64| kb / 1024.0 / 1024.0;
-    (gb(avail), gb(swap_total - swap_free))
+    (avail.map_or(f64::MAX, gb), gb(swap_total - swap_free))
 }
 
 fn parse_loadavg(text: &str) -> (f64, f64) {
@@ -272,6 +274,9 @@ pub struct Capacity {
     pub mem_available_gb: f64,
     /// A new sandbox may be created right now.
     pub has_room: bool,
+    /// Which gate is shut when it may not, for the log and the fleet event.
+    #[serde(skip)]
+    pub shut: Option<&'static str>,
     /// The `boxd` provider's own gate (docs/box-scaling.md §4.2): awake boxes are capped, a new
     /// box needs only disk. Absent when the provider is off, and nothing above counts its boxes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +310,7 @@ pub async fn capacity(state: &AppState) -> Capacity {
         min_free_disk_gb: state.cfg.fleet.min_free_disk_gb,
         mem_available_gb: p.mem_available_gb,
         has_room: room_for_one(max, resident, &p, &state.cfg.fleet),
+        shut: shut_gate(max, resident, &p, &state.cfg.fleet),
         boxd: crate::boxd::capacity(state).await,
     }
 }
@@ -313,9 +319,34 @@ pub async fn capacity(state: &AppState) -> Capacity {
 /// memory above the eviction floor. A host that is stopping sandboxes for memory does not make
 /// new ones, whatever the count says.
 pub fn room_for_one(max: usize, resident: usize, p: &Pressure, cfg: &FleetCfg) -> bool {
-    resident < max
-        && p.disk_free_gb >= cfg.min_free_disk_gb
-        && p.mem_available_gb >= cfg.evict_min_available_gb
+    shut_gate(max, resident, p, cfg).is_none()
+}
+
+/// The first gate that is shut, by name; `None` when a sandbox may be made.
+pub fn shut_gate(
+    max: usize,
+    resident: usize,
+    p: &Pressure,
+    cfg: &FleetCfg,
+) -> Option<&'static str> {
+    if resident >= max {
+        Some("the cap is reached")
+    } else if p.disk_free_gb < cfg.min_free_disk_gb {
+        Some("free disk is under its floor")
+    } else if p.mem_available_gb < cfg.evict_min_available_gb {
+        Some("available memory is under its floor")
+    } else {
+        None
+    }
+}
+
+/// Available memory for a log line; "unknown" where it could not be read.
+fn mem_gb_text(gb: f64) -> String {
+    if gb < 1e9 {
+        format!("{gb:.0} GB")
+    } else {
+        "unknown".into()
+    }
 }
 
 /// Admit a user who needs a sandbox: `Ok(true)` = go ahead and create it; `Ok(false)` = the host
@@ -331,12 +362,14 @@ pub async fn try_admit(state: &AppState, user_id: &str) -> Result<bool> {
     if !state.db.is_waitlisted(user_id)? {
         state.db.waitlist_add(user_id)?;
         let pos = state.db.waitlist_position(user_id)?.unwrap_or(0);
-        tracing::info!(%user_id, pos, resident = cap.resident, max = cap.max_boxes, disk_free_gb = cap.disk_free_gb, "host full; user waitlisted");
+        let gate = cap.shut.unwrap_or("the gate is shut");
+        let mem = mem_gb_text(cap.mem_available_gb);
+        tracing::info!(%user_id, pos, gate, resident = cap.resident, max = cap.max_boxes, disk_free_gb = cap.disk_free_gb, mem_available = %mem, "host full; user waitlisted");
         let _ = state.db.fleet_event(
             "waitlisted",
             Some(user_id),
             &format!(
-                "position {pos}; resident {}/{}; disk {:.0} GB free",
+                "position {pos}; {gate}; resident {}/{}; disk {:.0} GB free; memory {mem} available",
                 cap.resident, cap.max_boxes, cap.disk_free_gb
             ),
         );
@@ -1517,6 +1550,17 @@ mod tests {
             "a host short of memory is evicting; it makes no new sandbox"
         );
         assert!(room_for_one(80, 10, &host(200.0, 64.0), &cfg));
+        // The waitlisted event names the gate: "host full" at 72 of 150 was unreadable.
+        let gate = |resident, disk, mem| shut_gate(80, resident, &host(disk, mem), &cfg);
+        assert_eq!(gate(80, 200.0, 400.0), Some("the cap is reached"));
+        assert_eq!(gate(10, 39.9, 400.0), Some("free disk is under its floor"));
+        assert_eq!(
+            gate(10, 200.0, 63.9),
+            Some("available memory is under its floor")
+        );
+        assert_eq!(gate(10, 200.0, 64.0), None);
+        assert_eq!(mem_gb_text(63.9), "64 GB");
+        assert_eq!(mem_gb_text(f64::MAX), "unknown");
     }
 
     #[test]
@@ -1851,5 +1895,20 @@ mod tests {
         assert!((avail - 2.0).abs() < 1e-9);
         assert!((swap - 1.0).abs() < 1e-9);
         assert_eq!(parse_loadavg("1.5 2.5 3.5 1/100 42"), (1.5, 2.5));
+        // A file with no usable MemAvailable is "unknown", not "none left".
+        for text in ["MemTotal: 100 kB\n", "MemAvailable: lots kB\n", ""] {
+            let (avail, _) = parse_meminfo(text);
+            assert!(avail > 1e9, "{text:?} read as {avail}");
+            assert!(room_for_one(
+                80,
+                10,
+                &Pressure {
+                    disk_free_gb: 200.0,
+                    mem_available_gb: avail,
+                    ..Pressure::default()
+                },
+                &FleetCfg::default()
+            ));
+        }
     }
 }
