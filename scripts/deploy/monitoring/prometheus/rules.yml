@@ -209,6 +209,16 @@ groups:
         annotations:
           summary: The relay restarted in the last 15 minutes.
 
+      # The write-ahead log sits near 4 MB. One that stays this large means a read is being held open
+      # across many commits, and writes get slower. Quiet while the relay does not export the series.
+      - alert: RelayWalLarge
+        expr: arbos_relay_db_bytes{file="wal"} > 128e6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The relay database's write-ahead log is {{ $value | humanize1024 }}B and not shrinking (Fleet dashboard → Relay database)."
+
       - alert: RelayMemoryHigh
         # The relay sat at ~22 GB on 2026-11-18. Tune this number as the real ceiling becomes known.
         expr: container_memory_rss{id="/system.slice/arbos-relay.service"} > 40 * 1024^3

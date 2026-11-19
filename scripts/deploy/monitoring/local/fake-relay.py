@@ -88,6 +88,8 @@ def relay_metrics():
         f'arbos_relay_http_requests_total{{route="unmatched",class="4xx"}} {t * 2}',
         f'arbos_relay_http_requests_total{{route="/proxy/v1/{{*tail}}",class="5xx"}} {t // 20}',
         *histogram("arbos_relay_db_writer_wait_seconds", RELAY_BUCKETS, t // 10, 0.005),
+        f'arbos_relay_db_bytes{{file="db"}} {9_000_000_000 + t % 1000 * 4096}',
+        f'arbos_relay_db_bytes{{file="wal"}} {4_000_000 + wave * 300_000}',
         f"container_memory_rss{{{svc}}} {22_500_000_000 + wave * 50_000_000}",
         f"container_memory_working_set_bytes{{{svc}}} {23_000_000_000 + wave * 50_000_000}",
         f"container_cpu_usage_seconds_total{{{svc}}} {t * 3}",
