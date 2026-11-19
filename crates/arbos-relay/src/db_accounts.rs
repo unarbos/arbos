@@ -950,7 +950,7 @@ impl Db {
         user_id: &str,
         include_revoked: bool,
     ) -> Result<Vec<serde_json::Value>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT id, name, created_at, revoked_at, last_seen_at, kind FROM devices
                  WHERE user_id = ?1 AND (?2 OR revoked_at IS NULL) ORDER BY created_at",
