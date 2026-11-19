@@ -1789,7 +1789,7 @@ impl ClaudeCodeAdapter {
         cwd: &std::path::Path,
     ) -> Result<()> {
         use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::io::BufReader;
         let mut boot = self.sessions.begin(session_id).await?;
         boot.owned.close().await;
         // No `--bare`: the seed settings (PreToolUse deny/audit hook, bypassPermissions) must load.
@@ -1889,8 +1889,11 @@ impl ClaudeCodeAdapter {
             .await?;
         let tx = resource.stream.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stdout = BufReader::new(stdout);
+            while let Ok(Some(line)) =
+                crate::rpc_child::read_capped_line(&mut stdout, crate::rpc_child::CHILD_LINE_MAX)
+                    .await
+            {
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };

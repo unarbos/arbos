@@ -8,11 +8,45 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use arbos_core::rpc::{self, Command as RpcCommand, Event, Record, Response};
+
+/// The longest line a child's stdout may hand agentd. A record is one line of JSON, and a line
+/// was read whole however long it was, so one runaway record was held in memory in full, twice
+/// over once parsed. Far above any real record (an image part is a few MiB).
+pub(crate) const CHILD_LINE_MAX: usize = 32 * 1024 * 1024;
+
+/// The next line of a child's stdout, `None` at its end. A line over `max` bytes is read past
+/// without being kept and comes back empty, which no caller parses as a record, so the stream
+/// goes on from the line after it.
+pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
+    stdout: &mut R,
+    max: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut part = (&mut *stdout).take(max as u64 + 1);
+    if part.read_until(b'\n', &mut buf).await? == 0 {
+        return Ok(None);
+    }
+    if buf.len() > max && buf.last() != Some(&b'\n') {
+        tracing::warn!(max, "a line from a child was over the cap and was dropped");
+        loop {
+            buf.clear();
+            let mut part = (&mut *stdout).take(64 * 1024);
+            if part.read_until(b'\n', &mut buf).await? == 0 || buf.last() == Some(&b'\n') {
+                return Ok(Some(String::new()));
+            }
+        }
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&buf)
+            .trim_end_matches(['\n', '\r'])
+            .to_owned(),
+    ))
+}
 
 pub struct RpcChild {
     pub name: String,
@@ -152,9 +186,9 @@ impl RpcChild {
         });
         let reader_me = me.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
+            let mut stdout = BufReader::new(stdout);
             loop {
-                match lines.next_line().await {
+                match read_capped_line(&mut stdout, CHILD_LINE_MAX).await {
                     Ok(Some(line)) => {
                         // Before the parse, so a line this build cannot read still counts as the
                         // child doing something. An idle clock that only unparseable traffic
@@ -396,5 +430,24 @@ impl RpcChild {
             },
             None => ChildExit::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod capped_line_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_line_over_the_cap_is_dropped_and_the_next_one_is_read() {
+        let input = format!(
+            "first\n{}\n{{\"type\":\"agent_start\"}}\r\nlast",
+            "x".repeat(200_000)
+        );
+        let mut stdout = BufReader::new(input.as_bytes());
+        let mut lines = Vec::new();
+        while let Some(line) = read_capped_line(&mut stdout, 64).await.unwrap() {
+            lines.push(line);
+        }
+        assert_eq!(lines, ["first", "", "{\"type\":\"agent_start\"}", "last"]);
     }
 }
