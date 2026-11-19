@@ -155,30 +155,30 @@ tests:
           - { labels: "subnet:boxes_not_reporting", value: 0 }
           - { labels: "subnet:boxes_asleep", value: 0 }
 
-  # Today's relay: its own metrics, no box scrape series (those come with a later release), and
-  # nobody has called a model or woken a box in the last five minutes. No NaN, and the box counts
-  # read 0 instead of being absent.
-  - name: relay metrics only, no traffic
+  # Today's relay just after a restart: its own metrics, no box scrape series (those come with a
+  # later release), and no model call or box start yet. The labelled counters
+  # (arbos_relay_model_requests_total, arbos_relay_box_starts_total) therefore do not exist at all;
+  # only the unlabelled histograms do, at zero. No NaN, and every count reads 0 instead of being absent.
+  - name: relay metrics only, no traffic since the relay started
     interval: 30s
     input_series:
       - series: 'arbos_relay_uptime_seconds'
         values: 100x20
-      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
-        values: 500x20
       - series: 'arbos_relay_model_response_seconds_bucket{le="+Inf"}'
-        values: 500x20
+        values: 0x20
       - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf"}'
-        values: 40x20
+        values: 0x20
     promql_expr_test:
       - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+)"}'
         eval_time: 10m
         exp_samples: []
-      - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_start_failures:rate5m)"}'
+      - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_starts:rate5m|box_start_failures:rate5m)"}'
         eval_time: 10m
         exp_samples:
           - { labels: "subnet:boxes_reporting", value: 0 }
           - { labels: "subnet:boxes_not_reporting", value: 0 }
           - { labels: "subnet:model_requests:rate5m", value: 0 }
+          - { labels: "subnet:box_starts:rate5m", value: 0 }
           - { labels: "subnet:box_start_failures:rate5m", value: 0 }
 
   # ...and with nothing reporting, there is no invented zero.

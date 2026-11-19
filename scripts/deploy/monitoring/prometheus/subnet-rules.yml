@@ -31,7 +31,7 @@ groups:
       - record: subnet:boxes_not_reporting
         expr: sum(arbos_relay_box_scrapes{result!="ok"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:box_starts:rate5m
-        expr: sum(rate(arbos_relay_box_starts_total[5m]))
+        expr: sum(rate(arbos_relay_box_starts_total[5m])) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:box_start_failures:rate5m
         expr: sum(rate(arbos_relay_box_starts_total{result="failed"}[5m])) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:turns_started:rate5m
@@ -53,8 +53,10 @@ groups:
       - record: subnet:model_error_ratio
         # `> 0`: with no call in the window this is absent, not 0/0 = NaN.
         expr: (sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / (sum(rate(arbos_relay_model_requests_total[5m])) > 0)
+      # Both counters are labelled, so after a relay restart neither exists until the first call or
+      # the first start: 0 per minute then, not "no data".
       - record: subnet:model_requests:rate5m
-        expr: sum(rate(arbos_relay_model_requests_total[5m]))
+        expr: sum(rate(arbos_relay_model_requests_total[5m])) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:model_response_seconds:p95
         expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
       - record: subnet:box_wake_seconds:p95

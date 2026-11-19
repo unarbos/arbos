@@ -389,7 +389,7 @@ Undo, deleting data and images: `cd /etc/arbos-monitoring && docker compose --en
 # every target: 1 = scraped. relay reads 0 until step 9. No box target is listed until the relay
 # release with box discovery (#3096) is deployed and boxes run an image that reports.
 curl -s '127.0.0.1:9090/api/v1/query?query=up' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
-# every probe: 1 = answered. All three must be 1.
+# every probe: 1 = answered. The relay on loopback and relay.arbos.life must be 1; arbos.life may be 0.
 curl -s '127.0.0.1:9090/api/v1/query?query=probe_success' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
 # cAdvisor names every box: these two numbers are equal
 curl -s 127.0.0.1:9180/metrics | grep -c '^container_last_seen{.*name="arbos-box-'
@@ -409,7 +409,10 @@ finding no list of boxes; it is expected and stops by itself with #3096.
 What each outcome means:
 
 - **A probe reads 0**: for `http://127.0.0.1:7700/healthz` the relay is not answering on loopback
-  and `RelayDown` will page: stop and look. For a public name see the note on `/etc/hosts` below.
+  and `RelayDown` will page: stop and look. For `https://relay.arbos.life/healthz` see the note on
+  `/etc/hosts` below. `https://arbos.life/` may read 0 while the site is fine: it is behind
+  Cloudflare, which can answer a probe from a server with a challenge. That costs one warning
+  (`PublicProbeFailing`) and nothing on the partner's view, which does not use that probe.
 - **Box count 0, or lower than `docker ps`**: cAdvisor cannot reach Docker or containerd.
   `docker logs arbos-mon-cadvisor 2>&1 | grep -i factory` names the socket. The Boxes dashboard is
   empty until that is fixed; every host panel and the relay's own numbers are unaffected. Do not
@@ -498,15 +501,25 @@ It is run through the deploy lane, as the deploy worker runs it, so that no cana
 reload overlaps it:
 
 ```bash
-SHA=<the commit of main to deploy>
-( . /usr/local/bin/deploy-state.sh; export STATE=/var/lib/arbos-deploy LANE_MARKER_MAX_S=1800
+SHA=        # the commit of main to deploy, in full
+( [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "set SHA to the full commit id first"; exit 1; }
+  . /usr/local/bin/deploy-state.sh; export STATE=/var/lib/arbos-deploy LANE_MARKER_MAX_S=1800
   deploy_lane_run relay env BUILD_USER=const bash /home/const/arbos-build/repo/scripts/feedback/deploy-relay.sh "$SHA" ); echo "exit $?"
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7700/healthz
 ```
 
 `exit 0` and `200`: deployed. `exit 75`: a canary smoke or another deploy holds the lane; nothing
-happened, run it again when that is done. Any other exit: the deploy script failed; its output is
-above, and the relay keeps running what it ran (the script never rolls back).
+happened, run it again when that is done. `exit 1` with `set SHA to the full commit id first`: the commit
+was not filled in and nothing ran (the deploy script would otherwise take main's head). Any other exit: the
+deploy script failed; its output is above, and the relay keeps running what it ran (the script
+never rolls back).
+
+After a successful relay deploy, and only then, lift the silence from step 4, so that a relay that
+later loses its metrics endpoint is reported:
+
+```bash
+docker exec arbos-mon-alertmanager sh -c 'amtool silence expire $(amtool silence query -q alertname=RelayMetricsOff --alertmanager.url=http://127.0.0.1:9093) --alertmanager.url=http://127.0.0.1:9093'
+```
 
 Do not run `systemctl reload arbos-www` or restart the relay by hand for this stack. If Grafana has
 to be published with no relay deploy in sight, that is a user-interrupting step of its own and also
@@ -517,11 +530,7 @@ goes through the lane:
   deploy_lane_run www systemctl reload arbos-www.service ); echo "exit $?"
 ```
 
-Then lift the silence from step 4, so that a relay that later loses its metrics endpoint is reported:
-
-```bash
-docker exec arbos-mon-alertmanager sh -c 'amtool silence expire $(amtool silence query -q alertname=RelayMetricsOff --alertmanager.url=http://127.0.0.1:9093) --alertmanager.url=http://127.0.0.1:9093'
-```
+That reload does not turn on the relay's metrics, so the silence from step 4 stays.
 
 After the window:
 
