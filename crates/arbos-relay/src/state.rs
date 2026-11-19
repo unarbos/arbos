@@ -186,6 +186,9 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Held while a cold `doc_cache` is rebuilt, so the room's other readers wait for that
+    /// build and do not each start their own.
+    pub(crate) doc_build: tokio::sync::Mutex<()>,
     /// One speculative push owns the message preimage through durable admission.
     pub(crate) push_admission: tokio::sync::Mutex<()>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
@@ -571,6 +574,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    doc_build: tokio::sync::Mutex::new(()),
                     push_admission: tokio::sync::Mutex::new(()),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })

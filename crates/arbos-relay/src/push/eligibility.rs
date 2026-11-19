@@ -335,7 +335,7 @@ pub fn silenced_by_level(state: &AppState, user_id: &str, chat: &ChatRef) -> boo
 impl Db {
     /// The chat-level setting; `Inherit` when the user never set one.
     pub fn chat_notify_level(&self, user_id: &str, chat_id: &str) -> Result<Level> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT level FROM chat_notify_level WHERE user_id = ?1 AND chat_id = ?2",
                 params![user_id, chat_id],
@@ -371,7 +371,7 @@ impl Db {
 
     /// The account default; `All` when never set. Never `Inherit`.
     pub fn user_notify_default(&self, user_id: &str) -> Result<Level> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT level FROM user_notify_default WHERE user_id = ?1",
                 params![user_id],
