@@ -16,7 +16,9 @@ A sign-up is refused a machine, and put on the waitlist, when any of these holds
 | free disk on the relay data volume < the floor | `ARBOS_HOST_MIN_FREE_DISK_GB`, default 40 | env, relay restart |
 | available memory < the eviction floor | `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64 | env, relay restart |
 
-The waitlist is first come, first served; once a minute every free slot is given to the people at its head. A slot is free when neither a machine nor someone already let through (`capacity.pending`) holds it. A machine its user stopped keeps its slot, so Start is never refused.
+The waitlist is first come, first served. Once a minute the people at its head, as many as there are free slots, are woken; each leaves the line and is told their computer is ready when their machine's create passes the gate, not before. A newcomer stands behind everyone already in line, and a person whose create fails keeps their place. A machine its user stopped keeps its slot, so Start is never refused. While the spend kill switch is on (§7) the line does not move.
+
+The memory gate uses `MemAvailable`. Its default of 64 GB suits this host; on a host with less memory than that, set `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB` lower or every sign-up is waitlisted.
 
 ## 2. The capacity number
 
@@ -44,7 +46,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
    curl -sS -X PUT -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"max_boxes":300}' http://127.0.0.1:7700/admin/fleet
    ```
 
-   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80 until 2026-11-18, 150 since). Raising the cap lets the whole waitlist through, up to the new free slots, on the next tick: within a minute everyone admitted is told their computer is ready and their machines are made eight at a time.
+   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80 until 2026-11-18, 150 since). Raising the cap lets the waitlist through, up to the new free slots, on the next tick: within a minute those people are woken, their machines are made eight at a time, and each is told their computer is ready as theirs passes the gate.
 
 2. **[production]** In `/etc/arbos/relay.env` (read at the next relay restart; a restart does not stop machines, they reconnect within seconds):
 
@@ -100,9 +102,9 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 | event `disk_low` | events | free disk within 20 GB of the floor; sign-ups stop at the floor |
 | event `evicted` | events | the host stopped an idle machine under pressure; its user's next message starts it |
 | event `died` | events | a machine's container went away (out of memory at its own cap, or killed); the relay restarted it |
-| machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish; `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason |
-| `wake failed` naming `losetup` or `mount` | journal | two machines made at once were given the same loop device (eight are made at a time since #3089); the wake job retries by itself three times, so one line is noise and a run of them is not |
-| load5 > 100 | `pressure` | eviction by load starts |
+| machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish, after two tries 5 s apart; `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason. Its user's Start tries again |
+| `wake failed` naming `losetup` or `mount` | journal | two machines made at once were given the same loop device (eight are made at a time since #3089); the wake job tries twice before the machine is left in `error`, so one line is noise and a run of them is not. Gone once the relay carrying #3110 is deployed |
+| load5 > 100 | `pressure` | eviction by load starts, one machine every 30 s |
 
 ## 6. When the host is 80 % full
 
@@ -110,7 +112,7 @@ Eighty per cent is 240 machines, or free disk under 100 GB, or available memory 
 
 1. Find what is short in `/admin/fleet`: `capacity` and `pressure`.
 2. Disk: repeat §4. Then look for the largest `/work` images (`sandboxes[].work_img_used_mb`).
-3. Memory or CPU: the host already sheds load by itself. Under the memory floor, 20 GB of swap or load 100 it stops idle machines, least recently used first, never one in the middle of a turn, five at most every 30 s. Nothing is deleted; a stopped machine starts again on its user's next message.
+3. Memory or CPU: the host already sheds load by itself. Under the memory floor or over 20 GB of swap it stops idle machines, least recently used first, never one in the middle of a turn, five at most every 30 s; over load 100, one every 30 s. Nothing is deleted; a stopped machine starts again on its user's next message.
 4. **[production]** To shed load before that point, stop the machines nobody is using (after the relay carrying #3092 is deployed; before it there is no such call):
 
    ```bash

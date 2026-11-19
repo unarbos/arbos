@@ -2387,7 +2387,6 @@ mod tests {
                 "max_boxes",
                 "mem_available_gb",
                 "min_free_disk_gb",
-                "pending",
                 "resident",
                 "waitlist"
             ]

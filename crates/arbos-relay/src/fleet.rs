@@ -267,9 +267,6 @@ pub struct Capacity {
     pub max_boxes: usize,
     pub resident: usize,
     pub waitlist: usize,
-    /// People let through whose sandbox is not made yet: a wake job and no box row. They hold
-    /// a slot for the admission tick, or two ticks would give the same slot away twice.
-    pub pending: usize,
     pub disk_free_gb: f64,
     pub min_free_disk_gb: f64,
     pub mem_available_gb: f64,
@@ -301,13 +298,11 @@ pub async fn capacity(state: &AppState) -> Capacity {
         .count_boxes_of_provider(Provider::Gvisor.as_str())
         .unwrap_or(usize::MAX);
     let waitlist = state.db.waitlist().map(|w| w.len()).unwrap_or(0);
-    let pending = state.db.count_wakes_without_box().unwrap_or(usize::MAX);
     let p = sample_pressure(state).await;
     Capacity {
         max_boxes: max,
         resident,
         waitlist,
-        pending,
         disk_free_gb: p.disk_free_gb,
         min_free_disk_gb: state.cfg.fleet.min_free_disk_gb,
         mem_available_gb: p.mem_available_gb,
@@ -325,44 +320,60 @@ pub fn room_for_one(max: usize, resident: usize, p: &Pressure, cfg: &FleetCfg) -
         && p.mem_available_gb >= cfg.evict_min_available_gb
 }
 
-/// How many waitlisted users one admission tick lets through: the slots neither a sandbox nor
-/// someone already let through holds, and none while the gate is shut.
+/// The free slots: how far down the line the host can take people right now, and none while
+/// the gate is shut.
 pub fn admit_count(cap: &Capacity) -> usize {
     if cap.has_room {
-        cap.max_boxes
-            .saturating_sub(cap.resident.saturating_add(cap.pending))
+        cap.max_boxes.saturating_sub(cap.resident)
     } else {
         0
     }
 }
 
-/// One admission tick: the people at the head of the waitlist, as many as [`admit_count`] says,
-/// are taken off it, woken (which makes their sandbox) and told. Returns who was admitted.
+/// One admission tick: the people at the head of the waitlist, as many as there are free slots,
+/// are woken, which makes their sandbox. Nobody leaves the line here: a person leaves it in
+/// [`admit`], when their create passes the gate, and is told then. So a tick that runs again
+/// before the sandboxes exist wakes the same people and gives nothing away twice, and someone
+/// whose create fails keeps their place. Returns who was woken.
+///
+/// Not while the kill switch is on: a wake is refused then and leaves the box in `error`, which
+/// nothing but the user lifts.
 pub(crate) async fn admit_waitlisted(state: &AppState, cap: &Capacity) -> Vec<String> {
-    let list = state.db.waitlist().unwrap_or_default();
-    let mut admitted = Vec::new();
-    for user_id in list.into_iter().take(admit_count(cap)).map(|w| w.user_id) {
-        let _ = state.db.waitlist_remove(&user_id);
-        let _ = state
-            .db
-            .fleet_event("admitted", Some(&user_id), "slot free (tick)");
-        tracing::info!(%user_id, "waitlist: admitting");
-        boxes::ensure_awake(state, &user_id, "waitlist admitted").await;
-        let _ = state
-            .db
-            .push_user_event(&user_id, &machine_ready_push(), None);
-        admitted.push(user_id);
+    if crate::credits::check_read_only(state).is_err() {
+        return Vec::new();
     }
-    admitted
+    let list = state.db.waitlist().unwrap_or_default();
+    let mut woken = Vec::new();
+    for user_id in list.into_iter().take(admit_count(cap)).map(|w| w.user_id) {
+        boxes::ensure_awake(state, &user_id, "waitlist admitted").await;
+        woken.push(user_id);
+    }
+    woken
 }
 
 /// Admit a user who needs a sandbox: `Ok(true)` = go ahead and create it; `Ok(false)` = the host
 /// is full, the user is on the waitlist (idempotent).
 pub async fn try_admit(state: &AppState, user_id: &str) -> Result<bool> {
-    let cap = capacity(state).await;
-    if cap.has_room {
+    admit(state, user_id, &capacity(state).await)
+}
+
+/// The gate for one person, first come, first served: they pass when the free slots reach as far
+/// as their place in line, and someone not in line stands behind everyone who is. A newcomer
+/// cannot take the slot of a person the tick has just woken, and a person in line who does not
+/// pass keeps their place.
+pub(crate) fn admit(state: &AppState, user_id: &str, cap: &Capacity) -> Result<bool> {
+    let list = state.db.waitlist()?;
+    let ahead = list
+        .iter()
+        .position(|w| w.user_id == user_id)
+        .unwrap_or(list.len());
+    if ahead < admit_count(cap) {
         if state.db.waitlist_remove(user_id)? {
             let _ = state.db.fleet_event("admitted", Some(user_id), "slot free");
+            tracing::info!(%user_id, "waitlist: admitted");
+            let _ = state
+                .db
+                .push_user_event(user_id, &machine_ready_push(), None);
         }
         return Ok(true);
     }
@@ -1500,12 +1511,10 @@ pub async fn admin_waitlist_admit(
             "no free slot on the host",
         );
     }
-    let _ = state.db.waitlist_remove(&user_id);
+    // To the head of the line, then woken: their create passes the gate first and tells them.
+    let _ = state.db.waitlist_to_front(&user_id);
     let _ = state.db.fleet_event("admitted", Some(&user_id), "by admin");
     boxes::ensure_awake(&state, &user_id, "waitlist admitted").await;
-    let _ = state
-        .db
-        .push_user_event(&user_id, &machine_ready_push(), None);
     Json(json!({ "admitted": user_id, "capacity": capacity(&state).await })).into_response()
 }
 
@@ -1566,11 +1575,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A tick fills every free slot, oldest first, and the next tick does not give the same
-    /// slots away again while the first people's sandboxes are still being made. A box its user
-    /// stopped keeps its slot: Start is never refused.
+    /// The line is first come, first served, and nobody is told "ready" who is not. A tick wakes
+    /// the people the free slots reach and takes nobody off the line; a second tick gives nothing
+    /// away twice; a newcomer stands behind the line; a box its user stopped keeps its slot.
     #[tokio::test]
-    async fn a_tick_fills_the_free_slots_once() {
+    async fn the_line_is_served_in_order_and_a_slot_is_given_once() {
         let state = test_state(AuthMode::Github);
         state.db.set_fleet_setting("max_boxes", "4").unwrap();
         gvisor_row(&state, "u_old");
@@ -1589,32 +1598,80 @@ mod tests {
                 cap
             }
         };
-        let first = cap(&state).await;
-        assert_eq!((first.resident, first.pending), (2, 0), "stopped counts");
-        assert_eq!(
-            admit_waitlisted(&state, &first).await,
-            ["u_1", "u_2"],
-            "two slots, the two who waited longest"
+        let line = |state: &AppState| -> Vec<String> {
+            let list = state.db.waitlist().unwrap();
+            list.into_iter().map(|w| w.user_id).collect()
+        };
+        let now = cap(&state).await;
+        assert_eq!((now.resident, admit_count(&now)), (2, 2), "stopped counts");
+
+        // Two free slots, four in line: a newcomer does not pass, nor does the third in line.
+        assert!(!admit(&state, "u_new", &now).unwrap());
+        assert!(!admit(&state, "u_3", &now).unwrap());
+        assert_eq!(line(&state), ["u_1", "u_2", "u_3", "u_4", "u_new"]);
+
+        // Two ticks before any sandbox exists wake the same two people and nobody leaves.
+        for _ in 0..2 {
+            assert_eq!(admit_waitlisted(&state, &now).await, ["u_1", "u_2"]);
+            assert_eq!(line(&state).len(), 5);
+        }
+        assert_eq!(state.db.due_wake_jobs().unwrap().len(), 2);
+
+        // Their creates pass the gate; each sandbox made takes its slot.
+        assert!(admit(&state, "u_2", &now).unwrap());
+        gvisor_row(&state, "u_2");
+        let now = cap(&state).await;
+        assert!(
+            !admit(&state, "u_3", &now).unwrap(),
+            "one slot, and u_1 is first"
         );
-        // Their wake jobs are queued and no sandbox exists yet.
-        let second = cap(&state).await;
-        assert_eq!((second.resident, second.pending), (2, 2));
-        assert!(admit_waitlisted(&state, &second).await.is_empty());
-        let left: Vec<String> = state
-            .db
-            .waitlist()
-            .unwrap()
-            .into_iter()
-            .map(|w| w.user_id)
-            .collect();
-        assert_eq!(left, ["u_3", "u_4"]);
-        // One sandbox is made: its row holds the slot now, not the job.
+        assert!(admit(&state, "u_1", &now).unwrap());
         gvisor_row(&state, "u_1");
-        let third = cap(&state).await;
-        assert_eq!((third.resident, third.pending), (3, 1));
-        let mut shut = third.clone();
+        let full = cap(&state).await;
+        assert_eq!(admit_count(&full), 0);
+        assert!(!admit(&state, "u_3", &full).unwrap());
+        assert_eq!(line(&state), ["u_3", "u_4", "u_new"], "places kept");
+        let mut shut = now.clone();
         shut.has_room = false;
         assert_eq!(admit_count(&shut), 0, "a shut gate admits nobody");
+
+        // An operator's admit puts one person first.
+        state.db.waitlist_to_front("u_new").unwrap();
+        assert_eq!(line(&state), ["u_new", "u_3", "u_4"]);
+    }
+
+    /// With the kill switch on a wake is refused and leaves the box in `error`. The tick must
+    /// not spend the line on that: everyone keeps their place and nobody is woken.
+    #[tokio::test]
+    async fn the_kill_switch_does_not_drain_the_line() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_fleet_setting("max_boxes", "4").unwrap();
+        for u in ["u_1", "u_2"] {
+            state.db.waitlist_add(u).unwrap();
+        }
+        state
+            .db
+            .set_kill_switch(&crate::db_accounts::KillSwitch {
+                on: true,
+                reason: Some("test".into()),
+                by: Some("admin".into()),
+                at: now_ms(),
+                auto: false,
+            })
+            .unwrap();
+        let mut cap = capacity(&state).await;
+        cap.has_room = true;
+        assert!(admit_waitlisted(&state, &cap).await.is_empty());
+        assert_eq!(state.db.waitlist().unwrap().len(), 2);
+        assert!(state.db.due_wake_jobs().unwrap().is_empty());
+        for u in ["u_1", "u_2"] {
+            assert_ne!(state.box_state(u).await.0, BoxState::Error);
+        }
+        state
+            .db
+            .set_kill_switch(&crate::db_accounts::KillSwitch::default())
+            .unwrap();
+        assert_eq!(admit_waitlisted(&state, &cap).await, ["u_1", "u_2"]);
     }
 
     #[test]
