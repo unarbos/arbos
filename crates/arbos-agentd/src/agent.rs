@@ -2201,6 +2201,9 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Workers whose task is alive and waiting to start (a job cap, a lock, a slot). They are not
+    /// in `subagent_msgs` yet, and the orphan sweep must not read that as their task being gone.
+    subagents_waiting: std::sync::Mutex<HashSet<String>>,
     /// Subagent id → the process group its harness child leads, recorded at spawn.
     ///
     /// "The job has no record of child pids" was the true half of bug Z's hunch. A cancel has to
@@ -2513,6 +2516,7 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            subagents_waiting: std::sync::Mutex::new(HashSet::new()),
             worker_pgids: Mutex::new(HashMap::new()),
             cancel_leftovers: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
@@ -12323,7 +12327,17 @@ impl Agent {
         if on_boot {
             self.reclaim_interrupted_jobs().await;
         }
-        let live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        let mut live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        // A worker still waiting to start is alive however long it has waited: behind hour-long
+        // jobs that is well past the freshness window below, and reading it as an orphan wrote
+        // "Stopped" on the row of a job that then ran.
+        live.extend(
+            self.subagents_waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
         let now = now_ms();
         let mut healed: Vec<(String, Option<String>)> = Vec::new();
         for s in self.store.subagents().unwrap_or_default() {
@@ -13133,6 +13147,7 @@ impl Agent {
             self.post_activity(chat_id, Some(j.title.clone()));
         }
         let queued_at = Instant::now();
+        let waiting = WaitingWorker::enter(&self.subagents_waiting, &subagent_id);
         if self.subagent_slots.available_permits() == 0 {
             let waiting = self
                 .store
@@ -13229,6 +13244,7 @@ impl Agent {
             .lock()
             .await
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
+        drop(waiting);
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
@@ -14774,6 +14790,33 @@ fn behavior_name(b: StreamingBehavior) -> &'static str {
     match b {
         StreamingBehavior::Steer => "steer",
         StreamingBehavior::FollowUp => "followUp",
+    }
+}
+
+/// A worker's place in [`Agent::subagents_waiting`], given back when it starts or gives up.
+struct WaitingWorker<'a> {
+    set: &'a std::sync::Mutex<HashSet<String>>,
+    id: String,
+}
+
+impl<'a> WaitingWorker<'a> {
+    fn enter(set: &'a std::sync::Mutex<HashSet<String>>, id: &str) -> Self {
+        set.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned());
+        Self {
+            set,
+            id: id.to_owned(),
+        }
+    }
+}
+
+impl Drop for WaitingWorker<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
     }
 }
 

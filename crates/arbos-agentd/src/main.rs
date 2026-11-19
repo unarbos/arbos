@@ -77,6 +77,8 @@ mod job_steer_inherit_tests;
 mod job_steer_race_tests;
 #[cfg(test)]
 mod job_wait_tier_tests;
+#[cfg(test)]
+mod job_waiting_sweep_tests;
 mod jobs_view;
 mod llm;
 mod local;
