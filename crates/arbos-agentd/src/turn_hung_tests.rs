@@ -20,12 +20,14 @@ use crate::sync::SharedHost;
 const CHAT: &str = "01TESTCHATTURNHUNG00000001";
 
 /// What the first child does with its first prompt is in `mode`, beside the script. `hang`: it
-/// starts a tool of its own (a `sleep` in a process group of its own, the way a tool runner
-/// starts a command it means to time out; pid recorded) and never ends the run, whatever
-/// it is told. `busy`: it reports tool output five times a second for longer than the deadline
-/// and the grace together, then answers. Every later child answers at once.
+/// starts a tool of its own (pid recorded) and never ends the run, whatever it is told; that
+/// child also has a "server" running from before the turn, as an earlier turn would have left.
+/// `busy`: it reports tool output five times a second for longer than the deadline and the
+/// grace together, then answers. `slow`: it is silent past the deadline, ignores the abort, and
+/// goes on reporting with gaps longer than the loop's tick before it answers. Every later child
+/// answers at once.
 const STUB_PI: &str = r#"#!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, threading, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 counter = os.path.join(here, "starts")
@@ -38,9 +40,24 @@ with open(counter + ".tmp", "w") as f:
     f.write(str(n))
 os.replace(counter + ".tmp", counter)
 
+writing = threading.Lock()
+
 def out(o):
-    sys.stdout.write(json.dumps(o) + "\n")
-    sys.stdout.flush()
+    with writing:
+        sys.stdout.write(json.dumps(o) + "\n")
+        sys.stdout.flush()
+
+def background(name):
+    # A process in a group of its own, the way a tool runner starts a command; pid recorded.
+    p = subprocess.Popen(["sleep", "600"], process_group=0,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(os.path.join(here, name + ".tmp"), "w") as f:
+        f.write(str(p.pid))
+    os.replace(os.path.join(here, name + ".tmp"), os.path.join(here, name))
+
+# What an earlier turn left running on purpose: a dev server, started before this turn began.
+if n == 1 and open(os.path.join(here, "mode")).read().strip() == "hang":
+    background("server")
 
 hung = False
 for line in sys.stdin:
@@ -66,19 +83,27 @@ for line in sys.stdin:
     mode = open(os.path.join(here, "mode")).read().strip()
     if n == 1 and mode == "hang":
         hung = True
-        tool = subprocess.Popen(["sleep", "600"], process_group=0,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(os.path.join(here, "tool.tmp"), "w") as f:
-            f.write(str(tool.pid))
-        os.replace(os.path.join(here, "tool.tmp"), os.path.join(here, "tool"))
+        background("tool")
         continue
     if n == 1 and mode == "busy":
-        for _ in range(18):
+        for _ in range(25):
             out({"type": "tool_execution_update", "toolCallId": "t1", "toolName": "bash", "partialResult": {}})
             time.sleep(0.2)
         out({"type": "message_update",
              "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "the long build finished"}})
         out({"type": "agent_settled", "aborted": False})
+        continue
+    if n == 1 and mode == "slow":
+        # On a thread, so the abort is acknowledged at once (and ignored) while the run goes on.
+        def run():
+            time.sleep(1.6)
+            for _ in range(4):
+                out({"type": "tool_execution_update", "toolCallId": "t1", "toolName": "bash", "partialResult": {}})
+                time.sleep(1.3)
+            out({"type": "message_update",
+                 "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "the slow run finished"}})
+            out({"type": "agent_settled", "aborted": False})
+        threading.Thread(target=run, daemon=True).start()
         continue
     out({"type": "message_update",
          "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "a fresh child answered"}})
@@ -205,10 +230,18 @@ async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message
 }
 
 /// The tool that hung the turn is a process of its own, in a group of its own. Closing the
-/// child does not reach it; the sweep of the child's session does.
+/// child does not reach it; the sweep of the child's session does. What the child was already
+/// running when the turn began, a server an earlier turn started, is in that same session and
+/// is left alone, as it is when a child is lost any other way.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_tool_that_hung_the_turn_dies_with_it() {
+async fn the_tool_that_hung_the_turn_dies_with_it_and_an_earlier_turns_server_does_not() {
     let (agent, host, dir, root) = a_box("hang").await;
+    let server: i32 = std::fs::read_to_string(dir.join("server"))
+        .expect("the child had a server running before the turn")
+        .parse()
+        .unwrap();
+    // Well clear of the start-time resolution (a clock tick) before the turn begins.
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let (_, cmd) = send_cmd(&host, "do the thing that never returns").await;
     let ended = tokio::time::timeout(Duration::from_secs(30), agent.handle_command(CHAT, cmd))
@@ -232,11 +265,57 @@ async fn the_tool_that_hung_the_turn_dies_with_it() {
             nix::sys::signal::Signal::SIGKILL,
         );
     }
+    let server_alive = alive(server);
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(server),
+        nix::sys::signal::Signal::SIGKILL,
+    );
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     assert!(ended, "the turn was still held 30 s after a 1 s deadline");
     assert!(gone, "tool {tool} of the hung turn outlived it");
+    assert!(
+        server_alive,
+        "server {server}, running since before the turn, was killed with it"
+    );
+}
+
+/// The grace is silence, not time since the abort. A child that ignored the abort and is still
+/// reporting, even with gaps longer than the loop's tick, is still working: the turn stays with
+/// it until it ends its own run, on the child it started on, as it did before there was a grace
+/// at all. (What that turn then shows in the chat is the deadline's business and unchanged.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_that_ignores_the_abort_but_keeps_reporting_is_left_to_end_itself() {
+    let (agent, host, dir, root) = a_box("slow").await;
+
+    let (ask, cmd) = send_cmd(&host, "run the slow thing").await;
+    let began = std::time::Instant::now();
+    let ended = tokio::time::timeout(Duration::from_secs(60), agent.handle_command(CHAT, cmd))
+        .await
+        .is_ok();
+    let took = began.elapsed();
+    let said = replies(&host, &ask).await;
+    let starts = std::fs::read_to_string(dir.join("starts")).unwrap_or_default();
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(ended, "the turn did not end");
+    assert!(
+        !said.contains(TURN_HUNG_NOTICE),
+        "a turn that was still reporting was ended as hung: {said:?}"
+    );
+    // The child's run is 1.6 s of silence and four reports 1.3 s apart.
+    assert!(
+        took >= Duration::from_secs(6),
+        "the turn ended after {took:?}, before the child ended its run"
+    );
+    assert_eq!(
+        starts.trim(),
+        "1",
+        "the child was replaced under a working turn"
+    );
 }
 
 /// A turn that is still reporting is working, and none of the limits apply to it: not the
@@ -246,6 +325,11 @@ async fn the_tool_that_hung_the_turn_dies_with_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_that_keeps_reporting_runs_past_the_deadline_to_its_answer() {
     let (agent, host, dir, root) = a_box("busy").await;
+    // The limits are read after this long with no event. Three seconds here, against a child
+    // that reports five times a second, so a runner that stalls for a second or two does not
+    // open the window by itself; an arm that fired on a timer instead would still fire well
+    // inside the five seconds the child reports for.
+    agent.turn_quiet_tick_ms.store(3_000, Ordering::SeqCst);
 
     let (ask, cmd) = send_cmd(&host, "run the long build").await;
     let ended = tokio::time::timeout(Duration::from_secs(30), agent.handle_command(CHAT, cmd))

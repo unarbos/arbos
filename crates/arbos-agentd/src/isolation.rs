@@ -461,6 +461,60 @@ impl ProcessTree {
     }
 }
 
+/// Clock ticks since boot, the unit of a process's start time in `/proc/<pid>/stat`. `None`
+/// where there is no `/proc` to read.
+fn ticks_since_boot() -> Option<u64> {
+    let uptime = std::fs::read_to_string(proc_root().join("uptime")).ok()?;
+    let secs: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+    let per_sec = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK).ok()??;
+    Some((secs * per_sec as f64) as u64)
+}
+
+impl ProcessTree {
+    /// SIGKILL the members of this tree that started less than `age` ago, and leave every older
+    /// one alone. Returns the ones still alive after the reap wait.
+    ///
+    /// For ending one piece of work inside a child that has done others: the tree's handles
+    /// name everything the child ever started, and the start time is what tells this turn's
+    /// tool from a server an earlier turn left running. The signals go to the chosen pids only;
+    /// the group and the cgroup as wholes are not signalled, because they hold the older ones.
+    pub fn kill_started_within(&self, age: std::time::Duration) -> Vec<u32> {
+        let (Some(now), Ok(Some(per_sec))) = (
+            ticks_since_boot(),
+            nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK),
+        ) else {
+            return Vec::new();
+        };
+        let cutoff = now.saturating_sub((age.as_secs_f64() * per_sec as f64).ceil() as u64);
+        let recent = || -> Vec<Witness> {
+            self.members()
+                .into_iter()
+                .filter_map(Witness::of)
+                .filter(|w| w.start >= cutoff)
+                .collect()
+        };
+        let mut witnesses = recent();
+        let mut alive: Vec<u32> = witnesses.iter().map(|w| w.pid).collect();
+        for _ in 0..REAP_TRIES {
+            if alive.is_empty() {
+                break;
+            }
+            for pid in &alive {
+                signal(*pid);
+            }
+            std::thread::sleep(REAP_WAIT);
+            // Again from the kernel, so a process forked since the last pass is caught too.
+            for w in recent() {
+                if !witnesses.contains(&w) {
+                    witnesses.push(w);
+                }
+            }
+            alive = still_alive(&witnesses);
+        }
+        alive
+    }
+}
+
 /// The witnesses that are still the process they were, read one pid at a time. A pid the kernel
 /// has given to something else since is not a survivor, and signalling it again would be a kill
 /// aimed at a stranger.
