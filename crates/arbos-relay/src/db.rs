@@ -4147,12 +4147,14 @@ mod reader_tests {
                 })
             })
             .collect();
-        for n in 0..10_000 {
-            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
-        }
+        // The readers are stopped and the directory removed whatever the appends did.
+        let refused =
+            (0..10_000).find_map(|n| db.append_row("p/c", "dev", &format!("b{n}"), b"x").err());
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        readers.into_iter().for_each(|r| r.join().unwrap());
+        let readers_ok = readers.into_iter().all(|r| r.join().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(refused.is_none(), "an append was refused: {refused:?}");
+        assert!(readers_ok, "a reader failed");
     }
 
     /// What a room socket asks on every upgrade and every frame (who the device is, whether it
