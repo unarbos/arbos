@@ -450,11 +450,17 @@ pub fn run_args(
 }
 
 async fn docker(args: &[String]) -> Result<String> {
-    let out = match tokio::process::Command::new("docker")
-        .args(args)
-        .output()
-        .await
-    {
+    docker_output(
+        args,
+        tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await,
+    )
+}
+
+fn docker_output(args: &[String], out: std::io::Result<std::process::Output>) -> Result<String> {
+    let out = match out {
         Ok(out) => out,
         Err(e) => return Err(docker_failure(args, &e.to_string())),
     };
@@ -463,6 +469,27 @@ async fn docker(args: &[String]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
+
+/// A command given up on after `limit`: the child is killed and the caller gets an error
+/// instead of waiting for ever on a daemon or a mount that hangs.
+async fn output_within(
+    mut cmd: tokio::process::Command,
+    limit: Duration,
+) -> std::io::Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    tokio::time::timeout(limit, cmd.output())
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("gave up after {} s", limit.as_secs()),
+            ))
+        })
+}
+
+/// How long one privileged helper may take. It attaches and mounts, or unmounts, one image: a
+/// second or two, more only when the helper image is pulled for the first time.
+const HELPER_LIMIT: Duration = Duration::from_secs(120);
 
 fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|x| (*x).to_owned()).collect()
@@ -474,7 +501,7 @@ fn s(v: &[&str]) -> Vec<String> {
 async fn helper(state: &AppState, script: &str) -> Result<String> {
     let dir = boxes_dir(state);
     std::fs::create_dir_all(&dir)?;
-    docker(&[
+    let args: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
         "--privileged".into(),
@@ -489,8 +516,10 @@ async fn helper(state: &AppState, script: &str) -> Result<String> {
         "sh".into(),
         "-c".into(),
         script.into(),
-    ])
-    .await
+    ];
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.args(&args);
+    docker_output(&args, output_within(cmd, HELPER_LIMIT).await)
 }
 
 fn safe_user_segment(user_id: &str) -> Result<()> {
@@ -505,16 +534,22 @@ fn safe_user_segment(user_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Loop devices are attached one at a time. `losetup --find --show` asks the kernel for a free
-/// device and then claims it, in two steps, and machines are made eight at a time: two helpers
-/// in the gap can be offered the same device. Whether `losetup` then retries depends on its
-/// version in the helper image; this does not rely on it. The step takes well under a second, so
-/// the queue it makes is short, and mkfs, the seed and the sandbox boot around it still run in
-/// parallel.
-async fn one_attach_at_a_time<T>(attach: impl std::future::Future<Output = T>) -> T {
-    static ATTACH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _one = ATTACH.lock().await;
-    attach.await
+/// The helper's shell for attaching and mounting one user's image. An image already attached is
+/// found and reused. A new attach is `losetup --find --show`, which asks the kernel for a free
+/// device and then claims it, in two steps; machines are made eight at a time, so that one
+/// command runs under a lock file every helper shares (`/boxes` is the host's boxes directory).
+/// The lock is held for the attach only and waited for at most 20 s: a helper stuck anywhere
+/// else holds nothing, and a host coming back up with every image to re-attach queues only for
+/// that one command.
+pub fn mount_script(user_id: &str) -> String {
+    format!(
+        "set -e; img=/boxes/{u}/work.img; mnt=/boxes/{u}/mnt; \
+         d=$(losetup -j \"$img\" | cut -d: -f1 | head -1); \
+         [ -n \"$d\" ] || d=$(flock -w 20 /boxes/.loop.lock losetup --find --show \"$img\"); \
+         mountpoint -q \"$mnt\" || mount -o discard,nosuid,nodev \"$d\" \"$mnt\"; \
+         mkdir -p \"$mnt/.home\" \"$mnt/.etc\"; chown 1000:1000 \"$mnt\" \"$mnt/.home\"; echo \"$d\"",
+        u = user_id
+    )
 }
 
 /// Make sure the user's `/work` image exists, is attached to a loop device and mounted at
@@ -543,15 +578,7 @@ async fn ensure_work_mounted(state: &AppState, user_id: &str) -> Result<PathBuf>
             ));
         }
     }
-    let script = format!(
-        "set -e; img=/boxes/{u}/work.img; mnt=/boxes/{u}/mnt; \
-         d=$(losetup -j \"$img\" | cut -d: -f1 | head -1); \
-         [ -n \"$d\" ] || d=$(losetup --find --show \"$img\"); \
-         mountpoint -q \"$mnt\" || mount -o discard,nosuid,nodev \"$d\" \"$mnt\"; \
-         mkdir -p \"$mnt/.home\" \"$mnt/.etc\"; chown 1000:1000 \"$mnt\" \"$mnt/.home\"; echo \"$d\"",
-        u = user_id
-    );
-    let dev = one_attach_at_a_time(helper(state, &script)).await?;
+    let dev = helper(state, &mount_script(user_id)).await?;
     tracing::debug!(%user_id, dev, "work image mounted");
     Ok(mnt)
 }
@@ -1513,27 +1540,6 @@ mod tests {
         assert!(room_for_one(80, 10, 40.0, 40.0));
     }
 
-    /// Eight machines made at once attach their loop devices one after another.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn loop_devices_are_attached_one_at_a_time() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static INSIDE: AtomicUsize = AtomicUsize::new(0);
-        static MOST: AtomicUsize = AtomicUsize::new(0);
-        let attaches: Vec<_> = (0..8)
-            .map(|_| {
-                tokio::spawn(one_attach_at_a_time(async {
-                    MOST.fetch_max(INSIDE.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    INSIDE.fetch_sub(1, Ordering::SeqCst);
-                }))
-            })
-            .collect();
-        for a in attaches {
-            a.await.unwrap();
-        }
-        assert_eq!(MOST.load(Ordering::SeqCst), 1);
-    }
-
     #[test]
     fn waitlist_is_fifo_and_idempotent() {
         let state = test_state(AuthMode::Github);
@@ -1866,5 +1872,33 @@ mod tests {
         assert!((avail - 2.0).abs() < 1e-9);
         assert!((swap - 1.0).abs() < 1e-9);
         assert_eq!(parse_loadavg("1.5 2.5 3.5 1/100 42"), (1.5, 2.5));
+    }
+
+    /// The one command that claims a loop device runs under the shared lock, with a bound on
+    /// the wait, and nothing else in the helper does.
+    #[test]
+    fn a_loop_device_is_claimed_under_the_shared_lock() {
+        let script = mount_script("gh_1");
+        assert!(
+            script.contains("flock -w 20 /boxes/.loop.lock losetup --find --show \"$img\""),
+            "{script}"
+        );
+        assert_eq!(script.matches("--find").count(), 1, "{script}");
+        assert_eq!(script.matches("flock").count(), 1, "{script}");
+        assert!(script.contains("img=/boxes/gh_1/work.img"));
+    }
+
+    /// A helper that hangs is given up on and killed; the caller is not held.
+    #[tokio::test]
+    async fn a_hung_command_is_given_up_on() {
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30");
+        let t0 = std::time::Instant::now();
+        let out = output_within(cmd, Duration::from_millis(200)).await;
+        assert_eq!(out.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        let quick = tokio::process::Command::new("true");
+        let out = output_within(quick, Duration::from_secs(5)).await;
+        assert!(out.unwrap().status.success());
     }
 }
