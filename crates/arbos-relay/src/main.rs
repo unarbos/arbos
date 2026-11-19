@@ -54,6 +54,7 @@ mod livekit;
 mod load_gate;
 mod local;
 mod matrix;
+mod metrics;
 mod moderation;
 #[cfg(test)]
 mod module_lookup_tests;
@@ -129,6 +130,9 @@ struct Args {
     /// Data directory (SQLite + blobs + local boxes).
     #[arg(long, env = "ARBOS_RELAY_DATA", default_value = "./.arbos-local/relay")]
     data: PathBuf,
+    /// Loopback address for Prometheus `GET /metrics` (`127.0.0.1:9108`); unset = no endpoint.
+    #[arg(long, env = "ARBOS_RELAY_METRICS_LISTEN")]
+    metrics_listen: Option<String>,
     /// Admin token for `POST /pair/new`; generated and printed when absent.
     #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
     admin_token: Option<String>,
@@ -1136,7 +1140,11 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
+        .layer(axum::middleware::from_fn(metrics::track_http))
         .with_state(state.clone());
+    if let Some(listen) = &args.metrics_listen {
+        metrics::serve(state.clone(), listen).await?;
+    }
     let state_for_restart = state;
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
