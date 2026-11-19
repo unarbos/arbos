@@ -915,7 +915,7 @@ impl Db {
     /// the device since: `last_seen_at` only moves forward.
     pub fn touch_devices(&self, seen: &[(String, i64)]) -> Result<()> {
         self.with(|c| {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             {
                 let mut st = tx.prepare(
                     "UPDATE devices SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2) WHERE id = ?1",
