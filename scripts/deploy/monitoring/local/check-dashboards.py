@@ -4,8 +4,8 @@ datasource reference is exercised too) and fails on an error or an empty result,
 nothing the Subnet datasource holds carries an identifying label.
 
     python3 local/check-dashboards.py        # after docker compose ... up -d and grafana-access.sh
-    python3 local/check-dashboards.py --relay-only   # stack started with FAKE_BOXES=0: only checks that
-                                                     # no Subnet tile is blank or NaN without box metrics
+    python3 local/check-dashboards.py --relay-only   # stack started with FAKE_BOXES=0: every panel of the
+                                                     # Subnet view has real data from relay metrics alone
 """
 import base64, json, pathlib, sys, time, urllib.request
 
@@ -17,6 +17,9 @@ AUTH = "Basic " + base64.b64encode(f"admin:{ENV['GF_SECURITY_ADMIN_PASSWORD']}".
 # empty is a blank panel on a healthy system, and fails.
 EMPTY_IS_FINE = ("container_oom_events_total", "changes(container_start_time_seconds{name=~", "cfs_throttled",
                  "sum by (kind) (increase(arbos_agentd_worker_crashes_total")
+
+
+RELAY_ONLY = "--relay-only" in sys.argv
 
 
 def post(path, body, org):
@@ -38,9 +41,10 @@ def query(expr, uid, org):
         return "no data"
     if any(v is None or v != v for v in values[-3:]):
         return "NaN"
+    if RELAY_ONLY and values[-1] == -1:
+        return "placeholder (no data yet)"
 
 
-RELAY_ONLY = "--relay-only" in sys.argv
 failed = 0
 for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/boxes.json", 1),
                   ("grafana/dashboards/agents.json", 1), ("grafana/dashboards-subnet/subnet.json", 2)):
@@ -48,7 +52,6 @@ for path, org in (("grafana/dashboards/fleet.json", 1), ("grafana/dashboards/box
     if RELAY_ONLY:
         if org != 2:
             continue
-        dash["panels"] = [p for p in dash["panels"] if p["type"] == "stat"]
     for panel in dash["panels"]:
         for t in panel.get("targets", []):
             problem = query(t["expr"], t["datasource"]["uid"], org)

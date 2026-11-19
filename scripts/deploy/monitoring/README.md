@@ -51,12 +51,14 @@ Files:
   and pids limit; OOM kills and restarts; a drill-down by the `Box` variable.
 - **Agents**: turns started / finished / failed, turn duration percentiles, messages waiting,
   crashes, model calls, errors and response time, and how many awake boxes are reporting.
-- **Subnet view** (separate organisation), aggregates only. Its first row is built from the relay,
-  the host and the probes alone: service up, reachable from outside, machines running, machines
-  working now, model calls succeeding, waiting for a machine. The turn figures (per minute,
-  succeeding, p95) come from the machines themselves; a tile whose source is not reporting shows
-  "no data yet" in grey, never a blank or a NaN, and "Machines reporting turns" says how many
-  machines those figures cover.
+- **Subnet view** (separate organisation), aggregates only, and only what the relay, the host and
+  the probes feed, which is what exists today: service up, reachable from outside (the relay's own
+  public name), machines running, machines working now, model calls succeeding and per minute,
+  model response time, machine starts succeeding, machine wake time, waiting for a machine, host
+  CPU and memory. A percentage with nothing to divide by reads 100 (nothing failed); a tile whose
+  source is not reporting says "no data yet" in grey, never a blank or a NaN. Turn counts and turn
+  duration can only come from the machines themselves; the rules for them exist and are tested, and
+  the panels are added when boxes run an image that reports them (#3096).
 
 To change a panel: edit the query in `dashboards.py`, run `python3 dashboards.py`, commit both.
 Grafana reloads the files within a minute; the Subnet view is reloaded by `grafana-access.sh`.
@@ -71,7 +73,7 @@ Grafana reloads the files within a minute; the Subnet view is reloaded by `grafa
 | `PublicProbeFailing` | `relay.arbos.life/healthz` or `arbos.life` fails from the host for 5 min (through DNS and, for the site, Cloudflare: it can fail while the relay is fine) | warning |
 | `TLSExpirySoon` | a probed certificate has under 14 days left | warning |
 | `ScrapeTargetDown` | a target that used to answer does not (the relay and box targets have their own alerts) | warning |
-| `RelayMetricsOff` | the relay is healthy but its metrics endpoint does not answer for 10 min (the relay starts without it when the variable is unset or wrong, or the port is taken). Fires once between step 4 and step 9; expected then | warning |
+| `RelayMetricsOff` | the relay is healthy but its metrics endpoint does not answer for 10 min (the relay starts without it when the variable is unset or wrong, or the port is taken). Silenced in step 4 until the relay deploy of step 9 | warning |
 | `BoxesUnreachable` | awake boxes do not answer the relay's metrics scrape for 5 min | warning |
 | `BoxMetricsRejected` | a box's metrics answer was rejected by the relay or had lines dropped | warning |
 | `DiskFreeLow` | `/` or `/var/lib/docker` under 15 % free | warning |
@@ -82,7 +84,9 @@ Grafana reloads the files within a minute; the Subnet view is reloaded by `grafa
 | `BoxCapacityHigh` | 90 % of `max_boxes` admitted | warning |
 | `SpendAt60Percent` / `SpendAt85Percent` | today's spend against the global daily cap, which trips the kill switch and stops every agent | warning / critical |
 | `KillSwitchOn` | the kill switch is on | critical |
-| `ModelErrorsHigh` / `ModelSlow` | over 10 % of model calls failing / p95 over 30 s to first byte | critical / warning |
+| `ModelErrorsHigh` | over 10 % of model calls not answering 2xx (4xx included: there is no baseline for those yet) | warning |
+| `ModelProviderFailing` | over 10 % of model calls failing at the provider: 5xx or no answer | critical |
+| `ModelSlow` | p95 over 30 s to first byte | warning |
 | `BoxOOMKilled` | the kernel OOM-killed anything on the host | critical |
 | `RelayRestarted` | the relay restarted in the last 15 min | warning |
 | `RelayMemoryHigh` | relay memory over 40 GiB (it sat at ~22 GB when this was written; tune the number in the rule) | warning |
@@ -298,7 +302,8 @@ already on the host.
 over an SSH tunnel. Publishing Grafana needs a reload of the `:443` Caddy, and the relay's metrics
 need a relay restart. Both close every open WebSocket (`scripts/deploy/arbos-deploy-worker` records
 49–57 boxes dropped by each Caddy reload), so neither is done on its own: step 8 only stages them,
-and step 9 is the **one** window in which the planned relay deploy does both.
+and step 9 is the **one** window: a single relay deploy, run by hand through the deploy lane, that
+does both.
 
 **Cost.** Memory: the caps add up to 4.6 GB; expect about 1.5 GB, most of it Grafana, which grows
 to its cap (the host has 503 GB). CPU: well under one core; cAdvisor is capped at two. Disk: ~2.6 GB
@@ -313,11 +318,15 @@ docker compose version
 df -h / /var/lib/docker
 ls -l /run/docker.sock /run/containerd/containerd.sock
 docker info --format '{{.Driver}} / {{.CgroupDriver}} / cgroup v{{.CgroupVersion}}'
+getent hosts relay.arbos.life; curl -s https://api.ipify.org; echo
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7700/healthz
 curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.arbos.life/healthz
 ```
 
-Expected: `ports free`, both sockets listed, `overlayfs` as the driver, `200` twice. Stop if a port
+Expected: `ports free`, both sockets listed, `overlayfs` as the driver, `relay.arbos.life` resolving
+to the server's own public address (the second line; it is a DNS-only record, not proxied, which
+is why the partner's "Reachable from outside" tile is built on it and not on `arbos.life`), `200`
+twice. Stop if a port
 is taken (it would have to change in `docker-compose.yml`, `prometheus/prometheus.yml` and the
 Grafana datasource together) or a socket is missing.
 
@@ -363,14 +372,25 @@ docker compose --env-file /etc/arbos/monitoring.env ps
 All seven are `Up` (cAdvisor `healthy` after 30 s). Every listener is on loopback: nothing is
 reachable from outside, and no existing service was touched.
 
+The relay has no metrics endpoint until step 9, which `RelayMetricsOff` would report to Discord
+ten minutes from now and every 12 hours after. Silence it for a day; the silence expires by itself:
+
+```bash
+docker exec arbos-mon-alertmanager amtool silence add alertname=RelayMetricsOff --duration=24h \
+  --comment='until the relay deploy that turns on its metrics listener' --alertmanager.url=http://127.0.0.1:9093
+```
+
 Undo, keeping the data: `cd /etc/arbos-monitoring && docker compose --env-file /etc/arbos/monitoring.env down`
 Undo, deleting data and images: `cd /etc/arbos-monitoring && docker compose --env-file /etc/arbos/monitoring.env down -v --rmi all`
 
 ### 5. Check what could not be checked off the host — changes nothing
 
 ```bash
-# every target: 1 = scraped. relay reads 0, and no box is listed, until step 9.
+# every target: 1 = scraped. relay reads 0 until step 9. No box target is listed until the relay
+# release with box discovery (#3096) is deployed and boxes run an image that reports.
 curl -s '127.0.0.1:9090/api/v1/query?query=up' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
+# every probe: 1 = answered. All three must be 1.
+curl -s '127.0.0.1:9090/api/v1/query?query=probe_success' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
 # cAdvisor names every box: these two numbers are equal
 curl -s 127.0.0.1:9180/metrics | grep -c '^container_last_seen{.*name="arbos-box-'
 docker ps -q --filter name=arbos-box- | wc -l
@@ -382,8 +402,14 @@ curl -s 127.0.0.1:9180/metrics | grep '^container_network_receive_bytes_total{.*
 docker logs arbos-mon-cadvisor 2>&1 | grep -i 'disabling OOM events'
 ```
 
+Until box discovery exists, Prometheus logs one line a minute, `Unable to refresh target groups …
+config=arbos-agentd` (connection refused before step 9, HTTP 404 after it). That is the box job
+finding no list of boxes; it is expected and stops by itself with #3096.
+
 What each outcome means:
 
+- **A probe reads 0**: for `http://127.0.0.1:7700/healthz` the relay is not answering on loopback
+  and `RelayDown` will page: stop and look. For a public name see the note on `/etc/hosts` below.
 - **Box count 0, or lower than `docker ps`**: cAdvisor cannot reach Docker or containerd.
   `docker logs arbos-mon-cadvisor 2>&1 | grep -i factory` names the socket. The Boxes dashboard is
   empty until that is fixed; every host panel and the relay's own numbers are unaffected. Do not
@@ -426,9 +452,7 @@ container, probe and relay-process panels have data now; the relay's own and the
 docker exec arbos-mon-alertmanager amtool alert add Test severity=warning --annotation='summary="test alert"' --alertmanager.url=http://127.0.0.1:9093
 ```
 
-The message arrives within 30 seconds and resolves itself after five minutes. A second message,
-`RelayMetricsOff`, arrives on its own about ten minutes after step 4: the relay has no metrics
-endpoint until step 9. It is expected, repeats every 12 hours at most, and resolves in step 9. If nothing arrives,
+The message arrives within 30 seconds and resolves itself after five minutes. If nothing arrives,
 `docker logs arbos-mon-alertmanager` shows the refusal; fix `ALERT_WEBHOOK_URL` and run
 `docker compose --env-file /etc/arbos/monitoring.env up -d alertmanager`.
 
@@ -461,25 +485,43 @@ interruption of ours.
 
 Undo: `rm /etc/arbos/sites.d/grafana.caddy`, `sed -i '/^ARBOS_RELAY_METRICS_LISTEN=/d' /etc/arbos/relay.env`, delete the DNS record.
 
-### 9. The window: the planned relay deploy — **changes production: interrupts every connected user and box once**
+### 9. The window: one relay deploy — **changes production: interrupts every connected user and box once**
 
-This is the planned deploy of the relay release that contains its metrics endpoint (#3086,
-[`docs/metrics.md`](../../../docs/metrics.md)), run the usual way through the deploy worker, which
-holds the deploy lane (`relay`) so that no canary smoke or other reload overlaps it. That deploy
-runs `relay-server.sh`, which restarts the relay and reloads `arbos-www`: the relay starts with its
-metrics listener and Caddy starts serving `grafana.arbos.life` in the same interruption. Chats show
+Relay deploys are manual on this host (`AUTO_DEPLOY_RELAY=0` in `/etc/arbos/deploy.env`), so
+nothing does this by itself. One command deploys the relay at a commit of `main` that contains its
+metrics endpoint (#3086 or later, [`docs/metrics.md`](../../../docs/metrics.md)): it builds, runs
+`relay-server.sh`, restarts the relay and reloads `arbos-www`. The relay comes back with its metrics
+listener and Caddy starts serving `grafana.arbos.life` in the same interruption. Chats show
 "Reconnecting…" and boxes reconnect, once.
 
-Do not run `systemctl reload arbos-www` or restart the relay by hand for this stack. If Grafana has
-to be published with no relay deploy in sight, it is a user-interrupting step of its own and goes
-through the lane, from the checkout:
+It is run through the deploy lane, as the deploy worker runs it, so that no canary smoke or other
+reload overlaps it:
 
 ```bash
-( . "$REPO/scripts/deploy/deploy-state.sh"; STATE=/var/lib/arbos-deploy LANE_MARKER_MAX_S=1800 deploy_lane_run www systemctl reload arbos-www.service ); echo "exit $?"
+SHA=<the commit of main to deploy>
+( . /usr/local/bin/deploy-state.sh; export STATE=/var/lib/arbos-deploy LANE_MARKER_MAX_S=1800
+  deploy_lane_run relay env BUILD_USER=const bash /home/const/arbos-build/repo/scripts/feedback/deploy-relay.sh "$SHA" ); echo "exit $?"
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7700/healthz
 ```
 
-`exit 0`: reloaded. `exit 75`: a relay deploy or canary smoke holds the lane; nothing happened, try
-again later.
+`exit 0` and `200`: deployed. `exit 75`: a canary smoke or another deploy holds the lane; nothing
+happened, run it again when that is done. Any other exit: the deploy script failed; its output is
+above, and the relay keeps running what it ran (the script never rolls back).
+
+Do not run `systemctl reload arbos-www` or restart the relay by hand for this stack. If Grafana has
+to be published with no relay deploy in sight, that is a user-interrupting step of its own and also
+goes through the lane:
+
+```bash
+( . /usr/local/bin/deploy-state.sh; export STATE=/var/lib/arbos-deploy LANE_MARKER_MAX_S=1800
+  deploy_lane_run www systemctl reload arbos-www.service ); echo "exit $?"
+```
+
+Then lift the silence from step 4, so that a relay that later loses its metrics endpoint is reported:
+
+```bash
+docker exec arbos-mon-alertmanager sh -c 'amtool silence expire $(amtool silence query -q alertname=RelayMetricsOff --alertmanager.url=http://127.0.0.1:9093) --alertmanager.url=http://127.0.0.1:9093'
+```
 
 After the window:
 
@@ -499,15 +541,12 @@ at the next reload or relay start, or at once at the cost of another interruptio
 ### 10. Hand over the Subnet view — after step 9, not before
 
 Log in at `https://grafana.arbos.life` as the viewer in a private window. The Subnet view is the
-home page and there is nothing else. Before the relay's metrics are on, three of its first-row
-tiles read "no data yet"; after step 9 the whole first row is live. Only then give the viewer the
-address and their login, over a private channel.
+home page and there is nothing else. Before step 9 most of it reads "no data yet", because it is
+built on the relay's metrics; after step 9 every tile and every panel on it is live. Only then give
+the viewer the address and their login, over a private channel.
 
-What the viewer sees on day one: the first row and "Machine starts succeeding" are live from the
-relay. "Turns per minute", "Turns succeeding" and "Turn duration p95" read "no data yet" in grey,
-and "Machines reporting turns" reads 0, until boxes run an image whose agentd serves `/metrics`
-(#3096); boxes are not being re-imaged for the launch, so say so when handing over. They fill in
-box by box with no change here.
+It does not show agent turns: those figures can only come from the machines, which do not report
+them yet (#3096 and an image roll). Say so when handing over; the panels are added then.
 
 ## Rolling back everything
 

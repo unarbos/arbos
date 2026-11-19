@@ -111,7 +111,8 @@ UP = dict(mappings=UPDOWN, thresholds=steps((None, RED), (1, GREEN)))
 PCT_ERRORS = steps((None, GREEN), (2, ORANGE), (10, RED))
 SLOTS_USED = '100 * sum(arbos_relay_boxes_registered{provider=~"gvisor|boxd|docker"}) / max(arbos_relay_boxes_max)'
 SPEND_PCT = "100 * max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0)"
-MODEL_ERR_PCT = f'100 * (sum(rate(arbos_relay_model_requests_total{{class!="2xx"}}[5m])) or {R0}) / sum(rate(arbos_relay_model_requests_total[5m]))'
+# `> 0` on the denominator: with no call in the window the result is absent ("–"), not 0/0 = NaN.
+MODEL_ERR_PCT = f'100 * (sum(rate(arbos_relay_model_requests_total{{class!="2xx"}}[5m])) or {R0}) / (sum(rate(arbos_relay_model_requests_total[5m])) > 0)'
 MODEL = "arbos_relay_model_response_seconds"
 
 fleet = dashboard("arbos-fleet", "Arbos fleet", [
@@ -235,8 +236,8 @@ boxes = dashboard("arbos-boxes", "Boxes", [
 ])
 
 
-FAILED_PCT = f'100 * (sum(rate(arbos_agentd_turns_finished_total{{result="error"}}[5m])) or {A0}) / sum(rate(arbos_agentd_turns_finished_total[5m]))'
-BOX_MODEL_ERR_PCT = f'100 * (sum(rate(arbos_agentd_model_requests_total{{class!="2xx"}}[5m])) or {A0}) / sum(rate(arbos_agentd_model_requests_total[5m]))'
+FAILED_PCT = f'100 * (sum(rate(arbos_agentd_turns_finished_total{{result="error"}}[5m])) or {A0}) / (sum(rate(arbos_agentd_turns_finished_total[5m])) > 0)'
+BOX_MODEL_ERR_PCT = f'100 * (sum(rate(arbos_agentd_model_requests_total{{class!="2xx"}}[5m])) or {A0}) / (sum(rate(arbos_agentd_model_requests_total[5m])) > 0)'
 
 agents = dashboard("arbos-agents", "Agents", [
     stat("Boxes reporting", 'sum(arbos_relay_box_scrapes{result="ok"})',
@@ -273,10 +274,17 @@ agents = dashboard("arbos-agents", "Agents", [
 
 
 # The Subnet view lives in its own Grafana organisation whose only datasource holds `subnet:*`.
-# It has to read as healthy and honest with relay metrics alone: per-box agent metrics arrive box by
-# box as machines move to a new image. So the first row is built from the relay, the host and the
-# probes only, and a tile whose source is not reporting says so (-1 → "no data yet") instead of "–".
+# Everything on it is fed by the relay, the host and the probes, which is what exists today. The
+# turn figures that only the machines themselves can report (`subnet:turns_*`,
+# `subnet:turn_duration_seconds:*`) are recorded and tested but not shown: boxes are not on an image
+# that reports them yet, and a row of empty panels is not something to hand a partner. Add them here
+# when they have data.
+#
+# A percentage with nothing to divide by (no model call, no machine start in five minutes) reads
+# 100: nothing failed. A tile whose source is not reporting at all says "no data yet" (-1) in grey,
+# never a blank or a NaN.
 PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": "#6e7681"}}}]
+RELAY_REPORTS = "0 * subnet:box_start_failures:rate5m"  # present exactly while the relay reports
 
 
 def or_pending(expr):
@@ -288,11 +296,10 @@ def tile(title, expr, unit="short", thresholds=OK, decimals=None, desc=""):
     return stat(title, or_pending(expr), unit, thresholds, PENDING, decimals, w=4, desc=desc)
 
 
-TURNS_OK = "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m"
-MODEL_OK = "100 * (1 - subnet:model_error_ratio)"
-STARTS_OK = "100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + 0 * subnet:box_start_failures:rate5m"
+MODEL_OK = f"100 * (1 - subnet:model_error_ratio) or 100 + {RELAY_REPORTS}"
+STARTS_OK = f"100 * (1 - subnet:box_start_failures:rate5m / (subnet:box_starts:rate5m > 0)) or 100 + {RELAY_REPORTS}"
 GOOD_PCT = steps((None, RED), (90, ORANGE), (98, GREEN))
-FROM_AGENTS = "Reported by the agent machines themselves; fills in as machines move to the image that reports it."
+QUIET = " Reads 0 when there was none in the last five minutes."
 subnet = dashboard("arbos-subnet", "Subnet view", [
     stat("Service", "subnet:relay_up", **UP, w=4),
     stat("Reachable from outside", "subnet:public_up", **UP, w=4),
@@ -302,21 +309,23 @@ subnet = dashboard("arbos-subnet", "Subnet view", [
     tile("Waiting for a machine", "subnet:boxes_waitlisted", thresholds=ANY_IS_BAD),
 
     tile("Machine starts succeeding", STARTS_OK, "percent", GOOD_PCT, 1),
-    tile("Machines reporting turns", "subnet:boxes_reporting", desc="How many machines the three turn figures on this row come from."),
-    tile("Turns per minute", "60 * subnet:turns_started:rate5m", decimals=1, desc=FROM_AGENTS),
-    tile("Turns succeeding", TURNS_OK, "percent", GOOD_PCT, 1, desc=FROM_AGENTS),
-    tile("Turn duration p95", "subnet:turn_duration_seconds:p95", "s", decimals=1, desc=FROM_AGENTS + " Empty when no turn finished in the last 5 minutes."),
-    tile("Host CPU used", "100 * subnet:host_cpu_used_ratio", "percent", PCT_HIGH_BAD, 0),
+    tile("Machine wake time p95", f"subnet:box_wake_seconds:p95 or {RELAY_REPORTS}", "s", decimals=1,
+         desc="From waking a sleeping machine to it being connected." + QUIET),
+    tile("Model calls per minute", "60 * subnet:model_requests:rate5m", decimals=0),
+    tile("Model response p95", f"subnet:model_response_seconds:p95 or {RELAY_REPORTS}", "s", decimals=1,
+         desc="Time until the model provider starts answering." + QUIET),
+    stat("Host CPU used", "100 * subnet:host_cpu_used_ratio", "percent", PCT_HIGH_BAD, decimals=0, w=4),
+    stat("Host memory used", "100 * subnet:host_memory_used_ratio", "percent", PCT_HIGH_BAD, decimals=0, w=4),
 
     ts("Agent machines", [("subnet:boxes_running", "running"), ("subnet:boxes_working", "working"), ("subnet:boxes_asleep", "asleep"),
-                          ("subnet:boxes_waitlisted", "waiting"), ("subnet:boxes_max", "limit"), ("subnet:boxes_reporting", "reporting turn numbers")]),
-    ts("Success rates", [(MODEL_OK, "model calls"), (STARTS_OK, "machine starts"), (TURNS_OK, "turns")], "percent", max_=100),
+                          ("subnet:boxes_waitlisted", "waiting"), ("subnet:boxes_max", "limit")]),
+    ts("Success rates", [(MODEL_OK, "model calls"), (STARTS_OK, "machine starts")], "percent", max_=100),
+    ts("Model calls per minute", [("60 * subnet:model_requests:rate5m", "calls")]),
+    ts("Machine starts per minute", [("60 * subnet:box_starts:rate5m", "started"), ("60 * subnet:box_start_failures:rate5m", "failed")]),
+    ts("Response and wake time (p95)", [(f"subnet:model_response_seconds:p95 or {RELAY_REPORTS}", "model response"),
+                                         (f"subnet:box_wake_seconds:p95 or {RELAY_REPORTS}", "machine wake")], "s"),
     ts("Host headroom", [("100 * subnet:host_cpu_used_ratio", "CPU used"), ("100 * subnet:host_memory_used_ratio", "memory used"),
                          ("100 * (1 - subnet:host_disk_free_ratio)", "disk used")], "percent", max_=100),
-    ts("Machine starts per minute", [("60 * subnet:box_starts:rate5m", "started"), ("60 * subnet:box_start_failures:rate5m", "failed")]),
-    ts("Agent turns per minute", [("60 * subnet:turns_started:rate5m", "started"), ("60 * subnet:turns_finished:rate5m", "finished"),
-                                  ("60 * subnet:turns_failed:rate5m", "failed")], desc=FROM_AGENTS),
-    ts("Turn duration", [("subnet:turn_duration_seconds:p50", "p50"), ("subnet:turn_duration_seconds:p95", "p95")], "s", desc=FROM_AGENTS),
 ], ds="prometheus-subnet", nav=False)
 
 FILES = {"grafana/dashboards/fleet.json": fleet, "grafana/dashboards/boxes.json": boxes,

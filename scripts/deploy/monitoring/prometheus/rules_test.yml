@@ -16,6 +16,16 @@ tests:
         values: 1x20
       - series: 'probe_success{job="public-https", instance="https://relay.arbos.life/healthz"}'
         values: 1x20
+      - series: 'probe_success{job="public-https", instance="https://arbos.life/"}' # Cloudflare challenged the probe: not the partner's "reachable"
+        values: 0x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="2.5", instance="host-1"}'
+        values: 0+50x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="+Inf", instance="host-1"}'
+        values: 0+50x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="10", instance="host-1"}'
+        values: 0+5x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf", instance="host-1"}'
+        values: 0+5x20
       - series: 'arbos_relay_uptime_seconds{instance="127.0.0.1:9108", job="relay"}'
         values: 100x20
       - series: 'arbos_agentd_uptime_seconds{box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
@@ -103,6 +113,9 @@ tests:
           - { labels: "subnet:turn_duration_seconds:p50", value: 5 }
           - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
           - { labels: "subnet:model_error_ratio", value: 0.1 }
+          - { labels: "subnet:model_requests:rate5m", value: 3.3333333333333335 }
+          - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
+          - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
           - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
           - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
           - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
@@ -141,6 +154,32 @@ tests:
           - { labels: "subnet:model_error_ratio", value: 0 }
           - { labels: "subnet:boxes_not_reporting", value: 0 }
           - { labels: "subnet:boxes_asleep", value: 0 }
+
+  # Today's relay: its own metrics, no box scrape series (those come with a later release), and
+  # nobody has called a model or woken a box in the last five minutes. No NaN, and the box counts
+  # read 0 instead of being absent.
+  - name: relay metrics only, no traffic
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x20
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
+        values: 500x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="+Inf"}'
+        values: 500x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf"}'
+        values: 40x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+)"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_start_failures:rate5m)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:boxes_reporting", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:model_requests:rate5m", value: 0 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0 }
 
   # ...and with nothing reporting, there is no invented zero.
   - name: no relay metrics means no data
@@ -184,6 +223,30 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "A box's metrics answer was rejected or had lines dropped by the relay (oversized, not text, or not agentd's own series)." }
+
+  - name: provider 4xx warns, provider 5xx pages
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
+        values: 0+60x40
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="4xx"}' # 20% of calls from the start
+        values: 0+15x40
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx"}' # and from minute 20, 5xx as well
+        values: 0x20 0+25x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ModelErrorsHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "20% of model calls do not answer 2xx." }
+      - eval_time: 15m
+        alertname: ModelProviderFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ModelProviderFailing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "25% of model calls fail at the provider (5xx or no answer)." }
 
   - name: a waitlist warns, a growing waitlist pages
     interval: 1m

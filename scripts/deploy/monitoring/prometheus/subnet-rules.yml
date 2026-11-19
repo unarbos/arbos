@@ -10,8 +10,10 @@ groups:
     rules:
       - record: subnet:relay_up
         expr: min(probe_success{job="relay-health"})
+      # The relay's own public name only. arbos.life is behind Cloudflare, which can challenge a
+      # probe while the service is fine; that probe stays on the admin dashboard.
       - record: subnet:public_up
-        expr: min(probe_success{job="public-https"})
+        expr: min(probe_success{job="public-https", instance=~"https://relay[.].*"})
       - record: subnet:boxes_running
         expr: count(container_last_seen{name=~"arbos-box-.+"}) or vector(0)
       - record: subnet:boxes_working
@@ -25,9 +27,9 @@ groups:
       # Awake boxes whose agentd answers the scrape, and those that do not (an image from before
       # agentd had /metrics, unreachable, or not scraped yet): turn numbers cover only the first group.
       - record: subnet:boxes_reporting
-        expr: sum(arbos_relay_box_scrapes{result="ok"})
+        expr: sum(arbos_relay_box_scrapes{result="ok"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:boxes_not_reporting
-        expr: sum(arbos_relay_box_scrapes{result!="ok"})
+        expr: sum(arbos_relay_box_scrapes{result!="ok"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:box_starts:rate5m
         expr: sum(rate(arbos_relay_box_starts_total[5m]))
       - record: subnet:box_start_failures:rate5m
@@ -49,7 +51,14 @@ groups:
       - record: subnet:turn_duration_seconds:p95
         expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))) >= 0
       - record: subnet:model_error_ratio
-        expr: (sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / sum(rate(arbos_relay_model_requests_total[5m]))
+        # `> 0`: with no call in the window this is absent, not 0/0 = NaN.
+        expr: (sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / (sum(rate(arbos_relay_model_requests_total[5m])) > 0)
+      - record: subnet:model_requests:rate5m
+        expr: sum(rate(arbos_relay_model_requests_total[5m]))
+      - record: subnet:model_response_seconds:p95
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
+      - record: subnet:box_wake_seconds:p95
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_box_wake_duration_seconds_bucket[5m])))) >= 0
       - record: subnet:host_cpu_used_ratio
         expr: sum(rate(node_cpu_seconds_total{mode!="idle"}[5m])) / count(node_cpu_seconds_total{mode="idle"})
       - record: subnet:host_memory_used_ratio

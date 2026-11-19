@@ -311,7 +311,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / (sum(rate(arbos_agentd_turns_finished_total[5m])) > 0)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -984,7 +984,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / (sum(rate(arbos_agentd_turns_finished_total[5m])) > 0)",
      "legendFormat": "turns failed",
      "instant": false,
      "range": true
@@ -995,7 +995,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / sum(rate(arbos_relay_model_requests_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / (sum(rate(arbos_relay_model_requests_total[5m])) > 0)",
      "legendFormat": "model errors (relay)",
      "instant": false,
      "range": true
@@ -1006,7 +1006,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (sum(rate(arbos_agentd_model_requests_total{class!=\"2xx\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / sum(rate(arbos_agentd_model_requests_total[5m]))",
+     "expr": "100 * (sum(rate(arbos_agentd_model_requests_total{class!=\"2xx\"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)) / (sum(rate(arbos_agentd_model_requests_total[5m])) > 0)",
      "legendFormat": "model errors (as boxes saw them)",
      "instant": false,
      "range": true

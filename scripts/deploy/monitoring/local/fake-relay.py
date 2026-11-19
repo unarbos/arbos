@@ -17,8 +17,8 @@ import json, os, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
-# FAKE_BOXES=0: no box reports (every box still on an old image), as on the day the relay gets its
-# metrics before the boxes are re-imaged. The Subnet view has to read sensibly like that.
+# FAKE_BOXES=0: the relay as it is before box metrics ship: its own series only, no
+# arbos_relay_box_scrapes, no box discovery (404). The Subnet view has to be complete like that.
 BOXES = ["0a1b2c3d4e5f", "1b2c3d4e5f60", "2c3d4e5f6071"] if os.environ.get("FAKE_BOXES", "1") != "0" else []
 OLD_IMAGE_BOX = "3d4e5f607182"
 
@@ -63,12 +63,9 @@ def relay_metrics():
         "arbos_relay_boxes_max 80",
         f"arbos_relay_boxes_turn_running {20 + wave}",
         "arbos_relay_boxes_evicted 1",
-        f'arbos_relay_box_scrapes{{result="ok"}} {len(BOXES)}',
-        f'arbos_relay_box_scrapes{{result="old_image"}} {1 if BOXES else 72}',
-        'arbos_relay_box_scrapes{result="unreachable"} 0',
-        'arbos_relay_box_scrapes{result="rejected"} 0',
-        "arbos_relay_box_scrape_dropped_lines_total 0",
-        'arbos_relay_box_scrapes{result="pending"} 0',
+        *([f'arbos_relay_box_scrapes{{result="ok"}} {len(BOXES)}', 'arbos_relay_box_scrapes{result="old_image"} 1',
+           'arbos_relay_box_scrapes{result="unreachable"} 0', 'arbos_relay_box_scrapes{result="rejected"} 0',
+           'arbos_relay_box_scrapes{result="pending"} 0', "arbos_relay_box_scrape_dropped_lines_total 0"] if BOXES else []),
         "arbos_relay_boxes_upgrading 0",
         "arbos_relay_boxes_creating 0",
         "arbos_relay_waitlist_length 0",
@@ -134,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
             body, kind = '{"ok":true}', "application/json"
         elif path == "/metrics":
             body = "\n".join(relay_metrics()) + "\n"
-        elif path == "/metrics/targets":
+        elif path == "/metrics/targets" and BOXES:
             body, kind = json.dumps([{"targets": ["127.0.0.1:9108"], "labels": {"__metrics_path__": f"/metrics/box/{b}", "box": b}}
                                      for b in BOXES + [OLD_IMAGE_BOX]]), "application/json"
         elif path.startswith("/metrics/box/") and path.rsplit("/", 1)[1] in BOXES:

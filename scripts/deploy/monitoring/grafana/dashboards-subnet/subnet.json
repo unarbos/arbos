@@ -359,7 +359,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(100 * (1 - subnet:model_error_ratio)) or vector(-1)",
+     "expr": "max(100 * (1 - subnet:model_error_ratio) or 100 + 0 * subnet:box_start_failures:rate5m) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -514,12 +514,12 @@
   },
   {
    "type": "stat",
-   "title": "Machines reporting turns",
-   "description": "How many machines the three turn figures on this row come from.",
+   "title": "Machine wake time p95",
+   "description": "From waking a sleeping machine to it being connected. Reads 0 when there was none in the last five minutes.",
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
-     "decimals": null,
+     "unit": "s",
+     "decimals": 1,
      "mappings": [
       {
        "type": "value",
@@ -572,7 +572,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(subnet:boxes_reporting) or vector(-1)",
+     "expr": "max(subnet:box_wake_seconds:p95 or 0 * subnet:box_start_failures:rate5m) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -581,12 +581,12 @@
   },
   {
    "type": "stat",
-   "title": "Turns per minute",
-   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "title": "Model calls per minute",
+   "description": "",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "decimals": 1,
+     "decimals": 0,
      "mappings": [
       {
        "type": "value",
@@ -639,7 +639,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(60 * subnet:turns_started:rate5m) or vector(-1)",
+     "expr": "max(60 * subnet:model_requests:rate5m) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -648,83 +648,8 @@
   },
   {
    "type": "stat",
-   "title": "Turns succeeding",
-   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "decimals": 1,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
-        }
-       }
-      }
-     ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "value": null,
-        "color": "red"
-       },
-       {
-        "value": 90,
-        "color": "orange"
-       },
-       {
-        "value": 98,
-        "color": "green"
-       }
-      ]
-     },
-     "noValue": "\u2013"
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    },
-    "colorMode": "background",
-    "graphMode": "none",
-    "textMode": "value"
-   },
-   "id": 10,
-   "gridPos": {
-    "x": 12,
-    "y": 4,
-    "w": 4,
-    "h": 4
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus-subnet"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "max(100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m) or vector(-1)",
-     "legendFormat": "",
-     "instant": false,
-     "range": true
-    }
-   ]
-  },
-  {
-   "type": "stat",
-   "title": "Turn duration p95",
-   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it. Empty when no turn finished in the last 5 minutes.",
+   "title": "Model response p95",
+   "description": "Time until the model provider starts answering. Reads 0 when there was none in the last five minutes.",
    "fieldConfig": {
     "defaults": {
      "unit": "s",
@@ -763,6 +688,71 @@
     "graphMode": "none",
     "textMode": "value"
    },
+   "id": 10,
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus-subnet"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "max(subnet:model_response_seconds:p95 or 0 * subnet:box_start_failures:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Host CPU used",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 75,
+        "color": "orange"
+       },
+       {
+        "value": 90,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
    "id": 11,
    "gridPos": {
     "x": 16,
@@ -781,7 +771,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(subnet:turn_duration_seconds:p95) or vector(-1)",
+     "expr": "100 * subnet:host_cpu_used_ratio",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -790,23 +780,13 @@
   },
   {
    "type": "stat",
-   "title": "Host CPU used",
+   "title": "Host memory used",
    "description": "",
    "fieldConfig": {
     "defaults": {
      "unit": "percent",
      "decimals": 0,
-     "mappings": [
-      {
-       "type": "value",
-       "options": {
-        "-1": {
-         "text": "no data yet",
-         "color": "#6e7681"
-        }
-       }
-      }
-     ],
+     "mappings": [],
      "thresholds": {
       "mode": "absolute",
       "steps": [
@@ -856,7 +836,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "max(100 * subnet:host_cpu_used_ratio) or vector(-1)",
+     "expr": "100 * subnet:host_memory_used_ratio",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -961,17 +941,6 @@
      "legendFormat": "limit",
      "instant": false,
      "range": true
-    },
-    {
-     "refId": "F",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "subnet:boxes_reporting",
-     "legendFormat": "reporting turn numbers",
-     "instant": false,
-     "range": true
     }
    ]
   },
@@ -1025,7 +994,7 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * (1 - subnet:model_error_ratio)",
+     "expr": "100 * (1 - subnet:model_error_ratio) or 100 + 0 * subnet:box_start_failures:rate5m",
      "legendFormat": "model calls",
      "instant": false,
      "range": true
@@ -1040,29 +1009,18 @@
      "legendFormat": "machine starts",
      "instant": false,
      "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:turns_failed:rate5m / (subnet:turns_finished:rate5m > 0)) or 100 + 0 * subnet:turns_failed:rate5m",
-     "legendFormat": "turns",
-     "instant": false,
-     "range": true
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Host headroom",
+   "title": "Model calls per minute",
    "description": "",
    "fieldConfig": {
     "defaults": {
-     "unit": "percent",
+     "unit": "short",
      "min": 0,
-     "max": 100,
+     "max": null,
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 5,
@@ -1077,9 +1035,12 @@
    },
    "options": {
     "legend": {
-     "displayMode": "list",
+     "displayMode": "table",
      "placement": "bottom",
-     "calcs": []
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
     },
     "tooltip": {
      "mode": "multi",
@@ -1104,30 +1065,8 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "100 * subnet:host_cpu_used_ratio",
-     "legendFormat": "CPU used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * subnet:host_memory_used_ratio",
-     "legendFormat": "memory used",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
-     "legendFormat": "disk used",
+     "expr": "60 * subnet:model_requests:rate5m",
+     "legendFormat": "calls",
      "instant": false,
      "range": true
     }
@@ -1203,11 +1142,11 @@
   },
   {
    "type": "timeseries",
-   "title": "Agent turns per minute",
-   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "title": "Response and wake time (p95)",
+   "description": "",
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "s",
      "min": 0,
      "max": null,
      "custom": {
@@ -1251,8 +1190,8 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "60 * subnet:turns_started:rate5m",
-     "legendFormat": "started",
+     "expr": "subnet:model_response_seconds:p95 or 0 * subnet:box_start_failures:rate5m",
+     "legendFormat": "model response",
      "instant": false,
      "range": true
     },
@@ -1262,19 +1201,8 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "60 * subnet:turns_finished:rate5m",
-     "legendFormat": "finished",
-     "instant": false,
-     "range": true
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus-subnet"
-     },
-     "expr": "60 * subnet:turns_failed:rate5m",
-     "legendFormat": "failed",
+     "expr": "subnet:box_wake_seconds:p95 or 0 * subnet:box_start_failures:rate5m",
+     "legendFormat": "machine wake",
      "instant": false,
      "range": true
     }
@@ -1282,13 +1210,13 @@
   },
   {
    "type": "timeseries",
-   "title": "Turn duration",
-   "description": "Reported by the agent machines themselves; fills in as machines move to the image that reports it.",
+   "title": "Host headroom",
+   "description": "",
    "fieldConfig": {
     "defaults": {
-     "unit": "s",
+     "unit": "percent",
      "min": 0,
-     "max": null,
+     "max": 100,
      "custom": {
       "lineWidth": 1,
       "fillOpacity": 5,
@@ -1330,8 +1258,8 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "subnet:turn_duration_seconds:p50",
-     "legendFormat": "p50",
+     "expr": "100 * subnet:host_cpu_used_ratio",
+     "legendFormat": "CPU used",
      "instant": false,
      "range": true
     },
@@ -1341,8 +1269,19 @@
       "type": "prometheus",
       "uid": "prometheus-subnet"
      },
-     "expr": "subnet:turn_duration_seconds:p95",
-     "legendFormat": "p95",
+     "expr": "100 * subnet:host_memory_used_ratio",
+     "legendFormat": "memory used",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus-subnet"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk used",
      "instant": false,
      "range": true
     }

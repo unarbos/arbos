@@ -159,16 +159,29 @@ groups:
         annotations:
           summary: The kill switch is on. Every model call is refused and no agent can work.
 
+      # More than one call in ten, on real traffic (over 6 calls a minute). Providers answer 4xx for
+      # ordinary reasons (a context too long, a rate limit on one key) and there is no baseline for
+      # that yet, so everything that is not 2xx is a warning; the page is for the provider itself
+      # failing: 5xx and calls that got no answer.
       - alert: ModelErrorsHigh
-        # More than one call in ten failing, on real traffic (over 6 calls a minute).
         expr: >
           sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
           and sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
         for: 5m
         labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of model calls do not answer 2xx."
+
+      - alert: ModelProviderFailing
+        expr: >
+          sum(rate(arbos_relay_model_requests_total{class=~"5xx|unreachable"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
+          and sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
           severity: critical
         annotations:
-          summary: "{{ $value | humanizePercentage }} of model calls are failing."
+          summary: "{{ $value | humanizePercentage }} of model calls fail at the provider (5xx or no answer)."
 
       - alert: ModelSlow
         expr: histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m]))) > 30
