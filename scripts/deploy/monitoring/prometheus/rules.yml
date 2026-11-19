@@ -22,8 +22,10 @@ groups:
           summary: "The certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}."
 
       - alert: ScrapeTargetDown
-        # A target that has never answered (the relay before it serves /metrics) stays quiet.
-        expr: up == 0 and on (job, instance) max_over_time(up[1d]) == 1
+        # A target that has never answered (the relay before it serves /metrics) stays quiet. Boxes are
+        # left out: one on an image from before agentd had /metrics answers 502, and box health is
+        # alerted from the relay's own series (BoxStartFailures, Waitlist, BoxCapacityHigh).
+        expr: up{job!="arbos-agentd"} == 0 and on (job, instance) max_over_time(up[1d]) == 1
         for: 3m
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }}."

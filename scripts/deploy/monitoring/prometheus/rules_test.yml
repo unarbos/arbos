@@ -99,6 +99,8 @@ tests:
         values: 14x30
       - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/"}'
         values: 100x30
+      - series: 'up{job="arbos-agentd", instance="127.0.0.1:9108", box="0a1b2c3d4e5f"}' # a box that stops answering: no page
+        values: 1x4 0x20
       - series: 'node_vmstat_oom_kill'
         values: 0x10 1x20
       - series: 'arbos_relay_boxes_registered{provider="gvisor"}'

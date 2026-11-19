@@ -91,7 +91,7 @@ DAYS_TO_FULL = (f"clamp_max(min(node_filesystem_avail_bytes{FS} / "
                 f"clamp_min(-deriv(node_filesystem_avail_bytes{FS}[6h]), 1)) / 86400, 999)")
 CPU_USED = '100 * sum(rate(node_cpu_seconds_total{mode!="idle"}[5m])) / count(node_cpu_seconds_total{mode="idle"})'
 MEM_AVAIL = "100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes"
-TARGETS_DOWN = "count(up == 0 and on (job, instance) max_over_time(up[1d]) == 1) or vector(0)"
+TARGETS_DOWN = 'count(up{job!="arbos-agentd"} == 0 and on (job, instance) max_over_time(up[1d]) == 1) or vector(0)'
 RELAY_RSS = f'max(process_resident_memory_bytes{{job="relay"}}) or max(container_memory_rss{{{RELAY}}})'
 SERVICE = 'id=~"/system.slice/.+"'
 
@@ -120,7 +120,7 @@ fleet = dashboard("arbos-fleet", "Arbos fleet", [
     stat("Model p95", quantile(0.95, MODEL), "s", steps((None, GREEN), (15, ORANGE), (30, RED)), decimals=1,
          desc="Time until the provider starts answering."),
     stat("Relay restarts (24h)", f"changes(container_start_time_seconds{{{RELAY}}}[24h])", thresholds=ANY_IS_BAD),
-    stat("Targets down", TARGETS_DOWN, thresholds=ANY_IS_BAD, desc="Targets that answered in the last day and do not now."),
+    stat("Targets down", TARGETS_DOWN, thresholds=ANY_IS_BAD, desc="Targets that answered in the last day and do not now. Boxes are on the Agents dashboard."),
     # boxes
     stat("Boxes running", f"count(container_last_seen{{{BOX}}}) or vector(0)", desc="arbos-box-* containers Docker is running."),
     stat("Box slots used", SLOTS_USED, "percent", steps((None, GREEN), (80, ORANGE), (90, RED)), decimals=0,

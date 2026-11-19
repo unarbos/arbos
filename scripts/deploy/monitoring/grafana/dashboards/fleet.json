@@ -501,7 +501,7 @@
   {
    "type": "stat",
    "title": "Targets down",
-   "description": "Targets that answered in the last day and do not now.",
+   "description": "Targets that answered in the last day and do not now. Boxes are on the Agents dashboard.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -552,7 +552,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up == 0 and on (job, instance) max_over_time(up[1d]) == 1) or vector(0)",
+     "expr": "count(up{job!=\"arbos-agentd\"} == 0 and on (job, instance) max_over_time(up[1d]) == 1) or vector(0)",
      "legendFormat": "",
      "instant": false,
      "range": true
