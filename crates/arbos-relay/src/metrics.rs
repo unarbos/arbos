@@ -154,7 +154,7 @@ fn add(name: &'static str, labels: String, v: f64) {
 
 fn observe(name: &'static str, seconds: f64) {
     let slot = BOUNDS.partition_point(|b| *b < seconds);
-    let mut h = HISTOGRAMS.lock().expect("metrics lock");
+    let mut h = locked(&HISTOGRAMS);
     let (buckets, sum) = h.entry(name).or_default();
     buckets[slot] += 1;
     *sum += seconds;
@@ -324,7 +324,7 @@ fn spawn_sampler(state: AppState) {
                 sample_db(&s)
             };
             if let Ok(sampled) = tokio::task::spawn_blocking(sample).await {
-                *SAMPLED.lock().expect("metrics lock") = sampled;
+                *locked(&SAMPLED) = sampled;
             }
             tokio::time::sleep(SAMPLE_EVERY).await;
         }
@@ -545,10 +545,10 @@ fn line(out: &mut String, name: &str, labels: &str, value: f64) {
 /// The whole exposition.
 pub fn render(state: &AppState) -> String {
     let mut series = gauges(state);
-    series.extend(SAMPLED.lock().expect("metrics lock").iter().cloned());
-    let counters = COUNTERS.lock().expect("metrics lock").clone();
+    series.extend(locked(&SAMPLED).iter().cloned());
+    let counters = locked(&COUNTERS).clone();
     series.extend(counters.into_iter().map(|((n, l), v)| (n, l, v)));
-    let histograms = HISTOGRAMS.lock().expect("metrics lock").clone();
+    let histograms = locked(&HISTOGRAMS).clone();
 
     let mut out = String::new();
     for (name, kind, help) in FAMILIES {
@@ -736,7 +736,7 @@ mod tests {
             Duration::ZERO,
         );
         state.db.waitlist_add(&user).unwrap();
-        *SAMPLED.lock().unwrap() = sample_db(&state);
+        *locked(&SAMPLED) = sample_db(&state);
 
         let text = fetch(addr, "/metrics").await;
         let after = parse(&text);
@@ -979,18 +979,38 @@ mod tests {
         assert!(!locked(&BOX_USE).contains_key(&busy));
     }
 
-    /// The proxy counts a call on its way out. A panic that poisoned a metrics lock must not make
-    /// the next count panic too.
+    /// The proxy counts a call on its way out, and times it before it is charged. A panic that
+    /// poisoned a metrics lock must not make the next count, or the next scrape, panic too.
+    /// The assertions are on the fleet counters and the histogram, which no sampler prunes.
     #[test]
-    fn counting_survives_a_poisoned_lock() {
-        let _ = std::thread::spawn(|| {
-            let _held = BOX_USE.lock().unwrap();
-            panic!("poison the lock");
-        })
-        .join();
-        assert!(BOX_USE.is_poisoned());
+    fn counting_survives_poisoned_locks() {
+        fn poison<T: Send>(m: &'static Mutex<T>) {
+            let _ = std::thread::spawn(move || {
+                let _held = m.lock().unwrap();
+                panic!("poison the lock");
+            })
+            .join();
+            assert!(m.is_poisoned());
+        }
+        poison(&BOX_USE);
+        poison(&COUNTERS);
+        poison(&HISTOGRAMS);
+        poison(&SAMPLED);
+        let output = (TOKENS, label("kind", "output"));
+        let tokens = || locked(&COUNTERS).get(&output).copied().unwrap_or(0.0);
+        let answers = || locked(&HISTOGRAMS).get(MODEL_SECONDS).map_or(0, |h| h.0[2]);
+        let (before, answered) = (tokens(), answers());
         model_usage(Some("gh_poison"), [1, 2, 3, 4], 0.5);
-        assert_eq!(locked(&BOX_USE)["gh_poison"].calls, 1.0);
+        model_request(
+            "https://openrouter.ai/x",
+            Some(200),
+            Duration::from_millis(10),
+        );
+        assert!(tokens() >= before + 2.0);
+        assert!(answers() > answered);
+        let state = test_state(AuthMode::Github);
+        assert!(render(&state).contains(TOKENS));
+        assert!(render_boxes(&state).contains("arbos_relay_box_info"));
     }
 
     /// A listener that cannot start is an error for `main` to log, never a panic: a taken port
