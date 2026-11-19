@@ -239,12 +239,12 @@ impl Db {
         })
     }
 
-    /// Boxes of a provider that hold a slot on the host: every one but those stopped by hand.
-    pub fn count_resident_boxes(&self, provider: &str) -> Result<usize> {
+    /// Users with a wake job and no box row: let through, sandbox not made yet.
+    pub fn count_wakes_without_box(&self) -> Result<usize> {
         self.with(|c| {
             c.query_row(
-                "SELECT COUNT(*) FROM boxes WHERE provider = ?1 AND held_stopped = 0",
-                params![provider],
+                "SELECT COUNT(*) FROM box_wake_jobs WHERE user_id NOT IN (SELECT user_id FROM boxes)",
+                [],
                 |r| r.get::<_, i64>(0),
             )
             .map(|n| n as usize)

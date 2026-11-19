@@ -12,11 +12,11 @@ A sign-up is refused a machine, and put on the waitlist, when any of these holds
 
 | Gate | Value | Where it is set |
 |---|---|---|
-| machines not stopped by their user ≥ the cap | cap: `PUT /admin/fleet {"max_boxes": N}` (kept in the database, wins), else `ARBOS_HOST_MAX_BOXES`, else 80 | runtime, no restart |
+| machines, running or stopped by their user, ≥ the cap | cap: `PUT /admin/fleet {"max_boxes": N}` (kept in the database, wins), else `ARBOS_HOST_MAX_BOXES`, else 80 | runtime, no restart |
 | free disk on the relay data volume < the floor | `ARBOS_HOST_MIN_FREE_DISK_GB`, default 40 | env, relay restart |
 | available memory < the eviction floor | `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64 | env, relay restart |
 
-The waitlist is first come, first served; once a minute every free slot is given to the people at its head.
+The waitlist is first come, first served; once a minute every free slot is given to the people at its head. A slot is free when neither a machine nor someone already let through (`capacity.pending`) holds it. A machine its user stopped keeps its slot, so Start is never refused.
 
 ## 2. The capacity number
 
@@ -44,7 +44,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
    curl -sS -X PUT -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"max_boxes":300}' http://127.0.0.1:7700/admin/fleet
    ```
 
-   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80).
+   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80 until 2026-11-18, 150 since). Raising the cap lets the whole waitlist through, up to the new free slots, on the next tick: within a minute everyone admitted is told their computer is ready and their machines are made eight at a time.
 
 2. **[production]** In `/etc/arbos/relay.env` (read at the next relay restart; a restart does not stop machines, they reconnect within seconds):
 
@@ -64,11 +64,13 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
    A user who needs more is given it by hand; nothing grows an image by itself yet.
 
-4. **[production]** Keep the kernel away from the databases. The relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
+4. **[production]** Keep the kernel away from the databases. After the relay carrying #3090 is deployed, the relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
 
    ```bash
    for c in arbos-matrix-postgres arbos-matrix-synapse livekit; do for p in $(docker top "$c" -o pid | tail -n +2); do echo -900 | sudo tee /proc/$p/oom_score_adj >/dev/null; done; done
    ```
+
+   After that deploy, make one canary machine (a test user, `POST /admin/users/test`, then its first sign-in or `POST /machine/start`) before the wave and read its score: `cat /proc/$(docker inspect --format '{{.State.Pid}}' arbos-box-<user>)/oom_score_adj` must print `500`. If the machine does not start, `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason, and the flag is the first suspect.
 
 ## 4. Before the wave
 
@@ -99,6 +101,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 | event `evicted` | events | the host stopped an idle machine under pressure; its user's next message starts it |
 | event `died` | events | a machine's container went away (out of memory at its own cap, or killed); the relay restarted it |
 | machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish; `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason |
+| `wake failed` naming `losetup` or `mount` | journal | two machines made at once were given the same loop device (eight are made at a time since #3089); the wake job retries by itself three times, so one line is noise and a run of them is not |
 | load5 > 100 | `pressure` | eviction by load starts |
 
 ## 6. When the host is 80 % full
@@ -108,13 +111,15 @@ Eighty per cent is 240 machines, or free disk under 100 GB, or available memory 
 1. Find what is short in `/admin/fleet`: `capacity` and `pressure`.
 2. Disk: repeat §4. Then look for the largest `/work` images (`sandboxes[].work_img_used_mb`).
 3. Memory or CPU: the host already sheds load by itself. Under the memory floor, 20 GB of swap or load 100 it stops idle machines, least recently used first, never one in the middle of a turn, five at most every 30 s. Nothing is deleted; a stopped machine starts again on its user's next message.
-4. **[production]** To shed load before that point, stop the machines nobody is using:
+4. **[production]** To shed load before that point, stop the machines nobody is using (after the relay carrying #3092 is deployed; before it there is no such call):
 
    ```bash
    curl -sS -X POST -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"count":20}' http://127.0.0.1:7700/admin/fleet/evict
    ```
 
-   Up to 20 per call, the same choice and the same effect as step 3. Do not use `docker stop` by hand: the relay sees a dead container and starts it again within ten seconds.
+   Up to 20 per call, the same choice and the same effect as step 3. Three cautions. Not within two minutes of a relay restart: the relay learns which machines are mid-turn from their keepalives, and for the first minute it knows of none. Let the call finish: each stop waits up to 30 s for the machine to shut down, and an interrupted call leaves the rest running. And a relay restart forgets who was evicted: always-on starts every one of them again within a minute, so evict after a deploy, not before.
+
+   Do not use `docker stop` by hand: the relay sees a dead container and starts it again within ten seconds.
 5. **[production]** To stop taking sign-ups while you work, lower the cap to the current resident count with the call in §3; newcomers are waitlisted in order and admitted when it is raised.
 6. A second host. The gVisor fleet in this document is one host only. More hosts are supported only through the `boxd` provider (`ARBOS_BOXD_URL`, `ARBOS_BOXD_NODES_FILE`; `crates/arbos-boxd/README.md`, "More than one host"), which is not deployed on this host and is not a launch-day switch: it needs the daemon installed on each host, mutual TLS between them, and the relay moved onto the daemon's bridge. Until then the levers are the ones above and a bigger disk.
 
