@@ -1,5 +1,5 @@
 //! Load driver for a LOCAL relay: `USERS` test accounts, three room sockets each (two DMs and a
-//! group of `GROUP`), presence every 15 s, `RATE` small message pushes a second in all, then
+//! group of `GROUP`), presence every 15 s, `RATE` pushes of `BYTES`-long messages a second, then
 //! `STORMS` reconnect storms (every socket drops and redials at once; one in three catches up
 //! from seq 0). Prints p50/p99 of dial-to-caught-up and push-to-ack per phase.
 //!
@@ -69,6 +69,7 @@ async fn socket(
 ) {
     let device = format!("dev:load{n}");
     let doc = ChatDoc::new(Some(n + 1), false);
+    let text = "m".repeat(env("BYTES", 40));
     let err = |stats: &Shared, code: &str| {
         *stats.lock().unwrap().errors.entry(code.into()).or_default() += 1
     };
@@ -122,7 +123,7 @@ async fn socket(
                 _ = push.tick(), if live => {
                     sent += 1;
                     let (base, batch) = (doc.oplog_vv(), format!("b{n}-{sent}"));
-                    let _ = doc.append_user_message(&format!("m{n}-{sent}"), "a short message, as most are", &device, &UserMessageOpts::default());
+                    let _ = doc.append_user_message(&format!("m{n}-{sent}"), &text, &device, &UserMessageOpts::default());
                     in_flight.insert(batch.clone(), Instant::now());
                     let _ = tx.send(send(FrameType::Push, json!({ "batchId": batch }), doc.export_updates_since(&base))).await;
                 }
