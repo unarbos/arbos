@@ -11,6 +11,7 @@ promtool check config prometheus.yml subnet.yml
 promtool check rules rules.yml subnet-rules.yml
 promtool test rules rules_test.yml
 docker run --rm -v "$PWD/alertmanager:/etc/alertmanager:ro" --entrypoint amtool "$(image prom/alertmanager)" check-config /etc/alertmanager/alertmanager.yml
+python3 check-rules.py
 python3 dashboards.py --check
 docker compose --env-file local/local.env config -q
 # no secrets, no start: an empty env file must be refused

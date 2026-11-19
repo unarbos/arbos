@@ -31,6 +31,7 @@ Files:
 | `prometheus/rules.yml` | alerts |
 | `prometheus/subnet-rules.yml`, `prometheus/subnet.yml` | the aggregates behind the Subnet view, and the Prometheus that holds only them |
 | `prometheus/rules_test.yml` | unit tests for both rule files |
+| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter or a label other than `kind` and `slot` leave; the rounding steps of the partner's dots are named there |
 | `alertmanager/alertmanager.yml`, `blackbox/blackbox.yml` | their configs |
 | `grafana/provisioning/` | datasource and dashboard loading for the main organisation |
 | `grafana/dashboards/*.json`, `grafana/dashboards-subnet/subnet.json` | the dashboards, written by `dashboards.py` |
@@ -298,8 +299,9 @@ CPU, memory and state, and nothing that says which machine it is.
 - The rules in the `subnet-swarm` group join each box's numbers to its slot and aggregate
   `by (slot)`. `slot` is the only label that leaves; the rule test lists the complete output.
 - What a dot carries is blunted: a five-minute token rate rounded to 1,000, CPU to a tenth of a
-  core, memory to half a GiB. No counter leaves, because a running total would tie a box to its
-  past across a draw.
+  core, memory to half a GiB (the steps are named in `check-rules.py`, the five minutes in the
+  relay's `SLOTS_EVERY`). No counter leaves, because a running total would tie a box to its past
+  across a draw; `check-rules.py` fails on a rule that would let one.
 - The partner's panel is joined on `slot` and does not show it. There is no table of machines, no
   drill-down and no Explore on that side.
 
