@@ -56,7 +56,15 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
    The first only matters if the database value is ever cleared; it is there so the two do not disagree. The other two are the defaults, written down so the host's numbers are in one place. The deploy script keeps all three when it rewrites the file. Machines made from now on can be given a smaller ceiling than today's 16 GB / 8 CPU with `ARBOS_BOX_MEM_GB` and `ARBOS_BOX_CPUS`; existing machines keep theirs until they are re-created by an image roll.
 
-3. **[production]** Keep the kernel away from the databases. The relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
+3. **[production]** Shrink what one newcomer can write. `ARBOS_BOX_WORK_GB` is the size of a new machine's `/work` image; at 128, three people who fill theirs take all the free disk, and a full disk stops every machine (2026-10-25). The image is sized once, when the machine is made, so a smaller number applies to machines made after the restart and existing ones keep theirs:
+
+   ```
+   ARBOS_BOX_WORK_GB=32
+   ```
+
+   A user who needs more is given it by hand; nothing grows an image by itself yet.
+
+4. **[production]** Keep the kernel away from the databases. The relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
 
    ```bash
    for c in arbos-matrix-postgres arbos-matrix-synapse livekit; do for p in $(docker top "$c" -o pid | tail -n +2); do echo -900 | sudo tee /proc/$p/oom_score_adj >/dev/null; done; done
