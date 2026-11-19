@@ -283,7 +283,7 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
     // Unreachable, or an image from before agentd had `/metrics`: the target reads as down.
     match sent {
         Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(body) => body.into_response(),
+            Ok(body) => exposition(body),
             Err(_) => axum::http::StatusCode::BAD_GATEWAY.into_response(),
         },
         _ => axum::http::StatusCode::BAD_GATEWAY.into_response(),
@@ -291,7 +291,12 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
 }
 
 async fn scrape(State(state): State<AppState>) -> Response {
-    let mut res = Response::new(render(&state).into());
+    exposition(render(&state))
+}
+
+/// Prometheus refuses a scrape whose content type it cannot place.
+fn exposition(body: String) -> Response {
+    let mut res = Response::new(body.into());
     res.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/plain; version=0.0.4"),
@@ -754,7 +759,15 @@ mod tests {
         );
         assert!(!listed.contains(&awake), "a target must not name the user");
 
-        assert_eq!(fetch(addr, path).await, "arbos_agentd_turns_running 2\n");
+        let scraped = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(
+            scraped.headers()["content-type"],
+            "text/plain; version=0.0.4"
+        );
+        assert_eq!(
+            scraped.text().await.unwrap(),
+            "arbos_agentd_turns_running 2\n"
+        );
         let status = |path: &'static str| async move {
             reqwest::get(format!("http://{addr}{path}"))
                 .await
