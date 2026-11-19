@@ -1043,11 +1043,11 @@ async fn handle_frame(
                 }
                 // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
                 // `flush_presence` writes every device's stamp in one transaction.
-                state
-                    .presence_seen
-                    .lock()
-                    .await
-                    .insert(id.clone(), arbos_core::ids::now_ms());
+                let now = arbos_core::ids::now_ms();
+                state.presence_seen.lock().await.insert(id.clone(), now);
+                if let Some(user) = principal.user_id() {
+                    state.user_seen.lock().unwrap().insert(user.to_owned(), now);
+                }
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
@@ -1465,9 +1465,8 @@ mod refusal_frame_tests {
 
 /// How often presence stamps reach `devices.last_seen_at`.
 ///
-/// Not free to raise: a person reads as online for `people::ONLINE_MS` (90 s) after the newest
-/// stamp in that column, and presence frames come every 15 s, so this plus one frame has to
-/// stay under it. Going past 60 s means answering `online` from `presence_seen` first.
+/// `online` does not wait for it: `AppState::seen_at` answers from the in-memory stamp first.
+/// The column is what survives a restart and what `last_seen_at` shows, floored to the minute.
 const PRESENCE_FLUSH: Duration = Duration::from_secs(60);
 
 /// Write every presence stamp newer than `since` to `devices.last_seen_at`, all in one

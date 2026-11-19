@@ -467,6 +467,10 @@ pub struct AppState {
     /// device_id → its last presence frame; `rooms::flush_presence` writes these to
     /// `devices.last_seen_at` in batches.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// user_id → when a device of theirs last talked to the relay (a presence frame or an
+    /// authenticated request). `online` is answered from here first: the same stamps reach
+    /// `devices.last_seen_at` only with the next presence flush, up to a minute later.
+    pub user_seen: Arc<std::sync::Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
@@ -586,6 +590,11 @@ impl AppState {
     /// `device_status` and closes if it was the device in question (see [`AppState::revocations`]).
     pub fn note_device_revoked(&self) {
         self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// When this user was last seen: the newer of the stored stamp and the one in memory.
+    pub fn seen_at(&self, user_id: &str, stored: Option<i64>) -> Option<i64> {
+        stored.max(self.user_seen.lock().unwrap().get(user_id).copied())
     }
 
     /// Is this device still a live session? `false` for a revoked row and for a row that is
@@ -838,6 +847,7 @@ pub(crate) mod test_support {
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
+            user_seen: Arc::default(),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
