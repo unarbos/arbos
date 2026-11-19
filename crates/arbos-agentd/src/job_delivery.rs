@@ -34,7 +34,7 @@ use std::sync::Arc;
 use arbos_core::doc::MessageView;
 use serde_json::Value;
 
-use crate::agent::{Agent, JobSpec};
+use crate::agent::{Agent, JobSpec, ModelError};
 use crate::sync::SharedHost;
 
 /// A row `start_job` wrote as a receipt for this job rather than as an answer to the ask: the
@@ -125,11 +125,14 @@ impl Agent {
                 &job.title,
                 "failed",
                 &notes,
-                Some(error),
+                Some(&ModelError {
+                    detail: error.to_owned(),
+                    refusal: ModelError::detail_is_refusal(error),
+                }),
             )
             .await
         {
-            tracing::info!(chat_id, job = %job.id, error = %e, "the job's failure row was written");
+            tracing::warn!(chat_id, job = %job.id, error = %e, "the job's failure row could not be written");
         }
         if self.chat_answered_ask(host, ask_msg_id, &job.id).await {
             let _ = self
