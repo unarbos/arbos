@@ -59,6 +59,8 @@ mod job_finished_sweep_tests;
 #[cfg(test)]
 mod job_handoff_leak_tests;
 #[cfg(test)]
+mod job_kill_unlock_probe_tests;
+#[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
 mod job_list_cap_tests;
