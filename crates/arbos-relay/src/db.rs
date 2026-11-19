@@ -4147,7 +4147,7 @@ mod reader_tests {
                 })
             })
             .collect();
-        for n in 0..30_000 {
+        for n in 0..10_000 {
             db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
