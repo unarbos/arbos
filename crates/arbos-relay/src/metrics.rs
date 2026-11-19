@@ -5,6 +5,9 @@
 //! box sits on a bridge network, so neither the internet nor a box can reach it, and there is no
 //! token to leak or rotate.
 //!
+//! The same listener is how Prometheus reaches the boxes: `GET /metrics/targets` lists the awake
+//! ones and `GET /metrics/box/{id}` proxies a scrape to that box's agentd with its own token.
+//!
 //! Most series are gauges read at scrape time from state the relay already holds. A scrape never
 //! waits: in-memory maps are read with `try_lock` (a busy one leaves its series out of that
 //! scrape) and the database is asked by a sampler every [`SAMPLE_EVERY`], not by the scrape. The
@@ -22,9 +25,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::{MatchedPath, Request, State};
+use axum::extract::{MatchedPath, Path, Request, State};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
@@ -213,7 +216,78 @@ pub async fn serve(state: AppState, listen: &str) -> anyhow::Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(scrape))
+        .route("/metrics/targets", get(box_targets))
+        .route("/metrics/box/{id}", get(box_scrape))
         .with_state(state)
+}
+
+/// How long one box may take to answer a scrape; under Prometheus's own 10 s default.
+const BOX_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A box's name in metrics: stable across restarts, and not its user id.
+fn box_id(user_id: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(user_id.as_bytes())[..6])
+}
+
+/// `GET /metrics/targets`: Prometheus HTTP service discovery for the boxes. One target per awake
+/// box, each this same listener with the box's own path, so Prometheus never learns a box's port
+/// or token. A sleeping box is not listed: scraping must not be what keeps a box looking alive.
+async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    // The address Prometheus reached this listener on is the address it scrapes the boxes on.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| {
+            h.parse::<std::net::SocketAddr>()
+                .is_ok_and(|a| a.ip().is_loopback())
+        });
+    let Some(host) = host else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    let targets: Vec<serde_json::Value> = state
+        .box_states
+        .read()
+        .await
+        .iter()
+        .filter(|(_, (st, _))| *st == BoxState::Awake)
+        .map(|(user_id, _)| {
+            let id = box_id(user_id);
+            serde_json::json!({
+                "targets": [host],
+                "labels": { "__metrics_path__": format!("/metrics/box/{id}"), "box": id },
+            })
+        })
+        .collect();
+    axum::Json(targets).into_response()
+}
+
+/// `GET /metrics/box/{id}`: one box's agentd `/metrics`, fetched with that box's own token.
+async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let user_id = {
+        let boxes = state.box_states.read().await;
+        boxes.keys().find(|u| box_id(u) == id).cloned()
+    };
+    let sb = user_id.and_then(|u| state.db.user_box(&u).ok().flatten());
+    let Some((sb, url)) = sb.and_then(|sb| sb.box_url.clone().map(|url| (sb, url))) else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let sent = crate::boxes::send_to_box(&state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/metrics"))
+            .bearer_auth(&sb.mcp_token)
+            .timeout(BOX_SCRAPE_TIMEOUT)
+    })
+    .await;
+    // Unreachable, or an image from before agentd had `/metrics`: the target reads as down.
+    match sent {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(body) => body.into_response(),
+            Err(_) => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+        },
+        _ => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+    }
 }
 
 async fn scrape(State(state): State<AppState>) -> Response {
@@ -621,6 +695,79 @@ mod tests {
         for listen in ["0.0.0.0:0", "192.0.2.1:9108", "localhost:9108", ""] {
             assert!(serve(state.clone(), listen).await.is_err(), "{listen}");
         }
+    }
+
+    /// Prometheus finds the awake boxes at `/metrics/targets` and scrapes each through the
+    /// relay, which is the one that holds the box's address and token.
+    #[tokio::test]
+    async fn awake_boxes_are_listed_and_scraped_through_the_relay() {
+        let state = test_state(AuthMode::Github);
+        // A box's agentd: `/metrics` behind its own bearer.
+        let agentd = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(|headers: axum::http::HeaderMap| async move {
+                match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                    Some("Bearer mcp-of-the-box") => {
+                        "arbos_agentd_turns_running 2\n".into_response()
+                    }
+                    _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }),
+        ))
+        .await;
+        let (awake, asleep) = (arbos_core::ids::ulid(), arbos_core::ids::ulid());
+        state
+            .db
+            .upsert_box(&crate::db::Sandbox {
+                user_id: awake.clone(),
+                provider: "gvisor".into(),
+                sandbox_id: Some("arbos-box-test".into()),
+                daytona_state: None,
+                device_id: "box:test".into(),
+                box_token_hash: "hash".into(),
+                mcp_token: "mcp-of-the-box".into(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: Some(format!("http://{agentd}")),
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        state.set_box_state(&awake, BoxState::Awake, None).await;
+        state.set_box_state(&asleep, BoxState::Asleep, None).await;
+        let addr = serve_on_loopback(router(state.clone())).await;
+
+        let listed = fetch(addr, "/metrics/targets").await;
+        let targets: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
+        assert_eq!(targets.len(), 1, "only the awake box: {listed}");
+        assert_eq!(targets[0]["targets"][0], addr.to_string());
+        let path = targets[0]["labels"]["__metrics_path__"].as_str().unwrap();
+        assert_eq!(
+            path,
+            format!(
+                "/metrics/box/{}",
+                targets[0]["labels"]["box"].as_str().unwrap()
+            )
+        );
+        assert!(!listed.contains(&awake), "a target must not name the user");
+
+        assert_eq!(fetch(addr, path).await, "arbos_agentd_turns_running 2\n");
+        let status = |path: &'static str| async move {
+            reqwest::get(format!("http://{addr}{path}"))
+                .await
+                .unwrap()
+                .status()
+        };
+        assert_eq!(status("/metrics/box/000000000000").await, 404);
+        // An unreachable box reads as a failed scrape, not as an empty one.
+        let mut gone = state.db.user_box(&awake).unwrap().unwrap();
+        gone.box_url = Some("http://127.0.0.1:1".into());
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
     }
 
     #[test]

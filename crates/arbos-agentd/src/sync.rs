@@ -1409,6 +1409,7 @@ impl SyncHub {
             h.link.sessions = h.link.sessions.saturating_add(1);
             h.link.last_error = None;
             if h.link.sessions > 1 {
+                crate::metrics::relay_reconnected();
                 tracing::info!(room = %room, sessions = h.link.sessions, cursor, unacked = h.doc.oplog_vv() != h.acked_vv, "room session reconnected");
             } else {
                 // The first leg of a cold chat: told to open, now talking to the relay. What
