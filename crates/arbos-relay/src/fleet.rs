@@ -493,6 +493,18 @@ fn safe_user_segment(user_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Loop devices are attached one at a time. `losetup --find --show` asks the kernel for a free
+/// device and then claims it, in two steps, and machines are made eight at a time: two helpers
+/// in the gap can be offered the same device. Whether `losetup` then retries depends on its
+/// version in the helper image; this does not rely on it. The step takes well under a second, so
+/// the queue it makes is short, and mkfs, the seed and the sandbox boot around it still run in
+/// parallel.
+async fn one_attach_at_a_time<T>(attach: impl std::future::Future<Output = T>) -> T {
+    static ATTACH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ATTACH.lock().await;
+    attach.await
+}
+
 /// Make sure the user's `/work` image exists, is attached to a loop device and mounted at
 /// `<data>/boxes/<user>/mnt` (idempotent; survives relay and host restarts).
 async fn ensure_work_mounted(state: &AppState, user_id: &str) -> Result<PathBuf> {
@@ -527,7 +539,7 @@ async fn ensure_work_mounted(state: &AppState, user_id: &str) -> Result<PathBuf>
          mkdir -p \"$mnt/.home\" \"$mnt/.etc\"; chown 1000:1000 \"$mnt\" \"$mnt/.home\"; echo \"$d\"",
         u = user_id
     );
-    let dev = helper(state, &script).await?;
+    let dev = one_attach_at_a_time(helper(state, &script)).await?;
     tracing::debug!(%user_id, dev, "work image mounted");
     Ok(mnt)
 }
@@ -1487,6 +1499,27 @@ mod tests {
         assert!(!room_for_one(80, 80, 200.0, 40.0), "N reached");
         assert!(!room_for_one(80, 10, 39.9, 40.0), "disk floor");
         assert!(room_for_one(80, 10, 40.0, 40.0));
+    }
+
+    /// Eight machines made at once attach their loop devices one after another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn loop_devices_are_attached_one_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INSIDE: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        let attaches: Vec<_> = (0..8)
+            .map(|_| {
+                tokio::spawn(one_attach_at_a_time(async {
+                    MOST.fetch_max(INSIDE.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    INSIDE.fetch_sub(1, Ordering::SeqCst);
+                }))
+            })
+            .collect();
+        for a in attaches {
+            a.await.unwrap();
+        }
+        assert_eq!(MOST.load(Ordering::SeqCst), 1);
     }
 
     #[test]
