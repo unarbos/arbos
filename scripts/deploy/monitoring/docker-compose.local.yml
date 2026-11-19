@@ -18,11 +18,11 @@ x-box: &box
 services:
   # The relay stand-in, and the owner of the shared network namespace.
   fake-relay:
-    image: busybox:1.37
-    container_name: arbos-obs-fake-relay
-    command: ["/bin/sh", "/fake-relay.sh"]
+    image: python:3.13-alpine
+    container_name: arbos-mon-fake-relay
+    command: ["python3", "-u", "/fake-relay.py"]
     volumes:
-      - ./local/fake-relay.sh:/fake-relay.sh:ro
+      - ./local/fake-relay.py:/fake-relay.py:ro
     ports:
       - 127.0.0.1:3300:3300
 

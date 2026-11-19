@@ -10,11 +10,11 @@
 # Grafana cannot create an organisation from provisioning files (it refuses to start when a file
 # names one that does not exist), so this goes through its HTTP API on loopback as the admin.
 #
-#   usage: grafana-access.sh [env file]      default /etc/arbos/observability.env
+#   usage: grafana-access.sh [env file]      default /etc/arbos/monitoring.env
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-ENV_FILE=${1:-/etc/arbos/observability.env}
+ENV_FILE=${1:-/etc/arbos/monitoring.env}
 GRAFANA=${GRAFANA:-http://127.0.0.1:3300}
 ORG_NAME=Subnet
 

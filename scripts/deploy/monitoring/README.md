@@ -9,7 +9,7 @@ list of steps, each marked when it changes production.
 
 ## What runs
 
-One `docker compose` project (`arbos-obs`), host networking, every listener on `127.0.0.1`.
+One `docker compose` project (`arbos-mon`), host networking, every listener on `127.0.0.1`.
 
 | service | image | listens on | memory cap | what it is for |
 |---|---|---|---|---|
@@ -41,13 +41,15 @@ Files:
 
 ## Dashboards
 
-- **Arbos fleet** (home): relay and public probes, boxes running / asleep / waitlisted, start
-  failures, host CPU, memory, disk free and days until full, load, relay memory, restarts, sockets,
-  containers running, scrape targets down, certificate days left.
+- **Arbos fleet** (home), three rows of single stats then time series. Service: relay and public
+  probes, kill switch, today's spend against the daily cap, model errors and response time, relay
+  restarts, targets down. Boxes: running, slots used against `max_boxes`, asleep, waitlisted, start
+  failures, wake queue. Host: CPU, memory, disk free and days until full, load, relay memory,
+  sockets, database writer wait.
 - **Boxes**: top-N boxes by CPU, memory, pids, disk IO and network; every box against its memory
   and pids limit; OOM kills and restarts; a drill-down by the `Box` variable.
-- **Agents**: turns started / finished / failed, turn duration percentiles, queue depth, worker
-  crashes, model request rate, errors and latency.
+- **Agents**: turns started / finished / failed, turn duration percentiles, messages waiting,
+  crashes, model calls, errors and response time, and how many awake boxes are reporting.
 - **Subnet view** (separate organisation): service up, reachable from outside, machines running,
   turn success rate and duration, queue, host headroom. Aggregates only.
 
@@ -58,7 +60,10 @@ Grafana reloads the files within a minute; the Subnet view is reloaded by `grafa
 
 `prometheus/rules.yml`: `RelayDown`, `HealthProbeFailing`, `TLSExpirySoon` (< 14 days),
 `ScrapeTargetDown`, `DiskFreeLow` (< 15 %), `DiskFullWithin24h`, `HostMemoryLow` (< 10 %
-available), `BoxStartFailures`, `Waitlist`, `BoxOOMKilled`, `RelayRestarted`, `RelayMemoryHigh`
+available), `BoxStartFailures` (failed wake jobs), `Waitlist`, `BoxCapacityHigh` (90 % of
+`max_boxes` admitted), `SpendAt60Percent` and `SpendAt85Percent` (of the global daily cap, which
+trips the kill switch and stops every agent), `KillSwitchOn`, `ModelErrorsHigh` (> 10 % of calls),
+`ModelSlow` (p95 > 30 s to first byte), `BoxOOMKilled`, `RelayRestarted`, `RelayMemoryHigh`
 (> 40 GiB; the relay sat at ~22 GB when this was written — tune the number in the rule).
 
 All go to one receiver. Summaries never name a box or a user: they say what is wrong, and the
@@ -70,7 +75,7 @@ Webhooks → New Webhook → Copy Webhook URL. Put it in the env file as `ALERT_
 channel); it lives only in the env file. Send a test:
 
 ```bash
-docker exec arbos-obs-alertmanager amtool alert add Test --annotation=summary='test alert' --alertmanager.url=http://127.0.0.1:9093
+docker exec arbos-mon-alertmanager amtool alert add Test --annotation=summary='test alert' --alertmanager.url=http://127.0.0.1:9093
 ```
 
 It arrives within 30 seconds and resolves itself after five minutes.
@@ -81,7 +86,7 @@ It arrives within 30 seconds and resolves itself after five minutes.
   authentication of their own, so they bind loopback and are never proxied.
 - **Grafana**: anonymous access off, sign-up off, organisation creation off, public dashboards and
   external snapshots off, Secure + SameSite=strict cookies. The admin password comes from
-  `/etc/arbos/observability.env` (root, mode 0600).
+  `/etc/arbos/monitoring.env` (root, mode 0600).
 - **Two organisations.** The main one holds Fleet, Boxes and Agents and the full Prometheus; only
   the admin is in it. The **Subnet** organisation holds one dashboard and one datasource.
 - **The viewer account** (`SUBNET_VIEWER_LOGIN`, default `tobias`) is a Viewer in the Subnet
@@ -94,8 +99,8 @@ It arrives within 30 seconds and resolves itself after five minutes.
   `prometheus/rules_test.yml` feeds the rules labelled input and fails if a label comes out;
   `grafana-access.sh` ends by logging in as the viewer and failing unless the admin dashboards
   and datasource refuse it.
-- Box names contain user ids. They appear on the Boxes dashboard only: not in the Subnet view and
-  not in alert messages.
+- Container names contain user ids. They appear on the Boxes dashboard only: not in the Subnet
+  view and not in alert messages. (The `box` label on agent metrics is an opaque id.)
 
 ## What cAdvisor sees under gVisor
 
@@ -124,36 +129,22 @@ commands, `runsc events --stats <id>` and `runsc usage <id>`, and a Prometheus e
 (`runsc metric-server`) that needs a flag in `/etc/docker/daemon.json` and a Docker restart. Not
 part of this stack.
 
-## Metric contract
+## Relay and agent metrics
 
-The relay and agent panels are built against these names (prefix `arbos_`). Until the relay serves
-them, those panels show "–" and the `relay` and `boxes` targets are down without alerting; the host
-and container panels do not depend on them.
+The names are the relay's and agentd's own, listed in `docs/metrics.md`. Prometheus reaches them
+through the relay's metrics listener, which is loopback-only and needs no credentials:
 
-Prometheus scrapes `http://127.0.0.1:7700/metrics` (the relay) and `/box-metrics` (per-box agentd
-metrics, fanned out by the relay, which alone knows each box's port and token). Both need
-`Authorization: Bearer <token>`; Prometheus reads the token from
-`/etc/arbos/observability/relay-metrics-token`.
+| job | scrapes |
+|---|---|
+| `relay` | `http://127.0.0.1:9108/metrics` |
+| `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque id, not a user id. A sleeping box is absent, not down. |
 
-| name | type | labels |
-|---|---|---|
-| `process_resident_memory_bytes`, `process_open_fds`, `process_start_time_seconds`, `process_cpu_seconds_total` | standard | |
-| `arbos_relay_ws_connections`, `arbos_relay_box_connections` | gauge | |
-| `arbos_relay_http_requests_total` | counter | `class` |
-| `arbos_boxes` | gauge | `state` = `running` `starting` `asleep` `stopped` `error` |
-| `arbos_boxes_waitlisted`, `arbos_boxes_max` | gauge | |
-| `arbos_box_starts_total` | counter | `result` = `ok` `error` |
-| `arbos_box_evictions_total` | counter | |
-| `arbos_model_requests_total` | counter | `provider`, `result` = `ok` `error` |
-| `arbos_model_request_duration_seconds` | histogram | |
-| `arbos_agent_turns_started_total` | counter | (`box`) |
-| `arbos_agent_turns_finished_total` | counter | `result` = `ok` `failed` `cancelled`, (`box`) |
-| `arbos_agent_turn_duration_seconds` | histogram | (`box`) |
-| `arbos_agent_turns_active`, `arbos_agent_queue_depth`, `arbos_agent_workers` | gauge | (`box`) |
-| `arbos_agent_worker_crashes_total` | counter | (`box`) |
-
-Every query aggregates, so the `box` label is optional. A renamed metric is a one-line change in
-`dashboards.py`, `prometheus/rules.yml` or `prometheus/subnet-rules.yml`.
+The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108`.
+`/etc/arbos/relay.env` is rebuilt by `scripts/deploy/relay-server.sh` from its key lists, so the
+variable has to be in those lists and the relay restarted; that belongs to the relay's release, not
+to this stack. Until then the relay and agent panels show "–", the two jobs are down or empty, and
+nothing alerts on them (`ScrapeTargetDown` ignores a target that has never answered). Relay up,
+memory, CPU and restarts, and every host and container panel, do not depend on it.
 
 ## Decisions
 
@@ -163,7 +154,11 @@ Every query aggregates, so the `box` label is optional. A renamed metric is a on
   payload would dwarf everything else scraped here. node_exporter is one static binary using
   ~20 MB with the names every Prometheus rule and dashboard expects. Netdata is left untouched.
 - **A second Prometheus for the Subnet view**, see Access model. It costs ~60 MB.
-- **Host networking**, like LiveKit and Synapse here: the relay listens on loopback.
+- **Host networking**, like LiveKit and Synapse here: the relay and its metrics listener are on
+  loopback.
+- **No setup script and no systemd unit**, unlike LiveKit and Synapse: `restart: unless-stopped`
+  brings the containers back with Docker, and the first deployment is the explicit steps below,
+  each of which can be read before it is run.
 - **Relay memory, CPU and restarts come from cAdvisor** reading the `arbos-relay.service` cgroup,
   so they work before the relay has `/metrics`.
 - **Alertmanager speaks Discord natively** (`discord_configs`); the URL reaches it through a file
@@ -176,15 +171,16 @@ Every query aggregates, so the `box` label is optional. A renamed metric is a on
 Needs Docker Desktop and ~3 GB of disk for images.
 
 ```bash
-cd scripts/deploy/observability
+cd scripts/deploy/monitoring
 docker compose --env-file local/local.env -f docker-compose.yml -f docker-compose.local.yml up -d
 ./grafana-access.sh local/local.env
 python3 local/check-dashboards.py      # after ~2 minutes of data: every panel's query returns data
 open http://127.0.0.1:3300             # admin / the password in local/local.env
 ```
 
-The local override runs a fake relay (`local/fake-relay.sh`: `/healthz`, `/metrics`, `/box-metrics`
-with the contract's names, counters that move) and three containers named `arbos-box-test_*`. The
+The local override runs a fake relay (`local/fake-relay.py`: `/healthz`, `/metrics`, the box
+discovery and per-box metrics, with the names from `docs/metrics.md` and counters that move) and
+three containers named `arbos-box-test_*`. The
 config files are the production ones, unchanged. Differences from production: the containers share
 one network namespace instead of the host's; the public probes hit the real `relay.arbos.life` and
 `arbos.life` (two GETs every 30 s); the relay's systemd-service series are faked, since a Mac has
@@ -210,6 +206,7 @@ under one core; cAdvisor is capped at two. Disk: ~2.6 GB of images, at most 16 G
 
 ```bash
 ss -ltnH | grep -E ':(3300|9090|9091|9093|9100|9115|9180)\s' || echo "ports free"
+ss -ltnH | grep -E ':9108\s' || echo "relay metrics listener not up yet (app panels stay empty)"
 docker compose version
 df -h /var/lib/docker
 ls -l /run/docker.sock /run/containerd/containerd.sock
@@ -219,8 +216,8 @@ curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.arbos.life/healthz
 ```
 
 Stop if a port is taken (change it in `docker-compose.yml`, `prometheus/prometheus.yml` and the
-datasource together). If the relay does not answer on `127.0.0.1:7700`, read `ARBOS_RELAY_LISTEN`
-in `/etc/arbos/relay.env` and change the three `127.0.0.1:7700` in `prometheus/prometheus.yml`.
+datasource together). The relay listens on `127.0.0.1:7700`; port 8080 on this host is something
+else.
 `/run/containerd/containerd.sock` may be absent on an older Docker; cAdvisor then needs only
 `docker.sock`.
 
@@ -229,31 +226,21 @@ in `/etc/arbos/relay.env` and change the three `127.0.0.1:7700` in `prometheus/p
 From a checkout of `main` at the merged commit:
 
 ```bash
-install -d -m 0755 /opt/arbos-observability
-git archive HEAD scripts/deploy/observability | tar -x -C /opt/arbos-observability --strip-components=3
-/opt/arbos-observability/check.sh
+install -d -m 0755 /etc/arbos-monitoring
+git archive HEAD scripts/deploy/monitoring | tar -x -C /etc/arbos-monitoring --strip-components=3
+/etc/arbos-monitoring/check.sh
 ```
 
-### 3. Write the secrets (new files only)
+### 3. Write the env file (new file only)
 
 ```bash
-install -m 0600 /opt/arbos-observability/.env.example /etc/arbos/observability.env
-openssl rand -hex 24      # twice: the Grafana admin password and the viewer password
-$EDITOR /etc/arbos/observability.env
+install -m 0600 /etc/arbos-monitoring/.env.example /etc/arbos/monitoring.env
+openssl rand -hex 24      # run twice: the Grafana admin password and the viewer password
+$EDITOR /etc/arbos/monitoring.env
 ```
 
 Fill in `GF_SECURITY_ADMIN_PASSWORD`, `SUBNET_VIEWER_PASSWORD`, `ALERT_WEBHOOK_URL` (see Alerts)
-and `GF_SERVER_ROOT_URL`. Then the token Prometheus presents to the relay (Prometheus runs as uid
-65534):
-
-```bash
-install -d -m 0750 -g 65534 /etc/arbos/observability
-(umask 027; openssl rand -hex 32 > /etc/arbos/observability/relay-metrics-token)
-chgrp 65534 /etc/arbos/observability/relay-metrics-token
-```
-
-The relay gets the same value as `ARBOS_METRICS_TOKEN` when its `/metrics` ships; that is a change
-to `/etc/arbos/relay.env` and a relay restart, and belongs to that release, not to this runbook.
+and `GF_SERVER_ROOT_URL`. That file is the stack's only secret.
 
 ### 4. DNS — **changes production (DNS only)**
 
@@ -263,14 +250,14 @@ Add an A record `grafana.arbos.life` → the server's public IP, **DNS-only** (n
 ### 5. Start the stack — **changes production: pulls images, starts 7 containers**
 
 ```bash
-cd /opt/arbos-observability && docker compose up -d
+cd /etc/arbos-monitoring && docker compose up -d
 docker compose ps
 ```
 
 All seven are `Up` (cAdvisor `healthy` after 30 s). Then check what could not be checked off the host:
 
 ```bash
-# every target: 1 = scraped. relay and boxes stay 0 until the relay serves /metrics.
+# every target: 1 = scraped. relay stays 0, and no box is listed, until the relay has its metrics listener.
 curl -s '127.0.0.1:9090/api/v1/query?query=up' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
 # cAdvisor names every box: these two numbers are equal
 curl -s 127.0.0.1:9180/metrics | grep -c '^container_last_seen{.*name="arbos-box-'
@@ -286,7 +273,7 @@ goes through Caddy and checks the certificate).
 ### 6. Subnet organisation and viewer — **changes Grafana only**
 
 ```bash
-/opt/arbos-observability/grafana-access.sh
+/etc/arbos-monitoring/grafana-access.sh
 ```
 
 It ends with `viewer '…' can open the Subnet view and nothing else`, having tested exactly that.
@@ -295,7 +282,7 @@ It ends with `viewer '…' can open the Subnet view and nothing else`, having te
 
 ```bash
 WWW_DIR=/home/const/arbos-www
-sed 's#@GRAFANA_HOST@#grafana.arbos.life#g' /opt/arbos-observability/Caddyfile.grafana > /etc/arbos/sites.d/grafana.caddy
+sed 's#@GRAFANA_HOST@#grafana.arbos.life#g' /etc/arbos-monitoring/Caddyfile.grafana > /etc/arbos/sites.d/grafana.caddy
 CLOUDFLARE_DNS_API_TOKEN=validate-only-placeholder "$WWW_DIR/bin/caddy" validate --config "$WWW_DIR/Caddyfile" --adapter caddyfile \
   && systemctl reload arbos-www.service
 ```
@@ -324,13 +311,13 @@ Each of these stands alone; do as many as needed, in this order.
 rm /etc/arbos/sites.d/grafana.caddy && systemctl reload arbos-www.service
 
 # stop everything, keep the data (undoes step 5)
-cd /opt/arbos-observability && docker compose down
+cd /etc/arbos-monitoring && docker compose down
 
 # …or stop and delete the data and images too
-cd /opt/arbos-observability && docker compose down -v --rmi all
+cd /etc/arbos-monitoring && docker compose down -v --rmi all
 
 # remove the files and secrets (undoes steps 2–3)
-rm -r /opt/arbos-observability /etc/arbos/observability /etc/arbos/observability.env
+rm -r /etc/arbos-monitoring /etc/arbos/monitoring.env
 ```
 
 Then delete the `grafana.arbos.life` DNS record and the Discord webhook. Nothing in the relay, the

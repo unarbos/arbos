@@ -2,13 +2,13 @@
 # blackbox_exporter, and a second small Prometheus that holds only the label-free `subnet:*`
 # aggregates behind the shareable Subnet view. README.md in this folder is the runbook.
 #
-# host networking, like LiveKit and Synapse: Prometheus scrapes the relay on 127.0.0.1:7700 and the
-# exporters on loopback. Every listener binds 127.0.0.1; nothing is reachable from outside. Grafana
+# host networking, like LiveKit and Synapse: Prometheus scrapes the relay's loopback-only metrics
+# listener (127.0.0.1:9108) and the exporters on loopback. Every listener binds 127.0.0.1; nothing is reachable from outside. Grafana
 # (127.0.0.1:3300) is the only piece published, through the :443 Caddy (Caddyfile.grafana).
 #
-# Secrets come from OBS_ENV_FILE (default /etc/arbos/observability.env, see .env.example) and
-# OBS_SECRETS_DIR (default /etc/arbos/observability); neither is in the repo.
-name: arbos-obs
+# Secrets come from MON_ENV_FILE (default /etc/arbos/monitoring.env, see .env.example), which is not
+# in the repo.
+name: arbos-mon
 
 x-common: &common
   restart: unless-stopped
@@ -23,7 +23,7 @@ services:
   prometheus:
     <<: *common
     image: prom/prometheus:v3.13.5
-    container_name: arbos-obs-prometheus
+    container_name: arbos-mon-prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --web.listen-address=127.0.0.1:9090
@@ -36,7 +36,6 @@ services:
     mem_limit: 2g
     volumes:
       - ./prometheus:/etc/prometheus:ro
-      - ${OBS_SECRETS_DIR:-/etc/arbos/observability}:/etc/secrets:ro
       - prometheus-data:/prometheus
 
   # Federates only `subnet:*` recording rules from the Prometheus above. The Subnet view's Grafana
@@ -45,7 +44,7 @@ services:
   prometheus-subnet:
     <<: *common
     image: prom/prometheus:v3.13.5
-    container_name: arbos-obs-prometheus-subnet
+    container_name: arbos-mon-prometheus-subnet
     command:
       - --config.file=/etc/prometheus/subnet.yml
       - --web.listen-address=127.0.0.1:9091
@@ -60,8 +59,8 @@ services:
   alertmanager:
     <<: *common
     image: prom/alertmanager:v0.34.2
-    container_name: arbos-obs-alertmanager
-    env_file: ${OBS_ENV_FILE:-/etc/arbos/observability.env}
+    container_name: arbos-mon-alertmanager
+    env_file: ${MON_ENV_FILE:-/etc/arbos/monitoring.env}
     # Alertmanager does not expand environment variables in its config; it reads the webhook URL
     # from a file, so the URL from the env file is written to one before it starts.
     entrypoint:
@@ -80,8 +79,8 @@ services:
   grafana:
     <<: *common
     image: grafana/grafana:13.2.6
-    container_name: arbos-obs-grafana
-    env_file: ${OBS_ENV_FILE:-/etc/arbos/observability.env}
+    container_name: arbos-mon-grafana
+    env_file: ${MON_ENV_FILE:-/etc/arbos/monitoring.env}
     environment:
       GF_SERVER_HTTP_ADDR: 127.0.0.1
       GF_SERVER_HTTP_PORT: 3300
@@ -110,7 +109,7 @@ services:
   cadvisor:
     <<: *common
     image: ghcr.io/google/cadvisor:v0.60.6
-    container_name: arbos-obs-cadvisor
+    container_name: arbos-mon-cadvisor
     privileged: true
     devices:
       - /dev/kmsg # OOM kills are read from the kernel log
@@ -140,7 +139,7 @@ services:
   node-exporter:
     <<: *common
     image: prom/node-exporter:v1.12.1
-    container_name: arbos-obs-node-exporter
+    container_name: arbos-mon-node-exporter
     pid: host
     command:
       - --web.listen-address=127.0.0.1:9100
@@ -156,7 +155,7 @@ services:
   blackbox:
     <<: *common
     image: prom/blackbox-exporter:v0.29.1
-    container_name: arbos-obs-blackbox
+    container_name: arbos-mon-blackbox
     command:
       - --config.file=/etc/blackbox/blackbox.yml
       - --web.listen-address=127.0.0.1:9115

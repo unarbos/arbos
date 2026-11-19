@@ -11,31 +11,31 @@ groups:
       - record: subnet:boxes_running
         expr: count(container_last_seen{name=~"arbos-box-.+"}) or vector(0)
       - record: subnet:boxes_asleep
-        expr: sum(arbos_boxes{state="asleep"})
+        expr: sum(arbos_relay_boxes{state="asleep"})
       - record: subnet:boxes_waitlisted
-        expr: sum(arbos_boxes_waitlisted)
+        expr: sum(arbos_relay_waitlist_length)
       - record: subnet:boxes_max
-        expr: max(arbos_boxes_max)
+        expr: max(arbos_relay_boxes_max)
       - record: subnet:box_starts:rate5m
-        expr: sum(rate(arbos_box_starts_total[5m]))
+        expr: sum(rate(arbos_relay_box_starts_total[5m]))
       - record: subnet:box_start_failures:rate5m
-        expr: sum(rate(arbos_box_starts_total{result="error"}[5m]))
+        expr: sum(rate(arbos_relay_box_starts_total{result="failed"}[5m]))
       - record: subnet:turns_started:rate5m
-        expr: sum(rate(arbos_agent_turns_started_total[5m]))
+        expr: sum(rate(arbos_agentd_turns_started_total[5m]))
       - record: subnet:turns_finished:rate5m
-        expr: sum(rate(arbos_agent_turns_finished_total[5m]))
+        expr: sum(rate(arbos_agentd_turns_finished_total[5m]))
       - record: subnet:turns_failed:rate5m
-        expr: sum(rate(arbos_agent_turns_finished_total{result="failed"}[5m]))
+        expr: sum(rate(arbos_agentd_turns_finished_total{result="error"}[5m]))
       - record: subnet:turns_active
-        expr: sum(arbos_agent_turns_active)
+        expr: sum(arbos_agentd_turns_running)
       - record: subnet:queue_depth
-        expr: sum(arbos_agent_queue_depth)
+        expr: sum(arbos_agentd_sends_waiting)
       - record: subnet:turn_duration_seconds:p50
-        expr: max(histogram_quantile(0.5, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m]))))
+        expr: max(histogram_quantile(0.5, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m]))))
       - record: subnet:turn_duration_seconds:p95
-        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m]))))
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m]))))
       - record: subnet:model_error_ratio
-        expr: sum(rate(arbos_model_requests_total{result="error"}[5m])) / sum(rate(arbos_model_requests_total[5m]))
+        expr: sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))
       - record: subnet:host_cpu_used_ratio
         expr: sum(rate(node_cpu_seconds_total{mode!="idle"}[5m])) / count(node_cpu_seconds_total{mode="idle"})
       - record: subnet:host_memory_used_ratio

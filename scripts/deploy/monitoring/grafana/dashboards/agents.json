@@ -67,7 +67,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum(rate(arbos_agent_turns_started_total[5m]))",
+     "expr": "60 * sum(rate(arbos_agentd_turns_started_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -124,7 +124,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "expr": "60 * sum(rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -189,7 +189,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_agent_turns_finished_total{result=\"failed\"}[5m])) / sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "expr": "100 * sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -246,7 +246,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -303,7 +303,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agent_turns_active)",
+     "expr": "sum(arbos_agentd_turns_running)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -312,8 +312,8 @@
   },
   {
    "type": "stat",
-   "title": "Queue depth",
-   "description": "",
+   "title": "Messages waiting",
+   "description": "User messages waiting for a turn, over all boxes.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -368,7 +368,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agent_queue_depth)",
+     "expr": "sum(arbos_agentd_sends_waiting)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -378,7 +378,7 @@
   {
    "type": "stat",
    "title": "Crashes (1h)",
-   "description": "",
+   "description": "Main agents respawned and job workers replaced.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -429,7 +429,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(increase(arbos_agent_worker_crashes_total[1h]))",
+     "expr": "sum(increase(arbos_agentd_worker_crashes_total[1h]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -494,7 +494,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_model_requests_total{result=\"error\"}[5m])) / sum(rate(arbos_model_requests_total[5m]))",
+     "expr": "100 * sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -551,7 +551,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum(rate(arbos_agent_turns_started_total[5m]))",
+     "expr": "60 * sum(rate(arbos_agentd_turns_started_total[5m]))",
      "legendFormat": "started",
      "instant": false,
      "range": true
@@ -562,7 +562,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum by (result) (rate(arbos_agent_turns_finished_total[5m]))",
+     "expr": "60 * sum by (result) (rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "finished {{result}}",
      "instant": false,
      "range": true
@@ -619,7 +619,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
      "legendFormat": "p50",
      "instant": false,
      "range": true
@@ -630,7 +630,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
      "legendFormat": "p95",
      "instant": false,
      "range": true
@@ -641,7 +641,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.99, sum by (le) (rate(arbos_agent_turn_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))",
      "legendFormat": "p99",
      "instant": false,
      "range": true
@@ -650,7 +650,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Queue and running turns",
+   "title": "Queue and running work",
    "description": "",
    "fieldConfig": {
     "defaults": {
@@ -698,8 +698,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agent_queue_depth)",
-     "legendFormat": "queued",
+     "expr": "sum(arbos_agentd_sends_waiting)",
+     "legendFormat": "messages waiting",
      "instant": false,
      "range": true
     },
@@ -709,8 +709,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agent_turns_active)",
-     "legendFormat": "running",
+     "expr": "sum(arbos_agentd_turns_running)",
+     "legendFormat": "turns running",
      "instant": false,
      "range": true
     },
@@ -720,8 +720,19 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(arbos_agent_workers)",
-     "legendFormat": "workers",
+     "expr": "sum(arbos_agentd_workers_running)",
+     "legendFormat": "worker turns running",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (state) (arbos_agentd_jobs)",
+     "legendFormat": "jobs {{state}}",
      "instant": false,
      "range": true
     }
@@ -729,7 +740,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Worker crashes per hour",
+   "title": "Crashes per hour",
    "description": "",
    "fieldConfig": {
     "defaults": {
@@ -780,8 +791,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(increase(arbos_agent_worker_crashes_total[1h]))",
-     "legendFormat": "crashes",
+     "expr": "sum by (kind) (increase(arbos_agentd_worker_crashes_total[1h]))",
+     "legendFormat": "{{kind}}",
      "instant": false,
      "range": true
     }
@@ -789,8 +800,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Model requests per minute",
-   "description": "",
+   "title": "Model calls per minute",
+   "description": "Upstream calls as the relay made them.",
    "fieldConfig": {
     "defaults": {
      "unit": "short",
@@ -840,8 +851,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "60 * sum by (provider, result) (rate(arbos_model_requests_total[5m]))",
-     "legendFormat": "{{provider}} {{result}}",
+     "expr": "60 * sum by (provider, class) (rate(arbos_relay_model_requests_total[5m]))",
+     "legendFormat": "{{provider}} {{class}}",
      "instant": false,
      "range": true
     }
@@ -849,7 +860,7 @@
   },
   {
    "type": "timeseries",
-   "title": "Model request duration",
+   "title": "Model response time",
    "description": "",
    "fieldConfig": {
     "defaults": {
@@ -897,7 +908,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_model_request_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))",
      "legendFormat": "p50",
      "instant": false,
      "range": true
@@ -908,7 +919,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_model_request_duration_seconds_bucket[5m])))",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))",
      "legendFormat": "p95",
      "instant": false,
      "range": true
@@ -965,7 +976,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_agent_turns_finished_total{result=\"failed\"}[5m])) / sum(rate(arbos_agent_turns_finished_total[5m]))",
+     "expr": "100 * sum(rate(arbos_agentd_turns_finished_total{result=\"error\"}[5m])) / sum(rate(arbos_agentd_turns_finished_total[5m]))",
      "legendFormat": "turns failed",
      "instant": false,
      "range": true
@@ -976,8 +987,19 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum(rate(arbos_model_requests_total{result=\"error\"}[5m])) / sum(rate(arbos_model_requests_total[5m]))",
-     "legendFormat": "model errors",
+     "expr": "100 * sum(rate(arbos_relay_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m]))",
+     "legendFormat": "model errors (relay)",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * sum(rate(arbos_agentd_model_requests_total{class!=\"2xx\"}[5m])) / sum(rate(arbos_agentd_model_requests_total[5m]))",
+     "legendFormat": "model errors (as boxes saw them)",
      "instant": false,
      "range": true
     }
@@ -985,11 +1007,11 @@
   },
   {
    "type": "timeseries",
-   "title": "Relay HTTP requests per second",
-   "description": "",
+   "title": "Box health",
+   "description": "Only awake boxes are scraped; a sleeping box is absent, not down.",
    "fieldConfig": {
     "defaults": {
-     "unit": "reqps",
+     "unit": "short",
      "min": 0,
      "max": null,
      "custom": {
@@ -1006,12 +1028,9 @@
    },
    "options": {
     "legend": {
-     "displayMode": "table",
+     "displayMode": "list",
      "placement": "bottom",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ]
+     "calcs": []
     },
     "tooltip": {
      "mode": "multi",
@@ -1036,8 +1055,52 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (class) (rate(arbos_relay_http_requests_total[5m]))",
-     "legendFormat": "{{class}}",
+     "expr": "count(up{job=\"arbos-agentd\"} == 1)",
+     "legendFormat": "boxes reporting",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(up{job=\"arbos-agentd\"} == 0) or vector(0)",
+     "legendFormat": "awake but not answering",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agentd_workspaces{health=\"unhealthy\"})",
+     "legendFormat": "unhealthy workspaces",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_agentd_rooms_open) - sum(arbos_agentd_rooms_connected)",
+     "legendFormat": "rooms not connected",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(increase(arbos_agentd_relay_reconnects_total[1h]))",
+     "legendFormat": "relay reconnects (1h)",
      "instant": false,
      "range": true
     }

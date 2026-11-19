@@ -47,15 +47,54 @@ groups:
           summary: "The host has {{ $value | humanizePercentage }} memory available."
 
       - alert: BoxStartFailures
-        expr: sum(increase(arbos_box_starts_total{result="error"}[10m])) > 0
+        # Every wake goes through the wake runner; `fetching` (a cold box still coming back) is not a failure.
+        expr: sum(increase(arbos_relay_box_starts_total{result="failed"}[10m])) > 0
         annotations:
-          summary: "{{ $value | printf \"%.0f\" }} box starts failed in the last 10 minutes."
+          summary: "{{ $value | printf \"%.0f\" }} box starts (wake jobs) failed in the last 10 minutes."
 
       - alert: Waitlist
-        expr: arbos_boxes_waitlisted > 0
+        expr: arbos_relay_waitlist_length > 0
         for: 5m
         annotations:
           summary: "{{ $value }} users are waiting for a box: the host is at its box limit."
+
+      - alert: BoxCapacityHigh
+        expr: sum(arbos_relay_boxes_registered{provider=~"gvisor|boxd|docker"}) / max(arbos_relay_boxes_max) >= 0.9
+        for: 5m
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of the box slots are taken; new sign-ups go on the waitlist at 100%."
+
+      # Reaching the global daily cap trips the kill switch, which stops every agent until 00:00 UTC
+      # or until someone lifts it. Two warnings on the way there, then the switch itself.
+      - alert: SpendAt60Percent
+        expr: arbos_relay_spend_today_usd / (arbos_relay_spend_daily_cap_usd > 0) >= 0.6
+        annotations:
+          summary: "Today's spend is {{ $value | humanizePercentage }} of the daily cap that trips the kill switch."
+
+      - alert: SpendAt85Percent
+        expr: arbos_relay_spend_today_usd / (arbos_relay_spend_daily_cap_usd > 0) >= 0.85
+        annotations:
+          summary: "Today's spend is {{ $value | humanizePercentage }} of the daily cap: the kill switch is close. Raise the cap or expect every agent to stop."
+
+      - alert: KillSwitchOn
+        expr: arbos_relay_kill_switch == 1
+        annotations:
+          summary: The kill switch is on. Every model call is refused and no agent can work.
+
+      - alert: ModelErrorsHigh
+        # More than one call in ten failing, on real traffic (over 6 calls a minute).
+        expr: >
+          sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) / sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
+          and sum(rate(arbos_relay_model_requests_total[5m])) > 0.1
+        for: 5m
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of model calls are failing."
+
+      - alert: ModelSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m]))) > 30
+        for: 10m
+        annotations:
+          summary: "Model providers take {{ $value | humanizeDuration }} (p95) to start answering."
 
       - alert: BoxOOMKilled
         # A killed box's container can be gone before its own counter is scraped twice, so the
@@ -67,7 +106,7 @@ groups:
       - alert: RelayRestarted
         expr: >
           changes(container_start_time_seconds{id="/system.slice/arbos-relay.service"}[15m]) > 0
-          or changes(process_start_time_seconds{job="relay"}[15m]) > 0
+          or resets(arbos_relay_uptime_seconds[15m]) > 0
         annotations:
           summary: The relay restarted in the last 15 minutes.
 

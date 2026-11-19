@@ -22,33 +22,33 @@ tests:
         values: 1x20
       - series: 'container_last_seen{name="postgres", id="/docker/ccc", instance="host-1"}'
         values: 1x20
-      - series: 'arbos_boxes{state="asleep", instance="host-1"}'
+      - series: 'arbos_relay_boxes{state="asleep", instance="host-1"}'
         values: 3x20
-      - series: 'arbos_boxes_waitlisted{instance="host-1"}'
+      - series: 'arbos_relay_waitlist_length{instance="host-1"}'
         values: 0x20
-      - series: 'arbos_boxes_max{instance="host-1"}'
+      - series: 'arbos_relay_boxes_max{instance="host-1"}'
         values: 100x20
-      - series: 'arbos_box_starts_total{result="ok", instance="host-1"}'
+      - series: 'arbos_relay_box_starts_total{result="ok", instance="host-1"}'
         values: 0+27x20
-      - series: 'arbos_box_starts_total{result="error", instance="host-1"}'
+      - series: 'arbos_relay_box_starts_total{result="failed", instance="host-1"}'
         values: 0+3x20
-      - series: 'arbos_agent_turns_started_total{box="u_alice"}'
+      - series: 'arbos_agentd_turns_started_total{box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
         values: 0+60x20
-      - series: 'arbos_agent_turns_finished_total{box="u_alice", result="ok"}'
+      - series: 'arbos_agentd_turns_finished_total{box="0a1b2c3d4e5f", result="done"}'
         values: 0+54x20
-      - series: 'arbos_agent_turns_finished_total{box="u_bob", result="failed"}'
+      - series: 'arbos_agentd_turns_finished_total{box="1b2c3d4e5f60", result="error"}'
         values: 0+6x20
-      - series: 'arbos_agent_turns_active{box="u_alice"}'
+      - series: 'arbos_agentd_turns_running{box="0a1b2c3d4e5f"}'
         values: 2x20
-      - series: 'arbos_agent_queue_depth{box="u_bob"}'
+      - series: 'arbos_agentd_sends_waiting{box="1b2c3d4e5f60"}'
         values: 5x20
-      - series: 'arbos_agent_turn_duration_seconds_bucket{box="u_alice", le="10"}'
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="10"}'
         values: 0+30x20
-      - series: 'arbos_agent_turn_duration_seconds_bucket{box="u_alice", le="+Inf"}'
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="+Inf"}'
         values: 0+30x20
-      - series: 'arbos_model_requests_total{provider="openrouter", result="ok", instance="host-1"}'
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx", instance="host-1"}'
         values: 0+90x20
-      - series: 'arbos_model_requests_total{provider="openrouter", result="error", instance="host-1"}'
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx", instance="host-1"}'
         values: 0+10x20
       - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
         values: 0+15x20
@@ -91,7 +91,7 @@ tests:
     input_series:
       - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
         values: 1x4 0x20
-      - series: 'up{job="relay", instance="127.0.0.1:7700"}' # /metrics not served yet: must stay quiet
+      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # /metrics not served yet: must stay quiet
         values: 0x30
       - series: 'up{job="node", instance="127.0.0.1:9100"}' # was up, went down: must fire
         values: 1x4 0x20
@@ -101,6 +101,18 @@ tests:
         values: 100x30
       - series: 'node_vmstat_oom_kill'
         values: 0x10 1x20
+      - series: 'arbos_relay_boxes_registered{provider="gvisor"}'
+        values: 72x30
+      - series: 'arbos_relay_boxes_registered{provider="daytona"}' # retired provider rows hold no slot
+        values: 5x30
+      - series: 'arbos_relay_boxes_max'
+        values: 80x30
+      - series: 'arbos_relay_spend_today_usd'
+        values: 290x10 310x20
+      - series: 'arbos_relay_spend_daily_cap_usd'
+        values: 500x30
+      - series: 'arbos_relay_kill_switch'
+        values: 0x30
     alert_rule_test:
       - eval_time: 2m
         alertname: RelayDown
@@ -124,3 +136,22 @@ tests:
         alertname: BoxOOMKilled
         exp_alerts:
           - exp_annotations: { summary: "The kernel OOM-killed 1 processes in the last 10 minutes (Boxes dashboard → OOM kills)." }
+      # 72 of 80 slots is exactly 90%: fires after its 5 minutes
+      - eval_time: 8m
+        alertname: BoxCapacityHigh
+        exp_alerts:
+          - exp_annotations: { summary: "90% of the box slots are taken; new sign-ups go on the waitlist at 100%." }
+      # $290 of $500 is 58%: quiet. $310 is 62%: the first warning, not the second.
+      - eval_time: 4m
+        alertname: SpendAt60Percent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SpendAt60Percent
+        exp_alerts:
+          - exp_annotations: { summary: "Today's spend is 62% of the daily cap that trips the kill switch." }
+      - eval_time: 8m
+        alertname: SpendAt85Percent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: KillSwitchOn
+        exp_alerts: []

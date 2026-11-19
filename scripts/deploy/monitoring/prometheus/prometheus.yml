@@ -33,24 +33,19 @@ scrape_configs:
         regex: .+;.*|;/|;/system\.slice/(arbos-[^/]+|caddy|docker|containerd|livekit)\.service
         action: keep
 
-  # The relay's own metrics and the per-box agentd metrics it fans out (names: README "Metric
-  # contract"). Both routes need the read-only metrics token. Until the relay serves them these two
-  # targets are down; ScrapeTargetDown leaves them out until they have answered once.
+  # The relay's metrics listener (ARBOS_RELAY_METRICS_LISTEN, loopback only, no auth; names in
+  # docs/metrics.md). Until the relay serves it these targets are down or absent;
+  # ScrapeTargetDown leaves out a target that has never answered.
   - job_name: relay
-    authorization:
-      credentials_file: /etc/secrets/relay-metrics-token
-    fallback_scrape_protocol: PrometheusText0.0.4
     static_configs:
-      - targets: ["127.0.0.1:7700"]
+      - targets: ["127.0.0.1:9108"]
 
-  - job_name: boxes
-    metrics_path: /box-metrics
+  # One target per awake box, listed by the relay, which proxies each scrape to that box's agentd.
+  # The `box` label is an opaque id, not a user id. A sleeping box is absent, not down.
+  - job_name: arbos-agentd
     scrape_interval: 30s
-    authorization:
-      credentials_file: /etc/secrets/relay-metrics-token
-    fallback_scrape_protocol: PrometheusText0.0.4
-    static_configs:
-      - targets: ["127.0.0.1:7700"]
+    http_sd_configs:
+      - url: http://127.0.0.1:9108/metrics/targets
 
   # Is the relay answering, asked directly (no Caddy, no DNS, no TLS in the way).
   - job_name: relay-health
