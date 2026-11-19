@@ -12,8 +12,9 @@ fails when a family is missing from this page.
 | format | Prometheus text exposition 0.0.4 |
 
 The endpoint is on a listener of its own, not on the relay's main port. `ARBOS_RELAY_METRICS_LISTEN`
-must be a loopback socket address (`127.0.0.1:PORT`); the relay refuses to start on anything else,
-and with the variable unset there is no endpoint at all. Caddy proxies only to the main listener, so
+must be a loopback socket address (`127.0.0.1:PORT`). On anything else, or when the port is taken,
+the relay logs `metrics listener is off` and runs without the endpoint: a mistake here costs the
+dashboards, never the relay. With the variable unset there is no endpoint at all. Caddy proxies only to the main listener, so
 the internet cannot reach it, and a box is on a bridge network, so a box cannot either. Prometheus
 has to run on the relay host itself (a host service, or a container with host networking).
 
@@ -56,7 +57,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_model_response_seconds` | histogram | | time for the provider to answer with response headers (not the whole stream) |
 | `arbos_relay_spend_today_usd` | gauge | | relay-wide debits since 00:00 UTC, machine cost excluded; what the kill switch compares with the cap |
 | `arbos_relay_spend_daily_cap_usd` | gauge | | global daily spend cap (`ARBOS_GLOBAL_DAILY_CAP_USD`) |
-| `arbos_relay_kill_switch` | gauge | | 1 while the kill switch is on and every spend is refused |
+| `arbos_relay_kill_switch` | gauge | | 1 while the kill switch is on and every spend is refused. Read only: an automatic trip from an earlier UTC day reads 0 without the stored switch being touched |
 | `arbos_relay_http_requests_total` | counter | `route`, `class` = `1xx`…`5xx` | HTTP requests. A websocket upgrade is `1xx` |
 | `arbos_relay_http_request_seconds_total` | counter | `route`, `class` | seconds spent until the response headers; divide by the request rate for a mean. An upgrade or a stream counts only its start |
 | `arbos_relay_db_writer_wait_seconds` | histogram | | how long a caller waits for the database writer lock, probed every 10 s |
