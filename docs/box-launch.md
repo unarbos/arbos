@@ -8,14 +8,15 @@ Steps marked **[production]** change the host. Everything else only reads.
 
 With `ARBOS_DEFAULT_PROVIDER=gvisor` a new user's machine is a `runsc` container made by the relay (`fleet::create_box`): a sparse ext4 image for `/work`, mounted through a loop device, and one container from the current `arbos-agent` image. Always-on keeps every machine running whether its user is there or not, so each sign-up is a container that stays.
 
-A sign-up is refused a machine, and put on the waitlist, when either of these holds (`fleet::capacity`):
+A sign-up is refused a machine, and put on the waitlist, when any of these holds (`fleet::capacity`):
 
 | Gate | Value | Where it is set |
 |---|---|---|
 | machines, running or stopped by their user, ≥ the cap | cap: `PUT /admin/fleet {"max_boxes": N}` (kept in the database, wins), else `ARBOS_HOST_MAX_BOXES`, else 80 | runtime, no restart |
 | free disk on the relay data volume < the floor | `ARBOS_HOST_MIN_FREE_DISK_GB`, default 40 | env, relay restart |
+| available memory (`MemAvailable`) < the eviction floor | `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64 | env, relay restart |
 
-Memory is not part of the gate: a host short of memory still accepts sign-ups and relies on eviction (§6). The cap is what keeps it from getting there.
+The memory gate is the eviction floor: a host that is stopping idle machines for memory (§6) makes no new ones. A `waitlisted` event and the journal line name the gate that shut and give the numbers. The operator's admit (`POST /admin/waitlist/{id}/admit`) passes the same three gates and answers 409 `host_full` while one is shut; the cap is raised with one call, but the disk and memory floors are env settings, so getting past them means changing the env file and restarting the relay. On a host with less than 64 GB of memory, lower the memory floor or every sign-up is waitlisted.
 
 The waitlist is first come, first served, and slow: once a minute, when there is room, the one person at its head is taken off it, told their computer is ready, and woken. Sixty people in line take an hour. Keep the cap above demand so the line stays empty; the Mac app in particular leaves a new user who is waitlisted on its first-run screen. A machine its user stopped keeps its slot, so Start is never refused.
 
@@ -91,7 +92,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
 ## 5. What to watch
 
-`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, `has_room`), `pressure` (available memory, swap, load, free disk), every machine with its live CPU and memory, and the last 50 fleet events.
+`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, available memory, `has_room`), `pressure` (available memory, swap, load, free disk), every machine with its live CPU and memory, and the last 50 fleet events.
 
 | Sign | Where | Meaning |
 |---|---|---|
