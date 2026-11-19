@@ -364,8 +364,12 @@ fn sample_db(state: &AppState) -> Vec<Series> {
         String::new(),
         state.cfg.global_daily_cap_usd,
     ));
-    // The gate's own reading, not the stored row: it is what clears yesterday's automatic trip.
-    let on = crate::credits::kill_switch(state).on;
+    // The gate's rule without the gate's write: an automatic trip ends at 00:00 UTC, whether or
+    // not anything has asked the gate since. Monitoring reads; it never changes the switch.
+    let on = state
+        .db
+        .kill_switch()
+        .is_ok_and(|ks| ks.on && !(ks.auto && ks.at < crate::proxy::start_of_utc_day_ms()));
     out.push((
         "arbos_relay_kill_switch",
         String::new(),
@@ -843,8 +847,8 @@ mod tests {
             .collect()
     }
 
-    /// Yesterday's automatic trip is over at 00:00 UTC. The stored row still says `on` until
-    /// something asks the gate, and on an idle relay the sampler is the only thing that asks.
+    /// Yesterday's automatic trip is over at 00:00 UTC, though the stored row still says `on`
+    /// until something asks the gate. The gauge reads the rule and leaves the row alone.
     #[test]
     fn an_automatic_trip_from_yesterday_does_not_read_as_on() {
         let state = test_state(AuthMode::Github);
@@ -864,22 +868,31 @@ mod tests {
         ks.at = crate::proxy::start_of_utc_day_ms() - 1;
         state.db.set_kill_switch(&ks).unwrap();
         assert_eq!(kill_switch(&state), 0.0);
+        assert!(state.db.kill_switch().unwrap().on, "reading must not write");
     }
 
-    /// The public listener must never grow a metrics route: Caddy proxies everything on it. The
-    /// app is built inside `main`, so this reads its source; the loopback router is the only
-    /// place a `/metrics` path may be routed.
-    #[test]
-    fn the_public_listener_has_no_metrics_route() {
-        let main = include_str!("main.rs");
-        assert!(
-            main.contains(".route(\"/healthz\""),
-            "the app is still built in main.rs"
-        );
-        assert!(
-            !main.contains("\"/metrics"),
-            "main.rs routes a /metrics path"
-        );
+    /// The public listener, as `main` builds it, has no metrics route: Caddy proxies all of it.
+    #[tokio::test]
+    async fn the_public_listener_answers_404_for_metrics() {
+        let addr = serve_on_loopback(crate::app(test_state(AuthMode::Github))).await;
+        let status = |path: &'static str| async move {
+            let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+            res.status().as_u16()
+        };
+        assert_eq!(status("/healthz").await, 200);
+        for path in ["/metrics", "/metrics/targets", "/metrics/box/0"] {
+            assert_eq!(status(path).await, 404, "{path}");
+        }
+    }
+
+    /// A listener that cannot start is an error for `main` to log, never a panic: a taken port
+    /// must cost the dashboards and not the relay.
+    #[tokio::test]
+    async fn a_taken_port_is_an_error_and_not_a_panic() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = taken.local_addr().unwrap().to_string();
+        let e = serve(test_state(AuthMode::Github), &listen).await;
+        assert!(e.is_err(), "{listen} is taken");
     }
 
     #[test]
