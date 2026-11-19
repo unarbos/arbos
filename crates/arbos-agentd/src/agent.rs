@@ -12348,17 +12348,20 @@ impl Agent {
         if on_boot {
             self.reclaim_interrupted_jobs().await;
         }
-        let mut live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
         // A worker still waiting to start is alive however long it has waited: behind hour-long
         // jobs that is well past the freshness window below, and reading it as an orphan wrote
         // "Stopped" on the row of a job that then ran.
-        live.extend(
-            self.subagents_waiting
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .cloned(),
-        );
+        //
+        // Read before `subagent_msgs`, and the order is the point. A starting worker enters
+        // `subagent_msgs` first and leaves the waiting set second, so it is in at least one of
+        // them at every instant; read in the other order, a worker that made that move between
+        // the two reads was in neither copy.
+        let mut live: HashSet<String> = self
+            .subagents_waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        live.extend(self.subagent_msgs.lock().await.keys().cloned());
         let now = now_ms();
         let mut healed: Vec<(String, Option<String>)> = Vec::new();
         for s in self.store.subagents().unwrap_or_default() {
