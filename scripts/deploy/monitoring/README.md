@@ -509,7 +509,9 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7700/healthz
 ```
 
 `exit 0` and `200`: deployed. `exit 75`: a canary smoke or another deploy holds the lane; nothing
-happened, run it again when that is done. `exit 1` with `set SHA to the full commit id first`: the commit
+happened, run it again when that is done. If it keeps answering 75 with no `relay.deploying`,
+`agentd.canary` or `www.reloading` file in `/var/lib/arbos-deploy`, a process left by an earlier lane
+command holds the lock: `find /proc/[0-9]*/fd -lname /var/lib/arbos-deploy/.lane.lock` names it. `exit 1` with `set SHA to the full commit id first`: the commit
 was not filled in and nothing ran (the deploy script would otherwise take main's head). Any other exit: the
 deploy script failed; its output is above, and the relay keeps running what it ran (the script
 never rolls back).
