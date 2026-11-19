@@ -28,10 +28,16 @@ const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 /// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
 const HEALS_PER_CONNECTION: u32 = 1;
 
+/// Rooms rebuilt in full, in order (tests count them).
+#[cfg(test)]
+static BUILDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Full rebuild of the room's stored doc (checkpoint ∪ every row). Runs off the socket task via
 /// `spawn_blocking` on a cold cache.
 fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::state::RoomDocCache> {
     use arbos_core::doc::ChatDoc;
+    #[cfg(test)]
+    BUILDS.lock().unwrap().push(room_name.to_owned());
     let key = state.db.room_position(room_name)?;
     let mut doc = match state.db.checkpoint_bytes(room_name)? {
         Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
@@ -207,29 +213,51 @@ fn diff_pushed_row(
     changes
 }
 
-/// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
-/// room: head moves import only new rows; the first build runs in `spawn_blocking`.
-async fn room_version_vector(
+/// Read the room's stored doc (checkpoint ∪ rows) from the cache the room keeps: head moves
+/// import only new rows, and a cold cache is rebuilt in `spawn_blocking`.
+///
+/// One rebuild per room at a time. Every socket of a room asks for the doc as it catches up, so
+/// after a relay restart a 500-member chat used to be rebuilt 500 times at once, each on its own
+/// blocking thread with its own copy of the doc. The others now wait and read what the first built.
+async fn read_room_doc<T>(
     state: &AppState,
     room: &crate::state::Room,
     room_name: &str,
-) -> anyhow::Result<Vec<u8>> {
-    use arbos_core::doc::encode_vv;
-    {
+    read: impl Fn(&crate::state::RoomDocCache) -> T,
+) -> anyhow::Result<T> {
+    let warm = || -> anyhow::Result<Option<T>> {
         let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(encode_vv(&cached.doc.oplog_vv()));
-        }
+        let Some(cached) = guard.as_mut() else {
+            return Ok(None);
+        };
+        advance_room_doc(state, room_name, cached)?;
+        Ok(Some(read(cached)))
+    };
+    if let Some(v) = warm()? {
+        return Ok(v);
+    }
+    let _building = room.doc_build.lock().await;
+    if let Some(v) = warm()? {
+        return Ok(v);
     }
     let state_c = state.clone();
     let name = room_name.to_owned();
     let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
         .await
         .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, room, room_name, built, |cached| {
-        encode_vv(&cached.doc.oplog_vv())
+    publish_room_doc(state, room, room_name, built, read)
+}
+
+/// Encoded version vector of the room's stored doc.
+async fn room_version_vector(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    read_room_doc(state, room, room_name, |cached| {
+        arbos_core::doc::encode_vv(&cached.doc.oplog_vv())
     })
+    .await
 }
 
 /// Version vector of the room's stored doc (same cache as [`room_version_vector`]).
@@ -238,21 +266,7 @@ async fn room_oplog_vv(
     room: &crate::state::Room,
     room_name: &str,
 ) -> anyhow::Result<arbos_core::doc::VersionVector> {
-    {
-        let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(cached.doc.oplog_vv());
-        }
-    }
-    let state_c = state.clone();
-    let name = room_name.to_owned();
-    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
-        .await
-        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, room, room_name, built, |cached| {
-        cached.doc.oplog_vv()
-    })
+    read_room_doc(state, room, room_name, |cached| cached.doc.oplog_vv()).await
 }
 
 /// The newest `n` message rows of a room's stored doc (projected JSON, oldest first), from the
@@ -264,26 +278,14 @@ pub async fn room_tail_rows(
     n: usize,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let room = state.room(room_name).await;
-    let tail = |doc: &arbos_core::doc::ChatDoc| {
-        let list = doc.messages_list();
+    read_room_doc(state, &room, room_name, |cached| {
+        let list = cached.doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| doc.projected_row(i))
-            .collect::<Vec<_>>()
-    };
-    {
-        let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(tail(&cached.doc));
-        }
-    }
-    let state_c = state.clone();
-    let name = room_name.to_owned();
-    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
-        .await
-        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    publish_room_doc(state, &room, room_name, built, |cached| tail(&cached.doc))
+            .filter_map(|i| cached.doc.projected_row(i))
+            .collect()
+    })
+    .await
 }
 
 /// Per-socket row ordering (see `run`).
@@ -2942,6 +2944,33 @@ mod covered_push_tests {
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
     }
+    /// A room's sockets all ask for its doc as they catch up; a cold room is rebuilt once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cold_room_is_rebuilt_once_however_many_sockets_ask() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 11);
+        let (bob, _) = person(&state, 12);
+        let chat = dm(&state, &alice, &bob);
+        let room_name = format!("people/{chat}");
+        let room = state.room(&room_name).await;
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.append_user_message("m0", "x", "dev", &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(&room_name, "dev", "b0", &doc.export_updates_since(&base))
+            .unwrap();
+
+        let asks = (0..64).map(|_| super::room_version_vector(&state, &room, &room_name));
+        let vvs = futures::future::join_all(asks).await;
+        assert!(vvs
+            .iter()
+            .all(|vv| vv.as_ref().unwrap() == &encode_vv(&doc.oplog_vv())));
+        let builds = super::BUILDS.lock().unwrap();
+        assert_eq!(builds.iter().filter(|r| **r == room_name).count(), 1);
+    }
+
     async fn prepare_push<'a>(
         state: &AppState,
         room: &'a crate::state::Room,
