@@ -36,6 +36,8 @@ Each resource gives a ceiling; the cap is the lowest, with a margin.
 
 A machine's own limits (`ARBOS_BOX_CPUS=8`, `ARBOS_BOX_MEM_GB=16`) are what one user may use at once, not what the host has set aside: 300 machines × 16 GB is ten times the host, and fourteen machines pinning 8 cores each fill every core. That is deliberate. It is safe for memory because of the eviction loop (§6) and the kernel order in §3; for CPU, Docker's shares keep machines fair to each other but do not keep a full host fast, so watch load.
 
+One limit that is none of these: inotify instances. containerd keeps one per running container, all of them root's, and the kernel default is 128 per user (`fs.inotify.max_user_instances`). On 2026-11-18 the host ran 131 containers and root held exactly 128: each further container still started, but containerd logged `failed to create inotify fd: too many open files` and nothing watched that container's cgroup events, out-of-memory among them. It is 8192 now, in `/etc/sysctl.d/60-arbos-inotify.conf`, which `scripts/deploy/relay-server.sh` writes on every run; a container started while the limit was exhausted is not watched until it is next restarted. The relay does not depend on that watch to notice a dead machine (§5, `died`), only to be told by Docker that the cause was memory.
+
 Not limits on this host: the machines' bridge is a /16, loop devices are made on demand, and connection tracking is at 1 % of its table.
 
 ## 3. Settings
@@ -103,6 +105,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 | event `evicted` | events | the host stopped an idle machine under pressure; its user's next message starts it |
 | event `died` | events | a machine's container went away (out of memory at its own cap, or killed); the relay restarted it |
 | machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish, after three tries (two on a relay older than #3117); `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason. Its user's Start tries again |
+| `failed to create inotify fd: too many open files` | `journalctl -u containerd` | root is out of inotify instances (§2): containers start unwatched. `sysctl fs.inotify.max_user_instances` must say 8192; `sudo sysctl -p /etc/sysctl.d/60-arbos-inotify.conf` sets it at once and restarts nothing |
 | `wake failed` naming `losetup`, `flock` or "gave up after 120 s" | journal | machines are made eight at a time and each claims a loop device under a shared lock (#3110), waiting 20 s for it at most; a helper that hangs is given up on after 120 s. One line is noise, since the wake is retried; a run of them means a helper container is stuck: `docker ps --filter ancestor=ubuntu:24.04` shows it, and removing it frees the lock |
 | load5 > 100 | `pressure` | eviction by load starts, one machine every 30 s |
 
