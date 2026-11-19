@@ -278,7 +278,7 @@ pub const ONLINE_MS: i64 = 90_000;
 /// Add `last_seen_at` (floored to the minute) and `online` to a user card.
 pub fn with_presence(state: &AppState, mut card: UserCardDto) -> UserCardDto {
     let uid = card.id.clone();
-    let seen = state.db.user_last_seen(&uid).ok().flatten();
+    let seen = state.seen_at(&uid, state.db.user_last_seen(&uid).ok().flatten());
     card.last_seen_at = Some(seen.map(|t| t - t % 60_000));
     card.online = Some(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
     // D79: people's initials colour derives from the user id; no override for people.
@@ -340,6 +340,10 @@ impl MemberProfiles {
                 })
                 .collect()
         });
+        let mut users = users;
+        for (id, profile) in users.iter_mut() {
+            profile.seen = state.seen_at(id, profile.seen);
+        }
         Self { users, projects }
     }
 
@@ -2984,7 +2988,7 @@ fn project_member_dto(
             id: user_id.to_owned(),
             ..Default::default()
         });
-    let seen = state.db.user_last_seen(user_id).ok().flatten();
+    let seen = state.seen_at(user_id, state.db.user_last_seen(user_id).ok().flatten());
     ProjectMemberDto {
         id: if card.id.is_empty() {
             user_id.to_owned()

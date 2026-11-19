@@ -1470,6 +1470,12 @@ tick() {
   mkdir -p "$STATE"
   exec 9> "$STATE/.lock"
   flock -n 9 || exit 0
+  # The tick's effects run in a child that has closed the lock descriptor, and this shell keeps the
+  # lock: a process one of them leaves behind must not make every later tick exit here.
+  (exec 9<&-; tick_locked)
+}
+
+tick_locked() {
   apply_pending_www_reload
   ensure_repo
   mkdir -p "$QUEUE"

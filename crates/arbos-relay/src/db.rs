@@ -32,6 +32,18 @@ pub struct Db(Arc<Mutex<Connection>>, Arc<Vec<Mutex<Connection>>>);
 /// sockets; a read that finds them all busy waits for one rather than opening more.
 const READERS: usize = 4;
 
+/// A transaction on the writer's connection.
+///
+/// It takes the write lock at `BEGIN` (`IMMEDIATE`), not at its first write. A deferred
+/// transaction that reads first holds a snapshot by the time it writes, and SQLite will not run
+/// the busy handler for a connection in that state: if a reader holds the WAL write lock at that
+/// instant (it takes it briefly to re-read a header it caught mid-change), the write fails with
+/// "database is locked" at once, whatever `busy_timeout` says. A room PUSH was refused that way.
+/// At `BEGIN` no snapshot is held yet, so the same collision waits for the reader instead.
+pub(crate) fn write_tx(c: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
+}
+
 const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
 
 const SCHEMA: &str = r#"
@@ -1919,7 +1931,7 @@ impl Db {
             // The room position and its row commit together: an insert failure must not leave
             // a head that promises bytes the relay never stored, and a reader beside the writer
             // ([`Db::read`]) must never see the head moved to a seq whose row is not there yet.
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
                 tx.commit()?;
                 return Ok((seq, true));
@@ -1981,7 +1993,7 @@ impl Db {
     pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
         let now = now_ms();
         self.with(|c| {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             let moved = tx.execute(
                 "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
                  SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
@@ -2041,7 +2053,7 @@ impl Db {
         self.with(|c| {
             // One transaction, for the same reason as `append_row`: the checkpoint, the rows it
             // replaces and the floor change together or not at all.
-            let c = c.unchecked_transaction()?;
+            let c = crate::db::write_tx(c)?;
             let floor: i64 = c
                 .query_row("SELECT floor FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))
                 .optional()?
@@ -2254,13 +2266,25 @@ impl Db {
     pub fn wake_job_waiting(&self, user_id: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row(
-                "SELECT 1 FROM box_wake_jobs WHERE user_id = ?1 AND attempts = 0",
+                "SELECT 1 FROM box_wake_jobs WHERE user_id = ?1 AND attempts = 0 AND last_error IS NULL",
                 params![user_id],
                 |_| Ok(()),
             )
             .optional()
         })
         .map(|r| r.is_some())
+    }
+
+    /// The runner has started this job: it is not due again for `hold_ms` (the box's dial
+    /// finishes it) and is no longer waiting in line. Not a failed attempt, so not counted as one.
+    pub fn start_wake_job(&self, user_id: &str, hold_ms: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE box_wake_jobs SET due_at = ?2, last_error = 'in flight' WHERE user_id = ?1",
+                params![user_id, now_ms() + hold_ms],
+            )
+            .map(|_| ())
+        })
     }
 
     pub fn finish_wake_job(&self, user_id: &str) -> Result<()> {
@@ -4104,6 +4128,33 @@ mod reader_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A write that reads before it writes (`append_row` looks the batch up first) must wait for
+    /// the write lock like any other write, not be refused. Readers take that lock for an instant
+    /// when they catch the WAL header mid-change, and SQLite does not run the busy handler for a
+    /// transaction that already holds a read snapshot: it answers "database is locked" at once.
+    #[test]
+    fn a_write_that_reads_first_is_never_refused_by_busy_readers() {
+        let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let (db, stop) = (db.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        db.room_position("p/c").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for n in 0..10_000 {
+            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        readers.into_iter().for_each(|r| r.join().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// What a room socket asks on every upgrade and every frame (who the device is, whether it
     /// is signed out, whose project or chat this is) is answered beside the writer, and a
     /// sign-out is seen by the very next question.
@@ -4142,6 +4193,25 @@ mod reader_tests {
             Some(("u1".to_owned(), true)),
             "a sign-out is visible to the next read"
         );
+
+        // `device_status` falls back to the writer when a reader fails; the answer it gets
+        // there is the same one. Each reader is given a temp view that hides the table from
+        // that connection only, so its query fails and the writer's does not.
+        for reader in db.1.iter() {
+            let reader = reader.lock().unwrap();
+            reader
+                .execute_batch("CREATE TEMP VIEW devices AS SELECT 1 AS hidden")
+                .unwrap();
+        }
+        let direct =
+            db.read(|c| c.query_row("SELECT user_id FROM devices", [], |r| r.get::<_, String>(0)));
+        assert!(direct.is_err(), "the readers cannot answer");
+        assert_eq!(
+            db.device_status("d1").unwrap(),
+            Some(("u1".to_owned(), true)),
+            "a signed-out device is still signed out when only the writer can say so"
+        );
+        assert_eq!(db.device_status("nobody").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -411,6 +411,7 @@ fn error_frame(code: &str, message: &str) -> Message {
 /// and agentd read that silence as a dead link and reconnected 10 s later (2026-11-04). The
 /// people-push refusal below has always carried `batchId`; this is the same courtesy for rooms.
 fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(code);
     frame(
         FrameType::Error,
         json!({ "code": code, "message": message, "batchId": batch_id }),
@@ -423,6 +424,7 @@ fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message
 /// `chat_unavailable`) and, on a block, `byHandle` (+ `byName`). The code set never grows:
 /// fielded clients only keep a room Live for these two codes.
 fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(refused.code());
     let mut header = json!({
         "code": refused.code(),
         "message": refused.message(),
@@ -901,6 +903,7 @@ async fn handle_frame(
             let (seq, dup) = state
                 .db
                 .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            crate::metrics::room_push(dup);
             // Whose message each new row carries, recorded from the socket that pushed it and
             // before anyone can read the row. The announce routes write this record too, but
             // they take the message id from a request body and are gated only on membership —
@@ -1047,11 +1050,11 @@ async fn handle_frame(
                 }
                 // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
                 // `flush_presence` writes every device's stamp in one transaction.
-                state
-                    .presence_seen
-                    .lock()
-                    .await
-                    .insert(id.clone(), arbos_core::ids::now_ms());
+                let now = arbos_core::ids::now_ms();
+                state.presence_seen.lock().await.insert(id.clone(), now);
+                if let Some(user) = principal.user_id() {
+                    state.user_seen.lock().unwrap().insert(user.to_owned(), now);
+                }
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
@@ -1469,9 +1472,8 @@ mod refusal_frame_tests {
 
 /// How often presence stamps reach `devices.last_seen_at`.
 ///
-/// Not free to raise: a person reads as online for `people::ONLINE_MS` (90 s) after the newest
-/// stamp in that column, and presence frames come every 15 s, so this plus one frame has to
-/// stay under it. Going past 60 s means answering `online` from `presence_seen` first.
+/// `online` does not wait for it: `AppState::seen_at` answers from the in-memory stamp first.
+/// The column is what survives a restart and what `last_seen_at` shows, floored to the minute.
 const PRESENCE_FLUSH: Duration = Duration::from_secs(60);
 
 /// Write every presence stamp newer than `since` to `devices.last_seen_at`, all in one

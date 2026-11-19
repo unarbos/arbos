@@ -1,0 +1,2394 @@
+{
+ "uid": "arbos-swarm",
+ "title": "Swarm",
+ "tags": [
+  "arbos"
+ ],
+ "editable": false,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "refresh": "5s",
+ "time": {
+  "from": "now-30m",
+  "to": "now"
+ },
+ "graphTooltip": 1,
+ "templating": {
+  "list": [
+   {
+    "name": "box",
+    "label": "Box",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(container_last_seen{name=~\"arbos-box-.+\"}, name)",
+     "refId": "box"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "allValue": "arbos-box-.+",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "top",
+    "label": "Top",
+    "type": "custom",
+    "query": "5,10,20",
+    "current": {
+     "text": "10",
+     "value": "10"
+    },
+    "options": [
+     {
+      "text": "5",
+      "value": "5",
+      "selected": false
+     },
+     {
+      "text": "10",
+      "value": "10",
+      "selected": true
+     },
+     {
+      "text": "20",
+      "value": "20",
+      "selected": false
+     }
+    ]
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Working",
+   "description": "Boxes with an agent turn running in the last 3 minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 1,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_boxes_turn_running)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Running",
+   "description": "arbos-box-* containers Docker is running.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": null,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 2,
+   "gridPos": {
+    "x": 3,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(container_last_seen{name=~\"arbos-box-.+\"}) or vector(0)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / s",
+   "description": "Tokens the boxes' model calls used, per second over the last 20 s. A call is counted when it ends, so this moves in steps.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 3,
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sum(rate(arbos_relay_box_tokens_total[20s])) or (0 * count(arbos_relay_box_tokens_total) - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / min",
+   "description": "Tokens used in the last minute, all four kinds together: input, output, cache read, cache write.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 4,
+   "gridPos": {
+    "x": 9,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sum(increase(arbos_relay_box_tokens_total[1m])) or (0 * count(arbos_relay_box_tokens_total) - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / 24 h",
+   "description": "Every token the proxy metered in the last 24 hours, or since the relay started counting if that is more recent.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 5,
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sum(increase(arbos_relay_tokens_total[24h])) or (0 * count(arbos_relay_tokens_total) - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Calls / min",
+   "description": "Upstream model calls the relay made.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 6,
+   "gridPos": {
+    "x": 15,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_relay_model_requests_total[1m])) or 0 * max(arbos_relay_uptime_seconds)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Spend today",
+   "description": "Relay-wide spend since 00:00 UTC.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 7,
+   "gridPos": {
+    "x": 18,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arbos_relay_spend_today_usd)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Spend of cap",
+   "description": "Today's spend against the daily cap that trips the kill switch and stops every agent.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 60,
+        "color": "orange"
+       },
+       {
+        "value": 85,
+        "color": "red"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value"
+   },
+   "id": 8,
+   "gridPos": {
+    "x": 21,
+    "y": 0,
+    "w": 3,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "title": "Swarm",
+   "description": "Every box is one bubble. Up: tokens per minute its agents are using. Right: CPU cores it is using. Area: memory. Colour: state (key on the right). A busy fleet rises off the floor; an idle one sits along it; sleeping boxes are at the origin. Until the relay reports per box, every bubble is on the floor and grey: tokens and state arrive with the next relay deploy.",
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "name",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "renameByName": {
+       "Value #A": "CPU cores",
+       "Value #B": "Memory",
+       "Value #C": "State",
+       "Value #D": "Tokens / min",
+       "name": "Box"
+      },
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
+       "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
+       "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
+       "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
+       "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
+       "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
+       "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
+       "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
+       "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
+       "Time 10": true,
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "min": 0,
+     "custom": {
+      "show": "points",
+      "pointSize": {
+       "fixed": 8,
+       "min": 6,
+       "max": 44
+      },
+      "pointShape": "circle",
+      "pointStrokeWidth": 1,
+      "fillOpacity": 55,
+      "axisPlacement": "auto",
+      "scaleDistribution": {
+       "type": "linear"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Memory"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "unknown",
+            "color": "#8b949e"
+           },
+           "1": {
+            "text": "asleep",
+            "color": "#57606a"
+           },
+           "2": {
+            "text": "awake, idle",
+            "color": "#3987e5"
+           },
+           "3": {
+            "text": "waking",
+            "color": "#c9d1d9"
+           },
+           "4": {
+            "text": "working",
+            "color": "#c98500"
+           },
+           "5": {
+            "text": "error",
+            "color": "#d55181"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "value": null,
+           "color": "#8b949e"
+          },
+          {
+           "value": 1,
+           "color": "#57606a"
+          },
+          {
+           "value": 2,
+           "color": "#3987e5"
+          },
+          {
+           "value": 3,
+           "color": "#c9d1d9"
+          },
+          {
+           "value": 4,
+           "color": "#c98500"
+          },
+          {
+           "value": 5,
+           "color": "#d55181"
+          }
+         ]
+        }
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "thresholds"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "CPU cores"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "Tokens / min"
+       }
+      ]
+     }
+    ]
+   },
+   "type": "xychart",
+   "pluginVersion": "13.2.6",
+   "options": {
+    "mapping": "manual",
+    "series": [
+     {
+      "frame": {
+       "matcher": {
+        "id": "byIndex",
+        "options": 0
+       }
+      },
+      "x": {
+       "matcher": {
+        "id": "byName",
+        "options": "CPU cores"
+       }
+      },
+      "y": {
+       "matcher": {
+        "id": "byName",
+        "options": "Tokens / min"
+       }
+      },
+      "size": {
+       "matcher": {
+        "id": "byName",
+        "options": "Memory"
+       }
+      },
+      "color": {
+       "matcher": {
+        "id": "byName",
+        "options": "State"
+       }
+      },
+      "name": {
+       "fixed": "box"
+      }
+     }
+    ],
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 17,
+    "h": 14
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (rate(container_cpu_usage_seconds_total{name=~\"arbos-box-.+\"}[2m])) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (container_memory_working_set_bytes{name=~\"arbos-box-.+\"}) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((60 * sum by (box) (rate(arbos_relay_box_tokens_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ]
+  },
+  {
+   "type": "bargauge",
+   "title": "Boxes by state",
+   "description": "As the relay counts them. Working: a turn ran in the last 3 minutes. The colours are the swarm's.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "noValue": "\u2013",
+     "color": {
+      "mode": "fixed"
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "awake, idle"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "waking"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d1d9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "asleep"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#57606a"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "error"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "orientation": "horizontal",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": true,
+    "namePlacement": "left",
+    "minVizHeight": 16,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "id": 10,
+   "gridPos": {
+    "x": 17,
+    "y": 4,
+    "w": 7,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_boxes_turn_running)",
+     "legendFormat": "working",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "clamp_min(sum(arbos_relay_boxes{state=\"awake\"}) - sum(arbos_relay_boxes_turn_running), 0)",
+     "legendFormat": "awake, idle",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_boxes{state=\"waking\"})",
+     "legendFormat": "waking",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_boxes{state=\"asleep\"})",
+     "legendFormat": "asleep",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(arbos_relay_boxes{state=\"error\"})",
+     "legendFormat": "error",
+     "instant": true,
+     "range": false
+    }
+   ]
+  },
+  {
+   "title": "Network against CPU",
+   "description": "The same boxes by what they cost the host: network throughput against CPU, area = memory. Needs nothing from the relay.",
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "name",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "renameByName": {
+       "Value #A": "CPU cores",
+       "Value #B": "Memory",
+       "Value #C": "State",
+       "Value #D": "Network",
+       "name": "Box"
+      },
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
+       "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
+       "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
+       "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
+       "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
+       "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
+       "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
+       "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
+       "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
+       "Time 10": true,
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "min": 0,
+     "custom": {
+      "show": "points",
+      "pointSize": {
+       "fixed": 8,
+       "min": 6,
+       "max": 44
+      },
+      "pointShape": "circle",
+      "pointStrokeWidth": 1,
+      "fillOpacity": 55,
+      "axisPlacement": "auto",
+      "scaleDistribution": {
+       "type": "linear"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Memory"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Network"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bps"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "unknown",
+            "color": "#8b949e"
+           },
+           "1": {
+            "text": "asleep",
+            "color": "#57606a"
+           },
+           "2": {
+            "text": "awake, idle",
+            "color": "#3987e5"
+           },
+           "3": {
+            "text": "waking",
+            "color": "#c9d1d9"
+           },
+           "4": {
+            "text": "working",
+            "color": "#c98500"
+           },
+           "5": {
+            "text": "error",
+            "color": "#d55181"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "value": null,
+           "color": "#8b949e"
+          },
+          {
+           "value": 1,
+           "color": "#57606a"
+          },
+          {
+           "value": 2,
+           "color": "#3987e5"
+          },
+          {
+           "value": 3,
+           "color": "#c9d1d9"
+          },
+          {
+           "value": 4,
+           "color": "#c98500"
+          },
+          {
+           "value": 5,
+           "color": "#d55181"
+          }
+         ]
+        }
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "thresholds"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "CPU cores"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Network"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "Network"
+       }
+      ]
+     }
+    ]
+   },
+   "type": "xychart",
+   "pluginVersion": "13.2.6",
+   "options": {
+    "mapping": "manual",
+    "series": [
+     {
+      "frame": {
+       "matcher": {
+        "id": "byIndex",
+        "options": 0
+       }
+      },
+      "x": {
+       "matcher": {
+        "id": "byName",
+        "options": "CPU cores"
+       }
+      },
+      "y": {
+       "matcher": {
+        "id": "byName",
+        "options": "Network"
+       }
+      },
+      "size": {
+       "matcher": {
+        "id": "byName",
+        "options": "Memory"
+       }
+      },
+      "color": {
+       "matcher": {
+        "id": "byName",
+        "options": "State"
+       }
+      },
+      "name": {
+       "fixed": "box"
+      }
+     }
+    ],
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   },
+   "id": 11,
+   "gridPos": {
+    "x": 17,
+    "y": 10,
+    "w": 7,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (rate(container_cpu_usage_seconds_total{name=~\"arbos-box-.+\"}[2m])) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (container_memory_working_set_bytes{name=~\"arbos-box-.+\"}) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "8 * sum by (name) (rate(container_network_receive_bytes_total{name=~\"arbos-box-.+\"}[2m]) + rate(container_network_transmit_bytes_total{name=~\"arbos-box-.+\"}[2m])) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Tokens per minute by kind",
+   "description": "Every metered model call. Cache reads are tokens served from the provider's prompt cache.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 25,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "normal"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 12,
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum by (kind) (rate(arbos_relay_tokens_total[1m]))",
+     "legendFormat": "{{kind}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Busiest boxes, tokens per minute",
+   "description": "The $top boxes using the most tokens right now.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 13,
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "topk($top, max by (name) ((60 * sum by (box) (rate(arbos_relay_box_tokens_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")))",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "title": "Boxes",
+   "description": "Every box, busiest first. The token, call and spend columns arrive with the next relay deploy; a sleeping box has no container figures.",
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "name",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "renameByName": {
+       "Value #A": "Tokens / min",
+       "Value #B": "State",
+       "Value #C": "Calls / min",
+       "Value #D": "Spend / h",
+       "Value #E": "CPU cores",
+       "Value #F": "Memory",
+       "Value #G": "Pids",
+       "Value #H": "Network",
+       "name": "Box"
+      },
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
+       "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
+       "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
+       "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
+       "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
+       "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
+       "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
+       "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
+       "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
+       "Time 10": true,
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "decimals": 1
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Calls / min"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Spend / h"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "currencyUSD"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Memory"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Pids"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Network"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bps"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "unknown",
+            "color": "#8b949e"
+           },
+           "1": {
+            "text": "asleep",
+            "color": "#57606a"
+           },
+           "2": {
+            "text": "awake, idle",
+            "color": "#3987e5"
+           },
+           "3": {
+            "text": "waking",
+            "color": "#c9d1d9"
+           },
+           "4": {
+            "text": "working",
+            "color": "#c98500"
+           },
+           "5": {
+            "text": "error",
+            "color": "#d55181"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Pids"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "type": "table",
+   "options": {
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "displayName": "Tokens / min",
+      "desc": true
+     }
+    ]
+   },
+   "id": 14,
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 24,
+    "h": 10
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((60 * sum by (box) (rate(arbos_relay_box_tokens_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((60 * sum by (box) (rate(arbos_relay_box_model_calls_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((3600 * sum by (box) (rate(arbos_relay_box_spend_usd_total[5m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (rate(container_cpu_usage_seconds_total{name=~\"arbos-box-.+\"}[2m]))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "F",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (container_memory_working_set_bytes{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "G",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (container_threads{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "H",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "8 * sum by (name) (rate(container_network_receive_bytes_total{name=~\"arbos-box-.+\"}[2m]) + rate(container_network_transmit_bytes_total{name=~\"arbos-box-.+\"}[2m]))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Selected boxes ($box)",
+   "collapsed": false,
+   "id": 15,
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 24,
+    "h": 1
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Tokens per minute by kind",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 25,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "normal"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 16,
+   "gridPos": {
+    "x": 0,
+    "y": 37,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum by (kind) (sum by (box, kind) (rate(arbos_relay_box_tokens_total[1m])) * on (box) group_left () label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "{{kind}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Model calls per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 17,
+   "gridPos": {
+    "x": 8,
+    "y": 37,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((60 * sum by (box) (rate(arbos_relay_box_model_calls_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Spend per hour",
+   "description": "Metered cost of the selected boxes' model calls.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 18,
+   "gridPos": {
+    "x": 16,
+    "y": 37,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((3600 * sum by (box) (rate(arbos_relay_box_spend_usd_total[5m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU (cores)",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 19,
+   "gridPos": {
+    "x": 0,
+    "y": 45,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "rate(container_cpu_usage_seconds_total{name=~\"$box\"}[2m])",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Memory",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 20,
+   "gridPos": {
+    "x": 12,
+    "y": 45,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "container_memory_working_set_bytes{name=~\"$box\"}",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "state-timeline",
+   "title": "State",
+   "description": "What each selected box was doing, one row per box, in the swarm's colours. With every box selected it reads as the fleet's history.",
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "unknown",
+         "color": "#8b949e"
+        },
+        "1": {
+         "text": "asleep",
+         "color": "#57606a"
+        },
+        "2": {
+         "text": "awake, idle",
+         "color": "#3987e5"
+        },
+        "3": {
+         "text": "waking",
+         "color": "#c9d1d9"
+        },
+        "4": {
+         "text": "working",
+         "color": "#c98500"
+        },
+        "5": {
+         "text": "error",
+         "color": "#d55181"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "#8b949e"
+       },
+       {
+        "value": 1,
+        "color": "#57606a"
+       },
+       {
+        "value": 2,
+        "color": "#3987e5"
+       },
+       {
+        "value": 3,
+        "color": "#c9d1d9"
+       },
+       {
+        "value": 4,
+        "color": "#c98500"
+       },
+       {
+        "value": 5,
+        "color": "#d55181"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "custom": {
+      "fillOpacity": 80,
+      "lineWidth": 0
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": []
+   },
+   "options": {
+    "showValue": "never",
+    "mergeValues": true,
+    "rowHeight": 0.85,
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single"
+    }
+   },
+   "id": 21,
+   "gridPos": {
+    "x": 0,
+    "y": 53,
+    "w": 24,
+    "h": 14
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "{{name}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  }
+ ],
+ "links": [
+  {
+   "type": "dashboards",
+   "tags": [
+    "arbos"
+   ],
+   "title": "Arbos",
+   "asDropdown": false,
+   "includeVars": false,
+   "keepTime": true
+  }
+ ]
+}
