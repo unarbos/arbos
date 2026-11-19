@@ -780,7 +780,21 @@ async fn forward(
             cost_source: Some(cost_source),
             metering_status: Some(metering_status),
         };
-        match db.record_model_usage(record) {
+        let tokens = record.tokens;
+        let recorded = db.record_model_usage(record);
+        if matches!(recorded, Ok(true)) {
+            let agent = match &payer {
+                Principal::Box { user_id } => Some(user_id.as_str()),
+                _ => None,
+            };
+            let charged = if status.is_success() {
+                meter.usd()
+            } else {
+                0.0
+            };
+            crate::metrics::model_usage(agent, tokens, charged);
+        }
+        match recorded {
             // Observing a failed response must preserve the existing charging policy: only
             // successful responses are debited, even when an error contains usage metadata.
             Ok(true) if status.is_success() => {
