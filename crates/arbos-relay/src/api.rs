@@ -974,6 +974,7 @@ pub async fn chat_history(
         state
             .http
             .get(format!("{url}/w/{id}/history/{chat}"))
+            .bearer_auth(&sb.mcp_token)
             .query(&q)
     })
     .await;
