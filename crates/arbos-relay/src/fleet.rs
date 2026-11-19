@@ -1541,7 +1541,7 @@ mod tests {
             .last_client_push
             .lock()
             .await
-            .insert("u_busy".into(), now_ms());
+            .insert("u_busy".into(), now_ms() - 10_000);
         let cands = candidates(&state, Provider::Gvisor).await;
         assert_eq!(pick_eviction(&cands).as_deref(), Some("u_idle"));
 
