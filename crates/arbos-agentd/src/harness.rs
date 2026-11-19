@@ -2734,7 +2734,8 @@ mod claude_worker_owner_regressions {
 import json,os,select,sys,time
 from pathlib import Path
 root=Path(@ROOT@)
-(root/'pid').write_text(str(os.getpid()))
+(root/'pid.tmp').write_text(str(os.getpid()))
+os.replace(root/'pid.tmp',root/'pid')
 while not (root/'finish').exists():
     if (root/'no-read').exists():
         time.sleep(0.01)

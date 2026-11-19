@@ -856,6 +856,7 @@ async fn main() -> anyhow::Result<()> {
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
         )
+        .route("/admin/fleet/evict", post(fleet::admin_fleet_evict))
         .route(
             "/admin/waitlist/{id}/admit",
             post(fleet::admin_waitlist_admit),
@@ -1141,7 +1142,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
     restart::install_sigterm_handler(state_for_restart);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
 

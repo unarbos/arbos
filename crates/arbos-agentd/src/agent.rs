@@ -1785,6 +1785,16 @@ pub(crate) const RELAY_TURN_MARK: &str = "[Arbos relay turn]";
 pub(crate) const MODEL_CALL_RETRIES: u8 = 2;
 pub(crate) const MODEL_CALL_BACKOFF_S: [u64; 2] = [2, 5];
 
+/// The wait before retry `attempt` (0-based): the backoff above plus up to half as much again,
+/// drawn at random. Every box talks to the same providers, so a rate limit or an overload reaches
+/// many turns in the same second; without the spread they would all come back in the same second
+/// too.
+pub(crate) fn model_retry_wait(attempt: u8) -> Duration {
+    let base_ms =
+        MODEL_CALL_BACKOFF_S[usize::from(attempt).min(MODEL_CALL_BACKOFF_S.len() - 1)] * 1000;
+    Duration::from_millis(base_ms + rand::random::<u64>() % (base_ms / 2))
+}
+
 /// The direct tool call a turn is inside right now.
 #[derive(Clone, Debug)]
 pub struct RunningTool {
@@ -2177,6 +2187,9 @@ pub struct Agent {
     pub turn_running: AtomicBool,
     /// Subagent turns in flight (keep-alive must cover them too, design §4.6).
     pub subagent_turns: std::sync::atomic::AtomicU32,
+    /// How long one worker run may last before it is failed and stopped. A field so a test can
+    /// shorten it without touching the other tests' boxes.
+    pub(crate) worker_deadline_ms: std::sync::atomic::AtomicU64,
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     /// Set by `shutdown`: the pi supervisor must not respawn a child we are stopping (an orphaned
@@ -2201,6 +2214,9 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Workers whose task is alive and waiting to start (a job cap, a lock, a slot). They are not
+    /// in `subagent_msgs` yet, and the orphan sweep must not read that as their task being gone.
+    subagents_waiting: std::sync::Mutex<HashSet<String>>,
     /// Subagent id → the process group its harness child leads, recorded at spawn.
     ///
     /// "The job has no record of child pids" was the true half of bug Z's hunch. A cancel has to
@@ -2501,6 +2517,7 @@ impl Agent {
             adapters,
             turn_running: AtomicBool::new(false),
             subagent_turns: std::sync::atomic::AtomicU32::new(0),
+            worker_deadline_ms: std::sync::atomic::AtomicU64::new(60 * 60 * 1000),
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
@@ -2513,6 +2530,7 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            subagents_waiting: std::sync::Mutex::new(HashSet::new()),
             worker_pgids: Mutex::new(HashMap::new()),
             cancel_leftovers: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
@@ -7734,6 +7752,14 @@ impl Agent {
                             tracing::warn!(error = %e2, job = %j.id, "job fallback turn");
                         }
                     }
+                    // Bug AJ. The fallback above is a turn, so it needs the main pi child — the
+                    // process most likely to be gone here, because whatever took the worker
+                    // usually took it too. Every row this branch wrote before it was settled
+                    // quietly, so without a last word the job simply vanishes: in `r16burst` six
+                    // of eight asks got no row of any kind. `report_lost_job` is silent when
+                    // something did answer (`job_delivery.rs`).
+                    me.report_lost_job(&chat, &host2, &user_msg, j, &e.to_string())
+                        .await;
                     return;
                 }
                 // One plain line in the chat, on the helper's own progress row when it has one,
@@ -8607,10 +8633,9 @@ impl Agent {
             let Some((attempt, m)) = self.transient_model_error().await else {
                 break;
             };
-            let wait =
-                MODEL_CALL_BACKOFF_S[usize::from(attempt).min(MODEL_CALL_BACKOFF_S.len() - 1)];
-            tracing::warn!(chat_id, attempt = attempt + 1, wait_s = wait, detail = %m.detail, "transient model failure; retrying in the same turn");
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            let wait = model_retry_wait(attempt);
+            tracing::warn!(chat_id, attempt = attempt + 1, wait_ms = wait.as_millis() as u64, detail = %m.detail, "transient model failure; retrying in the same turn");
+            tokio::time::sleep(wait).await;
             if self.turn.lock().await.as_ref().is_none_or(|t| t.stopped) {
                 break;
             }
@@ -12323,7 +12348,17 @@ impl Agent {
         if on_boot {
             self.reclaim_interrupted_jobs().await;
         }
-        let live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        let mut live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        // A worker still waiting to start is alive however long it has waited: behind hour-long
+        // jobs that is well past the freshness window below, and reading it as an orphan wrote
+        // "Stopped" on the row of a job that then ran.
+        live.extend(
+            self.subagents_waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
         let now = now_ms();
         let mut healed: Vec<(String, Option<String>)> = Vec::new();
         for s in self.store.subagents().unwrap_or_default() {
@@ -12805,6 +12840,24 @@ impl Agent {
             me.jobs_running.fetch_sub(1, Ordering::SeqCst);
             if let Err(e) = r {
                 tracing::warn!(chat_id = %chat, error = %e, "job failed");
+                // The helper's own progress row was opened before it started. This task is the
+                // only thing that would ever close it, and it is ending here: left streaming,
+                // the row reads as work in progress until the orphan sweep finds it.
+                {
+                    let h = host2.lock().await;
+                    for m in h.doc.messages() {
+                        if m.role == "assistant"
+                            && m.status == "streaming"
+                            && m.rest.get("worker").and_then(Value::as_bool) == Some(true)
+                            && m.rest.get("inReplyTo").and_then(Value::as_str)
+                                == Some(user_msg_id.as_str())
+                        {
+                            h.doc.set_activity(&m.id, None);
+                            h.doc.add_status_part(&m.id, "failed", "Failed");
+                            h.doc.finish_message(&m.id, MessageStatus::Error);
+                        }
+                    }
+                }
                 // `write_job_result` already told the user when the job ran; only a start
                 // failure (no result row at all) needs a line here.
                 let has_row = host2.lock().await.doc.messages().iter().any(|m| {
@@ -13133,6 +13186,7 @@ impl Agent {
             self.post_activity(chat_id, Some(j.title.clone()));
         }
         let queued_at = Instant::now();
+        let waiting = WaitingWorker::enter(&self.subagents_waiting, &subagent_id);
         if self.subagent_slots.available_permits() == 0 {
             let waiting = self
                 .store
@@ -13229,6 +13283,7 @@ impl Agent {
             .lock()
             .await
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
+        drop(waiting);
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
@@ -13391,11 +13446,13 @@ impl Agent {
         // How the provider declined or failed this worker's last model call, if it did (bug AR).
         let mut model_err: Option<ModelError> = None;
         let mut tool_calls: u32 = 0;
-        let deadline = Instant::now() + Duration::from_secs(60 * 60);
+        let deadline =
+            Instant::now() + Duration::from_millis(self.worker_deadline_ms.load(Ordering::SeqCst));
+        let mut timed_out = false;
         loop {
             let ev = tokio::select! {
                 e = stream.recv() => e,
-                _ = tokio::time::sleep_until(deadline.into()) => { done_err = Some("subagent exceeded 60 minutes".into()); break; }
+                _ = tokio::time::sleep_until(deadline.into()) => { done_err = Some("subagent exceeded 60 minutes".into()); timed_out = true; break; }
             };
             let ev = match ev {
                 Ok(e) => e,
@@ -13574,6 +13631,13 @@ impl Agent {
             }
         }
         keepalive.abort();
+        if timed_out {
+            // The cap ends the wait, not the work: without this the worker and whatever its
+            // tool call started keep running outside every concurrency gate, holding pids and
+            // memory and spending tokens, after the chat was told the job failed.
+            let job_id = job.as_ref().map_or("", |j| j.id.as_str());
+            self.end_cancelled_worker(job_id, &subagent_id).await;
+        }
         self.subagent_turns.fetch_sub(1, Ordering::SeqCst);
         {
             let h = host.lock().await;
@@ -14774,6 +14838,33 @@ fn behavior_name(b: StreamingBehavior) -> &'static str {
     match b {
         StreamingBehavior::Steer => "steer",
         StreamingBehavior::FollowUp => "followUp",
+    }
+}
+
+/// A worker's place in [`Agent::subagents_waiting`], given back when it starts or gives up.
+struct WaitingWorker<'a> {
+    set: &'a std::sync::Mutex<HashSet<String>>,
+    id: String,
+}
+
+impl<'a> WaitingWorker<'a> {
+    fn enter(set: &'a std::sync::Mutex<HashSet<String>>, id: &str) -> Self {
+        set.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned());
+        Self {
+            set,
+            id: id.to_owned(),
+        }
+    }
+}
+
+impl Drop for WaitingWorker<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
     }
 }
 
@@ -17081,6 +17172,14 @@ mod tests {
     fn model_call_retry_shape() {
         assert_eq!(MODEL_CALL_RETRIES, 2);
         assert_eq!(MODEL_CALL_BACKOFF_S, [2, 5]);
+        // Each wait is its backoff plus less than half as much again, and the draws differ.
+        for (attempt, base) in [(0u8, 2_000u128), (1, 5_000), (9, 5_000)] {
+            let waits: Vec<u128> = (0..50)
+                .map(|_| model_retry_wait(attempt).as_millis())
+                .collect();
+            assert!(waits.iter().all(|w| (base..base + base / 2).contains(w)));
+            assert!(waits.iter().any(|w| *w != waits[0]), "no spread: {waits:?}");
+        }
         let p = model_retry_prompt(
             "Search them online",
             Some("Searching the web for Hezbola now."),
@@ -18944,7 +19043,8 @@ from pathlib import Path
 marker = Path(@MARKER@)
 release = Path(@RELEASE@)
 exited = Path(@EXITED@)
-Path(@PID@).write_text(str(os.getpid()))
+Path(@PID@ + '.tmp').write_text(str(os.getpid()))
+os.replace(@PID@ + '.tmp', @PID@)
 try:
     for line in sys.stdin:
         cmd = json.loads(line)
