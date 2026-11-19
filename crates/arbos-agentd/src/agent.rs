@@ -1453,6 +1453,20 @@ impl std::fmt::Display for JobWorkerFailed {
 
 impl std::error::Error for JobWorkerFailed {}
 
+/// A job's run ended in an error and its result row, saying so, is already in the chat. An error
+/// so the caller knows the job did not succeed, and a type of its own so the worker task can
+/// tell it from a worker that never started: this one is answered, and nothing runs it again.
+#[derive(Debug)]
+pub(crate) struct JobAnsweredFailed(pub String);
+
+impl std::fmt::Display for JobAnsweredFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "job {} ended with an error", self.0)
+    }
+}
+
+impl std::error::Error for JobAnsweredFailed {}
+
 /// Why a worker's run counts as failed once its stream closed, and whether a fresh worker is
 /// worth a try. `text` is what the worker wrote, `tool_calls` how many tools it ran.
 ///
@@ -7620,6 +7634,14 @@ impl Agent {
                 )
                 .await
             {
+                if e.downcast_ref::<JobAnsweredFailed>().is_some() {
+                    // The run reached its end and the chat has read how it ended (the cap, a
+                    // refusal). Everything below treats an error as a worker that never started
+                    // and gives the same brief to a fresh worker, or to the main agent inline:
+                    // the user would read a failure while the work quietly ran again.
+                    tracing::info!(error = %e, "the job's failure is already in the chat; not run again");
+                    return;
+                }
                 let label = if name.is_empty() {
                     existing.clone().unwrap_or_else(|| "subagent".into())
                 } else {
@@ -12417,17 +12439,20 @@ impl Agent {
         if on_boot {
             self.reclaim_interrupted_jobs().await;
         }
-        let mut live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
         // A worker still waiting to start is alive however long it has waited: behind hour-long
         // jobs that is well past the freshness window below, and reading it as an orphan wrote
         // "Stopped" on the row of a job that then ran.
-        live.extend(
-            self.subagents_waiting
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .cloned(),
-        );
+        //
+        // Read before `subagent_msgs`, and the order is the point. A starting worker enters
+        // `subagent_msgs` first and leaves the waiting set second, so it is in at least one of
+        // them at every instant; read in the other order, a worker that made that move between
+        // the two reads was in neither copy.
+        let mut live: HashSet<String> = self
+            .subagents_waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        live.extend(self.subagent_msgs.lock().await.keys().cloned());
         let now = now_ms();
         let mut healed: Vec<(String, Option<String>)> = Vec::new();
         for s in self.store.subagents().unwrap_or_default() {
@@ -13353,6 +13378,17 @@ impl Agent {
             .await
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         drop(waiting);
+        // Before this worker adds a child of its own. The timed pass that enforces
+        // `WORKER_RETAINED_MAX` runs every five minutes, and a box that finishes a job every few
+        // seconds holds one idle child per finished job until then: thirty short jobs are thirty
+        // processes, against a pid limit the whole box shares.
+        //
+        // On a task of its own: closing a child waits for it to exit, seconds for a slow one,
+        // and this worker is holding its slot, the box's slot and its job's locks.
+        let me = self.clone();
+        tokio::spawn(async move {
+            me.retire_idle_workers().await;
+        });
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
@@ -14521,7 +14557,7 @@ impl Agent {
             Some(&json!({ "message_id": row_id, "job": name, "status": status })),
         );
         if error.is_some() {
-            return Err(anyhow!("job {name} ended with an error"));
+            return Err(JobAnsweredFailed(name.to_owned()).into());
         }
         Ok(())
     }
