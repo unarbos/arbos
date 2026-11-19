@@ -2631,6 +2631,14 @@ mod history_tests {
     }
 }
 
+/// The apps' room session, compiled from its own source so a test can drive the real one
+/// against this relay. `arbos-client` is app-only and the relay may not depend on it; the
+/// module needs nothing beyond `arbos-core` and serde, which the relay already has.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../arbos-client/src/room.rs"]
+mod client_room;
+
 #[cfg(test)]
 mod covered_push_tests {
     //! Reconnect storm (#1570): pending batches whose ops the room already holds must ACK as
@@ -2926,10 +2934,10 @@ mod covered_push_tests {
     async fn run_session(
         addr: SocketAddr,
         token: &str,
-        session: &mut arbos_client::room::RoomSession,
+        session: &mut super::client_room::RoomSession,
         doc: &mut ChatDoc,
-    ) -> Vec<arbos_client::room::RoomAction> {
-        use arbos_client::room::RoomAction;
+    ) -> Vec<super::client_room::RoomAction> {
+        use super::client_room::RoomAction;
         let url = format!("ws://{addr}/room/{}?token={token}", session.room());
         let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
         let (mut sink, mut stream) = ws.split();
@@ -2970,7 +2978,7 @@ mod covered_push_tests {
     /// id is rewritten afterwards is refused without the session being told to redial.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_real_client_session_sends_what_it_wrote_offline_and_stays_connected() {
-        use arbos_client::room::{RoomAction, RoomSession};
+        use super::client_room::{RoomAction, RoomSession};
         let state = test_state(AuthMode::Github);
         let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
         let (alice, _) = person(&state, 1);
