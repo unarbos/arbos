@@ -108,7 +108,7 @@ impl Db {
         }
         self.with(|c| {
             let now = now_ms();
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             let mut inserted = 0usize;
             for p in pushes {
                 let n = tx.execute(
@@ -144,7 +144,7 @@ impl Db {
     pub fn outbox_claim_due(&self, limit: usize, lease_ms: i64) -> Result<Vec<OutboxRow>> {
         self.with(|c| {
             let now = now_ms();
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             let rows = {
                 let mut st = tx.prepare(&format!(
                     "SELECT {ROW_COLS} FROM push_outbox
