@@ -609,10 +609,14 @@ async fn forward(
     let t0 = Instant::now();
     let upstream = match req.send().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        Err(e) => {
+            crate::metrics::model_request(&url, None, t0.elapsed());
+            return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
+        }
     };
     let headers_ms = t0.elapsed().as_millis() as i64;
     let status = upstream.status();
+    crate::metrics::model_request(&url, Some(status.as_u16()), t0.elapsed());
     let upstream_marks = upstream_marks(upstream.headers());
     let mut resp_headers = HeaderMap::new();
     for (k, v) in upstream.headers() {
