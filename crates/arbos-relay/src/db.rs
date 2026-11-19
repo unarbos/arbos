@@ -4154,6 +4154,25 @@ mod reader_tests {
             Some(("u1".to_owned(), true)),
             "a sign-out is visible to the next read"
         );
+
+        // `device_status` falls back to the writer when a reader fails; the answer it gets
+        // there is the same one. Each reader is given a temp view that hides the table from
+        // that connection only, so its query fails and the writer's does not.
+        for reader in db.1.iter() {
+            let reader = reader.lock().unwrap();
+            reader
+                .execute_batch("CREATE TEMP VIEW devices AS SELECT 1 AS hidden")
+                .unwrap();
+        }
+        let direct =
+            db.read(|c| c.query_row("SELECT user_id FROM devices", [], |r| r.get::<_, String>(0)));
+        assert!(direct.is_err(), "the readers cannot answer");
+        assert_eq!(
+            db.device_status("d1").unwrap(),
+            Some(("u1".to_owned(), true)),
+            "a signed-out device is still signed out when only the writer can say so"
+        );
+        assert_eq!(db.device_status("nobody").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

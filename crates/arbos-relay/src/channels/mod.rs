@@ -858,6 +858,7 @@ mod tests {
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            user_seen: Arc::default(),
             activity: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             turn_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
