@@ -19,9 +19,13 @@ use arbos_core::rpc::{self, Command as RpcCommand, Event, Record, Response};
 /// over once parsed. Far above any real record (an image part is a few MiB).
 pub(crate) const CHILD_LINE_MAX: usize = 32 * 1024 * 1024;
 
-/// The next line of a child's stdout, `None` at its end. A line over `max` bytes is read past
-/// without being kept and comes back empty, which no caller parses as a record, so the stream
-/// goes on from the line after it.
+/// The next line of a child's stdout, `None` at its end. A line over `max` bytes is an error,
+/// and the readers end on an error exactly as they do when the child closes its stdout: the
+/// child reads as gone at once, so the turn or job it was serving fails over now.
+///
+/// Not skipped and read on, because the record that cannot be read may be the one the run is
+/// waiting for. A worker settles on `agent_end`, which carries the run's whole message list;
+/// dropping that line quietly would leave a finished job waiting until its cap.
 pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
     stdout: &mut R,
     max: usize,
@@ -32,14 +36,10 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
         return Ok(None);
     }
     if buf.len() > max && buf.last() != Some(&b'\n') {
-        tracing::warn!(max, "a line from a child was over the cap and was dropped");
-        loop {
-            buf.clear();
-            let mut part = (&mut *stdout).take(64 * 1024);
-            if part.read_until(b'\n', &mut buf).await? == 0 || buf.last() == Some(&b'\n') {
-                return Ok(Some(String::new()));
-            }
-        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("a line over {max} bytes"),
+        ));
     }
     Ok(Some(
         String::from_utf8_lossy(&buf)
@@ -436,18 +436,73 @@ impl RpcChild {
 #[cfg(test)]
 mod capped_line_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
-    async fn a_line_over_the_cap_is_dropped_and_the_next_one_is_read() {
+    async fn a_line_over_the_cap_is_an_error_and_lines_under_it_are_read() {
         let input = format!(
-            "first\n{}\n{{\"type\":\"agent_start\"}}\r\nlast",
+            "first\n{{\"type\":\"agent_start\"}}\r\n{}\nnever read\n",
             "x".repeat(200_000)
         );
         let mut stdout = BufReader::new(input.as_bytes());
-        let mut lines = Vec::new();
-        while let Some(line) = read_capped_line(&mut stdout, 64).await.unwrap() {
-            lines.push(line);
-        }
-        assert_eq!(lines, ["first", "", "{\"type\":\"agent_start\"}", "last"]);
+        assert_eq!(
+            read_capped_line(&mut stdout, 64).await.unwrap().unwrap(),
+            "first"
+        );
+        assert_eq!(
+            read_capped_line(&mut stdout, 64).await.unwrap().unwrap(),
+            "{\"type\":\"agent_start\"}"
+        );
+        let over = read_capped_line(&mut stdout, 64).await.unwrap_err();
+        assert_eq!(over.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The record a run ends on is the one most likely to be huge. A child whose terminal
+    /// record is over the cap must read as gone at once, with everyone waiting on it told, and
+    /// not sit there alive while the run waits out its cap for a line that was thrown away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_child_whose_terminal_record_is_over_the_cap_reads_as_gone_at_once() {
+        let dir = std::env::temp_dir().join(format!("arbos-line-cap-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("child.py");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/usr/bin/env python3\nimport sys, time\nsys.stdout.write('{{\"type\":\"agent_end\",\"messages\":[\"' + 'x' * {} + '\"]}}\\n')\nsys.stdout.flush()\ntime.sleep(600)\n",
+                CHILD_LINE_MAX + 1024
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let child = RpcChild::spawn(
+            "fake-pi-line-cap",
+            &script.display().to_string(),
+            &[],
+            &[],
+            &dir,
+            &dir.join("child.log"),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut events = child.subscribe();
+        let told = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match events.recv().await {
+                    Ok(Event::Other) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let alive = child.is_alive();
+        child.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(told, "nobody was told the child's stream ended");
+        assert!(
+            !alive,
+            "the child still reads as alive after its stream was abandoned"
+        );
     }
 }
