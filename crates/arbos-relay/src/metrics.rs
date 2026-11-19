@@ -45,6 +45,7 @@ const ROOM_PUSHES: &str = "arbos_relay_room_pushes_total";
 const ROOM_PUSH_REFUSALS: &str = "arbos_relay_room_push_refusals_total";
 const MODEL_REQUESTS: &str = "arbos_relay_model_requests_total";
 const MODEL_SECONDS: &str = "arbos_relay_model_response_seconds";
+const BOX_DROPPED: &str = "arbos_relay_box_scrape_dropped_lines_total";
 const DB_WRITER_WAIT: &str = "arbos_relay_db_writer_wait_seconds";
 
 /// Every family: name, type, help. Rendered in this order; `docs/metrics.md` names each one.
@@ -55,7 +56,8 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_rooms_open", "gauge", "Sync rooms held in memory."),
     ("arbos_relay_sockets", "gauge", "Open room websockets, by kind (client, box)."),
     ("arbos_relay_boxes", "gauge", "Boxes by the state the relay believes (awake, waking, asleep, error)."),
-    ("arbos_relay_box_scrapes", "gauge", "Awake boxes by how their last metrics scrape ended (ok, old_image, unreachable, pending)."),
+    ("arbos_relay_box_scrapes", "gauge", "Awake boxes by how their last metrics scrape ended (ok, old_image, unreachable, rejected, pending)."),
+    (BOX_DROPPED, "counter", "Lines a box's exposition carried that are not agentd's, dropped by the relay."),
     ("arbos_relay_boxes_registered", "gauge", "Box rows by provider."),
     ("arbos_relay_boxes_max", "gauge", "Resident box cap on this host."),
     ("arbos_relay_boxes_turn_running", "gauge", "Boxes whose last keepalive said a turn is running."),
@@ -229,10 +231,70 @@ fn router(state: AppState) -> Router {
 /// How long one box may take to answer a scrape; under Prometheus's own 10 s default.
 const BOX_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A box's name in metrics: stable across restarts, and not its user id.
-fn box_id(user_id: &str) -> String {
-    use sha2::Digest;
-    hex::encode(&sha2::Sha256::digest(user_id.as_bytes())[..6])
+/// The most a box's exposition may weigh. agentd's is about 3 KB; a box is its user's machine,
+/// so what it answers is untrusted and must not be able to fill the relay's memory.
+const BOX_BODY_MAX: usize = 256 * 1024;
+
+/// The label names agentd's series carry (`docs/metrics.md`). A line with any other is dropped.
+const BOX_LABELS: [&str; 7] = [
+    "version", "health", "state", "result", "kind", "class", "le",
+];
+
+/// A box's name in metrics: stable across restarts, and not derivable from its user id without
+/// the relay key. User ids are public (`gh_<GitHub id>`), so a bare hash of one could be
+/// matched to its box by anyone who can read a dashboard.
+fn box_id(state: &AppState, user_id: &str) -> String {
+    use hmac::Mac;
+    let key = state.relay_key.subkey("metrics-box-id");
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("any key length");
+    mac.update(user_id.as_bytes());
+    hex::encode(&mac.finalize().into_bytes()[..6])
+}
+
+/// One line of a box's exposition, kept only if it is what agentd writes: a `# HELP`/`# TYPE`
+/// line or a sample of an `arbos_agentd_` family, with labels from [`BOX_LABELS`] and short plain
+/// values, and a numeric value. Everything else a box could put there — another family's name,
+/// a `box` or `job` label, a label value that is somebody's id — is dropped.
+fn box_line_ok(line: &str) -> bool {
+    let name_ok = |n: &str| {
+        n.starts_with("arbos_agentd_")
+            && n.len() <= 80
+            && n.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    if let Some(rest) = line
+        .strip_prefix("# HELP ")
+        .or(line.strip_prefix("# TYPE "))
+    {
+        let name = rest.split(' ').next().unwrap_or_default();
+        return name_ok(name)
+            && line.len() <= 300
+            && line.bytes().all(|b| (b' '..=b'~').contains(&b));
+    }
+    let Some((series, value)) = line.rsplit_once(' ') else {
+        return false;
+    };
+    let (name, labels) = match series.split_once('{') {
+        Some((name, rest)) => match rest.strip_suffix('}') {
+            Some(labels) => (name, labels),
+            None => return false,
+        },
+        None => (series, ""),
+    };
+    let label_ok = |kv: &str| {
+        kv.split_once('=').is_some_and(|(k, v)| {
+            let v = v.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
+            BOX_LABELS.contains(&k)
+                && v.is_some_and(|v| {
+                    (1..=32).contains(&v.len())
+                        && v.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+                })
+        })
+    };
+    name_ok(name)
+        && value.parse::<f64>().is_ok()
+        && (labels.is_empty() || labels.split(',').all(label_ok))
 }
 
 /// `GET /metrics/targets`: Prometheus HTTP service discovery for the boxes. One target per awake
@@ -257,7 +319,7 @@ async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderM
         .iter()
         .filter(|(_, (st, _))| *st == BoxState::Awake)
         .map(|(user_id, _)| {
-            let id = box_id(user_id);
+            let id = box_id(&state, user_id);
             serde_json::json!({
                 "targets": [host],
                 "labels": { "__metrics_path__": format!("/metrics/box/{id}"), "box": id },
@@ -271,7 +333,7 @@ async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderM
 async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let user_id = {
         let boxes = state.box_states.read().await;
-        boxes.keys().find(|u| box_id(u) == id).cloned()
+        boxes.keys().find(|u| box_id(&state, u) == id).cloned()
     };
     // One row on a read connection: this runs once per awake box per scrape interval, and must
     // not stand in the queue for the writer lock.
@@ -297,10 +359,32 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
         .await;
     let down = || axum::http::StatusCode::BAD_GATEWAY.into_response();
     let (result, res) = match sent {
-        Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(body) => ("ok", exposition(body)),
-            Err(_) => ("unreachable", down()),
-        },
+        Ok(mut r) if r.status().is_success() => {
+            // Read to the cap and no further, then keep only agentd's own lines.
+            let mut body = Vec::new();
+            let read = loop {
+                match r.chunk().await {
+                    Ok(Some(chunk)) if body.len() + chunk.len() <= BOX_BODY_MAX => {
+                        body.extend_from_slice(&chunk)
+                    }
+                    Ok(Some(_)) => break "rejected",
+                    Ok(None) => break "ok",
+                    Err(_) => break "unreachable",
+                }
+            };
+            match (read, String::from_utf8(body)) {
+                ("ok", Ok(text)) => {
+                    let total = text.lines().count();
+                    let kept: Vec<&str> = text.lines().filter(|l| box_line_ok(l)).collect();
+                    if kept.len() < total {
+                        add(BOX_DROPPED, String::new(), (total - kept.len()) as f64);
+                    }
+                    ("ok", exposition(kept.join("\n") + "\n"))
+                }
+                ("ok", Err(_)) => ("rejected", down()),
+                (failed, _) => (failed, down()),
+            }
+        }
         // agentd answers 404 for a route it does not have: an image from before `/metrics`.
         Ok(r) if r.status() == axum::http::StatusCode::NOT_FOUND => ("old_image", down()),
         _ => ("unreachable", down()),
@@ -438,10 +522,10 @@ fn gauges(state: &AppState) -> Vec<Series> {
         let awake: std::collections::BTreeSet<String> = states
             .iter()
             .filter(|(_, (st, _))| *st == BoxState::Awake)
-            .map(|(user_id, _)| box_id(user_id))
+            .map(|(user_id, _)| box_id(state, user_id))
             .collect();
         let last = BOX_SCRAPES.lock().expect("metrics lock");
-        for result in ["ok", "old_image", "unreachable", "pending"] {
+        for result in ["ok", "old_image", "unreachable", "rejected", "pending"] {
             let n = awake
                 .iter()
                 .filter(|id| last.get(*id).copied().unwrap_or("pending") == result)
@@ -750,9 +834,7 @@ mod tests {
             "/metrics",
             get(|headers: axum::http::HeaderMap| async move {
                 match headers.get("authorization").and_then(|v| v.to_str().ok()) {
-                    Some("Bearer mcp-of-the-box") => {
-                        "arbos_agentd_turns_running 2\n".into_response()
-                    }
+                    Some("Bearer mcp-of-the-box") => BOX_ANSWER.into_response(),
                     _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
                 }
             }),
@@ -805,10 +887,21 @@ mod tests {
             scraped.headers()["content-type"],
             "text/plain; version=0.0.4"
         );
-        assert_eq!(
-            scraped.text().await.unwrap(),
-            "arbos_agentd_turns_running 2\n"
-        );
+        // Only agentd's own lines come through; the rest are dropped and counted.
+        assert_eq!(scraped.text().await.unwrap(), BOX_KEPT);
+        let dropped = parse(&render(&state))[BOX_DROPPED];
+        assert!(dropped >= 7.0, "{dropped}");
+        // The id is keyed: the bare hash of a (public) user id does not find the box.
+        let bare = {
+            use sha2::Digest;
+            hex::encode(&sha2::Sha256::digest(awake.as_bytes())[..6])
+        };
+        assert_ne!(targets[0]["labels"]["box"], bare);
+        assert_eq!(box_id(&state, &awake), box_id(&state, &awake));
+        let mut rekeyed = state.clone();
+        rekeyed.relay_key =
+            std::sync::Arc::new(crate::connectors::crypto::RelayKey::derive("another-key"));
+        assert_ne!(box_id(&state, &awake), box_id(&rekeyed, &awake));
         let status = |path: &'static str| async move {
             reqwest::get(format!("http://{addr}{path}"))
                 .await
@@ -831,7 +924,44 @@ mod tests {
         assert_eq!(down.status(), 502);
         let last = last_scrapes(&state);
         assert_eq!((last["old_image"], last["unreachable"]), (1.0, 0.0));
+        // A box that answers with more than the cap is cut off, not buffered.
+        let huge = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(|| async { "arbos_agentd_turns_running 1\n".repeat(BOX_BODY_MAX / 16) }),
+        ))
+        .await;
+        gone.box_url = Some(format!("http://{huge}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
+        assert_eq!(last_scrapes(&state)["rejected"], 1.0);
     }
+
+    /// What a box answers: agentd's lines, and what a user who owns the port could add.
+    const BOX_ANSWER: &str = "\
+# HELP arbos_agentd_turns_running Main-agent turns running now.
+# TYPE arbos_agentd_turns_running gauge
+arbos_agentd_turns_running 2
+arbos_agentd_turns_finished_total{result=\"done\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
+# TYPE arbos_relay_kill_switch gauge
+arbos_relay_kill_switch 1
+up 1
+arbos_agentd_turns_running{box=\"000000000000\"} 9
+arbos_agentd_turns_running{user=\"gh_1\"} 9
+arbos_agentd_jobs{state=\"a user's words, at any length\"} 1
+arbos_agentd_turns_running not-a-number
+arbos_agentd_turns_running{result=\"done\" 1
+";
+    const BOX_KEPT: &str = "\
+# HELP arbos_agentd_turns_running Main-agent turns running now.
+# TYPE arbos_agentd_turns_running gauge
+arbos_agentd_turns_running 2
+arbos_agentd_turns_finished_total{result=\"done\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
+";
 
     /// `arbos_relay_box_scrapes` by result, as a scrape of the relay reads it.
     fn last_scrapes(state: &AppState) -> BTreeMap<String, f64> {

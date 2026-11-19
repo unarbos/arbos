@@ -38,8 +38,15 @@ each scrape, because only the relay knows a box's port and token:
     - url: http://127.0.0.1:9108/metrics/targets
 ```
 
-`<id>` is 12 hex characters derived from the box's owner, stable across restarts; it is not a
-user id and no other label identifies a box. Use the listener's IP address in the discovery URL
+`<id>` is 12 hex characters, an HMAC of the box's owner under a key derived from the relay key:
+stable across restarts, and not something a user id can be turned into without that key. No other
+label identifies a box.
+
+A box is its user's machine, so the relay does not trust what one answers. It reads at most 256 KB
+and passes on only agentd's own lines: `arbos_agentd_` families, the label names in the table
+below, short plain label values, numeric values. Anything else is dropped and counted in
+`arbos_relay_box_scrape_dropped_lines_total`. Set `sample_limit` and `body_size_limit` on the
+Prometheus job as well. Use the listener's IP address in the discovery URL
 (`127.0.0.1`, not `localhost`): the relay hands that address back as the scrape target. Only awake
 boxes are listed, so a sleeping box is absent, not down. A listed box that answers `502` is
 unreachable, or runs an image from before agentd had `/metrics`; `arbos_relay_box_scrapes` on the
@@ -64,7 +71,8 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_rooms_open` | gauge | | sync rooms held in memory |
 | `arbos_relay_sockets` | gauge | `kind` = `client` `box` | open room websockets |
 | `arbos_relay_boxes` | gauge | `state` = `awake` `waking` `asleep` `error` | boxes by the state the relay believes. A box the relay has not heard of since it started is in no state yet |
-| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `pending`: awake, not scraped yet |
+| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake, not scraped yet |
+| `arbos_relay_box_scrape_dropped_lines_total` | counter | | lines in a box's answer that are not agentd's and were not passed on; above zero means a box is sending something it should not |
 | `arbos_relay_boxes_registered` | gauge | `provider` | box rows in the database |
 | `arbos_relay_boxes_max` | gauge | | resident box cap (`max_boxes`) |
 | `arbos_relay_boxes_turn_running` | gauge | | boxes whose keepalive said a turn is running in the last 3 min |
