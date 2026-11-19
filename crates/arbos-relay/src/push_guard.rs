@@ -162,19 +162,13 @@ pub fn check_push(
     claims_heal: bool,
     changes: &MessageChanges,
 ) -> PushCheck {
-    // Bytes the relay could not read tell it nothing about what the update does — but refusing
-    // them is not available either. `rooms.rs` has always stored and forwarded opaque rows, so
-    // a payload that is not a Loro update the relay's version can apply is within the contract,
-    // and a loro format skew between a client and the relay would otherwise become a total
-    // push outage rather than a missed check.
-    //
-    // So unreadable bytes keep their old route — stored, forwarded — and lose only what this
-    // check could have granted them: no heal exemption, so they are gated like any new
-    // message, and no authorship recorded, so they attest nothing.
+    // A diff the relay could not read says nothing about what the update does, so there is
+    // nothing to allow. `rooms.rs` discards the room's doc with the refusal and rebuilds it
+    // for the next push, which is also what puts a mirror that fell out of step right.
     if changes.unreadable {
-        return PushCheck::Allow {
-            carries_new_message: true,
-            attributed: Vec::new(),
+        return PushCheck::Refuse {
+            code: "unreadable",
+            detail: "this push cannot be applied as it stands".to_owned(),
         };
     }
     if changes.removed.is_empty() && changes.inserted.is_empty() && changes.rewritten.is_empty() {
@@ -530,7 +524,7 @@ mod tests {
             let mut mirror = room.message_identities();
             for (a, b) in [(from, cut), (cut, end)] {
                 let before = room.frontiers();
-                assert!(room.import(&span(a, b)).unwrap().pending.is_none());
+                assert!(room.import_exactly(&span(a, b)).unwrap(), "ops {a}..{b}");
                 let changes = room.messages_changed(&before, &room.frontiers(), &mirror);
                 let check = check_push(&state, &the_box, "p", "c", false, &changes);
                 assert!(!refused(&check), "cut at {cut}, ops {a}..{b}: {check:?}");
@@ -1102,31 +1096,24 @@ mod tests {
         );
     }
 
-    /// Bytes the relay cannot read are gated, not refused. `rooms.rs` stores and forwards
-    /// opaque rows by contract — the room socket's own tests push `row-1` as a payload — so
-    /// refusing an unimportable update would break that contract, and a loro format skew
-    /// between a client and the relay would read as a total push outage. What such a push
-    /// loses is only what this check could have granted: the heal exemption and a record.
+    /// A diff the relay could not read is refused: nothing is known about what the push
+    /// does, so nothing about it can be allowed.
     #[test]
-    fn an_unreadable_diff_is_gated_rather_than_refused() {
+    fn an_unreadable_diff_is_refused() {
         let state = test_state(AuthMode::Github);
         let (chat, _alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
 
         let mut c = changes();
         c.unreadable = true;
         for claims_heal in [false, true] {
-            let PushCheck::Allow {
-                carries_new_message,
-                attributed,
-            } = check_push(&state, &bob_dev, PEOPLE_PROJECT, &chat, claims_heal, &c)
-            else {
-                panic!("opaque bytes are within the room socket's contract");
-            };
-            assert!(
-                carries_new_message,
-                "a push the relay cannot read does not get the heal exemption"
-            );
-            assert!(attributed.is_empty(), "nothing readable, nothing attested");
+            assert!(refused(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                claims_heal,
+                &c
+            )));
         }
     }
 
