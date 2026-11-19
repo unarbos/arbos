@@ -426,7 +426,25 @@ async fn main() -> anyhow::Result<()> {
     matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
-    let app = Router::new()
+    let app = app(state.clone());
+    if let Some(listen) = &args.metrics_listen {
+        // Monitoring never takes the relay down: a bad address or a taken port costs the
+        // dashboards, not the service.
+        if let Err(e) = metrics::serve(state.clone(), listen).await {
+            tracing::error!(error = %e, "metrics listener is off");
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
+    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
+    restart::install_sigterm_handler(state);
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
+}
+
+/// Everything the public listener serves. Caddy proxies all of it, so `/metrics` is not here.
+fn app(state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(api::healthz))
         .route("/pair/new", post(api::pair_new))
         .route("/pair", post(api::pair))
@@ -1141,17 +1159,7 @@ async fn main() -> anyhow::Result<()> {
             api_error_layer::rewrite_plain_api_errors,
         ))
         .layer(axum::middleware::from_fn(metrics::track_http))
-        .with_state(state.clone());
-    if let Some(listen) = &args.metrics_listen {
-        metrics::serve(state.clone(), listen).await?;
-    }
-    let state_for_restart = state;
-
-    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
-    restart::install_sigterm_handler(state_for_restart);
-    axum::serve(listener, app.into_make_service()).await?;
-    Ok(())
+        .with_state(state)
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
