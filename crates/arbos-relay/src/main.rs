@@ -14,6 +14,8 @@ mod avatar;
 mod avatar_image;
 mod blobs;
 #[cfg(test)]
+mod box_bearer_tests;
+#[cfg(test)]
 mod box_row_tests;
 mod boxd;
 mod boxes;
@@ -355,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
+        user_seen: Arc::default(),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
