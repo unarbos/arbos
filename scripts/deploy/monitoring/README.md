@@ -31,7 +31,7 @@ Files:
 | `prometheus/rules.yml` | alerts |
 | `prometheus/subnet-rules.yml`, `prometheus/subnet.yml` | the aggregates behind the Subnet view, and the Prometheus that holds only them |
 | `prometheus/rules_test.yml` | unit tests for both rule files |
-| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter or a label other than `kind` and `slot` leave; the rounding steps of the partner's dots are named there |
+| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter, a per-box figure or a label other than `bucket` leave; the small-count numbers are named there |
 | `alertmanager/alertmanager.yml`, `blackbox/blackbox.yml` | their configs |
 | `grafana/provisioning/` | datasource and dashboard loading for the main organisation |
 | `grafana/dashboards/*.json`, `grafana/dashboards-subnet/subnet.json` | the dashboards, written by `dashboards.py` |
@@ -49,8 +49,10 @@ Files:
   tokens by kind, model calls and machine starts over time; below the fold spend, host and
   machines over time. It is generated once and written twice, `grafana/dashboards/arbos.json`
   and `grafana/dashboards-subnet/subnet.json`, and both copies read the same `subnet:*`
-  aggregates, so they cannot disagree. They differ in the swarm only: see
-  [The partner's swarm](#the-partners-swarm). The team's copy links to the dashboards below.
+  aggregates, so they cannot disagree. They differ in the centre: the team has the swarm, one
+  dot per box; the partner has machines by tokens per minute, as counts. See
+  [What the partner sees of the machines](#what-the-partner-sees-of-the-machines). The team's copy also splits tokens by
+  kind and links to the dashboards below.
 - **Arbos fleet**, three rows of single stats then time series. Service: relay and public
   probes, kill switch, today's spend against the daily cap, model errors and response time, relay
   restarts, targets down. Boxes: running, slots used against `max_boxes`, asleep, waitlisted, start
@@ -148,8 +150,8 @@ It arrives within 30 seconds and resolves itself after five minutes.
   boundary. So the Subnet organisation's datasource is an instance that only ever receives the
   `subnet:*` recording rules, each of which aggregates the identifying labels away. There is no
   query that returns a user id, a container name, a box id or a hostname, because that data is
-  not there. Two labels do leave: `kind` (which of four kinds of token) and `slot`
-  ([The partner's swarm](#the-partners-swarm)). It has no scrape job for the relay at all, so it
+  not there, and nothing in it is per machine. One label does leave: `bucket`, on a count of
+  machines ([What the partner sees of the machines](#what-the-partner-sees-of-the-machines)). It has no scrape job for the relay at all, so it
   cannot be pointed at `/metrics/boxes` by changing a path; it federates and nothing else.
   `prometheus/rules_test.yml` feeds the rules labelled input and lists their complete output;
   `grafana-access.sh` ends by logging in as the viewer and failing unless the admin dashboards
@@ -230,7 +232,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 | job | scrapes |
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
-| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend, slot), eleven series per box |
+| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend), ten series per box |
 | `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
@@ -267,7 +269,7 @@ cAdvisor reports.
 | Tokens / s, / min, / 24 h; token charts; table columns Tokens, Calls, Spend | "after the next relay update" | live |
 | Arbos, both copies: token numbers and token chart | "after the next relay update" | live |
 | Arbos, the team's swarm | as Swarm above | as Swarm above |
-| Arbos, the partner's swarm | "after the next relay update" (no slots yet) | anonymous dots |
+| Arbos, the partner's machines by tokens per minute | "after the next relay update" | counts per group |
 | Arbos, everything else | live | live |
 
 Nothing is configured when the relay changes: the `relay-boxes` job answers 404 until then, alerts
@@ -277,45 +279,68 @@ listener), and the panels fill by themselves.
 A model call is counted when it ends, because the provider reports usage last. Token rates
 therefore move in steps, one per finished call, not with the stream.
 
+For about half a minute after a relay restart its counters are there but have no rate yet. The
+token figures then say "relay just restarted", which is a different thing from "after the next
+relay update" (a relay that does not count tokens at all).
+
+The swarm's colour puts tokens first: a box that used tokens in the last minute is "working"
+whatever the relay believes about it. The relay's own state can be stale (it has just restarted
+and not heard from the box, or lost its heartbeat), and its turn flag drops at the first keepalive
+after a turn while that turn's tokens are still in the rate.
+
 "Tokens / 24 h" is the last 24 hours, not the calendar day, and counts from the relay's start if
 that is more recent: the counters live in the relay's memory and restart at zero with it.
 
-**Cost of the 5 s scrape.** Eleven series per registered box: about 800 series for 72 boxes and 1,650
+**Cost of the 5 s scrape.** Ten series per registered box: about 720 series for 72 boxes and 1,500
 at the cap of 150, roughly 60–120 KB per scrape, written by the relay from memory with no
-database read. In Prometheus that is 14–29 million samples a day; most are constants, so expect
+database read. In Prometheus that is 12–26 million samples a day; most are constants, so expect
 under 0.5 GB over the 15 days of retention. The scrape is the only thing here faster than 15 s;
 if it has to be slower, change `scrape_interval` of `relay-boxes` and the windows that are shorter
 than four scrapes (`[20s]` in `dashboards.py`).
 
-## The partner's swarm
+## What the partner sees of the machines
 
-The partner sees the same swarm as the team, as anonymous dots: each machine's tokens per minute,
-CPU, memory and state, and nothing that says which machine it is.
+The team's copy of Arbos has the swarm: one dot per box. The partner's copy has the same fleet as
+counts, **machines by tokens per minute**, and nothing per machine leaves the main Prometheus in
+any form.
 
-- The relay gives every box a `slot`, a number from 1 to the number of boxes, by a random
-  permutation that it draws again every five minutes, at its start, and whenever a box is added
-  or removed (`arbos_relay_box_slot`, [`docs/metrics.md`](../../../docs/metrics.md)). Nothing about a
-  box goes into its slot: not the user id, not the `box` id.
-- The rules in the `subnet-swarm` group join each box's numbers to its slot and aggregate
-  `by (slot)`. `slot` is the only label that leaves; the rule test lists the complete output.
-- What a dot carries is blunted: a five-minute token rate rounded to 1,000, CPU to a tenth of a
-  core, memory to half a GiB (the steps are named in `check-rules.py`, the five minutes in the
-  relay's `SLOTS_EVERY`). No counter leaves, because a running total would tie a box to its past
-  across a draw; `check-rules.py` fails on a rule that would let one.
-- The partner's panel is joined on `slot` and does not show it. There is no table of machines, no
-  drill-down and no Explore on that side.
+Why not anonymous dots. A dot per machine was built first, each under a random number redrawn
+every five minutes, with rounded values. The label was untraceable and the dots were not: a dot
+carries its machine's own numbers, the partner's Prometheus keeps 15 days of them, and a Viewer
+can ask it for ranges. The dot at 37,000 tokens a minute, 1.3 cores and 2.5 GiB under one number
+and the dot with the same figures under another, 30 seconds later, are one machine. Matching
+nearest neighbours re-links every active machine at every draw, which makes it a per-machine
+history under a pseudonym. So no per-machine series is exported, under any label.
 
-What this does and does not give. No label can be followed for more than five minutes, and
-nothing in the data says who a machine belongs to. It cannot stop two things, and no per-machine
-feed can: a machine with an unusual size can often be found again after a draw by its numbers, as
-an anonymous object; and someone who knows from elsewhere when a particular user's agents are
-working can guess which dot that is while few machines are busy, and so learn roughly how many
-tokens and how much CPU that user is using. If that is ever too much, replace the partner's
-swarm with a distribution (machines by tokens-per-minute bucket and by state): delete the
-`subnet-swarm` rules and the partner branch of `overview()` in `dashboards.py`.
+What leaves instead:
 
-Spend reaches the partner as a share of the daily cap (`subnet:spend_cap_ratio`), never as an
-amount.
+- `subnet:boxes_by_token_rate{bucket}`: how many machines are idle, under 10K, 10K to 100K, 100K
+  to 1M and over 1M tokens a minute (five-minute average). `bucket` is the only label any
+  `subnet:*` series carries.
+- **Small counts.** A group of 1 to 4 machines leaves as "<5" (the value -1), never as its number;
+  an empty group is 0. The groups add up to the machines there are, so a single hidden group can
+  be worked out from the others; two or more cannot.
+- **The fleet's token rate** (`subnet:tokens:rate5m`) is exact only while at least 5 machines are
+  using tokens. Below that it is close to one machine's own figure, so it leaves rounded to one
+  significant figure.
+- **Tokens are a total**, not split by kind. With public list prices, input, output and cache
+  tokens separately are a dollar figure; the split is on the team's copy only. The total still
+  bounds the spend loosely, and that is accepted.
+- **Spend** is a share of the daily cap rounded to the whole percent (`subnet:spend_cap_ratio`),
+  never an amount.
+- Machines by state (working, awake, waking, asleep, error, waiting) are exact counts, as they
+  were on the Subnet view before: they say what the fleet is doing, not what a machine uses.
+
+What the partner can and cannot do with it. They can see how busy the fleet is and how its load is
+spread. They cannot follow a machine over time, because there is no series per machine. Someone
+who knows from elsewhere that exactly one user's agents are working at a moment still learns that
+user's token range from the one non-empty group being "<5" in a known range, and the fleet rate to
+one figure; that is the floor of any live activity view and is accepted.
+
+`check-rules.py` holds the numbers (5, one percent) and fails if a rule could let a counter, a
+per-box step or a label other than `bucket` leave; `prometheus/rules_test.yml` proves the same on
+labelled input, and `local/check-dashboards.py` asserts the label set of the running Subnet
+datasource.
 
 ## Decisions
 

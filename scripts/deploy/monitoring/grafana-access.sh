@@ -76,6 +76,13 @@ api PUT /api/org/preferences "$ORG" <<<'{"homeDashboardUID":"arbos-subnet"}' | e
 # The main organisation's home is set the same way, per organisation. There is deliberately no
 # instance-wide default home dashboard: it would also be what the Subnet organisation falls back to
 # if its own preference were ever lost.
+# Grafana reads the dashboard files a little after it starts or after they change. Wait for the
+# home dashboard to be there (a minute at most) instead of pointing the home at nothing.
+for _ in $(seq 30); do
+  [[ $(api GET /api/dashboards/uid/arbos 1 </dev/null) == *$'\n'200 ]] && break
+  sleep 2
+done
+api GET /api/dashboards/uid/arbos 1 </dev/null | expect "Grafana has not loaded the Arbos dashboard" "200" >/dev/null
 api PUT /api/org/preferences 1 <<<'{"homeDashboardUID":"arbos"}' | expect "set the main home dashboard" "200" >/dev/null
 
 found=$(api GET "/api/users/lookup?loginOrEmail=$LOGIN" </dev/null | expect "look up viewer" "200 404")

@@ -196,6 +196,10 @@
         "-1": {
          "text": "after the next relay update",
          "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
         }
        }
       }
@@ -241,7 +245,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max(sum(rate(arbos_relay_box_tokens_total[20s]))) or vector(-1)",
+     "expr": "max(sum(rate(arbos_relay_box_tokens_total[20s])) or (0 * count(arbos_relay_box_tokens_total) - 2)) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -262,6 +266,10 @@
        "options": {
         "-1": {
          "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
          "color": "#6e7681"
         }
        }
@@ -308,7 +316,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max(sum(increase(arbos_relay_box_tokens_total[1m]))) or vector(-1)",
+     "expr": "max(sum(increase(arbos_relay_box_tokens_total[1m])) or (0 * count(arbos_relay_box_tokens_total) - 2)) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -329,6 +337,10 @@
        "options": {
         "-1": {
          "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
          "color": "#6e7681"
         }
        }
@@ -375,7 +387,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max(sum(increase(arbos_relay_tokens_total[24h]))) or vector(-1)",
+     "expr": "max(sum(increase(arbos_relay_tokens_total[24h])) or (0 * count(arbos_relay_tokens_total) - 2)) or vector(-1)",
      "legendFormat": "",
      "instant": false,
      "range": true
@@ -584,7 +596,6 @@
       },
       "excludeByName": {
        "Time": true,
-       "slot": true,
        "Time 1": true,
        "__name__ 1": true,
        "job 1": true,
@@ -898,7 +909,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (name) ((max by (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0), 1)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
      "legendFormat": "",
      "instant": true,
      "range": false,
@@ -1114,7 +1125,6 @@
       },
       "excludeByName": {
        "Time": true,
-       "slot": true,
        "Time 1": true,
        "__name__ 1": true,
        "job 1": true,
@@ -1428,7 +1438,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (name) ((max by (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0), 1)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
      "legendFormat": "",
      "instant": true,
      "range": false,
@@ -1597,7 +1607,6 @@
       },
       "excludeByName": {
        "Time": true,
-       "slot": true,
        "Time 1": true,
        "__name__ 1": true,
        "job 1": true,
@@ -1861,7 +1870,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (name) ((max by (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0), 1)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
      "legendFormat": "",
      "instant": true,
      "range": false,
@@ -2362,7 +2371,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (name) ((max by (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0), 1)))) * on (box) group_left (name) label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info{container=~\"$box\"}, \"name\", \"$1\", \"container\", \"(.+)\"))",
      "legendFormat": "{{name}}",
      "instant": false,
      "range": true

@@ -286,7 +286,8 @@ agents = dashboard("arbos-agents", "Agents", [
 # every running box from cAdvisor (state unknown, no tokens), the counts come from the relay's
 # fleet gauges, and each token figure says when it arrives instead of "No data".
 AFTER_DEPLOY = "after the next relay update"
-WAITING = [{"type": "value", "options": {"-1": {"text": AFTER_DEPLOY, "color": "#6e7681"}}}]
+WAITING = [{"type": "value", "options": {"-1": {"text": AFTER_DEPLOY, "color": "#6e7681"},
+                                         "-2": {"text": "relay just restarted", "color": "#6e7681"}}}]
 # Colour is the box's state. Three hues that stay apart for colour-blind readers on the dark panel
 # (checked pairwise), and greys for the states in which a box is not doing anything.
 STATES = [(0, "unknown", "#8b949e"), (1, "asleep", "#57606a"), (2, "awake, idle", "#3987e5"),
@@ -294,14 +295,16 @@ STATES = [(0, "unknown", "#8b949e"), (1, "asleep", "#57606a"), (2, "awake, idle"
 STATE_NAMES = [{"type": "value", "options": {str(n): {"text": text, "color": color} for n, text, color in STATES}}]
 STATE_STEPS = steps(*[(n or None, color) for n, _, color in STATES])
 INFO = 'label_replace(arbos_relay_box_info, "name", "$1", "container", "(.+)")'
-# Working: awake, and either a turn is running or the box used tokens in the last minute, the same
-# minute the swarm's height is measured over. The relay's turn flag alone would disagree with the
-# picture: it comes from keepalives and tokens land when a call ends, so a box can burn tokens
-# with the flag down (work outside a turn) and would then sit high in the swarm coloured idle.
+# Tokens first: a box that used tokens in the last minute, the minute the swarm's height is measured
+# over, is working, whatever the relay believes about it. The relay's view can be stale (it has
+# just restarted and has not heard from the box, or lost its heartbeat) and its turn flag drops
+# before the turn's tokens leave the rate; a box high in the swarm must not be coloured idle.
+# Otherwise the relay's state, with awake split by its turn flag.
 USED_TOKENS = "(sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0)"
-STATE_OF_BOX = ('max by (box) (0 * arbos_relay_box_state{state="unknown"} or 1 * arbos_relay_box_state{state="asleep"}'
-                ' or 3 * arbos_relay_box_state{state="waking"} or 5 * arbos_relay_box_state{state="error"}'
-                f' or (2 * arbos_relay_box_state{{state="awake"}} + on (box) 2 * clamp_max(arbos_relay_box_turn_running + on (box) {USED_TOKENS}, 1)))')
+STATE_OF_BOX = (f'max by (box) (4 * ({USED_TOKENS} == 1) or on (box) (0 * arbos_relay_box_state{{state="unknown"}}'
+                ' or 1 * arbos_relay_box_state{state="asleep"} or 3 * arbos_relay_box_state{state="waking"}'
+                ' or 5 * arbos_relay_box_state{state="error"}'
+                ' or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * arbos_relay_box_turn_running)))')
 RUNNING0 = f"max by (name) (0 * container_last_seen{{{BOX}}})"  # 0 for every running box
 KNOWN0 = f"max by (name) (0 * {INFO})"  # 0 for every box the relay lists, asleep ones included
 
@@ -319,18 +322,19 @@ def pending(expr):
     return f"max({expr}) or vector(-1)"
 
 
-def token_tile(title, expr, desc, decimals=0):
-    return stat(title, pending(expr), "short", OK, WAITING, decimals, desc=desc)
+def token_tile(title, expr, desc, metric, decimals=0):
+    """-2 while `metric` is there but has no rate yet (the relay just restarted), -1 while it is not there at all."""
+    return stat(title, pending(f"{expr} or (0 * count({metric}) - 2)"), "short", OK, WAITING, decimals, desc=desc)
 
 
-def per_box(title, fields, w, desc, key="name"):
-    """A panel with one row per box: instant queries joined on `key`. `fields` is a list of
-    (column name, unit, query). Joined on anything but the name, the key itself is not shown."""
+def per_box(title, fields, w, desc):
+    """A panel with one row per box: instant queries joined on `name`. `fields` is a list of
+    (column name, unit, query)."""
     renames = {f"Value #{chr(65 + i)}": head for i, (head, _, _) in enumerate(fields)}
     return {"title": title, "description": desc, "w": w, "instant": True, "exprs": [(q, "") for _, _, q in fields],
-            "transformations": [{"id": "joinByField", "options": {"byField": key, "mode": "outer"}},
+            "transformations": [{"id": "joinByField", "options": {"byField": "name", "mode": "outer"}},
                                 {"id": "organize", "options": {"renameByName": {**renames, "name": "Box"},
-                                                               "excludeByName": {"Time": True, "slot": True, **{
+                                                               "excludeByName": {"Time": True, **{
                                                                    f"{label} {i}": True for i in range(1, 12) for label in ("Time", "__name__", "job", "instance")}}}}],
             "fieldConfig": {"defaults": {}, "overrides": [
                 {"matcher": {"id": "byName", "options": head}, "properties": [{"id": "unit", "value": unit}]} for head, unit, _ in fields]}}
@@ -340,14 +344,14 @@ def override(name, **props):
     return {"matcher": {"id": "byName", "options": name}, "properties": [{"id": k, "value": v} for k, v in props.items()]}
 
 
-def swarm_chart(title, fields, x, y, size, w, h, desc, key="name"):
+def swarm_chart(title, fields, x, y, size, w, h, desc):
     """One bubble per box: position from two measures, area from a third, colour from its state."""
-    p = per_box(title, fields, w, desc, key)
+    p = per_box(title, fields, w, desc)
     by = lambda name: {"matcher": {"id": "byName", "options": name}}
     # pluginVersion: without one Grafana takes the options for the pre-11.1 format and rewrites them
     p.update(type="xychart", pluginVersion="13.2.6", h=h, options={
         "mapping": "manual", "series": [{"frame": {"matcher": {"id": "byIndex", "options": 0}}, "x": by(x), "y": by(y),
-                                         "size": by(size), "color": by("State"), "name": {"fixed": "machine" if key == "slot" else "box"}}],
+                                         "size": by(size), "color": by("State"), "name": {"fixed": "box"}}],
         "legend": {"showLegend": False}, "tooltip": {"mode": "single", "sort": "none"}})
     p["fieldConfig"]["defaults"] = {"min": 0, "custom": {
         "show": "points", "pointSize": {"fixed": 8, "min": 6, "max": 44}, "pointShape": "circle", "pointStrokeWidth": 1,
@@ -402,10 +406,10 @@ swarm = dashboard("arbos-swarm", "Swarm", [
     stat("Working", "sum(arbos_relay_boxes_turn_running)", desc="Boxes with an agent turn running in the last 3 minutes."),
     stat("Running", f"count(container_last_seen{{{BOX}}}) or vector(0)", desc="arbos-box-* containers Docker is running."),
     token_tile("Tokens / s", f"sum(rate({BOX_TOKENS}[20s]))",
-               "Tokens the boxes' model calls used, per second over the last 20 s. A call is counted when it ends, so this moves in steps."),
-    token_tile("Tokens / min", f"sum(increase({BOX_TOKENS}[1m]))", "Tokens used in the last minute, all four kinds together: input, output, cache read, cache write."),
+               "Tokens the boxes' model calls used, per second over the last 20 s. A call is counted when it ends, so this moves in steps.", BOX_TOKENS),
+    token_tile("Tokens / min", f"sum(increase({BOX_TOKENS}[1m]))", "Tokens used in the last minute, all four kinds together: input, output, cache read, cache write.", BOX_TOKENS),
     token_tile("Tokens / 24 h", f"sum(increase({FLEET_TOKENS}[24h]))",
-               "Every token the proxy metered in the last 24 hours, or since the relay started counting if that is more recent."),
+               "Every token the proxy metered in the last 24 hours, or since the relay started counting if that is more recent.", FLEET_TOKENS),
     stat("Calls / min", f"60 * sum(rate(arbos_relay_model_requests_total[1m])) or {R0}", decimals=0, desc="Upstream model calls the relay made."),
     stat("Spend today", "max(arbos_relay_spend_today_usd)", "currencyUSD", decimals=0, desc="Relay-wide spend since 00:00 UTC."),
     stat("Spend of cap", SPEND_PCT, "percent", steps((None, GREEN), (60, ORANGE), (85, RED)), decimals=0,
@@ -458,10 +462,11 @@ swarm = dashboard("arbos-swarm", "Swarm", [
 
 # Arbos: the front page, one screen, for the team and for the partner alike. It is written twice
 # from one definition: `arbos.json` for the main organisation and `subnet.json` for the Subnet one.
-# Both read the same label-free `subnet:*` aggregates (the main Prometheus evaluates them too), so
-# the two copies cannot disagree. They differ in one panel: the team's swarm is keyed by container
-# name, shows it on hover and links to the Swarm dashboard; the partner's is keyed by `slot`, a
-# random number each box holds for five minutes, and shows nothing that names a box.
+# Both read the same `subnet:*` aggregates (the main Prometheus evaluates them too), so the two
+# copies cannot disagree. They differ in the centre: the team sees the swarm, one dot per box with
+# its name on hover and a link to the Swarm dashboard; the partner sees the same fleet as counts
+# of machines by token rate, because a dot per machine can be followed by its values whatever it
+# is labelled with. The team also sees tokens by kind; the partner sees their total.
 #
 # Calm on purpose: numbers in the text colour, colour only for a crossed threshold or a box's state.
 # A figure whose source is not reporting says so in grey (-1), never a blank or a NaN; a percentage
@@ -470,6 +475,9 @@ QUIET_GREY = "#6e7681"
 PENDING = [{"type": "value", "options": {"-1": {"text": "no data yet", "color": QUIET_GREY}}}]
 NEUTRAL = steps((None, "text"))
 RELAY_REPORTS = "0 * subnet:box_start_failures:rate5m"  # present exactly while the relay reports
+# A relay that counts tokens but started under a minute ago has no rate yet: that is -2, "relay just
+# restarted", and not -1, which is a relay from before it counted them at all.
+JUST_STARTED = "(0 * subnet:relay_counts_tokens - 2)"
 MODEL_OK = f"100 * (1 - subnet:model_error_ratio) or 100 + {RELAY_REPORTS}"
 BLUE, AMBER, MAGENTA, AQUA = "#3987e5", "#c98500", "#d55181", "#199e70"
 
@@ -511,37 +519,37 @@ def trend(title, lines, unit="short", stack=False, desc="", max_=None):
 
 
 def overview(partner):
-    if partner:
-        hero = swarm_chart("Swarm", [("CPU cores", "short", "subnet:box_cpu_cores"), ("Memory", "bytes", "subnet:box_memory_bytes"),
-                                     ("State", "short", "subnet:box_state"), ("Tokens / min", "short", "subnet:box_tokens_per_minute")],
-                           "CPU cores", "Tokens / min", "Memory", 16, 10, "", key="slot")
-        # An XY chart with nothing to plot can only say "No data", so the title says why: $note is
-        # that sentence while no dot is reported, and a space once there is one.
-        hero["title"] = "Swarm$note"
-        note = (f'label_replace(vector(1) unless on () count(subnet:box_state), "note", " · {AFTER_DEPLOY}", "", "")'
-                ' or on () label_replace(vector(1), "note", " ", "", "")')
-        variables = [{"name": "note", "type": "query", "hide": 2, "refresh": 2, "datasource": {"type": "prometheus", "uid": "prometheus-subnet"},
-                      "query": {"query": f"query_result({note})", "refId": "note"}, "regex": '/note="(.*?)"/'}]
-    else:
-        hero = swarm_chart("Swarm", [*POINT, ("Tokens / min", "short", f"{TOKENS_MIN} or {RUNNING0}")], "CPU cores", "Tokens / min", "Memory", 16, 10, "")
-        variables = []
-        hero["fieldConfig"]["defaults"]["links"] = [{"title": "Open this box", "url": "/d/arbos-swarm/swarm?var-box=${__data.fields.Box}"}]
-    hero.update(transparent=True, description=(
-        "Every agent machine is one dot. Up: tokens per minute its agents are using. Right: CPU cores. Area: memory. Colour: what it is doing, "
-        "as in the list on the right. A busy fleet rises off the floor; an idle one sits along it; sleeping machines are at the origin."
-        + (" The dots carry no identity: which dot is which machine is drawn again at random every five minutes." if partner else
-           " Hover for the box; click to open it. Until the relay reports per box, every dot is grey and on the floor.")))
-    hero = later(hero)
     colors = {text: color for _, text, color in STATES}
+    if partner:
+        # No machine leaves the team's Prometheus as a series of its own, so the partner's centre
+        # piece is the same fleet as counts: how many machines use how many tokens a minute.
+        hero = bars("Machines by tokens per minute", [(name, f'subnet:boxes_by_token_rate{{bucket="{name}"}}', color) for name, color in (
+            ("idle", colors["awake, idle"]), ("under 10K", "#7a5a12"), ("10K to 100K", "#a06d0a"), ("100K to 1M", AMBER), ("over 1M", "#e59a0c"))],
+            "short", 10, desc="Agent machines by how many tokens a minute their agents are using, averaged over five minutes. "
+                              "A group of one to four machines is shown as \"<5\", not as its number.")
+        hero.update(w=16)
+        hero["options"].update(orientation="vertical", showUnfilled=False, text={"titleSize": 13, "valueSize": 28}, maxVizHeight=300,
+                               minVizWidth=40, maxVizWidth=220)
+        hero["fieldConfig"]["defaults"].update(mappings=[{"type": "value", "options": {"-1": {"text": "<5", "color": QUIET_GREY}}}], min=0)
+        del hero["fieldConfig"]["defaults"]["max"]
+    else:
+        hero = swarm_chart("Swarm", [*POINT, ("Tokens / min", "short", f"{TOKENS_MIN} or {RUNNING0}")], "CPU cores", "Tokens / min", "Memory", 16, 10,
+                           "Every box is one dot. Up: tokens per minute its agents are using. Right: CPU cores. Area: memory. Colour: what it is doing, "
+                           "as in the list on the right. A busy fleet rises off the floor; an idle one sits along it; sleeping boxes are at the origin. "
+                           "Hover for the box; click to open it. Until the relay reports per box, every dot is grey and on the floor.")
+        hero["fieldConfig"]["defaults"]["links"] = [{"title": "Open this box", "url": "/d/arbos-swarm/swarm?var-box=${__data.fields.Box}"}]
+        hero.update(transparent=True)
+    hero = later(hero)
     idle = "clamp_min(subnet:boxes_awake - subnet:boxes_working, 0)"
     return dashboard("arbos-subnet" if partner else "arbos", "Arbos", [
         headline("Service", "subnet:relay_up * subnet:public_up", thresholds=steps((None, MAGENTA), (1, AQUA)),
                  mappings=[{"type": "value", "options": {"0": {"text": "Down"}, "1": {"text": "Up"}, "-1": {"text": "no data yet", "color": QUIET_GREY}}}],
                  desc="The relay answers, on the server and from outside through its public name."),
         headline("Working now", "subnet:boxes_working", desc="Agent machines with a turn running in the last 3 minutes."),
-        headline("Tokens / min", "60 * subnet:tokens:rate5m", mappings=WAITING,
-                 desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes."),
-        headline("Tokens / 24 h", "subnet:tokens:increase24h", mappings=WAITING),
+        headline("Tokens / min", f"60 * subnet:tokens:rate5m or {JUST_STARTED}", mappings=WAITING,
+                 desc="Tokens the agents' model calls use: input, output and cached, averaged over five minutes. "
+                      "While fewer than five machines are using any, it is rounded to one figure."),
+        headline("Tokens / 24 h", f"subnet:tokens:increase24h or {JUST_STARTED}", mappings=WAITING),
         headline("Model calls OK", MODEL_OK, "percent", steps((None, MAGENTA), (90, AMBER), (98, "text")), decimals=1,
                  desc="Model calls answered successfully in the last five minutes."),
         headline("Spend of cap", "100 * subnet:spend_cap_ratio", "percent", steps((None, "text"), (60, AMBER), (85, MAGENTA)),
@@ -556,7 +564,9 @@ def overview(partner):
                          ("disk", "100 * (1 - subnet:host_disk_free_ratio)", None)], "percent", 4,
                 thresholds=steps((None, QUIET_GREY), (75, AMBER), (90, MAGENTA)), desc="How much of the server is in use."), "under": True},
 
-        trend("Tokens per minute", [(f"60 * subnet:tokens_by_kind:rate5m{{kind=\"{k}\"}}", name, c) for k, name, c in (
+        # By kind for the team only: with list prices the split would price the partner's view in dollars.
+        trend("Tokens per minute", [("60 * subnet:tokens:rate5m", "tokens", BLUE)]) if partner else
+        trend("Tokens per minute", [(f"60 * sum(rate({FLEET_TOKENS}{{kind=\"{k}\"}}[5m]))", name, c) for k, name, c in (
             ("cache_read", "cache read", BLUE), ("cache_write", "cache write", AQUA), ("input", "input", AMBER), ("output", "output", MAGENTA))], stack=True),
         trend("Model calls per minute", [("60 * subnet:model_requests:rate5m", "calls", BLUE),
                                          ("60 * subnet:model_requests:rate5m * subnet:model_error_ratio", "failed", MAGENTA)]),
@@ -568,7 +578,7 @@ def overview(partner):
                               ("100 * (1 - subnet:host_disk_free_ratio)", "disk", AMBER)], "percent", max_=100),
         trend("Machines", [("subnet:boxes_running", "running", BLUE), ("subnet:boxes_working", "working", AMBER),
                            ("subnet:boxes_asleep", "asleep", QUIET_GREY), ("subnet:boxes_max", "limit", "#c9d1d9")]),
-    ], ds="prometheus-subnet" if partner else "prometheus", variables=variables, nav=not partner, refresh="10s", span="now-3h")
+    ], ds="prometheus-subnet" if partner else "prometheus", nav=not partner, refresh="10s", span="now-3h")
 
 
 FILES = {"grafana/dashboards/arbos.json": overview(partner=False), "grafana/dashboards/fleet.json": fleet,

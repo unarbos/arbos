@@ -1,8 +1,11 @@
-# Aggregates for the Arbos front page, which the partner's organisation reads too. Every expression
-# ends in an aggregation, and all but two groups of them have no `by`, so the result has no labels:
-# nothing here can name a box, a user, a container or the host. The exceptions are `kind` (which of
-# four kinds of token) and `slot` (see the end of this file).
-# rules_test.yml feeds these rules labelled series and fails if any other label comes out.
+# Aggregates for the Arbos front page, which the partner's organisation reads too. Every `subnet:*`
+# expression ends in an aggregation with no `by`, so the result has no labels: nothing here can
+# name a box, a user, a container or the host, and nothing is per box. The one label that leaves
+# is `bucket`, on a count of machines. rules_test.yml feeds these rules labelled series and fails
+# if any other label comes out; check-rules.py reads this file and fails on a rule that could.
+#
+# The `arbos:*` rules at the top are the team's own steps on the way. The partner's Prometheus
+# federates `subnet:*` only, so they never leave.
 #
 # A counter with labels does not exist until its first event, so a healthy system has no "failed"
 # series at all. The failure rules fall back to 0 while the relay (or any agentd) is reporting, so
@@ -10,6 +13,32 @@
 groups:
   - name: subnet
     rules:
+      - record: arbos:box_tokens_per_minute
+        expr: 60 * sum by (box) (rate(arbos_relay_box_tokens_total[5m]))
+      - record: arbos:tokens:rate5m
+        expr: sum(rate(arbos_relay_tokens_total[5m]))
+      # How many machines use how many tokens a minute. 0, not nothing, for an empty group.
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute == 0) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "idle" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute > 0 < 1e4) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "under 10K" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e4 < 1e5) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "10K to 100K" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e5 < 1e6) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "100K to 1M" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e6) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "over 1M" }
+
+      # Small groups do not leave as a number: a group of 1 to 4 machines is -1, shown as "<5".
+      # An empty group is 0. (The five groups add up to the machines there are, so one hidden
+      # group can be worked out from the rest; two or more cannot.)
+      - record: subnet:boxes_by_token_rate
+        expr: arbos:boxes_by_token_rate >= 5 or arbos:boxes_by_token_rate == 0 or arbos:boxes_by_token_rate * 0 - 1
       - record: subnet:relay_up
         expr: min(probe_success{job="relay-health"})
       # The relay's own public name only. arbos.life is behind Cloudflare, which can challenge a
@@ -68,15 +97,21 @@ groups:
       # Every token the proxy metered, all kinds and all callers together. No fallback to 0: the
       # counter is there from the relay's start, so its absence means a relay from before it had
       # one, and "no data yet" is then the true reading.
+      # While fewer than 5 machines are using tokens the total is close to one machine's own
+      # figure, so it leaves rounded to one significant figure; 0 stays 0.
       - record: subnet:tokens:rate5m
-        expr: sum(rate(arbos_relay_tokens_total[5m]))
+        expr: >
+          (arbos:tokens:rate5m and on () count(arbos:box_tokens_per_minute > 0) >= 5)
+          or round((arbos:tokens:rate5m > 0) / 10 ^ floor(log10(arbos:tokens:rate5m > 0))) * 10 ^ floor(log10(arbos:tokens:rate5m > 0))
+          or arbos:tokens:rate5m
+      # 1 while the relay has a token counter at all, whether or not it has a rate yet.
+      - record: subnet:relay_counts_tokens
+        expr: 0 * count(arbos_relay_tokens_total) + 1
       - record: subnet:tokens:increase24h
         expr: sum(increase(arbos_relay_tokens_total[24h]))
-      - record: subnet:tokens_by_kind:rate5m
-        expr: sum by (kind) (rate(arbos_relay_tokens_total[5m]))
-      # A share, not an amount: how much is spent is the team's own figure.
+      # A share, not an amount, and to the whole percent: how much is spent is the team's own figure.
       - record: subnet:spend_cap_ratio
-        expr: max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0)
+        expr: round(max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0), 0.01)
       - record: subnet:model_response_seconds:p95
         expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
       - record: subnet:box_wake_seconds:p95
@@ -87,37 +122,3 @@ groups:
         expr: 1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)
       - record: subnet:host_disk_free_ratio
         expr: min(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes)
-
-  # One anonymous dot per box, for the swarm. `slot` is a number the relay gives each box by a
-  # random permutation and draws again every five minutes (docs/metrics.md): it names no box, is
-  # derived from nothing about one, and means another box after the next draw. It is the only
-  # label that leaves. What a dot carries is blunted so that a box is hard to recognise by its
-  # numbers across a draw: a five-minute rate rounded to 1000 tokens, CPU to a tenth of a core,
-  # memory to half a GiB. No counter leaves: a running total would tie a box to its past.
-  - name: subnet-swarm
-    rules:
-      - record: subnet:box_tokens_per_minute
-        expr: >
-          max by (slot) (round(60 * sum by (box) (rate(arbos_relay_box_tokens_total[5m])), 1000)
-          * on (box) group_left (slot) arbos_relay_box_slot)
-      # 0 unknown, 1 asleep, 2 awake and idle, 3 waking, 4 working, 5 error. Working: awake, and a
-      # turn is running or the box used tokens in the five minutes its dot's height is measured
-      # over, so that a dot off the floor is never coloured idle.
-      - record: subnet:box_state
-        expr: >
-          max by (slot) (max by (box) (0 * arbos_relay_box_state{state="unknown"} or 1 * arbos_relay_box_state{state="asleep"}
-          or 3 * arbos_relay_box_state{state="waking"} or 5 * arbos_relay_box_state{state="error"}
-          or (2 * arbos_relay_box_state{state="awake"} + on (box) 2 * clamp_max(arbos_relay_box_turn_running
-          + on (box) (sum by (box) (rate(arbos_relay_box_tokens_total[5m])) > bool 0), 1)))
-          * on (box) group_left (slot) arbos_relay_box_slot)
-      # A sleeping box has no container, so nothing from cAdvisor: it reads 0.
-      - record: subnet:box_cpu_cores
-        expr: >
-          max by (slot) (round(max by (name) (rate(container_cpu_usage_seconds_total{name=~"arbos-box-.+"}[5m])), 0.1)
-          * on (name) group_left (slot) label_replace(arbos_relay_box_info * on (box) group_left (slot) arbos_relay_box_slot, "name", "$1", "container", "(.+)"))
-          or max by (slot) (0 * arbos_relay_box_slot)
-      - record: subnet:box_memory_bytes
-        expr: >
-          max by (slot) (round(max by (name) (container_memory_working_set_bytes{name=~"arbos-box-.+"}), 536870912)
-          * on (name) group_left (slot) label_replace(arbos_relay_box_info * on (box) group_left (slot) arbos_relay_box_slot, "name", "$1", "container", "(.+)"))
-          or max by (slot) (0 * arbos_relay_box_slot)

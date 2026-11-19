@@ -18,7 +18,7 @@ which a laptop has no equivalent of, and for a fleet of SWARM boxes as cAdvisor 
 FAKE_BOXES=0 is the relay production runs today: no box discovery, no /metrics/boxes and no token
 counters. Every dashboard has to read honestly like that.
 """
-import json, os, random, threading, time
+import json, os, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = time.time()
@@ -82,13 +82,10 @@ def cadvisor_boxes():
 
 def swarm_metrics():
     lines = []
-    slots = list(range(1, SWARM + 4))
-    random.Random(int(time.time()) // 300).shuffle(slots)  # a new draw every five minutes, like the relay
     for i, (name, box, state, working) in enumerate(swarm()):
         calls = work(i, state) / 6
         lines += [
             f'arbos_relay_box_info{{box="{box}",container="{name}"}} 1',
-            f'arbos_relay_box_slot{{box="{box}",slot="{slots[i]}"}} 1',
             f'arbos_relay_box_state{{box="{box}",state="{state}"}} 1',
             f'arbos_relay_box_turn_running{{box="{box}"}} {int(working)}',
             f'arbos_relay_box_sockets{{box="{box}"}} {3 if state == "awake" else 0}',
