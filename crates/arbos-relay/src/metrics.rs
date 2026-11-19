@@ -345,13 +345,13 @@ fn sample_db(state: &AppState) -> Vec<Series> {
         String::new(),
         state.cfg.global_daily_cap_usd,
     ));
-    if let Ok(ks) = state.db.kill_switch() {
-        out.push((
-            "arbos_relay_kill_switch",
-            String::new(),
-            f64::from(u8::from(ks.on)),
-        ));
-    }
+    // The gate's own reading, not the stored row: it is what clears yesterday's automatic trip.
+    let on = crate::credits::kill_switch(state).on;
+    out.push((
+        "arbos_relay_kill_switch",
+        String::new(),
+        f64::from(u8::from(on)),
+    ));
     if let Some(n) = count("SELECT COUNT(*) FROM waitlist") {
         out.push(("arbos_relay_waitlist_length", String::new(), n as f64));
     }
@@ -781,6 +781,44 @@ mod tests {
         state.db.upsert_box(&gone).unwrap();
         let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(down.status(), 502);
+
+    /// Yesterday's automatic trip is over at 00:00 UTC. The stored row still says `on` until
+    /// something asks the gate, and on an idle relay the sampler is the only thing that asks.
+    #[test]
+    fn an_automatic_trip_from_yesterday_does_not_read_as_on() {
+        let state = test_state(AuthMode::Github);
+        let kill_switch = |state: &AppState| {
+            let sampled = sample_db(state);
+            let on = sampled.iter().find(|s| s.0 == "arbos_relay_kill_switch");
+            on.expect("the kill switch series").2
+        };
+        let mut ks = crate::db_accounts::KillSwitch {
+            on: true,
+            auto: true,
+            at: arbos_core::ids::now_ms(),
+            ..Default::default()
+        };
+        state.db.set_kill_switch(&ks).unwrap();
+        assert_eq!(kill_switch(&state), 1.0);
+        ks.at = crate::proxy::start_of_utc_day_ms() - 1;
+        state.db.set_kill_switch(&ks).unwrap();
+        assert_eq!(kill_switch(&state), 0.0);
+    }
+
+    /// The public listener must never grow a metrics route: Caddy proxies everything on it. The
+    /// app is built inside `main`, so this reads its source; the loopback router is the only
+    /// place a `/metrics` path may be routed.
+    #[test]
+    fn the_public_listener_has_no_metrics_route() {
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains(".route(\"/healthz\""),
+            "the app is still built in main.rs"
+        );
+        assert!(
+            !main.contains("\"/metrics"),
+            "main.rs routes a /metrics path"
+        );
     }
 
     #[test]

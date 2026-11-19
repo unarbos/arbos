@@ -228,6 +228,15 @@ FEATURE_KEYS=(ARBOS_FEATURE_VAULT_CONNECT)
 # Unset = the relay's defaults (16 GiB ceiling, 256 MiB parts, 4 attempts, rebuildable trees carried).
 #   ARBOS_UPGRADE_MAX_WORK_MIB / ARBOS_UPGRADE_PART_MIB / ARBOS_UPGRADE_ATTEMPTS / ARBOS_UPGRADE_SKIP_REBUILDABLE=1
 UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_ATTEMPTS ARBOS_UPGRADE_SKIP_REBUILDABLE ARBOS_UPGRADE_CONCURRENT_CARRIES)
+# Credits (crates/arbos-relay/src/credits.rs): the welcome grant, a new account's daily cap, and the relay-wide
+# daily spend cap whose crossing puts every account in read-only mode until midnight UTC. Operator
+# numbers, kept from the env file, never read from the vault. Unset = the relay's defaults ($100, no cap,
+# $500). They were not listed here, so a value set by hand was dropped by the next run of this script.
+CREDIT_KEYS=(ARBOS_DEFAULT_GRANT_USD ARBOS_DEFAULT_DAILY_CAP_USD ARBOS_GLOBAL_DAILY_CAP_USD)
+# Prometheus (docs/metrics.md): the loopback address the relay serves GET /metrics on, e.g.
+# 127.0.0.1:9108. An operator switch kept from the env file; unset = no endpoint. Dropping it on a
+# deploy would blank every dashboard without an error anywhere.
+METRICS_KEYS=(ARBOS_RELAY_METRICS_LISTEN)
 # Agent-hosted sites (#2060): the relay pushes published snapshots to the Cloudflare R2 bucket
 # the edge Worker serves from. Endpoint from the vault config item, S3 keys from the account-wide
 # R2 key pair ("Cloudflare R2 — S3 access key ID / secret key, account-wide, no IP lock").
@@ -248,7 +257,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}" "${GIF_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${CREDIT_KEYS[@]}" "${METRICS_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}" "${GIF_KEYS[@]}"; do keep "$k"; done
 fi
 # A kept APNS_KEY_P8 path whose file is gone is no key at all; the relay would log an error and run with push off.
 if [[ -n "${APNS_KEY_P8:-}" && "$APNS_KEY_P8" != *"-----BEGIN"* && ! -r "$APNS_KEY_P8" ]]; then
@@ -332,6 +341,14 @@ done
 for k in "${UPGRADE_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
+# Credit numbers: only the keys that have a value; unset means the relay default.
+for k in "${CREDIT_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
+# Metrics listener: only when set.
+for k in "${METRICS_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
 # Agent sites: only the keys that have a value.
 for k in "${SITES_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
@@ -363,6 +380,11 @@ RestartSec=2
 # the relay hit it on 2026-10-25 02:00 UTC (975 ESTAB + db + listener) and accept() failed with EMFILE for
 # 12 min — new sessions 502, chats empty, healthz still 200 on kept-alive connections. 65536 soft+hard.
 LimitNOFILE=65536
+# glibc gives every thread its own malloc arena, up to 8 per core (1,024 on the 128-core host), and
+# memory freed in one arena is neither reused by another nor handed back. With 128 runtime workers
+# and the blocking threads that rebuild room docs, the relay held 24.1 GB resident on 2026-11-18
+# after five days: 660 arenas with 22.8 GB between them, over about 100 MB of stored docs.
+Environment=MALLOC_ARENA_MAX=4
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

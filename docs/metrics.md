@@ -18,6 +18,8 @@ and with the variable unset there is no endpoint at all. Caddy proxies only to t
 the internet cannot reach it, and a box is on a bridge network, so a box cannot either. Prometheus
 has to run on the relay host itself (a host service, or a container with host networking).
 
+`scripts/deploy/relay-server.sh` keeps the variable from `/etc/arbos/relay.env` across deploys.
+
 ### Boxes
 
 Prometheus does not talk to a box. The relay's metrics listener lists the awake boxes and proxies
