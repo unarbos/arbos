@@ -2318,9 +2318,14 @@ impl ChatDoc {
             let now = (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"));
             // Every writer creates the row and then sets `id`, `role` and `sender`, in that
             // order, and an update may end between any two of them (a box cuts a backlog by
-            // size). A header field the row did not have yet is therefore the message still
-            // arriving, not a rewrite: once the row has its id it is reported as inserted,
-            // to be judged as one, under the name it now carries.
+            // size). A header field the row did not have yet, written by the peer that
+            // created the row, is therefore the message still arriving, not a rewrite: once
+            // the row has its id it is reported as inserted, to be judged as one, under the
+            // name it now carries. Written by any other peer it is a rewrite like any other.
+            let creator = match cid {
+                ContainerID::Normal { peer, .. } => Some(*peer),
+                ContainerID::Root { .. } => None,
+            };
             let mut arrived = false;
             for key in delta.updated.keys() {
                 let missing = match key.as_ref() {
@@ -2328,7 +2333,7 @@ impl ChatDoc {
                     "role" | "sender" => sender.is_none(),
                     _ => false,
                 };
-                if missing {
+                if missing && creator.is_some() && m.get_last_editor(key) == creator {
                     arrived = true;
                 } else {
                     out.rewritten.push((id.clone(), key.to_string()));

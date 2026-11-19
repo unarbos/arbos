@@ -264,7 +264,9 @@ pub fn check_push(
         }
     }
 
-    let mut carries_new_message = false;
+    // A row still waiting for its id is a message on its way in: gated now, and again,
+    // with everything else, when the id arrives.
+    let mut carries_new_message = changes.inserted.iter().any(|(id, _)| id.is_empty());
     let mut attributed = Vec::new();
     for (id, sender) in changes.inserted.iter().filter(|(id, _)| !id.is_empty()) {
         let mut attest = || {
@@ -533,36 +535,43 @@ mod tests {
     }
 
     /// The fields a message is created with may arrive after its row only while the row lacks
-    /// them, and the row is then judged as an insert by whoever sent them. A device writes a
-    /// message whole, so its row never arrives unnamed.
+    /// them and only from the peer that created the row. From anyone else they are a rewrite,
+    /// refused like any other, so a row a box has not finished sending is not there to take.
     #[test]
-    fn a_row_missing_its_first_fields_is_judged_as_an_insert_when_they_arrive() {
+    fn a_rows_first_fields_arriving_from_another_peer_are_a_rewrite() {
         use arbos_core::doc::ChatDoc;
         let state = test_state(AuthMode::Github);
-        let (chat, alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
-        let room = ChatDoc::new(Some(1), false);
-        let row = room
-            .messages_list()
-            .push_container(loro::LoroMap::new())
-            .unwrap();
-        row.insert("id", "m_alice").unwrap();
-        room.doc.commit();
-        for (field, value) in [("sender", "user:someone"), ("role", "user")] {
+        let (chat, _alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
+        for (has, writes) in [
+            (None, "id"),
+            (Some("m_reply"), "role"),
+            (Some("m_reply"), "sender"),
+        ] {
+            let room = ChatDoc::new(Some(9), false);
+            let row = room
+                .messages_list()
+                .push_container(loro::LoroMap::new())
+                .unwrap();
+            if let Some(id) = has {
+                row.insert("id", id).unwrap();
+            }
+            room.doc.commit();
             let mut d = ChatDoc::new(Some(2), false);
             d.import(&room.snapshot()).unwrap();
             let (before, mirror) = (d.frontiers(), d.message_identities());
-            d.set_message_fields("m_alice", &[(field, serde_json::json!(value))]);
+            let loro::ValueOrContainer::Container(loro::Container::Map(m)) =
+                d.messages_list().get(0).unwrap()
+            else {
+                unreachable!()
+            };
+            m.insert(writes, "user:someone").unwrap();
+            d.doc.commit();
             let c = d.messages_changed(&before, &d.frontiers(), &mirror);
+            assert!(c.inserted.is_empty(), "{writes}: {:?}", c.inserted);
+            let check = check_push(&state, &bob_dev, PEOPLE_PROJECT, &chat, false, &c);
             assert!(
-                refused(&check_push(
-                    &state,
-                    &bob_dev,
-                    PEOPLE_PROJECT,
-                    &chat,
-                    false,
-                    &c
-                )),
-                "{field} written on {alice}'s row by another member"
+                refused(&check),
+                "{writes} written on a row another peer began"
             );
         }
     }
