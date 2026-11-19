@@ -139,6 +139,8 @@ mod worker_lifetime;
 mod worker_model_refusal_tests;
 #[cfg(test)]
 mod worker_retention_tests;
+#[cfg(test)]
+mod worker_trim_tests;
 mod workspace;
 
 use std::time::{Duration, Instant};
