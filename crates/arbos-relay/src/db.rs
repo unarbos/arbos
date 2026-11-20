@@ -1962,6 +1962,7 @@ pub struct RowEffects<'a> {
 
 impl Db {
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
+    #[cfg(test)]
     pub fn append_row(
         &self,
         room: &str,
@@ -4531,6 +4532,59 @@ mod account_cap_migration_tests {
             .unwrap();
         assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod message_authors_migration_tests {
+    use super::*;
+
+    /// A database from before the stored mark and the deletion record gains both columns on
+    /// open, keeps its rows (their marks unknown, not false), and opens again unchanged.
+    #[test]
+    fn the_stored_and_deleted_columns_are_added_once_to_an_older_table() {
+        let dir =
+            std::env::temp_dir().join(format!("arbos-authors-mig-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE message_authors (
+                   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY (chat_id, message_id));
+                 INSERT INTO message_authors VALUES ('c1', 'm1', 'user:ana', 5);",
+            )
+            .unwrap();
+        }
+        for round in 0..2 {
+            let db = Db::open(&path).unwrap_or_else(|e| panic!("open {round}: {e:#}"));
+            let columns: Vec<String> = db
+                .with(|c| {
+                    let mut q =
+                        c.prepare("SELECT name FROM pragma_table_info('message_authors')")?;
+                    let names = q
+                        .query_map([], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    Ok(names)
+                })
+                .unwrap();
+            for column in ["stored", "deleted_at"] {
+                assert_eq!(
+                    columns.iter().filter(|c| *c == column).count(),
+                    1,
+                    "round {round}: {columns:?}"
+                );
+            }
+            assert_eq!(
+                db.message_author("c1", "m1").unwrap().as_deref(),
+                Some("user:ana")
+            );
+            assert_eq!(db.message_stored("c1", "m1").unwrap(), None, "unknown");
+            assert!(!db.message_deleted("c1", "m1").unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

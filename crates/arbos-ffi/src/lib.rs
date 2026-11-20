@@ -786,7 +786,7 @@ impl ChatDoc {
     /// One projected message row (`project_hidden_parts` + `project_reactions`),
     /// same shape as an element of [`Self::read_rows_json`].
     pub fn read_message_json(&self, index: u64) -> Option<String> {
-        let row = self.lock_doc().projected_row(index as usize)?;
+        let row = self.lock_doc().projected_row(index as usize, None)?;
         Some(serde_json::to_string(&row).unwrap_or_else(|_| "null".into()))
     }
 

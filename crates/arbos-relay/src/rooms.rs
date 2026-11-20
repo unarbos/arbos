@@ -124,6 +124,8 @@ struct PendingRoomPush<'a> {
     room_name: &'a str,
     cached: crate::state::RoomDocCache,
     changes: arbos_core::doc::MessageChanges,
+    /// The payload imported; `changes` is then the room's own reading of it.
+    imported: bool,
     _admission: tokio::sync::MutexGuard<'a, ()>,
 }
 
@@ -208,12 +210,13 @@ async fn push_message_changes<'a>(
                 .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??
         }
     };
-    let changes = diff_pushed_row(&mut cached, payload);
+    let (changes, imported) = diff_pushed_row(&mut cached, payload);
     Ok(PendingRoomPush {
         room,
         room_name,
         cached,
         changes,
+        imported,
         _admission: admission,
     })
 }
@@ -222,16 +225,19 @@ async fn push_message_changes<'a>(
 fn diff_pushed_row(
     cached: &mut crate::state::RoomDocCache,
     payload: &[u8],
-) -> arbos_core::doc::MessageChanges {
+) -> (arbos_core::doc::MessageChanges, bool) {
     let before = cached.doc.frontiers();
     if cached.doc.import(payload).is_err() {
         // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
         // before, so this is not a rejection of malformed input — it is "nothing is known
         // about what this does", which the caller fails closed on.
-        return arbos_core::doc::MessageChanges {
-            unreadable: true,
-            ..Default::default()
-        };
+        return (
+            arbos_core::doc::MessageChanges {
+                unreadable: true,
+                ..Default::default()
+            },
+            false,
+        );
     }
     let changes =
         cached
@@ -240,7 +246,7 @@ fn diff_pushed_row(
     if !changes.unreadable {
         cached.message_ids = changes.ids_after.clone();
     }
-    changes
+    (changes, true)
 }
 
 /// Read the room's stored doc (checkpoint ∪ rows) from the cache the room keeps: head moves
@@ -312,7 +318,7 @@ pub async fn room_tail_rows(
         let list = cached.doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| cached.doc.projected_row(i))
+            .filter_map(|i| cached.doc.projected_row(i, None))
             .collect()
     })
     .await
@@ -872,14 +878,26 @@ async fn handle_frame(
                 .unwrap_or(room_name);
             let mut pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
-            let (carries_new_message, attributed) = match crate::push_guard::check_push(
-                state,
-                principal,
-                project_id,
-                chat_of_room,
-                p.heal,
-                &pending.changes,
-            ) {
+            // A payload that imported and whose diff still cannot be read is refused: nothing
+            // is known about what it does. The room's doc left the cache for this admission
+            // and is dropped with it, so the next push reads against a rebuilt one. The code is
+            // the one every client stays connected on.
+            let check = if pending.imported && pending.changes.unreadable {
+                crate::push_guard::PushCheck::Refuse {
+                    code: "not_available",
+                    detail: "this push cannot be applied as it stands".to_owned(),
+                }
+            } else {
+                crate::push_guard::check_push(
+                    state,
+                    principal,
+                    project_id,
+                    chat_of_room,
+                    p.heal,
+                    &pending.changes,
+                )
+            };
+            let (carries_new_message, attributed) = match check {
                 crate::push_guard::PushCheck::Allow {
                     carries_new_message,
                     attributed,
@@ -2887,6 +2905,42 @@ mod covered_push_tests {
         }
     }
 
+    /// A push that imports and whose diff the relay still cannot read is refused with the code
+    /// a device stays connected on, and nothing is stored. The room's doc is rebuilt for the
+    /// next push, so the same change sent again is taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_diff_that_cannot_be_read_is_refused_and_the_next_push_reads_a_rebuilt_doc() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        // The room's mirror of ids out of step with its list: no row can be named.
+        let mut cached = super::build_room_doc(&state, &room).unwrap();
+        cached.message_ids.clear();
+        *state.room(&room).await.doc_cache.lock().unwrap() = Some(cached);
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("preview", json!("x"))]);
+        let edit = bob_doc.export_updates_since(&mark);
+        let addr = serve(state.clone()).await;
+
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("edit".into(), edit.clone())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error, "{}", frames[0].header);
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["batchId"], "edit");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+
+        let frames =
+            push_after_catchup(addr, &room, &bob_token, "dev:bob", &[("edit".into(), edit)]).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "{}", frames[0].header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 1);
+    }
+
     /// A whole snapshot is a payload like any other: applied in full, judged, stored.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_snapshot_pushed_as_a_row_is_judged_and_stored() {
@@ -3550,6 +3604,19 @@ mod covered_push_tests {
         peer: u64,
         write: impl FnOnce(&ChatDoc),
     ) -> Frame {
+        poll_push_as(state, addr, chat, user, peer, false, write).await
+    }
+
+    /// [`poll_push`], with the push calling itself a heal or not.
+    async fn poll_push_as(
+        state: &AppState,
+        addr: SocketAddr,
+        chat: &str,
+        user: &str,
+        peer: u64,
+        heal: bool,
+        write: impl FnOnce(&ChatDoc),
+    ) -> Frame {
         let replica = held(state, chat, peer);
         let before = replica.oplog_vv();
         replica.transact(write);
@@ -3557,7 +3624,7 @@ mod covered_push_tests {
         let token = device_token(state, user);
         let device = format!("dev:{peer}");
         let room = format!("people/{chat}");
-        push_after_catchup(addr, &room, &token, &device, &batch)
+        push_after_catchup_with_heal(addr, &room, &token, &device, &batch, heal)
             .await
             .remove(0)
     }
@@ -3579,7 +3646,6 @@ mod covered_push_tests {
         use arbos_core::doc::{
             POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
         };
-        use arbos_core::poll::{CLOSES_AT_ALLOWANCE_MS, DURATION_MAX_MS};
         let state = test_state(AuthMode::Github);
         let (alice, _) = person(&state, 1);
         let (bob, _) = person(&state, 2);
@@ -3620,10 +3686,16 @@ mod covered_push_tests {
             question: "Where to?".to_owned(),
             ..open_poll()
         };
-        let late = arbos_core::poll::Poll {
-            closes_at: Some(now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + 60_000),
+        let hour = 3_600_000i64;
+        let timed = arbos_core::poll::Poll {
+            closes_in: Some(hour),
             ..open_poll()
         };
+        let late = arbos_core::poll::Poll {
+            closes_in: Some(arbos_core::poll::DURATION_MAX_MS + 1),
+            ..open_poll()
+        };
+        let as_alice_again = as_alice.clone();
         let refused: [(&str, &str, &str, Write); 5] = [
             (
                 "a close by a member who did not make the poll",
@@ -3653,7 +3725,7 @@ mod covered_push_tests {
                 }),
             ),
             (
-                "a new poll that closes later than a poll may run",
+                "a new poll that runs longer than a week",
                 &alice,
                 "bad_poll",
                 Box::new(move |d| {
@@ -3675,6 +3747,92 @@ mod covered_push_tests {
         assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
         let part = held(&state, &chat, 51).projected_rows()[0]["parts"][1].clone();
         assert_eq!(part["counts"], json!({ "1": 1 }));
+
+        // A one-hour poll from a device half an hour slow, and one from a device more than
+        // a day fast: both are taken, and both close an hour from now by the relay's clock.
+        for (n, skew) in [-30 * 60_000i64, 26 * hour].into_iter().enumerate() {
+            let id = format!("p-skew-{n}");
+            let (poll, opts, row) = (timed.clone(), as_alice_again.clone(), id.clone());
+            let head = state.db.room_state(&room).unwrap().head;
+            let before = arbos_core::ids::now_ms();
+            let frame = poll_push(&state, addr, &chat, &alice, 60 + n as u64, move |d| {
+                d.append_poll_message(&row, &poll, "dev:alice", &opts)
+                    .unwrap();
+                let wrote = json!(arbos_core::ids::now_ms() + skew + hour);
+                d.set_message_fields(&row, &[(arbos_core::doc::POLL_CLOSES_FIELD, wrote)]);
+            })
+            .await;
+            assert_eq!(frame.ty, FrameType::Ack, "{skew}: {}", frame.header);
+            assert_eq!(state.db.room_state(&room).unwrap().head, head + 2, "{skew}");
+            let rows = held(&state, &chat, 70 + n as u64).projected_rows();
+            let row = rows.iter().find(|r| r["id"] == id.as_str()).unwrap();
+            let closes = row["parts"][1]["deadline"].as_i64().unwrap();
+            assert!(
+                (before + hour..=before + hour + 60_000).contains(&closes),
+                "{skew}: closes {} ms after posting",
+                closes - before
+            );
+        }
+    }
+
+    /// A member the people gates refuse does not vote or close by calling the push a heal.
+    /// Such a push carries no new message, and a heal used to skip the gates: a silenced or
+    /// blocked member's vote was stored and broadcast, with the relay's row behind it, at no
+    /// rate limit. Each is answered as a message of theirs would be, and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silenced_or_blocked_member_cannot_vote_or_close_as_a_heal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_alice = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_alice)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let head = state.db.room_state(&room).unwrap().head;
+
+        let (voter, maker) = (format!("user:{bob}"), format!("user:{alice}"));
+        let vote = |d: &ChatDoc| d.set_poll_vote("p1", &voter, &["1".to_owned()]).unwrap();
+        let close = |d: &ChatDoc| d.close_poll("p1", &maker).unwrap();
+
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, true, None)
+            .unwrap());
+        for heal in [true, false] {
+            let peer = 40 + u64::from(heal);
+            let frame = poll_push_as(&state, addr, &chat, &bob, peer, heal, vote).await;
+            assert_eq!(frame.ty, FrameType::Error, "heal={heal}: {}", frame.header);
+            assert_eq!(frame.header["code"], "not_available", "heal={heal}");
+            assert_eq!(frame.header["reason"], "silenced", "heal={heal}");
+        }
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, false, None)
+            .unwrap());
+
+        // Bob blocks Alice: her close is a write of hers in this chat, and is refused.
+        state.db.block(&bob, &alice).unwrap();
+        let frame = poll_push_as(&state, addr, &chat, &alice, 42, true, close).await;
+        assert_eq!(frame.ty, FrameType::Error, "header={}", frame.header);
+        assert_eq!(frame.header["code"], "not_available");
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head,
+            "nothing stored"
+        );
     }
 
     /// The app offers "Close poll" to the member whose name the row wears; the relay's record
@@ -3812,6 +3970,42 @@ mod covered_push_tests {
             );
             assert_eq!(poll(), was, "push {n}");
         }
+    }
+
+    /// What a push does to the record is written with its row, in one transaction: who each
+    /// new message is by, that the relay stored it (an announce cannot say that), and that a
+    /// message the push took out is deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_records_what_it_stored_and_what_it_deleted_with_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let token = device_token(&state, &bob);
+
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message("m1", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let post = vec![("post".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &post).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "m1").unwrap(),
+            Some(format!("user:{bob}"))
+        );
+        assert_eq!(state.db.message_stored(&chat, "m1").unwrap(), Some(true));
+        assert!(!state.db.message_deleted(&chat, "m1").unwrap());
+
+        let base = doc.oplog_vv();
+        doc.transact(|d| d.delete_message("m1").unwrap());
+        let delete = vec![("delete".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "m1").unwrap());
     }
 
     /// A batch id the room already stored is a dup before the gates (no rate event).

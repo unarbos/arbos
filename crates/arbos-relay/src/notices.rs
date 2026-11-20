@@ -99,6 +99,29 @@ pub async fn write_doc_as(
     .await
 }
 
+/// How long a relay write waits for a room's admission lock before it gives up. A push holds
+/// the lock while it is judged and stored, which is milliseconds on a warm room; the first
+/// push after a restart also holds it across the rebuild of the room's doc, which reads the
+/// room's whole history and has no bound of its own. A relay write that cannot get in by
+/// then fails, as it does on a database error, and its caller retries or reports.
+const ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The room's admission lock for a relay write, or an error after [`ADMISSION_WAIT`].
+pub(crate) async fn admission(
+    room: &crate::state::Room,
+) -> anyhow::Result<tokio::sync::MutexGuard<'_, ()>> {
+    admission_within(room, ADMISSION_WAIT).await
+}
+
+async fn admission_within(
+    room: &crate::state::Room,
+    wait: std::time::Duration,
+) -> anyhow::Result<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(wait, room.push_admission.lock())
+        .await
+        .map_err(|_| anyhow::anyhow!("the room is busy storing a push"))
+}
+
 /// [`write_doc_as`] for an edit that may take messages out of the chat: `edit` returns the
 /// ids it deleted, and they are recorded as deleted in the same transaction as the row, so a
 /// deletion the relay made is never stored without its record (`push_guard::corrections`
@@ -128,7 +151,7 @@ pub async fn write_doc_deleting(
     anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
     let room = state.room(&room_name).await;
-    let _admission = room.push_admission.lock().await;
+    let _admission = admission(&room).await?;
     let (seq, dup, _) = state.db.append_row_with(
         &room_name,
         device,
@@ -262,6 +285,19 @@ mod tests {
         );
         assert_eq!(added_line("Jacob", &[]), None);
         assert_eq!(left_line("Alice"), "Alice left");
+    }
+
+    /// A relay write does not wait for ever behind a push that holds the room: after
+    /// its wait it fails, and gets in at once when the room is free.
+    #[tokio::test]
+    async fn a_relay_write_gives_up_on_a_room_held_too_long() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let room = state.room("people/c1").await;
+        let held = room.push_admission.lock().await;
+        let wait = std::time::Duration::from_millis(20);
+        assert!(admission_within(&room, wait).await.is_err());
+        drop(held);
+        assert!(admission(&room).await.is_ok());
     }
 
     /// A relay write reads the room and makes its edit without the room's admission lock,

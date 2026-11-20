@@ -87,7 +87,7 @@ impl ChatDoc {
         let mut json = serde_json::to_value(map.get_deep_value()).ok()?;
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
-        arbos_core::doc::project_poll(&mut json);
+        arbos_core::doc::project_poll(&mut json, None);
         serde_json::from_value(json).ok()
     }
 
@@ -130,7 +130,7 @@ mod core_writer_tests {
         let mut json = row.clone();
         arbos_core::doc::project_hidden_parts(&mut json);
         arbos_core::doc::project_reactions(&mut json);
-        arbos_core::doc::project_poll(&mut json);
+        arbos_core::doc::project_poll(&mut json, None);
         serde_json::from_value(json).expect("core row deserializes as Message")
     }
 
