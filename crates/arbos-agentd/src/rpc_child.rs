@@ -35,6 +35,8 @@ pub struct RpcChild {
     /// through), and in the reader loop for every record in — so a child that is only receiving
     /// still reads as busy.
     last_used_ms: AtomicU64,
+    /// When the child was spawned, by this process's own clock.
+    spawned: std::time::Instant,
     /// Kept from spawn: `Child::id` is `None` once the process has been reaped, and the pid is
     /// what tells a workspace cgroup's leftovers apart from the children the box still owns.
     pid: Option<u32>,
@@ -149,6 +151,7 @@ impl RpcChild {
             pid,
             tree,
             last_used_ms: AtomicU64::new(arbos_core::ids::now_ms() as u64),
+            spawned: std::time::Instant::now(),
         });
         let reader_me = me.clone();
         tokio::spawn(async move {
@@ -361,6 +364,11 @@ impl RpcChild {
 
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// How long ago the child was spawned.
+    pub fn age(&self) -> Duration {
+        self.spawned.elapsed()
     }
 
     /// Where this child's descendants can be reached, for a cancel that has to reap them.

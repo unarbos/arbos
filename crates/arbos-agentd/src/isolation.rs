@@ -470,6 +470,34 @@ fn ticks_since_boot() -> Option<u64> {
     Some((secs * per_sec as f64) as u64)
 }
 
+/// How far a process's age as `/proc` gives it may be from its age as this process measured
+/// it before the two are taken to disagree.
+const CLOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Do the two clocks [`ProcessTree::kill_started_within`] compares agree on this kernel?
+///
+/// That sweep decides what is new from a process's start time (`/proc/<pid>/stat`) set against
+/// the time since boot (`/proc/uptime`). On Linux they are one clock. Under a sandbox that
+/// implements `/proc` itself that is an assumption, and if it is wrong every process reads as
+/// new, or none does. So before trusting it the caller asks about a process whose age it knows
+/// for itself: `pid`, which it spawned `age` ago. An answer that is off by more than
+/// [`CLOCK_SLACK`], or that cannot be read at all, is a no.
+pub fn clocks_agree(pid: u32, age: std::time::Duration) -> bool {
+    let (Some(now), Ok(Some(per_sec)), Some(stat)) = (
+        ticks_since_boot(),
+        nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK),
+        read_stat(pid),
+    ) else {
+        return false;
+    };
+    // A start time after "now" is a disagreement in itself.
+    let Some(ticks) = now.checked_sub(stat.start) else {
+        return false;
+    };
+    let by_proc = std::time::Duration::from_secs_f64(ticks as f64 / per_sec as f64);
+    by_proc.abs_diff(age) <= CLOCK_SLACK
+}
+
 impl ProcessTree {
     /// SIGKILL the members of this tree that started less than `age` ago, and leave every older
     /// one alone. Returns the ones still alive after the reap wait.
@@ -1274,6 +1302,45 @@ pub fn reexec_as_root_if_needed(local_box: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The check the hung-turn sweep makes before it trusts start times: a process this test
+    /// spawned a moment ago reads as a moment old, and not as an hour old or as never having
+    /// existed. On a kernel where the two clocks are one, which is every Linux this runs on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_clocks_agree_about_a_process_whose_age_is_known() {
+        let spawned = std::time::Instant::now();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pid = child.id();
+        let (right, wrong_by_an_hour) = (
+            clocks_agree(pid, spawned.elapsed()),
+            clocks_agree(
+                pid,
+                spawned.elapsed() + std::time::Duration::from_secs(3600),
+            ),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(right, "a process spawned 300 ms ago must read as that old");
+        assert!(!wrong_by_an_hour, "an age an hour off is a disagreement");
+        assert!(
+            !clocks_agree(pid, std::time::Duration::ZERO),
+            "a reaped pid cannot be read"
+        );
+        // With no `/proc` to read there is no answer, and no answer is a no.
+        let empty = std::env::temp_dir().join(format!("arbos-no-proc-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&empty).unwrap();
+        blind_proc_walks_to(&empty);
+        assert!(!clocks_agree(
+            std::process::id(),
+            std::time::Duration::from_secs(1)
+        ));
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 
     /// The harness children's directories exist after the call (the re-own needs root and is
     /// exercised by the box: `subagent-sessions` writable by the workspace user).

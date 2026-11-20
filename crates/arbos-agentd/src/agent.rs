@@ -9950,6 +9950,18 @@ impl Agent {
         if !handed_off {
             self.post_limit_notice(host, TURN_HUNG_NOTICE).await;
         }
+        // Asked while the child is still there to be read. The sweep below tells this turn's
+        // processes from older ones by start time, which is only right where the kernel's two
+        // clocks agree; the child's own age, which this process measured, is the check.
+        let clocks_agree = match pi.pid() {
+            Some(pid) => {
+                let age = pi.age();
+                tokio::task::spawn_blocking(move || crate::isolation::clocks_agree(pid, age))
+                    .await
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
         // Closed in place, not taken out of the slot: the next send then meets a dead child,
         // which is the loss the respawn path already answers without waiting on an empty slot.
         pi.shutdown().await;
@@ -9968,6 +9980,18 @@ impl Agent {
         // without isolation) a tool that called `setsid` itself is out of reach of this sweep.
         let mut tree = pi.tree();
         tree.mark = None;
+        if !clocks_agree {
+            // Killing by a start time this box reports on another clock could take every
+            // server the user has running, or nothing: so nothing, and it is said.
+            tracing::warn!(
+                chat_id,
+                "process start times and uptime do not agree on this box (or cannot be read); \
+                 nothing the hung turn started is swept"
+            );
+            self.append_audit("turn_hung_sweep_skipped", json!({ "chat_id": chat_id }));
+            self.pi_wake.notify_one();
+            return;
+        }
         let age = turn_started.elapsed();
         let survivors = tokio::task::spawn_blocking(move || tree.kill_started_within(age))
             .await
