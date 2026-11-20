@@ -1471,6 +1471,7 @@ struct ProjectMembersSheet: View {
                                         await load(work: work)
                                     }
                                 }
+                                .tint(theme.danger)
                             }
                         }
                     }
