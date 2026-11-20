@@ -19,16 +19,22 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL};
 const WIDTH: f32 = 320.0;
 const FIELD_H: f32 = 30.0;
 const HOUR_MS: i64 = 60 * 60 * 1000;
-/// How long a poll runs: the row's label and the time from now, `None` until its author
-/// closes it. A click on the row steps to the next.
+/// How long a poll runs: the choice's label and the duration, `None` until its author
+/// closes it. The row opens the list; a choice in it is picked by name.
 const DURATIONS: [(&str, Option<i64>); 4] = [
     ("No time limit", None),
     ("Closes in 1 hour", Some(HOUR_MS)),
     ("Closes in 1 day", Some(24 * HOUR_MS)),
     ("Closes in 1 week", Some(7 * 24 * HOUR_MS)),
 ];
-/// The step after the last of [`DURATIONS`]: a number of hours typed into a field.
+/// The choice after the last of [`DURATIONS`]: a number of hours typed into a field.
 const CUSTOM: usize = DURATIONS.len();
+const CUSTOM_LABEL: &str = "Closes in a number of hours";
+
+/// The label of duration choice `ix`.
+fn duration_label(ix: usize) -> &'static str {
+    DURATIONS.get(ix).map_or(CUSTOM_LABEL, |d| d.0)
+}
 
 /// A custom duration as typed: whole hours, from one to the week a poll may run.
 fn custom_duration(hours: &str) -> Option<i64> {
@@ -46,6 +52,8 @@ pub struct PollDraft {
     pub(super) show_voters: bool,
     /// Index into [`DURATIONS`], or [`CUSTOM`].
     pub(super) duration: usize,
+    /// The duration row's list of choices is open.
+    duration_open: bool,
     /// The hours field shown under the duration row at [`CUSTOM`].
     custom_hours: Entity<ComposerInput>,
 }
@@ -93,6 +101,7 @@ impl Composer {
             multiple: false,
             show_voters: false,
             duration: 0,
+            duration_open: false,
             custom_hours,
         });
         cx.notify();
@@ -212,6 +221,7 @@ impl Composer {
                 .gap(px(8.0))
                 .cursor_pointer()
                 .map(|el| highlight::button(el, &theme))
+                .role(gpui::Role::Button)
                 .child(lead)
                 .child(
                     div()
@@ -220,6 +230,8 @@ impl Composer {
                         .child(label),
                 )
         };
+        let switch_label =
+            |name: &str, on: bool| format!("{name}, {}", if on { "on" } else { "off" });
         // A switch: a box, ticked when on.
         let tick_box = |on: bool| {
             div()
@@ -309,6 +321,7 @@ impl Composer {
                         sf_symbols::glyph("plus", 14.0, theme.text_muted),
                         "Add option",
                     )
+                    .aria_label("Add option")
                     .on_click(cx.listener(|this, _, window, cx| {
                         let n = this.poll.as_ref().map_or(0, |d| d.options.len()) + 1;
                         let input = this.poll_input(format!("Option {n}"), cx);
@@ -326,6 +339,7 @@ impl Composer {
                     tick_box(draft.multiple),
                     "Allow multiple answers",
                 )
+                .aria_label(switch_label("Allow multiple answers", draft.multiple))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(draft) = this.poll.as_mut() {
                         draft.multiple = !draft.multiple;
@@ -343,6 +357,7 @@ impl Composer {
                         "Show who voted",
                     )
                     .debug_selector(|| "composer-poll-show-voters".into())
+                    .aria_label(switch_label("Show who voted", draft.show_voters))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(draft) = this.poll.as_mut() {
                             draft.show_voters = !draft.show_voters;
@@ -351,23 +366,63 @@ impl Composer {
                     })),
                 )
             })
+            // How long it runs: the row names the choice and opens the list of them.
             .when(poll_options, |el| {
                 el.child(
                     quiet_row(
                         "poll-duration",
                         sf_symbols::glyph("clock", 14.0, theme.text_muted),
-                        DURATIONS
-                            .get(draft.duration)
-                            .map_or("Closes in a number of hours", |d| d.0),
+                        duration_label(draft.duration),
                     )
                     .debug_selector(|| "composer-poll-duration".into())
+                    .aria_label(format!(
+                        "How long the poll runs: {}. Opens the choices",
+                        duration_label(draft.duration)
+                    ))
+                    .child(div().flex_1())
+                    .child(sf_symbols::glyph(
+                        if draft.duration_open {
+                            "chevron.up"
+                        } else {
+                            "chevron.down"
+                        },
+                        9.0,
+                        theme.text_muted,
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(draft) = this.poll.as_mut() {
-                            draft.duration = (draft.duration + 1) % (CUSTOM + 1);
+                            draft.duration_open = !draft.duration_open;
                         }
                         cx.notify();
                     })),
                 )
+            })
+            .when(poll_options && draft.duration_open, |el| {
+                el.children((0..=CUSTOM).map(|ix| {
+                    let picked = ix == draft.duration;
+                    let tick = div()
+                        .w(px(14.0))
+                        .flex()
+                        .justify_center()
+                        .when(picked, |el| {
+                            el.child(sf_symbols::glyph("checkmark", 9.0, theme.text))
+                        });
+                    quiet_row("poll-duration-choice", tick, duration_label(ix))
+                        .id(("poll-duration-choice", ix))
+                        .debug_selector(move || format!("composer-poll-duration-{ix}"))
+                        .aria_label(format!(
+                            "{}{}",
+                            duration_label(ix),
+                            if picked { ", selected" } else { "" }
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(draft) = this.poll.as_mut() {
+                                draft.duration = ix;
+                                draft.duration_open = false;
+                            }
+                            cx.notify();
+                        }))
+                }))
             })
             .when(poll_options && draft.duration == CUSTOM, |el| {
                 el.child(field(&draft.custom_hours).debug_selector(|| "composer-poll-hours".into()))

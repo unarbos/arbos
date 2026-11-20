@@ -34,6 +34,15 @@ pub fn set_relay_now(relay_now_ms: i64) {
     CLOCK_AHEAD_MS.store(ahead, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// [`set_relay_now`] from the `Date` header of an answer the relay just gave (to the second,
+/// which is enough for a countdown in minutes). A header that does not parse changes nothing.
+pub fn set_relay_date(date_header: &str) {
+    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(date_header) {
+        // The header is cut to the second: take the middle of it.
+        set_relay_now(date.timestamp_millis() + 500);
+    }
+}
+
 /// The time by the relay's clock, as closely as this device knows it ([`set_relay_now`]);
 /// the device's own until then. The `now` for [`closed`] and for every time a device writes
 /// on a poll.

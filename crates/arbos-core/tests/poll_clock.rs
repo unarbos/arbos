@@ -11,4 +11,10 @@ fn the_poll_clock_follows_the_relay() {
         let off = poll::now() - now_ms() - ahead;
         assert!(off.abs() < 1_000, "{ahead}: {off}");
     }
+    // From an HTTP `Date` header, as the apps set it; one that is not a date changes nothing.
+    poll::set_relay_date("Tue, 15 Nov 1994 08:12:31 GMT");
+    assert_eq!((poll::now() + 1_000) / 10_000, 784_887_151_500 / 10_000);
+    poll::set_relay_date("yesterday");
+    assert_eq!((poll::now() + 1_000) / 10_000, 784_887_151_500 / 10_000);
+    poll::set_relay_now(now_ms());
 }

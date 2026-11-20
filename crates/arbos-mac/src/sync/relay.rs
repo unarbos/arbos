@@ -1181,6 +1181,10 @@ impl Shared {
                 .await
                 .with_context(|| format!("GET {path}"))?;
             self.relay_answered();
+            // Polls are judged and counted down by the relay's clock, not this Mac's.
+            if let Some(date) = resp.headers().get("date").and_then(|d| d.to_str().ok()) {
+                arbos_core::poll::set_relay_date(date);
+            }
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {

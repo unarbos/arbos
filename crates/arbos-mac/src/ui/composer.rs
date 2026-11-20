@@ -7309,11 +7309,21 @@ mod overlay_tests {
             })
         };
         assert_eq!(switches(vcx), (false, 0));
-        for selector in ["composer-poll-show-voters", "composer-poll-duration"] {
+        // The duration row opens its choices; one of them is picked by name.
+        assert!(vcx.debug_bounds("composer-poll-duration-1").is_none());
+        for selector in [
+            "composer-poll-show-voters",
+            "composer-poll-duration",
+            "composer-poll-duration-1",
+        ] {
             let row = vcx.debug_bounds(selector).expect(selector).center();
             vcx.simulate_click(row, none);
             settle(&state, &shell, vcx);
         }
+        assert!(
+            vcx.debug_bounds("composer-poll-duration-1").is_none(),
+            "picking closes the list"
+        );
         assert_eq!(switches(vcx), (true, 1), "shown, and closing in an hour");
 
         let send = vcx.debug_bounds("composer-poll-send").unwrap().center();

@@ -759,8 +759,10 @@ pub enum RowKind {
         multiple: bool,
         /// Whose poll, when it is not mine.
         by: Option<String>,
-        /// "Show who voted": the author's choice, fixed with the poll. Off shows counts only.
-        show_voters: bool,
+        /// "Show who voted": the author's choice, fixed with the poll. `Some(false)` shows
+        /// counts only; `None` is a poll from before the choice, which names its voters as
+        /// it always has.
+        show_voters: Option<bool>,
         /// How many people voted.
         voted: usize,
         /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
@@ -985,6 +987,9 @@ pub struct Transcript {
     copied_feedback: Option<(Id, Instant)>,
     /// The poll deadline a redraw is scheduled for ([`Self::watch_poll_deadlines`]).
     poll_redraw_at: Option<i64>,
+    /// The poll (message id) whose maker picked "Close poll": its card asks before closing,
+    /// because a close is for everyone and cannot be taken back.
+    poll_close_asked: Option<Id>,
     /// The code card Copy pill reading "Copied" right now (its id, when).
     code_copied: Option<(SharedString, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
@@ -1082,6 +1087,7 @@ impl Transcript {
             people: false,
             copied_feedback: None,
             poll_redraw_at: None,
+            poll_close_asked: None,
             code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
@@ -1968,10 +1974,31 @@ impl Transcript {
         .detach();
     }
 
-    /// Redraw when the next open poll's time runs out, so its card closes by itself instead
-    /// of at the next unrelated redraw. One timer, for the nearest deadline on screen.
+    /// "Close poll" was picked on `message_id`: its card asks to confirm.
+    pub fn ask_close_poll(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        self.poll_close_asked = Some(message_id);
+        cx.notify();
+    }
+
+    /// A poll voter's name for an option's tip: `None` for someone this reader is not shown
+    /// by name — no longer in the chat, or blocked. They are counted, not named.
+    fn poll_voter_name(&self, sender: &str, me: &str, cx: &App) -> Option<String> {
+        if sender == me {
+            return Some("You".into());
+        }
+        let member = self.mentions.by_id(sender)?;
+        let blocked = sender.strip_prefix("user:").is_some_and(|id| {
+            let state = self.state.read(cx);
+            state.blocked.iter().any(|p| p.id == id)
+        });
+        (!blocked).then(|| member.name.clone())
+    }
+
+    /// Redraw while an open poll with a closing time is on screen: once a minute, so "closes
+    /// in 5 min" does not stand still on an idle window, and when the nearest one's time
+    /// runs out, so its card closes by itself. One timer.
     fn watch_poll_deadlines(&mut self, cx: &mut Context<Self>) {
-        let now = arbos_core::ids::now_ms();
+        let now = arbos_core::poll::now();
         let next = next_poll_deadline(&self.rows, now);
         if next == self.poll_redraw_at {
             return;
@@ -1982,7 +2009,7 @@ impl Transcript {
         };
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis((at - now).max(0) as u64 + 50))
+                .timer(Duration::from_millis(poll_redraw_wait(at, now)))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // Still the deadline being waited for: a newer timer owns any other.
@@ -3650,9 +3677,9 @@ impl Transcript {
                 named,
                 disc,
             } => {
-                // The core's one rule, by this Mac's clock. The counts are the reducer's,
-                // which goes by each vote's own time.
-                let now = arbos_core::ids::now_ms();
+                // The core's one rule, by the relay's clock as this Mac knows it. The counts
+                // are the reducer's, which goes by each vote's own time.
+                let now = arbos_core::poll::now();
                 let closed = arbos_core::poll::closed(deadline, now);
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
@@ -3666,12 +3693,13 @@ impl Transcript {
                 for (ix, (id, label, count, voters)) in options.iter().enumerate() {
                     let on = mine.contains(id);
                     let next = poll_pick(&mine, id, multiple);
-                    let names: SharedString = voters
+                    let names: Vec<Option<String>> = voters
                         .iter()
-                        .map(|s| self.reaction_sender_label(s, &me, cx))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                        .into();
+                        .map(|s| self.poll_voter_name(s, &me, cx))
+                        .collect();
+                    let names: SharedString = poll_voters_tip(&names).into();
+                    let spoken: SharedString =
+                        poll_option_spoken(ix, label, *count, on, closed).into();
                     let (state, chat, message_id) =
                         (self.state.clone(), chat_id.clone(), row.message_id.clone());
                     let selector: SharedString = format!("poll-option#{id}").into();
@@ -3683,6 +3711,8 @@ impl Transcript {
                     list = list.child(
                         poll_option_row(&row.id, ix, options.len(), id, label, state_of_row, &look)
                             .debug_selector(move || selector.to_string())
+                            .role(gpui::Role::Button)
+                            .aria_label(spoken)
                             .when(!closed, |el| el.cursor_pointer())
                             .child(
                                 div()
@@ -3691,9 +3721,9 @@ impl Transcript {
                                     .text_color(theme.text_muted)
                                     .child(count.to_string()),
                             )
-                            // Who voted for it, behind a hover — the reaction chip's tip — and
-                            // only where the author chose "Show who voted".
-                            .when(show_voters && !voters.is_empty(), |el| {
+                            // Who voted for it, behind a hover — the reaction chip's tip —
+                            // unless the author turned "Show who voted" off.
+                            .when(show_voters != Some(false) && !voters.is_empty(), |el| {
                                 el.tooltip(move |_, cx| {
                                     cx.new(|_| ReactionSendersTip(names.clone())).into()
                                 })
@@ -3713,10 +3743,54 @@ impl Transcript {
                     by.as_deref(),
                     voted as u32,
                     multiple,
-                    show_voters,
+                    show_voters == Some(true),
                     closed,
                     deadline.map(|t| t - now),
                 );
+                // "Close poll" was picked: the foot asks first. Closing is for everyone and
+                // cannot be undone, and the iPhone asks too.
+                let asking = !closed && self.poll_close_asked.as_ref() == Some(&row.message_id);
+                let foot_line =
+                    if asking {
+                        let (state, chat, message_id) =
+                            (self.state.clone(), chat_id.clone(), row.message_id.clone());
+                        let button = |id: &'static str, label: &'static str| {
+                            div()
+                                .id(format!("{}-{id}", row.id))
+                                .debug_selector(move || id.to_string())
+                                .role(gpui::Role::Button)
+                                .aria_label(label)
+                                .px(px(8.0))
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .map(|el| highlight::button(el, &theme))
+                                .child(label)
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child("Close this poll for everyone?")
+                            .child(button("poll-close-confirm", "Close poll").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.poll_close_asked = None;
+                                    let (chat, message_id) = (chat.clone(), message_id.clone());
+                                    state.update(cx, |s, cx| s.close_poll(chat, message_id, cx));
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(button("poll-close-cancel", "Cancel").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.poll_close_asked = None;
+                                    cx.notify();
+                                },
+                            )))
+                            .into_any_element()
+                    } else {
+                        foot.into_any_element()
+                    };
                 let card = card_frame(format!("{}-card", row.id), &look.palette)
                     .debug_selector(|| "poll-card".into())
                     .child(card_header("", &question, None, &look.palette, &theme))
@@ -3726,7 +3800,7 @@ impl Transcript {
                             .px(px(1.0))
                             .text_size(px(TEXT_SMALL))
                             .text_color(look.palette.badge_ink)
-                            .child(foot),
+                            .child(foot_line),
                     );
                 // Right-click is the message menu, as on a bubble: its maker closes or deletes
                 // it there.
@@ -4055,6 +4129,59 @@ fn next_poll_deadline(rows: &[Row], now: i64) -> Option<i64> {
             _ => None,
         })
         .min()
+}
+
+/// How many voters an option's tip names before it counts the rest, as on the iPhone.
+const POLL_VOTERS_NAMED: usize = 12;
+
+/// An option's tip: who holds it. One entry per voter, `None` for someone the reader is not
+/// shown by name. At most [`POLL_VOTERS_NAMED`] names, then "and 3 others"; the same words
+/// as the iPhone's line under the card.
+fn poll_voters_tip(names: &[Option<String>]) -> String {
+    let named: Vec<&str> = names
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .take(POLL_VOTERS_NAMED)
+        .collect();
+    let others = names.len() - named.len();
+    let rest = match (others, named.is_empty()) {
+        (0, _) => None,
+        (1, true) => Some("1 person".to_owned()),
+        (n, true) => Some(format!("{n} people")),
+        (1, false) => Some("1 other".to_owned()),
+        (n, false) => Some(format!("{n} others")),
+    };
+    let list = (!named.is_empty()).then(|| named.join(", "));
+    [list, rest]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// What VoiceOver reads for an option: its letter, label, count and state. The count and
+/// "chosen" are otherwise only drawn.
+fn poll_option_spoken(ix: usize, label: &str, count: usize, on: bool, closed: bool) -> String {
+    let votes = if count == 1 {
+        "1 vote".to_owned()
+    } else {
+        format!("{count} votes")
+    };
+    let mut spoken = format!("{}, {label}, {votes}", letter(ix));
+    if on {
+        spoken.push_str(", chosen");
+    }
+    if closed {
+        spoken.push_str(", closed");
+    }
+    spoken
+}
+
+/// How long to wait before redrawing for a poll that closes at `at`: until it closes, and at
+/// most a minute, which is how often its "closes in" line can change.
+fn poll_redraw_wait(at: i64, now: i64) -> u64 {
+    ((at - now).max(0) as u64 + 50).min(60_000)
 }
 
 /// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
@@ -5028,7 +5155,7 @@ pub fn build_rows_with_cache(
                         deadline,
                         ..
                     } => Some(RowKind::Poll {
-                        show_voters: *show_voters == Some(true),
+                        show_voters: *show_voters,
                         voted: *voters,
                         deadline: *deadline,
                         question: question.clone(),
@@ -12319,7 +12446,11 @@ mod poll_rows_tests {
         else {
             panic!("the poll row is a poll card");
         };
-        assert!(*show_voters, "the author's choice rides on the row");
+        assert_eq!(
+            *show_voters,
+            Some(true),
+            "the author's choice rides on the row"
+        );
         assert_eq!(
             (*voted, *deadline),
             (2, None),
@@ -12499,7 +12630,7 @@ mod poll_rows_tests {
                 options: vec![],
                 multiple: false,
                 by: None,
-                show_voters: false,
+                show_voters: Some(false),
                 voted: 0,
                 deadline,
                 sender: None,
@@ -12511,6 +12642,47 @@ mod poll_rows_tests {
         assert_eq!(next_poll_deadline(&rows, 100), Some(200));
         assert_eq!(next_poll_deadline(&rows, 300), None, "all closed");
         assert_eq!(next_poll_deadline(&[], 0), None);
+        // The countdown moves by the minute: an hour away is redrawn in a minute, ten
+        // seconds away when it closes.
+        assert_eq!(poll_redraw_wait(3_600_000, 0), 60_000);
+        assert_eq!(poll_redraw_wait(10_000, 0), 10_050);
+        assert_eq!(poll_redraw_wait(5, 100), 50);
+    }
+
+    /// An option's tip names at most twelve voters and counts the rest, including the ones
+    /// the reader is not shown by name; VoiceOver hears the count and the state that are
+    /// otherwise only drawn.
+    #[test]
+    fn a_polls_voters_are_bounded_and_its_options_are_spoken() {
+        let named =
+            |n: usize| -> Vec<Option<String>> { (0..n).map(|i| Some(format!("P{i}"))).collect() };
+        assert_eq!(poll_voters_tip(&named(2)), "P0, P1");
+        let many = poll_voters_tip(&named(15));
+        assert!(
+            many.starts_with("P0, P1, ") && many.ends_with("P11 and 3 others"),
+            "{many}"
+        );
+        let mixed = [Some("Ana".to_owned()), None, None];
+        assert_eq!(poll_voters_tip(&mixed), "Ana and 2 others");
+        assert_eq!(poll_voters_tip(&[None]), "1 person");
+        assert_eq!(poll_voters_tip(&[None, None]), "2 people");
+        assert_eq!(
+            poll_voters_tip(&[Some("Ana".into()), None]),
+            "Ana and 1 other"
+        );
+
+        assert_eq!(
+            poll_option_spoken(0, "Lisbon", 0, false, false),
+            "A, Lisbon, 0 votes"
+        );
+        assert_eq!(
+            poll_option_spoken(1, "Berlin", 1, true, false),
+            "B, Berlin, 1 vote, chosen"
+        );
+        assert_eq!(
+            poll_option_spoken(1, "Berlin", 3, true, true),
+            "B, Berlin, 3 votes, chosen, closed"
+        );
     }
 
     /// A poll that hides its voters reaches this Mac with counts and the reader's own vote:

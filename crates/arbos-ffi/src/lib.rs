@@ -287,6 +287,20 @@ pub fn poll_closed(deadline: Option<i64>, now_ms: i64) -> bool {
     arbos_core::poll::closed(deadline, now_ms)
 }
 
+/// The time by the relay's clock, as closely as this device knows it: the `now` for
+/// [`poll_closed`] and a poll's countdown (`arbos_core::poll::now`).
+#[uniffi::export]
+pub fn poll_now_ms() -> i64 {
+    arbos_core::poll::now()
+}
+
+/// Tell the poll rules the relay's clock, from the `Date` header of an answer it just gave
+/// (`arbos_core::poll::set_relay_date`).
+#[uniffi::export]
+pub fn poll_set_relay_date(date_header: String) {
+    arbos_core::poll::set_relay_date(&date_header);
+}
+
 /// The line under a poll's options (`arbos_core::poll::foot`).
 #[uniffi::export]
 pub fn poll_foot(
