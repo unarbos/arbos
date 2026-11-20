@@ -3754,26 +3754,19 @@ impl Transcript {
                     if asking {
                         let (state, chat, message_id) =
                             (self.state.clone(), chat_id.clone(), row.message_id.clone());
-                        let button = |id: &'static str, label: &'static str| {
-                            div()
-                                .id(format!("{}-{id}", row.id))
+                        // The kit's confirm pills, as the Unblock confirm uses them.
+                        let button = |id: &'static str, label: &'static str, go: bool| {
+                            crate::ui::profiles::kit::confirm_button(id, label, go, &theme)
                                 .debug_selector(move || id.to_string())
                                 .role(gpui::Role::Button)
                                 .aria_label(label)
-                                .px(px(8.0))
-                                .rounded(px(6.0))
-                                .cursor_pointer()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .map(|el| highlight::button(el, &theme))
-                                .child(label)
                         };
                         div()
                             .flex()
                             .items_center()
                             .gap(px(6.0))
                             .child("Close this poll for everyone?")
-                            .child(button("poll-close-confirm", "Close poll").on_click(
+                            .child(button("poll-close-confirm", "Close poll", true).on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.poll_close_asked = None;
                                     let (chat, message_id) = (chat.clone(), message_id.clone());
@@ -3781,7 +3774,7 @@ impl Transcript {
                                     cx.notify();
                                 }),
                             ))
-                            .child(button("poll-close-cancel", "Cancel").on_click(cx.listener(
+                            .child(button("poll-close-cancel", "Cancel", false).on_click(cx.listener(
                                 |this, _, _, cx| {
                                     this.poll_close_asked = None;
                                     cx.notify();

@@ -7799,6 +7799,96 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             ),
         );
     }
+    // `ARBOS_FIXTURE_POLLS=1` (screenshot rig): the group ends with three polls, one in each
+    // state the card draws — someone's closed one, mine with a time left and names shown,
+    // mine with names hidden.
+    if std::env::var("ARBOS_FIXTURE_POLLS").is_ok_and(|v| v == "1") {
+        use arbos_core::doc::{
+            UserMessageOpts, POLL_CLOSED_FIELD, POLL_CLOSES_FIELD, POLL_VOTE_AT_PREFIX,
+        };
+        use arbos_core::poll::Poll;
+        let now = arbos_core::ids::now_ms();
+        let from = |sender: &str, name: &str, handle: &str| UserMessageOpts {
+            sender: Some(sender.to_owned()),
+            sender_name: Some(name.to_owned()),
+            sender_handle: Some(handle.to_owned()),
+            ..Default::default()
+        };
+        let (sam, sara, samir) = ("user:gh_457", "user:gh_458", format!("user:{SAM_ID}"));
+        let labels = |a: &str, b: &str| [a.to_owned(), b.to_owned()];
+        let vote = |d: &arbos_core::doc::ChatDoc, id: &str, who: &str, option: &str| {
+            let _ = d.set_poll_vote(id, who, &[option.to_owned()]);
+        };
+        group.core.transact(|d| {
+            let closed = Poll::new(
+                "Where is the offsite?",
+                &labels("Lisbon", "Berlin"),
+                false,
+                true,
+                None,
+            );
+            let _ = d.append_poll_message(
+                "fx-poll-closed",
+                &closed.unwrap(),
+                DEVICE,
+                &from(sam, "Samir Haddad", "samir"),
+            );
+            for (who, option) in [(sam, "1"), (sara, "1"), (ME_SENDER, "2")] {
+                vote(d, "fx-poll-closed", who, option);
+                let at = format!("{POLL_VOTE_AT_PREFIX}{who}");
+                d.set_message_fields(
+                    "fx-poll-closed",
+                    &[(&at, serde_json::json!(now - 20 * 60_000))],
+                );
+            }
+            d.set_message_fields(
+                "fx-poll-closed",
+                &[(POLL_CLOSED_FIELD, serde_json::json!(now - 10 * 60_000))],
+            );
+
+            let timed = Poll::new(
+                "Which day works?",
+                &labels("Tuesday", "Thursday"),
+                false,
+                true,
+                Some(125 * 60_000),
+            );
+            let _ = d.append_poll_message(
+                "fx-poll-mine",
+                &timed.unwrap(),
+                DEVICE,
+                &from(ME_SENDER, "Me", ME_HANDLE),
+            );
+            d.set_message_fields(
+                "fx-poll-mine",
+                &[(POLL_CLOSES_FIELD, serde_json::json!(now + 125 * 60_000))],
+            );
+            for (who, option) in [
+                (ME_SENDER, "1"),
+                (sam, "1"),
+                (sara, "2"),
+                ("user:gh_gone", "2"),
+            ] {
+                vote(d, "fx-poll-mine", who, option);
+            }
+
+            let hidden = Poll::new("Ship on Friday?", &labels("Yes", "No"), false, false, None);
+            let _ = d.append_poll_message(
+                "fx-poll-hidden",
+                &hidden.unwrap(),
+                DEVICE,
+                &from(ME_SENDER, "Me", ME_HANDLE),
+            );
+            for (who, option) in [
+                (ME_SENDER, "1"),
+                (sam, "1"),
+                (samir.as_str(), "1"),
+                (sara, "2"),
+            ] {
+                vote(d, "fx-poll-hidden", who, option);
+            }
+        });
+    }
     out.push(group);
     if emoji_names_seeded() {
         let dm = ChatDoc::new(DM_MAGE, "people");

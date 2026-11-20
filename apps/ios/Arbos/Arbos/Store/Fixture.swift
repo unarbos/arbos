@@ -8,11 +8,12 @@ import Foundation
 extension AppModel {
     func loadFixture() {
         isFixture = true
-        // The fixture stands for a current relay: it takes the poll options.
-        PollOptionsFlag.shared.set(true)
         waitlistPosition = DebugHooks.fixtureWaitlist
         // The signed-in user (D79 initials at home and in Settings; reactions need `myUserId`).
         setFixtureUser(AuthUser(id: "fx-me", login: "jacob", name: "Jacob Steeves"))
+        // The fixture stands for a current relay: it takes the poll options. In memory only,
+        // and after the user is set (a change of account turns the flag off).
+        PollOptionsFlag.shared.set(true)
         let now = nowMs()
         let comms = Project(id: "fx-comms", name: "Comms", icon: "Co", color: "#1084FE", state: .awake, stateSince: now - 3_600_000,
                             stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0.4, spendCapUsd: 25)
@@ -300,6 +301,31 @@ extension AppModel {
         commsWords.senderHandle = "comms"
         commsWords.senderName = "Comms"
         messages["fx-group-launch", default: []].append(contentsOf: [commsPicture, commsWords])
+        // Polls rig: the card in each state, for the UI tests and screenshots. Display only:
+        // the fixture has no chat document, so a vote or a close here writes nothing.
+        if DebugHooks.fixturePolls {
+            let options = [ChoiceOption(id: "1", label: "Lisbon"), ChoiceOption(id: "2", label: "Berlin")]
+            func poll(_ id: String, sender: String, handle: String, name: String, minutesAgo: Int64, _ poll: Poll) -> Message {
+                Message(id: id, chatId: "fx-group-launch", role: .user, sender: sender, status: .done, turn: nil, decision: nil,
+                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: now - minutesAgo * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "\(id)-t", text: "Poll: \(poll.question)"), .poll(id: "\(id)-p", poll: poll)],
+                        hiddenCount: 0, senderHandle: handle, senderName: name)
+            }
+            messages["fx-group-launch", default: []].append(contentsOf: [
+                poll("fx-poll-closed", sender: "user:fx-u3", handle: "mira-k", name: "Mira Kaplan", minutesAgo: 20,
+                     Poll(question: "Where is the offsite?", options: options, max: 1,
+                          votes: ["1": ["user:fx-u3", "user:fx-u4"], "2": ["user:fx-me"]],
+                          counts: ["1": 2, "2": 1], voters: 3, showVoters: true, deadline: now - 10 * 60_000)),
+                poll("fx-poll-mine", sender: "user:fx-me", handle: "jacob", name: "Jacob Steeves", minutesAgo: 8,
+                     Poll(question: "Which day works?", options: [ChoiceOption(id: "1", label: "Tuesday"), ChoiceOption(id: "2", label: "Thursday")],
+                          max: 1, votes: ["1": ["user:fx-me", "user:fx-u3"], "2": ["user:fx-u4", "user:fx-gone"]],
+                          counts: ["1": 2, "2": 2], voters: 4, showVoters: true, deadline: now + 125 * 60_000)),
+                poll("fx-poll-hidden", sender: "user:fx-me", handle: "jacob", name: "Jacob Steeves", minutesAgo: 4,
+                     Poll(question: "Ship on Friday?", options: [ChoiceOption(id: "1", label: "Yes"), ChoiceOption(id: "2", label: "No")],
+                          max: 1, votes: ["1": ["user:fx-me"]], counts: ["1": 3, "2": 1], voters: 4, showVoters: false, deadline: nil)),
+            ])
+        }
         // #1592 rig: a question to someone else's agent and its first bubble — the shape of
         // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
         if DebugHooks.fixtureForeignAgent {

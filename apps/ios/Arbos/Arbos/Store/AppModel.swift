@@ -212,9 +212,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var user: AuthUser? {
         // Rows are read as the signed-in person (a poll that hides its voters hands over the
         // reader's own vote only), so a change of who that is reads the open chats again.
+        // Through `emitSnapshot`, which reads a long chat off the main thread. Not the project
+        // documents (they hold no transcript), and not on sign-out: there is no reader then,
+        // and the documents are on their way out.
         didSet {
             guard oldValue?.id != user?.id else { return }
-            for (chatId, doc) in docs { applySnapshot(chatId, list: doc.readAll(as: myUserId)) }
+            // What the last account's relay takes says nothing about this one's: off until
+            // its `/me` answers (and off for good at sign-out).
+            PollOptionsFlag.shared.set(false)
+            guard user != nil else { return }
+            for key in docs.keys where rooms[key]?.roomChat != projectDocChatId {
+                emitSnapshot(key)
+            }
         }
     }
     #if DEBUG || ARBOS_FIXTURE
@@ -4282,10 +4291,10 @@ final class AppModel: ObservableObject {
         do {
             if let poll {
                 // A relay from before the poll options refuses the newer shape: the older one.
-                let options = PollOptionsFlag.shared.on
+                let posted = poll.posted(relayTakesOptions: PollOptionsFlag.shared.on)
                 try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
-                                          multiple: poll.multiple, showVoters: options ? poll.showVoters : nil,
-                                          closesInMs: options ? poll.closesInMs : nil, deviceId: deviceId,
+                                          multiple: poll.multiple, showVoters: posted.showVoters,
+                                          closesInMs: posted.closesInMs, deviceId: deviceId,
                                           author: author, mentions: mentions)
             } else {
                 try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,

@@ -373,8 +373,23 @@ struct QuestionCard: View {
         }
         .buttonStyle(RowPress(enabled: open, fill: palette.press))
         .disabled(!open)
-        .accessibilityLabel("\(Self.letter(ix)), \(named(option.label))")
+        .accessibilityLabel(Self.optionSpoken(letter: Self.letter(ix), label: named(option.label),
+                                              votes: onPick == nil ? nil : option.hint, chosen: chosen))
+        .accessibilityAddTraits(chosen ? .isSelected : [])
         .accessibilityIdentifier("option-\(option.id)")
+    }
+
+    /// What VoiceOver reads for an option. On a poll (`votes` is its count) that is the count
+    /// and whether it is the reader's pick, which are otherwise only drawn: "A, Lisbon,
+    /// 3 votes, chosen".
+    static func optionSpoken(letter: String, label: String, votes: String?, chosen: Bool) -> String {
+        var spoken = "\(letter), \(label)"
+        if let votes {
+            let n = Int(votes) ?? 0
+            spoken += ", \(n) \(n == 1 ? "vote" : "votes")"
+        }
+        if chosen { spoken += ", chosen" }
+        return spoken
     }
 
     /// A poll that shows who voted: the option's count as its own control beside the row, so

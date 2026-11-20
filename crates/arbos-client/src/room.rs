@@ -775,6 +775,20 @@ impl RoomSession {
             });
             return;
         }
+        // A push refused for what it holds (the frame names its batch). It stays pending and
+        // goes out again on the next connection, with everything queued behind it, so the
+        // chat is not delivering: the apps say so on the chat, as they do for a
+        // `not_available`, until a push is acknowledged. Dropping the batch is not possible
+        // here: later updates from this device depend on it.
+        if header.batch_id.is_some() {
+            self.push(RoomAction::PushRefused {
+                batch_id: header.batch_id,
+                code: header.code.clone(),
+                reason: header.reason,
+                by_handle: None,
+                by_name: None,
+            });
+        }
         self.push(RoomAction::SessionError {
             code: header.code,
             message: header.message,
@@ -1958,8 +1972,8 @@ mod tests {
     }
 
     /// A push the relay refuses for what it holds ("not_yours", "bad_vote", …) is never
-    /// dropped by the client: the connection is closed and the same batch goes out first on
-    /// the next one. This is why the relay may refuse only what no honest device writes, and
+    /// dropped by the client: the app is told, the connection is closed and the same batch
+    /// goes out first on the next one. This is why the relay may refuse only what no honest device writes, and
     /// corrects the rest (`push_guard::corrections` in the relay).
     #[test]
     fn a_push_refused_for_its_contents_is_sent_again_on_every_reconnect() {
@@ -1985,6 +1999,14 @@ mod tests {
             assert!(actions
                 .iter()
                 .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    RoomAction::PushRefused { batch_id: Some(id), code, .. }
+                        if id == "batch-1" && code == "not_yours"
+                )),
+                "and the app is told, so the chat can say it is not delivering"
+            );
             assert_eq!(s.pending().len(), 1, "the batch is kept");
             s.prepare_reconnect();
         }

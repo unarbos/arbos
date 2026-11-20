@@ -457,12 +457,34 @@ relay takes. The relay should still be deployed first, so that the options appea
 
 **Replies, closing and removal.** A poll row takes the ordinary message menu: Reply (the quote
 reads "Poll: <question>"), Close poll for its maker while it is open, Delete for its maker and
-the chat's moderators, no Edit. The iPhone asks before closing; the Mac closes at once, as its
-Delete does.
+the chat's moderators, no Edit. Both apps ask before closing, because a close is for everyone
+and cannot be taken back: the iPhone with its centred alert, the Mac on the poll's own card
+(the foot becomes "Close this poll for everyone?" with Cancel and Close poll). A poll bears
+reactions like any message on both.
+
+**Who voted.** Where the names are not hidden, the iPhone lists an option's voters under the
+card on a tap of its count and the Mac in the option's tip. Both name at most twelve and
+count the rest, and neither names someone who is no longer in the chat or whom the reader
+blocked. VoiceOver reads each option with its count and whether it is the reader's pick.
 
 **Creating one.** Both composers offer: single or multiple answers, "Show who voted", and how
 long it runs — no limit, 1 hour, 1 day, 1 week, or a custom time (a date and time on iPhone,
-a number of hours on the Mac), at most a week.
+a number of hours on the Mac), at most a week. The Mac's duration row opens a list of the
+choices; the iPhone's is a menu. A custom date is turned into a duration on the device, so
+it is as exact as that device's clock.
+
+**The flag is not stored.** Each app holds `poll_options` in memory for the account whose
+`/me` answered: off at launch until that answer, off again when the account changes or signs
+out. Before the account has loaded no poll is drawn as the reader's own, so nobody is
+offered "Close poll" on someone else's.
+
+**A refused push.** A push the relay refuses for its contents stays queued and is sent again
+on every reconnect, with everything behind it; the client cannot drop it, because later
+updates from the same device depend on it. The shared client now reports it
+(`RoomAction::PushRefused`), so both apps show their standing "not being delivered" note on
+the chat until a push is acknowledged. Taking the refused row back out needs the device to
+discard its unacknowledged state and read the chat again from the relay, which no client
+does yet for any refusal.
 
 **Not built:** editing a poll. The poll field is written once and the relay refuses a rewrite
 (`poll_fixed`); allowing it while there are no votes needs a rule for a vote and an edit

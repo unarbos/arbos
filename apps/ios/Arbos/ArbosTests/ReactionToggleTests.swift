@@ -198,6 +198,69 @@ final class PollTests: XCTestCase {
         XCTAssertFalse(line.contains("P13"), line)
     }
 
+    /// What is posted follows what the relay says it takes: without the flag the poll goes
+    /// out in the older shape whatever the sheet held, and the flag is off until `/me`
+    /// answers for this account.
+    func testAPollIsPostedInTheShapeTheRelayTakes() {
+        let draft = PollDraft(question: "Q", options: ["A", "B"], multiple: false, showVoters: true, closesInMs: 3_600_000)
+        let newer = draft.posted(relayTakesOptions: true)
+        XCTAssertEqual(newer.showVoters, true)
+        XCTAssertEqual(newer.closesInMs, 3_600_000)
+        let older = draft.posted(relayTakesOptions: false)
+        XCTAssertNil(older.showVoters)
+        XCTAssertNil(older.closesInMs)
+        // In memory only: nothing of it is stored for the next launch or the next account.
+        PollOptionsFlag.shared.set(true)
+        XCTAssertNil(UserDefaults.standard.object(forKey: "features.poll_options"))
+        PollOptionsFlag.shared.set(false)
+    }
+
+    /// A poll bears its message's reactions, as the Mac draws them: the hold menu offers the
+    /// reaction row on a poll, so a reaction given there has to show.
+    func testAPollBearsItsReactions() throws {
+        let doc = try doc("poll-reactions")
+        var message = try XCTUnwrap(doc.readAll().first)
+        message.reactions = [MessageReaction(emoji: "🔥", senders: ["user:ben"])]
+        let rows = Transcript.rows([message], projectId: "people:c1", me: "user:ben", people: true, multiParty: true)
+        let card = try XCTUnwrap(rows.first { if case .poll = $0.kind { return true }; return false })
+        XCTAssertTrue(Transcript.bearsReactions(card.kind))
+        XCTAssertEqual(card.reactions, message.reactions)
+    }
+
+    /// Until the account has loaded nobody knows whose poll it is: it is not drawn as mine,
+    /// so "Close poll" is not offered on someone else's.
+    func testBeforeTheAccountLoadsNoPollIsMine() throws {
+        let doc = try doc("poll-no-account")
+        let rows = Transcript.rows(doc.readAll(), projectId: "people:c1", me: nil, people: true, multiParty: true)
+        let card = try XCTUnwrap(rows.first { if case .poll = $0.kind { return true }; return false })
+        guard case .poll(_, let by, _, _) = card.kind else { return XCTFail("a poll row") }
+        XCTAssertEqual(by, "Ana", "someone's poll, not mine")
+        XCTAssertEqual(card.role, .project)
+    }
+
+    /// VoiceOver hears an option's count and whether it is my pick; a question card that is
+    /// not a poll reads as before.
+    func testAnOptionIsSpokenWithItsCountAndState() {
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "A", label: "Lisbon", votes: "3", chosen: true), "A, Lisbon, 3 votes, chosen")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "B", label: "Berlin", votes: "1", chosen: false), "B, Berlin, 1 vote")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "B", label: "Berlin", votes: "0", chosen: false), "B, Berlin, 0 votes")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "A", label: "Yes", votes: nil, chosen: false), "A, Yes")
+    }
+
+    /// A poll from before "Show who voted" names its voters to every reader, as it always
+    /// has; only a poll whose author turned the names off hides them.
+    func testAPollFromBeforeTheChoiceStillNamesItsVoters() throws {
+        let doc = CoreChatDoc(key: "poll-older")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: nil, deviceId: "dev", author: .init(sender: "user:zoe", name: "Zoe"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ana", selections: ["2"])
+        doc.commit()
+        let older = try XCTUnwrap(poll(doc))
+        XCTAssertNil(older.showVoters)
+        XCTAssertEqual(older.votes, ["2": ["user:ana"]])
+        XCTAssertFalse(older.closable)
+    }
+
     /// A reply quotes a poll by its question: the strip above the composer and the header in
     /// the reply's bubble both read "Poll: <question>", not the list of options.
     func testAReplyQuotesAPollByItsQuestion() throws {

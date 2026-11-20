@@ -688,15 +688,15 @@ struct Poll: Equatable {
     var options: [ChoiceOption]
     /// How many options one person may hold: 1, or the option count for "multiple answers".
     var max: Int
-    /// Option id → the senders (`user:<id>`) this phone may name: everyone where the poll
-    /// shows who voted, otherwise my own vote and nobody else's. The core hands over no other
-    /// name (`arbos_core::doc::project_poll`).
+    /// Option id → the senders (`user:<id>`) this phone may name: everyone, unless the author
+    /// turned "Show who voted" off, and then my own vote and nobody else's. The core hands
+    /// over no other name (`arbos_core::doc::project_poll`).
     var votes: [String: [String]]
     /// Option id → how many hold it, and how many people voted.
     var counts: [String: Int] = [:]
     var voters = 0
     /// "Show who voted", the author's choice, fixed with the poll. nil on a poll from before
-    /// the choice existed: counts only, and it cannot be closed.
+    /// the choice existed: it names its voters as it always has, and cannot be closed.
     var showVoters: Bool? = nil
     /// When it closes or closed (ms since the epoch); nil runs until its author closes it.
     var deadline: Int64? = nil
@@ -705,7 +705,8 @@ struct Poll: Equatable {
     /// Its author can close it (every poll posted since closing exists).
     var closable: Bool { showVoters != nil }
 
-    /// The core's one rule (`arbos_core::poll::closed`), by this phone's clock. The counts
+    /// The core's one rule (`arbos_core::poll::closed`); `now` is `pollNowMs()`, the relay's
+    /// clock as this phone knows it. The counts
     /// are the core reducer's, which goes by each vote's own time.
     func closed(now: Int64) -> Bool { pollClosed(deadline: deadline, nowMs: now) }
 
@@ -742,7 +743,7 @@ struct Poll: Equatable {
 
     /// The card's foot, in the core's words (`arbos_core::poll::foot`): "Ana's poll · 3 voted ·
     /// pick one · names shown · closes in 2 h", or "… · closed" once it is.
-    func foot(by name: String?, now: Int64 = nowMs()) -> String {
+    func foot(by name: String?, now: Int64 = pollNowMs()) -> String {
         pollFoot(by: name, voted: UInt32(voters), multiple: multiple, showVoters: showVoters == true,
                  closed: closed(now: now), leftMs: deadline.map { $0 - now })
     }
@@ -750,16 +751,19 @@ struct Poll: Equatable {
 
 /// Remote flag `features.poll_options` from `GET /me`: the relay takes polls with "Show who
 /// voted", a duration and a close. Off on a relay from before them (it refuses such a poll,
-/// and a refused push is sent again for ever) and until `/me` has answered once: the sheet
-/// then offers none of the three and the poll is posted in the older shape.
+/// and a refused push is sent again for ever): the sheet then offers none of the three and
+/// the poll is posted in the older shape.
+///
+/// Held in memory only, for the account and relay that answered: off at every launch until
+/// `/me` answers, and off again at sign-out. A stored copy would outlive the relay it came
+/// from and let a poll be posted to one that refuses it.
 final class PollOptionsFlag: ObservableObject {
     static let shared = PollOptionsFlag()
-    @Published private(set) var on: Bool = UserDefaults.standard.object(forKey: "features.poll_options") as? Bool ?? false
+    @Published private(set) var on = false
 
     func set(_ value: Bool) {
         guard value != on else { return }
         on = value
-        UserDefaults.standard.set(value, forKey: "features.poll_options")
     }
 }
 
@@ -772,6 +776,13 @@ struct PollDraft: Equatable {
     var showVoters = false
     /// How long it runs from the send, nil until its author closes it.
     var closesInMs: Int64? = nil
+
+    /// The two newer fields as they are posted: what the sheet holds where the relay takes
+    /// them (`relayTakesOptions`, `PollOptionsFlag`), nothing where it does not — a poll of
+    /// the older shape, which every relay stores.
+    func posted(relayTakesOptions: Bool) -> (showVoters: Bool?, closesInMs: Int64?) {
+        relayTakesOptions ? (showVoters, closesInMs) : (nil, nil)
+    }
 }
 
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to

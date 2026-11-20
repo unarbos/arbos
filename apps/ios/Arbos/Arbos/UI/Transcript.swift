@@ -420,7 +420,8 @@ enum Transcript {
     /// Rows that can carry a message's reaction chips: prose and media.
     static func bearsReactions(_ kind: RowKind) -> Bool {
         switch kind {
-        case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+        // A poll too: its menu offers the reaction row, and the Mac draws reactions on it.
+        case .user, .other, .member, .assistant, .image, .file, .voiceMemo, .poll: return true
         default: return false
         }
     }
@@ -585,6 +586,10 @@ enum Transcript {
                 // A poll is the card and nothing else: its text part is the same poll in plain
                 // words, for builds without polls.
                 if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+                    // Whose poll decides its side and who is offered "Close poll". In a people
+                    // chat that takes knowing who I am: until the account has loaded, no poll
+                    // is mine.
+                    let mine = people ? (me != nil && message.sender == me) : mine
                     chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
                                      kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone",
                                                  handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
@@ -2049,7 +2054,7 @@ struct RowView: View, Equatable {
             // A poll with a time still to run redraws by itself, so the card closes and its
             // "closes in" line moves without waiting for the row to change: every 30 s, on a
             // beat that lands on the closing time itself.
-            if let deadline = poll.deadline, !poll.closed(now: nowMs()) {
+            if let deadline = poll.deadline, !poll.closed(now: pollNowMs()) {
                 TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(deadline % 30_000) / 1000), by: 30)) { _ in
                     pollCard(poll, by: by, handle: handle, avatar: avatar)
                 }
@@ -2255,21 +2260,21 @@ struct RowView: View, Equatable {
     /// closes or deletes it from the hold menu (`MessageMenu`).
     private func pollCard(_ poll: Poll, by: String?, handle: String, avatar: String?) -> some View {
         let lane = Theme.memberLane(composerInset: composerInset)
-        let closed = poll.closed(now: nowMs())
-        let namesFor = poll.showVoters == true ? poll.options.first { $0.id == pollVotersOption } : nil
+        let closed = poll.closed(now: pollNowMs())
+        let namesFor = poll.showVoters != false ? poll.options.first { $0.id == pollVotersOption } : nil
         let card = QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
                                 options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.counts[$0.id] ?? 0)") },
                                 multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
                                 onPick: { id in
                                     // A hold that opened the message menu is not a vote.
                                     guard let me = model.myUserId, !ChatGestures.heldIntoMenu,
-                                          !poll.closed(now: nowMs()) else { return }
+                                          !poll.closed(now: pollNowMs()) else { return }
                                     model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
                                 },
                                 foot: poll.foot(by: by),
                                 // Like a vote, not the lifted finger of a hold that opened the
                                 // message menu.
-                                onHint: poll.showVoters == true ? { id in
+                                onHint: poll.showVoters != false ? { id in
                                     guard !ChatGestures.heldIntoMenu else { return }
                                     pollVotersOption = pollVotersOption == id ? nil : id
                                 } : nil)
