@@ -3774,12 +3774,12 @@ impl Transcript {
                                     cx.notify();
                                 }),
                             ))
-                            .child(button("poll-close-cancel", "Cancel", false).on_click(cx.listener(
-                                |this, _, _, cx| {
+                            .child(button("poll-close-cancel", "Cancel", false).on_click(
+                                cx.listener(|this, _, _, cx| {
                                     this.poll_close_asked = None;
                                     cx.notify();
-                                },
-                            )))
+                                }),
+                            ))
                             .into_any_element()
                     } else {
                         foot.into_any_element()

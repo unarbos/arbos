@@ -746,7 +746,7 @@ mod tests {
         });
         show(&state, cx, poll_message("p-closed", Some(3_600_000), DM));
         let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
-        let mut settle = |vcx: &mut gpui::VisualTestContext| {
+        let settle = |vcx: &mut gpui::VisualTestContext| {
             for _ in 0..3 {
                 state.update(vcx, |_, cx| cx.notify());
                 vcx.run_until_parked();
@@ -838,7 +838,7 @@ mod tests {
         let state =
             cx.new(|cx| crate::app::AppState::new(Box::new(Recording(commands.clone())), cx));
         let options = ["Lisbon".to_owned(), "Berlin".to_owned()];
-        let mut posted = |flag: bool, cx: &mut gpui::TestAppContext| {
+        let posted = |flag: bool, cx: &mut gpui::TestAppContext| {
             state.update(cx, |s, cx| {
                 s.poll_options = flag;
                 assert!(s.send_poll(
