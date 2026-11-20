@@ -476,7 +476,9 @@ impl ProcessTree {
     ///
     /// For ending one piece of work inside a child that has done others: the tree's handles
     /// name everything the child ever started, and the start time is what tells this turn's
-    /// tool from a server an earlier turn left running. The signals go to the chosen pids only;
+    /// tool from a server an earlier turn left running. A new process whose parent, or any
+    /// ancestor inside the tree, is one of those older ones is spared with it: that is a
+    /// watcher restarting its program, not this turn's work. The signals go to the chosen pids only;
     /// the group and the cgroup as wholes are not signalled, because they hold the older ones.
     pub fn kill_started_within(&self, age: std::time::Duration) -> Vec<u32> {
         let (Some(now), Ok(Some(per_sec))) = (
@@ -486,11 +488,35 @@ impl ProcessTree {
             return Vec::new();
         };
         let cutoff = now.saturating_sub((age.as_secs_f64() * per_sec as f64).ceil() as u64);
+        // The child itself, which every tool of this turn is a child of. It predates the turn
+        // and that must not spare them.
+        let leader = self.sid.or(self.pgid);
         let recent = || -> Vec<Witness> {
-            self.members()
+            let stats: std::collections::HashMap<u32, ProcStat> = self
+                .members()
                 .into_iter()
-                .filter_map(Witness::of)
-                .filter(|w| w.start >= cutoff)
+                .filter_map(|pid| read_stat(pid).filter(ProcStat::running).map(|st| (pid, st)))
+                .collect();
+            // Under something an earlier turn left running? A watcher (`nodemon`, `cargo
+            // watch`) restarts its program whenever a file changes, so that program is new while
+            // the thing the user started is old; it belongs to the watcher, not to this turn.
+            let under_older = |st: &ProcStat| {
+                let mut parent = st.ppid;
+                loop {
+                    match stats.get(&parent) {
+                        Some(p) if p.start >= cutoff => parent = p.ppid,
+                        Some(_) => return Some(parent) != leader,
+                        None => return false,
+                    }
+                }
+            };
+            stats
+                .iter()
+                .filter(|(_, st)| st.start >= cutoff && !under_older(st))
+                .map(|(pid, st)| Witness {
+                    pid: *pid,
+                    start: st.start,
+                })
                 .collect()
         };
         let mut witnesses = recent();
@@ -584,6 +610,7 @@ impl Ids {
 /// The fields of `/proc/<pid>/stat` a sweep reads.
 struct ProcStat {
     state: char,
+    ppid: u32,
     pgrp: u32,
     session: u32,
     /// Clock ticks since boot at which the process started: what tells a pid from the same pid
@@ -606,6 +633,7 @@ fn parse_stat(stat: &str) -> Option<ProcStat> {
     let fields: Vec<&str> = after.split_whitespace().collect();
     Some(ProcStat {
         state: fields.first()?.chars().next()?,
+        ppid: fields.get(1)?.parse().ok()?,
         pgrp: fields.get(2)?.parse().ok()?,
         session: fields.get(3)?.parse().ok()?,
         // state is field 3 of the file, starttime is field 22, so 19 fields along from here.

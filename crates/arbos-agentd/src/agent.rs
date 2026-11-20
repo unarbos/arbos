@@ -9839,6 +9839,13 @@ impl Agent {
                     if deadline_announced
                         && quiet_since.get_or_insert_with(Instant::now).elapsed() > abort_grace
                     {
+                        // An event that arrived while this arm was running (it awaits the turn
+                        // and the approval state above) has not been seen yet. It may be the
+                        // answer: go round and read it, which also starts the silence over.
+                        if !events.is_empty() {
+                            quiet_since = None;
+                            continue;
+                        }
                         self.end_hung_turn(chat_id, host, &pi, started).await;
                         settled.store(true, Ordering::SeqCst);
                         break;

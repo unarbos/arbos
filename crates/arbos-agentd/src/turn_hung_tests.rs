@@ -55,9 +55,15 @@ def background(name):
         f.write(str(p.pid))
     os.replace(os.path.join(here, name + ".tmp"), os.path.join(here, name))
 
-# What an earlier turn left running on purpose: a dev server, started before this turn began.
+# What an earlier turn left running on purpose, started before this turn began: a dev server,
+# and a watcher that starts its program (pid in `app`) only once `restart` appears, as a watcher
+# restarts on a changed file. The hung turn makes that happen, so the program is new and its
+# parent is not.
 if n == 1 and open(os.path.join(here, "mode")).read().strip() == "hang":
     background("server")
+    subprocess.Popen(
+        ["bash", "-c", 'while [ ! -e "$0/restart" ]; do sleep 0.05; done; sleep 600 & echo $! > "$0/app.tmp"; mv "$0/app.tmp" "$0/app"; wait', here],
+        process_group=0, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 hung = False
 for line in sys.stdin:
@@ -84,6 +90,7 @@ for line in sys.stdin:
     if n == 1 and mode == "hang":
         hung = True
         background("tool")
+        open(os.path.join(here, "restart"), "w").close()
         continue
     if n == 1 and mode == "busy":
         for _ in range(25):
@@ -232,9 +239,10 @@ async fn a_turn_whose_child_ignores_the_abort_ends_in_words_and_the_next_message
 /// The tool that hung the turn is a process of its own, in a group of its own. Closing the
 /// child does not reach it; the sweep of the child's session does. What the child was already
 /// running when the turn began, a server an earlier turn started, is in that same session and
-/// is left alone, as it is when a child is lost any other way.
+/// is left alone, as it is when a child is lost any other way. So is a program that such a
+/// process started during the turn: a watcher restarting what it watches.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_tool_that_hung_the_turn_dies_with_it_and_an_earlier_turns_server_does_not() {
+async fn the_tool_that_hung_the_turn_dies_with_it_and_what_earlier_turns_left_running_does_not() {
     let (agent, host, dir, root) = a_box("hang").await;
     let server: i32 = std::fs::read_to_string(dir.join("server"))
         .expect("the child had a server running before the turn")
@@ -265,7 +273,16 @@ async fn the_tool_that_hung_the_turn_dies_with_it_and_an_earlier_turns_server_do
             nix::sys::signal::Signal::SIGKILL,
         );
     }
-    let server_alive = alive(server);
+    let app: i32 = std::fs::read_to_string(dir.join("app"))
+        .expect("the watcher restarted its program during the turn")
+        .trim()
+        .parse()
+        .unwrap();
+    let (server_alive, app_alive) = (alive(server), alive(app));
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(app),
+        nix::sys::signal::Signal::SIGKILL,
+    );
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(server),
         nix::sys::signal::Signal::SIGKILL,
@@ -278,6 +295,10 @@ async fn the_tool_that_hung_the_turn_dies_with_it_and_an_earlier_turns_server_do
     assert!(
         server_alive,
         "server {server}, running since before the turn, was killed with it"
+    );
+    assert!(
+        app_alive,
+        "program {app}, restarted during the turn by a watcher from before it, was killed with it"
     );
 }
 
