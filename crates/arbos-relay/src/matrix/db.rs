@@ -182,9 +182,12 @@ impl Db {
                 let payload: String = r.get(2)?;
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, payload))
             })?;
+            // Read to the end before any write: an UPDATE issued while this cursor is open is a
+            // write from inside a read snapshot, which SQLite refuses with "database is
+            // locked" instead of waiting when a reader holds the WAL lock (see `db::write_tx`).
+            let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut out = Vec::new();
-            for row in rows {
-                let (id, attempts, payload) = row?;
+            for (id, attempts, payload) in rows {
                 match serde_json::from_str::<Job>(&payload) {
                     Ok(job) => out.push(OutboxRow { id, attempts, job }),
                     Err(e) => {
@@ -941,5 +944,48 @@ mod tests {
         assert!(d.matrix_people_native_users().unwrap().is_empty());
         assert_eq!(backoff_ms(0), 2_000);
         assert_eq!(backoff_ms(20), 300_000);
+    }
+}
+
+#[cfg(test)]
+mod busy_reader_tests {
+    use rusqlite::params;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Jobs whose payload cannot be read are parked one by one as the due list is walked. Each
+    /// park is a write, and it must not be issued from inside the walk's own read: with readers
+    /// busy beside it that write is refused ("database is locked") instead of waiting.
+    #[test]
+    fn unreadable_jobs_are_parked_while_readers_are_busy() {
+        let dir = std::env::temp_dir().join(format!("arbos-matrix-{}", arbos_core::ids::ulid()));
+        let db = crate::db::Db::open(&dir.join("relay.db")).unwrap();
+        db.with(|c| {
+            let mut st = c.prepare(
+                "INSERT INTO matrix_outbox(chat_key, kind, payload, next_at, created_at)
+                 VALUES (?1, 'message', 'not json', 0, 0)",
+            )?;
+            (0..3_000).try_for_each(|n| st.execute(params![format!("c{n}")]).map(|_| ()))
+        })
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (db, stop) = (db.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        db.room_position("p/c").unwrap();
+                    }
+                })
+            })
+            .collect();
+        let due = db.matrix_outbox_due(5_000);
+        stop.store(true, Ordering::Relaxed);
+        let readers_ok = readers.into_iter().all(|r| r.join().is_ok());
+        let pending = db.matrix_outbox_stats().map(|s| s.pending);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(readers_ok, "a reader failed");
+        assert!(due.expect("the walk was refused").is_empty());
+        assert_eq!(pending.unwrap(), 0, "every unreadable job is parked");
     }
 }
