@@ -890,8 +890,15 @@ async fn handle_frame(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
                     );
-                    sink.send(room_push_refused_frame(code, &detail, &p.batch_id))
-                        .await?;
+                    // In a people chat the gates answer first. A sender they refuse gets
+                    // their answer, the one a device stays connected on, whatever else is
+                    // wrong with the push.
+                    let refusal = room_name
+                        .strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+                        .and_then(|chat_id| people::room_push_refusal(state, principal, chat_id))
+                        .map(|r| push_refused_frame(&r, &p.batch_id))
+                        .unwrap_or_else(|| room_push_refused_frame(code, &detail, &p.batch_id));
+                    sink.send(refusal).await?;
                     return Ok(());
                 }
             };
@@ -2691,6 +2698,14 @@ mod history_tests {
     }
 }
 
+/// The apps' room session, compiled from its own source so a test can drive the real one
+/// against this relay. `arbos-client` is app-only and the relay may not depend on it; the
+/// module needs nothing beyond `arbos-core` and serde, which the relay already has.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../arbos-client/src/room.rs"]
+mod client_room;
+
 #[cfg(test)]
 mod covered_push_tests {
     //! Reconnect storm (#1570): pending batches whose ops the room already holds must ACK as
@@ -2835,6 +2850,234 @@ mod covered_push_tests {
             }
         }
         out
+    }
+
+    fn chat_with_bobs_message(state: &AppState) -> (String, ChatDoc, String, String) {
+        let (alice, _) = person(state, 1);
+        let (bob, _) = person(state, 2);
+        let chat = dm(state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let bob_doc = ChatDoc::new(Some(7), false);
+        let base = bob_doc.oplog_vv();
+        bob_doc.init_meta(&chat, "people", 1);
+        bob_doc
+            .append_user_message("m-bob", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:bob",
+                "seed",
+                &bob_doc.export_updates_since(&base),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "m-bob", &format!("user:{bob}"))
+            .unwrap();
+        let (alice_token, bob_token) = (device_token(state, &alice), device_token(state, &bob));
+        (room, bob_doc, alice_token, bob_token)
+    }
+
+    fn as_user(user: &str) -> UserMessageOpts {
+        UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        }
+    }
+
+    /// A whole snapshot is a payload like any other: applied in full, judged, stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_pushed_as_a_row_is_judged_and_stored() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(frames[0].header["dup"], false);
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m-alice"]);
+
+        // And refused like any other when what it does is not the pusher's to do.
+        alice_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap-2".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_yours");
+    }
+
+    /// The record of who wrote what failing to read is not an empty record: the push is
+    /// refused and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_is_refused_while_the_author_record_cannot_be_read() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        state
+            .db
+            .with(|c| c.execute_batch("ALTER TABLE message_authors RENAME TO message_authors_gone"))
+            .unwrap();
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        let mark = alice_doc.oplog_vv();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("a1".into(), alice_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "unavailable");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+    }
+
+    /// In a people chat a sender the gates refuse gets the gates' answer for a push the guard
+    /// refuses too, so the device stays connected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sender_the_gates_refuse_gets_their_answer_for_a_push_the_guard_refuses() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let (bob, _) = person(&state, 2);
+        let chat = room.strip_prefix("people/").unwrap();
+        let me = format!("user:{bob}");
+        assert!(state.db.set_member_silenced(chat, &me, true, None).unwrap());
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("b1".into(), bob_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["reason"], "silenced");
+        assert_eq!(frames[0].header["batchId"], "b1");
+    }
+
+    /// Runs a real client session against the room until the relay has nothing more to say,
+    /// answering it as an app does. Returns what the session asked its host to do.
+    async fn run_session(
+        addr: SocketAddr,
+        token: &str,
+        session: &mut super::client_room::RoomSession,
+        doc: &mut ChatDoc,
+    ) -> Vec<super::client_room::RoomAction> {
+        use super::client_room::RoomAction;
+        let url = format!("ws://{addr}/room/{}?token={token}", session.room());
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        session.on_open(0);
+        let mut seen = Vec::new();
+        loop {
+            // Answering one action can queue more, so drain until the session is quiet.
+            let mut actions = std::collections::VecDeque::from(session.drain_actions());
+            while let Some(action) = actions.pop_front() {
+                match &action {
+                    RoomAction::SendFrame(bytes) => {
+                        sink.send(TMsg::Binary(bytes.clone().into())).await.unwrap()
+                    }
+                    RoomAction::ApplyBytes(bytes) => {
+                        doc.import(bytes).unwrap();
+                    }
+                    RoomAction::HealCheck { relay_vv } => {
+                        let vv = arbos_core::doc::decode_vv(relay_vv).unwrap();
+                        session.on_heal(doc.updates_beyond(&vv));
+                    }
+                    RoomAction::FetchCheckpoint { .. } => session.on_checkpoint_skipped(),
+                    _ => {}
+                }
+                seen.push(action);
+                actions.extend(session.drain_actions());
+            }
+            match tokio::time::timeout(Duration::from_millis(400), stream.next()).await {
+                Ok(Some(Ok(TMsg::Binary(bytes)))) => session.on_frame(&bytes),
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+        }
+        seen
+    }
+
+    /// What an app does today passes every rule: a device that comes back with several
+    /// messages written offline has each of them stored under its author, and its session
+    /// stays live with nothing refused and no redial asked for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_real_client_session_sends_what_it_wrote_offline_and_stays_connected() {
+        use super::client_room::{RoomAction, RoomSession};
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let (alice, _) = person(&state, 1);
+        let addr = serve(state.clone()).await;
+
+        let mut doc = ChatDoc::new(Some(5), false);
+        doc.import(&bob_doc.snapshot()).unwrap();
+        let mut session = RoomSession::new("dev:alice", room.clone(), 0, Vec::new());
+        for id in ["m1", "m2", "m3"] {
+            let mark = doc.oplog_vv();
+            doc.append_user_message(id, "hi", "dev:alice", &as_user(&alice))
+                .unwrap();
+            session.on_local_commit(doc.export_updates_since(&mark));
+        }
+        let seen = run_session(addr, &alice_token, &mut session, &mut doc).await;
+        // The heal on connect carries all three; the batches behind it ack as already held.
+        assert!(session.is_live() && session.pending().is_empty());
+        assert!(!seen.iter().any(|a| matches!(
+            a,
+            RoomAction::ScheduleReconnect { .. }
+                | RoomAction::SessionError { .. }
+                | RoomAction::PushRefused { .. }
+        )));
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m1", "m2", "m3"]);
+        for id in ["m1", "m2", "m3"] {
+            let chat = room.strip_prefix("people/").unwrap();
+            assert_eq!(
+                state.db.message_author(chat, id).unwrap(),
+                Some(format!("user:{alice}"))
+            );
+        }
     }
 
     /// 250 pending batches whose ops the room already holds → 250 dup ACKs, no new rows, no
@@ -3286,6 +3529,288 @@ mod covered_push_tests {
                     "order {first}, push {n}"
                 );
             }
+        }
+    }
+
+    /// A replica of what the relay holds for `chat`, as a device that is caught up has it.
+    fn held(state: &AppState, chat: &str, peer: u64) -> ChatDoc {
+        let doc = crate::matrix::backfill::load_doc(state, chat, None)
+            .unwrap()
+            .expect("the room's doc");
+        ChatDoc::from_snapshot(Some(peer), false, &doc.snapshot()).unwrap()
+    }
+
+    /// One push from `user`: `write` made on a caught-up replica, sent over a real socket.
+    /// The first frame the relay answers with.
+    async fn poll_push(
+        state: &AppState,
+        addr: SocketAddr,
+        chat: &str,
+        user: &str,
+        peer: u64,
+        write: impl FnOnce(&ChatDoc),
+    ) -> Frame {
+        let replica = held(state, chat, peer);
+        let before = replica.oplog_vv();
+        replica.transact(write);
+        let batch = vec![(format!("b-{peer}"), replica.export_updates_since(&before))];
+        let token = device_token(state, user);
+        let device = format!("dev:{peer}");
+        let room = format!("people/{chat}");
+        push_after_catchup(addr, &room, &token, &device, &batch)
+            .await
+            .remove(0)
+    }
+
+    /// One write a test makes on a replica before pushing it.
+    type Write = Box<dyn FnOnce(&ChatDoc) + Send>;
+
+    fn open_poll() -> arbos_core::poll::Poll {
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        arbos_core::poll::Poll::new("Where?", &labels, false, false, None).unwrap()
+    }
+
+    /// The poll rules no honest device breaks are refused by the socket handler itself, with
+    /// nothing stored: a close by someone who is not the maker, a vote in another member's
+    /// name, more choices than the poll allows, an edited poll, and a new poll that closes
+    /// later than a poll may run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poll_writes_no_honest_device_makes_are_refused_on_the_socket() {
+        use arbos_core::doc::{
+            POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+        };
+        use arbos_core::poll::{CLOSES_AT_ALLOWANCE_MS, DURATION_MAX_MS};
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let now = arbos_core::ids::now_ms();
+        let as_alice = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+
+        // Alice posts her poll through the socket, so the relay stored and attested it.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_alice)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+
+        let vote = |who: &str, picked: serde_json::Value| {
+            let (who, at) = (who.to_owned(), json!(now));
+            move |d: &ChatDoc| {
+                d.set_message_fields(
+                    "p1",
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{who}"), picked),
+                        (&format!("{POLL_VOTE_AT_PREFIX}user:{who}"), at),
+                    ],
+                )
+            }
+        };
+        let edited = arbos_core::poll::Poll {
+            question: "Where to?".to_owned(),
+            ..open_poll()
+        };
+        let late = arbos_core::poll::Poll {
+            closes_at: Some(now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + 60_000),
+            ..open_poll()
+        };
+        let refused: [(&str, &str, &str, Write); 5] = [
+            (
+                "a close by a member who did not make the poll",
+                &bob,
+                "not_yours",
+                Box::new(move |d| d.set_message_fields("p1", &[(POLL_CLOSED_FIELD, json!(now))])),
+            ),
+            (
+                "a vote in another member's name",
+                &bob,
+                "not_yours",
+                Box::new(vote(&alice, json!(["1"]))),
+            ),
+            (
+                "two choices where the poll allows one",
+                &bob,
+                "bad_vote",
+                Box::new(vote(&bob, json!(["1", "2"]))),
+            ),
+            (
+                "an edited poll",
+                &alice,
+                "poll_fixed",
+                Box::new(move |d| {
+                    let edited = serde_json::to_value(&edited).unwrap();
+                    d.set_message_fields("p1", &[(POLL_FIELD, edited)])
+                }),
+            ),
+            (
+                "a new poll that closes later than a poll may run",
+                &alice,
+                "bad_poll",
+                Box::new(move |d| {
+                    d.append_poll_message("p2", &late, "dev:alice", &as_alice)
+                        .unwrap()
+                }),
+            ),
+        ];
+        let head = state.db.room_state(&room).unwrap().head;
+        for (n, (what, who, code, write)) in refused.into_iter().enumerate() {
+            let frame = poll_push(&state, addr, &chat, who, 40 + n as u64, write).await;
+            assert_eq!(frame.ty, FrameType::Error, "{what}: {}", frame.header);
+            assert_eq!(frame.header["code"], code, "{what}");
+            assert_eq!(state.db.room_state(&room).unwrap().head, head, "{what}");
+        }
+
+        // The same socket takes the honest version of each: Bob's own single vote.
+        let frame = poll_push(&state, addr, &chat, &bob, 50, vote(&bob, json!(["1"]))).await;
+        assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
+        let part = held(&state, &chat, 51).projected_rows()[0]["parts"][1].clone();
+        assert_eq!(part["counts"], json!({ "1": 1 }));
+    }
+
+    /// The app offers "Close poll" to the member whose name the row wears; the relay's record
+    /// names whoever pushed the row. Where the two differ — a row one member pushed under
+    /// another's name, with no record to check it against — the named maker's close is taken
+    /// and timed like any other. Refused, it would be re-sent on every reconnect with the rest
+    /// of that device's queue stuck behind it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_maker_named_on_a_poll_closes_it_whoever_the_record_names() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+
+        // Alice pushes a poll that names Bob as its sender. The record names Alice.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_bob = UserMessageOpts {
+            sender: Some(format!("user:{bob}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_bob)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "p1").unwrap(),
+            Some(format!("user:{alice}"))
+        );
+
+        // Bob's app closes it exactly as `ChatDoc::close_poll` writes it.
+        let head = state.db.room_state(&room).unwrap().head;
+        let me = format!("user:{bob}");
+        let before = arbos_core::ids::now_ms();
+        let frame = poll_push(&state, addr, &chat, &bob, 40, |d| {
+            d.close_poll("p1", &me).unwrap();
+        })
+        .await;
+        assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 2);
+        let part = held(&state, &chat, 41).projected_rows()[0]["parts"][1].clone();
+        assert!(part["deadline"].as_i64().is_some_and(|at| at >= before));
+    }
+
+    /// A map that is not a message cannot stand in for one. Bob hangs a map on his own
+    /// message that carries the poll's id, a poll, a vote in Alice's name and a later close,
+    /// then rewrites it. The relay judges and corrects a poll only from the row in the
+    /// `messages` list: both pushes are stored as they come, the relay writes nothing in
+    /// answer, and Alice's closed poll reads exactly as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_decoy_map_wearing_a_polls_id_changes_nothing_on_the_poll() {
+        use arbos_core::doc::{
+            POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+        };
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let now = arbos_core::ids::now_ms();
+        let closed = now - 300_000;
+
+        // Alice's poll, closed five minutes ago, and a message of Bob's, both stored.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_user = |user: &str| UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_user(&alice))
+            .unwrap();
+        writer.set_message_fields("p1", &[(POLL_CLOSED_FIELD, json!(closed))]);
+        writer
+            .append_user_message("m-bob", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let seed = writer.export_updates_since(&base);
+        state
+            .db
+            .append_row(&room, "dev:alice", "seed", &seed)
+            .unwrap();
+        for (id, who) in [("p1", &alice), ("m-bob", &bob)] {
+            let author = format!("user:{who}");
+            state.db.record_message_author(&chat, id, &author).unwrap();
+        }
+        let poll = || held(&state, &chat, 60).projected_rows()[0]["parts"][1].clone();
+        let was = poll();
+        assert_eq!(was["deadline"], closed);
+
+        let value = |v: serde_json::Value| serde_json::from_value::<loro::LoroValue>(v).unwrap();
+        let (vote, at) = (
+            format!("{POLL_VOTE_PREFIX}user:{alice}"),
+            format!("{POLL_VOTE_AT_PREFIX}user:{alice}"),
+        );
+        let year = 365 * 24 * 3_600_000i64;
+        let writes: [Write; 2] = [
+            Box::new(move |d| {
+                let message = d.find_message("m-bob").unwrap();
+                let decoy = message
+                    .insert_container("decoy", loro::LoroMap::new())
+                    .unwrap();
+                decoy.insert("id", "p1").unwrap();
+                let poll = serde_json::to_value(open_poll()).unwrap();
+                decoy.insert(POLL_FIELD, value(poll)).unwrap();
+                decoy.insert(POLL_CLOSED_FIELD, now + year).unwrap();
+            }),
+            Box::new(move |d| {
+                let message = d.find_message("m-bob").unwrap();
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(decoy))) =
+                    message.get("decoy")
+                else {
+                    panic!("the decoy is a map on Bob's message");
+                };
+                decoy.insert(&vote, value(json!(["2"]))).unwrap();
+                decoy.insert(&at, now).unwrap();
+                decoy.insert(POLL_CLOSED_FIELD, now + 2 * year).unwrap();
+            }),
+        ];
+        for (n, write) in writes.into_iter().enumerate() {
+            let head = state.db.room_state(&room).unwrap().head;
+            let frame = poll_push(&state, addr, &chat, &bob, 61 + n as u64, write).await;
+            assert_eq!(frame.ty, FrameType::Ack, "push {n}: {}", frame.header);
+            assert_eq!(
+                state.db.room_state(&room).unwrap().head,
+                head + 1,
+                "push {n}: stored, and the relay wrote no row of its own"
+            );
+            assert_eq!(poll(), was, "push {n}");
         }
     }
 

@@ -48,7 +48,8 @@ use crate::ui::theme::{
 use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
 use crate::ui::widgets::{
-    card_frame, card_header, letter, option_list, option_row, CardLook, QuestionCard, RowState,
+    card_frame, card_header, last_row, letter, option_list, option_row, CardLook, QuestionCard,
+    RowState,
 };
 use serde_json::Value;
 
@@ -764,6 +765,10 @@ pub enum RowKind {
         voted: usize,
         /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
         deadline: Option<i64>,
+        /// Its sender when it is not mine: their disc and name, as on their bubble.
+        sender: Option<Person>,
+        named: bool,
+        disc: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
@@ -3641,6 +3646,9 @@ impl Transcript {
                 show_voters,
                 voted,
                 deadline,
+                sender,
+                named,
+                disc,
             } => {
                 // The core's one rule, by this Mac's clock. The counts are the reducer's,
                 // which goes by each vote's own time.
@@ -3673,37 +3681,32 @@ impl Transcript {
                         (false, true) => RowState::Faded,
                     };
                     list = list.child(
-                        option_row(
-                            format!("{}#{id}", row.id),
-                            Some(letter(ix)),
-                            label,
-                            state_of_row,
-                            ix > 0,
-                            &look,
-                        )
-                        .debug_selector(move || selector.to_string())
-                        .when(!closed, |el| el.cursor_pointer())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
-                                .child(count.to_string()),
-                        )
-                        // Who voted for it, behind a hover — the reaction chip's tip — and
-                        // only where the author chose "Show who voted".
-                        .when(show_voters && !voters.is_empty(), |el| {
-                            el.tooltip(move |_, cx| {
-                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                        poll_option_row(&row.id, ix, options.len(), id, label, state_of_row, &look)
+                            .debug_selector(move || selector.to_string())
+                            .when(!closed, |el| el.cursor_pointer())
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(count.to_string()),
+                            )
+                            // Who voted for it, behind a hover — the reaction chip's tip — and
+                            // only where the author chose "Show who voted".
+                            .when(show_voters && !voters.is_empty(), |el| {
+                                el.tooltip(move |_, cx| {
+                                    cx.new(|_| ReactionSendersTip(names.clone())).into()
+                                })
                             })
-                        })
-                        .when(!closed, |el| {
-                            el.on_click(move |_, _, cx| {
-                                let (chat, message_id, next) =
-                                    (chat.clone(), message_id.clone(), next.clone());
-                                state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
-                            })
-                        }),
+                            .when(!closed, |el| {
+                                el.on_click(move |_, _, cx| {
+                                    let (chat, message_id, next) =
+                                        (chat.clone(), message_id.clone(), next.clone());
+                                    state.update(cx, |s, cx| {
+                                        s.vote_poll(chat, message_id, next, cx)
+                                    });
+                                })
+                            }),
                     );
                 }
                 let foot = arbos_core::poll::foot(
@@ -3728,7 +3731,40 @@ impl Transcript {
                 // Right-click is the message menu, as on a bubble: its maker closes or deletes
                 // it there.
                 let card = self.menu_target(card, &row.message_id, cx);
-                card_row(card, true).into_any_element()
+                // Mine sits right at my bubble's width; someone else's after their disc.
+                if let Some(person) = sender {
+                    let (disc_el, name_el) = self.attachment_sender(
+                        &row.id,
+                        &AttachmentSender::Person(person),
+                        named,
+                        &theme,
+                        cx,
+                    );
+                    let disc_el = if disc {
+                        // The card carries a 4 pt margin; the disc stands on the card's edge.
+                        div().flex_shrink_0().pb(px(4.0)).child(disc_el)
+                    } else {
+                        div().w(px(SENDER_DISC)).flex_shrink_0()
+                    };
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_end()
+                        .pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(disc_el)
+                        .child(people_slot(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .children(name_el.map(|n| div().pl(px(6.0)).child(n)))
+                                .child(card),
+                        ))
+                        .into_any_element()
+                } else {
+                    own_card_row(card, self.people).into_any_element()
+                }
             }
             RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
@@ -4033,6 +4069,28 @@ fn poll_pick(mine: &[String], id: &str, multiple: bool) -> Vec<String> {
     }
 }
 
+/// A poll's option row `ix` of `count`: lettered, mine chosen, the end rows rounded to the
+/// list's corners.
+fn poll_option_row(
+    row_id: &str,
+    ix: usize,
+    count: usize,
+    id: &str,
+    label: &str,
+    state: RowState,
+    look: &CardLook,
+) -> gpui::Stateful<Div> {
+    option_row(
+        format!("{row_id}#{id}"),
+        Some(letter(ix)),
+        label,
+        state,
+        ix > 0,
+        look,
+    )
+    .when(ix + 1 == count, last_row)
+}
+
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
 /// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
 /// the same cap width (`assistant_slot`, or the people slot after a lane). The lane is left
@@ -4044,6 +4102,22 @@ pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
         .when(lane, |el| el.pl(px(SENDER_LANE)))
         .debug_selector(|| "chat-card-row".into())
         .child(incoming_slot(card, lane))
+}
+
+/// My own card (a poll I sent): on my side, as wide as my bubble may get.
+fn own_card_row(card: impl IntoElement, people: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .justify_end()
+        .debug_selector(|| "own-card-row".into())
+        .child(
+            div()
+                .w(relative_width(own_bubble_fraction(people)))
+                .min_w_0()
+                .debug_selector(|| "own-card".into())
+                .child(card),
+        )
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -4970,6 +5044,9 @@ pub fn build_rows_with_cache(
                         by: from
                             .as_ref()
                             .map(|p| p.name.clone().unwrap_or_else(|| p.handle.clone())),
+                        sender: from.clone(),
+                        named,
+                        disc: run_start,
                     }),
                     _ => None,
                 });
@@ -9985,9 +10062,9 @@ mod reaction_chip_tests {
         }
     }
 
-    struct SizedHost {
-        transcript: Entity<Transcript>,
-        width: f32,
+    pub(super) struct SizedHost {
+        pub(super) transcript: Entity<Transcript>,
+        pub(super) width: f32,
     }
 
     impl Render for SizedHost {
@@ -12237,6 +12314,7 @@ mod poll_rows_tests {
             show_voters,
             voted,
             deadline,
+            ..
         } = &rows[1].kind
         else {
             panic!("the poll row is a poll card");
@@ -12263,6 +12341,121 @@ mod poll_rows_tests {
                     vec!["user:ana".to_owned(), "user:me".to_owned()]
                 ),
             ]
+        );
+    }
+
+    /// My poll sits on my side like my bubble; someone else's after their disc like theirs,
+    /// at a narrow and a wide window (Doug 2026-11-19: "poll on left side when i sent it").
+    #[gpui::test]
+    fn my_poll_sits_right_and_theirs_after_their_disc(cx: &mut gpui::TestAppContext) {
+        use super::reaction_chip_tests::SizedHost;
+        let (_rt, state, transcript) = super::transcript_smoke_tests::mount_with(cx, Vec::new());
+        let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
+        let doc = ChatDoc::new(Some(1), false);
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+        let from = |sender: &str| UserMessageOpts {
+            sender: Some(sender.into()),
+            sender_name: Some("Ana".into()),
+            ..Default::default()
+        };
+        doc.transact(|d| {
+            d.append_poll_message("p1", &poll, "dev", &from("user:gh_ana"))
+                .unwrap();
+            d.append_poll_message("p3", &poll, "dev", &from("user:gh_ana"))
+                .unwrap();
+            d.append_poll_message("p2", &poll, "dev", &from(&me))
+                .unwrap();
+        });
+        let text = |id: &str, sender: &str| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "chatId": "c1", "role": "user", "sender": sender,
+                "senderHandle": "ana", "senderName": "Ana", "status": "done",
+                "createdAt": 1_700_000_000_000u64, "completedAt": 1_700_000_000_000u64,
+                "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": "ok" }],
+            }))
+            .expect("message")
+        };
+        state.update(cx, |s, cx| {
+            s.projects[0].kind = crate::model::SpaceKind::Group;
+            let rows = s.messages.entry("c1".into()).or_default();
+            rows.clear();
+            rows.extend(
+                doc.projected_rows()
+                    .into_iter()
+                    .map(|row| serde_json::from_value(row).expect("a core row reads as a Message")),
+            );
+            rows.extend([text("m1", "user:gh_ana"), text("m2", &me)]);
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        for width in [520.0_f32, 1400.0] {
+            let (_view, vcx) = cx.add_window_view(|_, _| SizedHost {
+                transcript: transcript.clone(),
+                width,
+            });
+            vcx.run_until_parked();
+            let mut bounds = |sel: &'static str| {
+                vcx.debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("{width} pt: {sel} drawn"))
+            };
+            let right = |b: Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+            let (mine, bubble) = (bounds("own-card"), bounds("own-bubble#m2#user"));
+            assert!(
+                (right(mine) - right(bubble)).abs() < 0.5,
+                "{width} pt: my poll ends at {} but my bubble at {}",
+                right(mine),
+                right(bubble)
+            );
+            let row = bounds("own-card-row");
+            assert!(
+                (f32::from(mine.size.width) - f32::from(row.size.width) * PEOPLE_BUBBLE_FRACTION)
+                    .abs()
+                    < 0.5,
+                "{width} pt: my poll is as wide as my bubble may get"
+            );
+            let (theirs, bubble) = (bounds("chat-bubble-cap"), bounds("person-bubble#m1#user"));
+            assert!(
+                (f32::from(theirs.origin.x) - f32::from(bubble.origin.x)).abs() < 0.5,
+                "{width} pt: their poll starts at {:?} but their bubble at {:?}",
+                theirs.origin.x,
+                bubble.origin.x
+            );
+            assert!(mine.origin.x > theirs.origin.x, "{width} pt: sides differ");
+            // Her run: the disc and her name on its first poll, an empty lane on the next.
+            let disc = bounds("disc#p1#poll");
+            assert!(right(disc) < f32::from(theirs.origin.x));
+            let who = bounds("who#p1#poll");
+            assert!(who.origin.x >= theirs.origin.x && who.origin.y < disc.origin.y);
+            assert!(vcx.debug_bounds("disc#p3#poll").is_none());
+            assert!(vcx.debug_bounds("who#p3#poll").is_none());
+            assert!(
+                vcx.debug_bounds("who#p2#poll").is_none(),
+                "mine has no name"
+            );
+        }
+    }
+
+    /// The fill of a poll's first and last option follows the list's rounded corners.
+    #[test]
+    fn a_polls_end_options_round_to_the_list() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let look = CardLook::of(&theme);
+        let corners = |ix: usize, count: usize| {
+            let mut row =
+                poll_option_row("p1#poll", ix, count, "1", "Lisbon", RowState::Open, &look);
+            let c = &row.style().corner_radii;
+            (c.top_left.is_some(), c.bottom_left.is_some())
+        };
+        assert_eq!(
+            [corners(0, 3), corners(1, 3), corners(2, 3), corners(0, 1)],
+            [(true, false), (false, false), (false, true), (true, true)]
         );
     }
 
@@ -12309,6 +12502,9 @@ mod poll_rows_tests {
                 show_voters: false,
                 voted: 0,
                 deadline,
+                sender: None,
+                named: false,
+                disc: false,
             },
         };
         let rows = [poll(None), poll(Some(50)), poll(Some(300)), poll(Some(200))];

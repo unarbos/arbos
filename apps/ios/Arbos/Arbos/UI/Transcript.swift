@@ -192,7 +192,7 @@ enum RowKind: Equatable {
     case cheque(bytes: String, mine: Bool, handle: String, avatar: String?)
     /// A poll (`docs/polls.md`): the question card kept open, each option with its count and my
     /// vote marked. `by` names whose poll it is when it is not mine.
-    case poll(poll: Poll, by: String?)
+    case poll(poll: Poll, by: String?, handle: String, avatar: String?)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -586,7 +586,8 @@ enum Transcript {
                 // words, for builds without polls.
                 if let poll = message.parts.lazy.compactMap(\.pollValue).first {
                     chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
-                                     kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone")))
+                                     kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone",
+                                                 handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
                     break
                 }
                 // Collect picture / video attachments first so a typed description can sit
@@ -966,7 +967,8 @@ enum Transcript {
         case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
-        case .user, .assistant, .system, .hidden, .question, .poll, .voiceMemo, .forwardHint, .error: return false
+        case .poll(poll: _, by: let by, handle: _, avatar: _): return by != nil
+        case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
         }
     }
 
@@ -2043,16 +2045,16 @@ struct RowView: View, Equatable {
                     Spacer(minLength: 0)
                 }
             }
-        case .poll(let poll, let by):
+        case .poll(let poll, let by, let handle, let avatar):
             // A poll with a time still to run redraws by itself, so the card closes and its
             // "closes in" line moves without waiting for the row to change: every 30 s, on a
             // beat that lands on the closing time itself.
             if let deadline = poll.deadline, !poll.closed(now: nowMs()) {
                 TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(deadline % 30_000) / 1000), by: 30)) { _ in
-                    pollCard(poll, by: by)
+                    pollCard(poll, by: by, handle: handle, avatar: avatar)
                 }
             } else {
-                pollCard(poll, by: by)
+                pollCard(poll, by: by, handle: handle, avatar: avatar)
             }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
@@ -2251,31 +2253,39 @@ struct RowView: View, Equatable {
     /// counts and takes no tap. Where its author chose "Show who voted", a tap on a count
     /// lists that option's voters under the card, as a held reaction chip does. Its maker
     /// closes or deletes it from the hold menu (`MessageMenu`).
-    private func pollCard(_ poll: Poll, by: String?) -> some View {
+    private func pollCard(_ poll: Poll, by: String?, handle: String, avatar: String?) -> some View {
         let lane = Theme.memberLane(composerInset: composerInset)
         let closed = poll.closed(now: nowMs())
         let namesFor = poll.showVoters == true ? poll.options.first { $0.id == pollVotersOption } : nil
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 0) {
-                Color.clear.frame(width: lane, height: 1)
-                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
-                             options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.counts[$0.id] ?? 0)") },
-                             multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
-                             onPick: { id in
-                                 // A hold that opened the message menu is not a vote.
-                                 guard let me = model.myUserId, !ChatGestures.heldIntoMenu,
-                                       !poll.closed(now: nowMs()) else { return }
-                                 model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
-                             },
-                             foot: poll.foot(by: by),
-                             // Like a vote, not the lifted finger of a hold that opened the
-                             // message menu.
-                             onHint: poll.showVoters == true ? { id in
-                                 guard !ChatGestures.heldIntoMenu else { return }
-                                 pollVotersOption = pollVotersOption == id ? nil : id
-                             } : nil)
-                    .frame(maxWidth: maxBubble - lane, alignment: .leading)
-                Spacer(minLength: 0)
+        let card = QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                                options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.counts[$0.id] ?? 0)") },
+                                multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
+                                onPick: { id in
+                                    // A hold that opened the message menu is not a vote.
+                                    guard let me = model.myUserId, !ChatGestures.heldIntoMenu,
+                                          !poll.closed(now: nowMs()) else { return }
+                                    model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                                },
+                                foot: poll.foot(by: by),
+                                // Like a vote, not the lifted finger of a hold that opened the
+                                // message menu.
+                                onHint: poll.showVoters == true ? { id in
+                                    guard !ChatGestures.heldIntoMenu else { return }
+                                    pollVotersOption = pollVotersOption == id ? nil : id
+                                } : nil)
+        // Mine sits right at my bubble's cap; someone else's after their avatar, like their bubble.
+        return VStack(alignment: by == nil ? .trailing : .leading, spacing: 4) {
+            if by == nil {
+                card.frame(maxWidth: maxBubble, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    avatarColumn {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    card.frame(maxWidth: maxBubble - lane, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             if let option = namesFor {
                 Text(Poll.voterLine(label: option.label, names: (poll.votes[option.id] ?? []).map(pollVoterName)))
@@ -2283,8 +2293,8 @@ struct RowView: View, Equatable {
                     .foregroundStyle(theme.muted)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, lane)
+                    .frame(maxWidth: .infinity, alignment: by == nil ? .trailing : .leading)
+                    .padding(.leading, by == nil ? 0 : lane)
                     .accessibilityIdentifier("poll-voters")
             }
         }
@@ -2340,7 +2350,7 @@ struct RowView: View, Equatable {
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
         case .cheque(_, let mine, _, _): return mine ? 0 : lane
-        case .poll: return lane
+        case .poll(_, let by, _, _): return by == nil ? 0 : lane
         case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
         case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0

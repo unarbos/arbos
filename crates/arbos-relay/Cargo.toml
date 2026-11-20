@@ -47,3 +47,5 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # The TLS server the boxd client's tests dial. Both are what reqwest already builds.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# Tests cut an update at a chosen op, as a box does with a backlog. arbos-core already builds it.
+loro.workspace = true
