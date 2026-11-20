@@ -19,13 +19,14 @@ use arbos_core::rpc::{self, Command as RpcCommand, Event, Record, Response};
 /// over once parsed. Far above any real record (an image part is a few MiB).
 pub(crate) const CHILD_LINE_MAX: usize = 32 * 1024 * 1024;
 
-/// The next line of a child's stdout, `None` at its end. A line over `max` bytes is an error,
-/// and the readers end on an error exactly as they do when the child closes its stdout: the
-/// child reads as gone at once, so the turn or job it was serving fails over now.
+/// How much of each end of an over-long line is kept to tell what it was.
+const OVER_CAP_KEEP: usize = 4096;
+
+/// The next line of a child's stdout, `None` at its end.
 ///
-/// Not skipped and read on, because the record that cannot be read may be the one the run is
-/// waiting for. A worker settles on `agent_end`, which carries the run's whole message list;
-/// dropping that line quietly would leave a finished job waiting until its cap.
+/// A line over `max` bytes is read past without being held, and what comes back in its place
+/// depends on what it was (see [`over_cap_line`]): the record a run ends on is kept as a record,
+/// anything else comes back empty, which no reader parses, and the stream goes on.
 pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
     stdout: &mut R,
     max: usize,
@@ -36,16 +37,60 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
         return Ok(None);
     }
     if buf.len() > max && buf.last() != Some(&b'\n') {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("a line over {max} bytes"),
-        ));
+        let head = buf[..OVER_CAP_KEEP.min(buf.len())].to_vec();
+        let mut tail = buf.split_off(buf.len().saturating_sub(OVER_CAP_KEEP));
+        drop(buf);
+        let mut chunk = Vec::new();
+        loop {
+            chunk.clear();
+            let mut part = (&mut *stdout).take(64 * 1024);
+            let read = part.read_until(b'\n', &mut chunk).await?;
+            tail.extend_from_slice(&chunk);
+            let excess = tail.len().saturating_sub(OVER_CAP_KEEP);
+            tail.drain(..excess);
+            if read == 0 || chunk.last() == Some(&b'\n') {
+                return Ok(Some(over_cap_line(&head, &tail, max)));
+            }
+        }
     }
-    Ok(Some(
-        String::from_utf8_lossy(&buf)
-            .trim_end_matches(['\n', '\r'])
-            .to_owned(),
-    ))
+    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8(buf).unwrap_or_else(|e| {
+        String::from_utf8_lossy(e.as_bytes()).into_owned()
+    })))
+}
+
+/// What stands in for a line that was over the cap, from its first and last few KiB.
+///
+/// `agent_end` is the record a Prime worker's run ends on, and it carries the run's whole
+/// message list, so it is the record most likely to be over the cap (a run with forty
+/// screenshots is). agentd reads one thing from it, `willRetry`, and nothing from `messages`. So
+/// it is handed on with that flag and an empty list: the run settles as it would have. Reading
+/// it as a lost child instead would give the finished job's brief to a fresh worker, which would
+/// do the work again and end on the same line.
+///
+/// Any other record is dropped: none of them ends a run, and the stream carries on after it.
+///
+/// The type and the flag are looked for as the bytes a top-level key is written with. Inside a
+/// message they would be inside a JSON string, with their quotes escaped, and would not match.
+fn over_cap_line(head: &[u8], tail: &[u8], max: usize) -> String {
+    let has = |needle: &[u8]| {
+        [head, tail]
+            .iter()
+            .any(|end| end.windows(needle.len()).any(|w| w == needle))
+    };
+    if has(br#""type":"agent_end""#) {
+        let will_retry = has(br#""willRetry":true"#);
+        tracing::warn!(
+            max,
+            will_retry,
+            "an agent_end over the line cap was settled without its messages"
+        );
+        return format!(r#"{{"type":"agent_end","messages":[],"willRetry":{will_retry}}}"#);
+    }
+    tracing::warn!(max, "a line from a child was over the cap and was dropped");
+    String::new()
 }
 
 pub struct RpcChild {
@@ -436,73 +481,65 @@ impl RpcChild {
 #[cfg(test)]
 mod capped_line_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
-    #[tokio::test]
-    async fn a_line_over_the_cap_is_an_error_and_lines_under_it_are_read() {
-        let input = format!(
-            "first\n{{\"type\":\"agent_start\"}}\r\n{}\nnever read\n",
-            "x".repeat(200_000)
-        );
+    async fn lines(input: &str, max: usize) -> Vec<String> {
         let mut stdout = BufReader::new(input.as_bytes());
-        assert_eq!(
-            read_capped_line(&mut stdout, 64).await.unwrap().unwrap(),
-            "first"
-        );
-        assert_eq!(
-            read_capped_line(&mut stdout, 64).await.unwrap().unwrap(),
-            "{\"type\":\"agent_start\"}"
-        );
-        let over = read_capped_line(&mut stdout, 64).await.unwrap_err();
-        assert_eq!(over.kind(), std::io::ErrorKind::InvalidData);
+        let mut out = Vec::new();
+        while let Some(line) = read_capped_line(&mut stdout, max).await.unwrap() {
+            out.push(line);
+        }
+        out
     }
 
-    /// The record a run ends on is the one most likely to be huge. A child whose terminal
-    /// record is over the cap must read as gone at once, with everyone waiting on it told, and
-    /// not sit there alive while the run waits out its cap for a line that was thrown away.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_child_whose_terminal_record_is_over_the_cap_reads_as_gone_at_once() {
-        let dir = std::env::temp_dir().join(format!("arbos-line-cap-{}", arbos_core::ids::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("child.py");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/usr/bin/env python3\nimport sys, time\nsys.stdout.write('{{\"type\":\"agent_end\",\"messages\":[\"' + 'x' * {} + '\"]}}\\n')\nsys.stdout.flush()\ntime.sleep(600)\n",
-                CHILD_LINE_MAX + 1024
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let child = RpcChild::spawn(
-            "fake-pi-line-cap",
-            &script.display().to_string(),
-            &[],
-            &[],
-            &dir,
-            &dir.join("child.log"),
-            None,
-        )
-        .await
-        .unwrap();
-        let mut events = child.subscribe();
-        let told = tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                match events.recv().await {
-                    Ok(Event::Other) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-        })
-        .await
-        .is_ok();
-        let alive = child.is_alive();
-        child.shutdown().await;
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(told, "nobody was told the child's stream ended");
-        assert!(
-            !alive,
-            "the child still reads as alive after its stream was abandoned"
+    #[tokio::test]
+    async fn a_line_over_the_cap_is_dropped_and_the_stream_goes_on() {
+        let input = format!(
+            "first\n{{\"type\":\"message_end\",\"x\":\"{}\"}}\n{{\"type\":\"agent_start\"}}\r\nlast",
+            "x".repeat(200_000)
         );
+        assert_eq!(
+            lines(&input, 64).await,
+            ["first", "", "{\"type\":\"agent_start\"}", "last"]
+        );
+    }
+
+    /// The record a run ends on, over the cap, still ends the run: it parses as an `agent_end`
+    /// with no messages and the flag it was sent with, whichever end of the line the keys are at.
+    #[tokio::test]
+    async fn an_agent_end_over_the_cap_is_still_an_agent_end() {
+        let big = "x".repeat(200_000);
+        // A message that quotes the words themselves must not be taken for the record's own keys.
+        let quoted = r#"{\"type\":\"agent_end\",\"willRetry\":true}"#;
+        for (line, retry) in [
+            (
+                format!(r#"{{"type":"agent_end","messages":["{big}"]}}"#),
+                false,
+            ),
+            (
+                format!(r#"{{"messages":["{big}"],"willRetry":true,"type":"agent_end"}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"type":"agent_end","messages":["{quoted}{big}"]}}"#),
+                false,
+            ),
+        ] {
+            let read = lines(&format!("{line}\nnext\n"), 64).await;
+            assert_eq!(read.len(), 2, "{read:?}");
+            assert_eq!(read[1], "next");
+            match rpc::parse_line(&read[0]) {
+                Some(Record::Event(Event::AgentEnd {
+                    messages,
+                    will_retry,
+                })) => {
+                    assert!(messages.is_empty());
+                    assert_eq!(will_retry, retry, "{}", &line[..60]);
+                }
+                _ => panic!("not an agent_end: {:?}", read[0]),
+            }
+        }
+        // Another record that merely quotes those words is dropped, not turned into an end.
+        let other = format!(r#"{{"type":"message_end","text":"{quoted}{big}"}}"#);
+        assert_eq!(lines(&format!("{other}\n"), 64).await, [""]);
     }
 }
