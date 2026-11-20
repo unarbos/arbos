@@ -104,9 +104,17 @@ final class PollTests: XCTestCase {
         let doc = try doc("poll-row")
         let rows = Transcript.rows(doc.readAll(), projectId: "people:c1", me: "user:ben", people: true, multiParty: true)
         let kinds = rows.map(\.kind)
-        XCTAssertTrue(kinds.contains { if case .poll(let poll, let by) = $0 { return poll.question == "Where?" && by == "Ana" }; return false })
+        XCTAssertTrue(kinds.contains { if case .poll(let poll, let by, _, _) = $0 { return poll.question == "Where?" && by == "Ana" }; return false })
         XCTAssertFalse(kinds.contains { if case .other = $0 { return true }; if case .member = $0 { return true }; return false },
                        "the plain-text twin draws no bubble")
+        // Ana's poll starts after her avatar; read as Ana it is hers, on her side.
+        let lane = Theme.memberLane(composerInset: 0)
+        let theirs = try XCTUnwrap(kinds.first { if case .poll = $0 { return true }; return false })
+        XCTAssertEqual(RowView.reactionLeading(for: theirs, composerInset: 0), lane)
+        let own = Transcript.rows(doc.readAll(), projectId: "people:c1", me: "user:ana", people: true, multiParty: true)
+        let mine = try XCTUnwrap(own.first { if case .poll(_, nil, _, _) = $0.kind { return true }; return false })
+        XCTAssertEqual(mine.role, .user)
+        XCTAssertEqual(RowView.reactionLeading(for: mine.kind, composerInset: 0), 0)
     }
 }
 
