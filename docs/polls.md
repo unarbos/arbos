@@ -296,7 +296,229 @@ and builds without polls.
 A row arriving whole that the relay already attested (a heal of lost history) carries its votes
 as they are, as it carries its sender.
 
-**Not built:** closing a poll (a Loro doc has no server order to say which votes came after the
-close, and a refused push is re-sent forever by an honest device, so the relay cannot refuse a
-late vote), server channels, native Matrix people chats, the agent tools, names of voters on
-iPhone, deleting a poll from iPhone.
+**Not built:** server channels, native Matrix people chats, the agent tools. Closing, voter
+names on iPhone and deleting from iPhone came later: section 11.
+
+## 11. Replies, visibility, closing (2026-11-17)
+
+Asked for by a tester on 2026-11-14: reply to a poll, choose whether who voted is shown, remove
+a poll, an optional duration. Closing by hand was already planned.
+
+**Stored shape, added.** All optional, so a poll stored before them still reads:
+
+- `poll.showVoters: bool`, written by every build since. It is "Show who voted", fixed with
+  the poll like the question. Its presence also marks a *timed* poll: one whose votes carry a
+  time and which can be closed. A poll without it (every poll from before the flag, and any
+  posted while the relay does not advertise the options) never closes and names its voters,
+  as every build has shown them.
+- `poll.closesIn: ms`, how long the poll runs before it closes by itself: what its author
+  picked, one minute to a week, valid only on a timed poll. Absent runs until closed by hand.
+- `pollCloses: ms` on the message: when a poll with a duration closes. The composing device
+  writes its own time plus the duration; the relay replaces it with its own time plus the
+  duration when it first stores the poll, and nobody writes it again. So a poll runs for
+  what was picked whatever the composing device's clock says, and a poll composed offline
+  starts running when the relay takes it.
+- `"voteAt|<sender>": ms` on the message, written with each vote on a timed poll.
+- `pollClosed: ms` on the message: the author's manual close.
+
+**One rule for "closed".** `arbos_core::poll::closed(deadline, now)` is `now >= deadline`, where
+the deadline is the earlier of `pollCloses` and `pollClosed`. The writers, the reducer, the relay
+and both apps (the iPhone over the FFI) call that one function; the apps read the deadline from
+the projected part.
+
+**One clock.** Every time on a poll is the relay's, so a device asks "closed?" and counts down
+against the relay's clock, not its own: `arbos_core::poll::now()` is the device's time moved
+by the difference it measured from the `Date` header of the relay's last `/me` answer
+(`set_relay_now`). Until that answer it is the device's own clock.
+
+**What the reducer enforces** (`project_poll`, on every device and on the relay's readers). On a
+timed poll a vote counts when it has a time and the poll was not closed at that time (a vote
+in the very millisecond of the close is not before it). It reads
+only the row, never the reader's clock, so every reader of the same row shows the same count,
+whatever order a close and a vote were merged in. It is the tie-breaker, not a guard: it
+believes the times on the row.
+
+**What the writers enforce** (`set_poll_vote`, `close_poll`, in the apps). No vote, change or
+retraction once `poll::now()` is past the deadline; a close only by the row's `sender`, and
+only once.
+
+**What the relay enforces** (`push_guard`), for chats it can read, by its own clock:
+
+- Refused outright, because no honest device pushes them: a close by someone who is
+  the poll's author neither by the relay's record of who posted the row nor by the name on
+  the row (`not_yours`); a close that is not a
+  time, or its removal (`bad_poll`); a vote or a vote time under someone else's name
+  (`not_yours`); a vote on a timed poll with no time (`bad_vote`); a duration over a week
+  (`bad_poll`); `pollCloses` written on a poll already posted (`poll_fixed`).
+- Corrected (`push_guard::corrections`) by a row the relay writes itself:
+  - a poll with a duration arriving for the first time gets `pollCloses` = the relay's time
+    plus `closesIn`;
+  - every changed vote on an open poll gets `voteAt|x` = the relay's time, and every first
+    `pollClosed` is set to the relay's time. No device time is kept, so the count depends on
+    one clock: a phone running ahead and a Mac running behind are both counted right;
+  - a `pollClosed` written over an earlier one is set back: a close is final;
+  - once the deadline has passed by the relay's clock, a changed `vote|x` or `voteAt|x` is set
+    back to what it was (a first vote becomes an empty one): no vote, change, retraction or
+    backdated time after the close;
+  - a message inserted under an id the relay saw deleted is taken out again, whoever pushes
+    it. The relay records the deletion on the message's author record
+    (`message_authors.deleted_at`) for this.
+
+  These are corrections and not refusals because honest devices produce every one of them: a
+  vote cast offline or in the second the author closed, a phone whose clock is off, a close
+  from the author's second device, a stale device healing a room. The client re-sends a
+  refused push on every reconnect and nothing queued behind it can go, so a refusal would cut
+  that device off the chat for good.
+
+  **A correction is part of the push.** It is computed and applied to the room's doc under
+  the room's admission lock, and stored with the push in one database transaction
+  (`Db::append_row_with`) together with who wrote each new message, which ids the relay now
+  holds a row for, and which the push deleted. Both rows are broadcast, in order, before the
+  lock is released, so no other push's row gets between them or ahead of them (a receiver
+  drops a row whose seq is not above the last it sent on). The next push, on any socket, is
+  judged against the corrected row; no reader of the room's rows sees the push without its
+  correction. If a correction cannot be computed, written whole or stored, the push is not
+  stored either: the socket errors and the device sends it again. A correction that would
+  change nothing (every field already holds the relay's value) is simply not written. A
+  device still shows its own uncorrected value until the relay's row reaches it.
+- A poll row arriving whole under an id **the relay itself stored a row for, and nobody
+  deleted,** is a heal of history the relay lost. Its votes, their times and its close are
+  taken as they come: a device restoring someone else's finished poll has to carry them, and
+  stamping them with today's time would void the count. "Stored" is a mark on the author
+  record (`message_authors.stored`) set only in the transaction of a push the relay accepted.
+  The announce route (`POST /chats/{id}/notify`) also writes an author record, for any
+  message id a member puts in its body, row or no row, and apps announce a message around
+  the moment they push it; that record names who announced an id and nothing more. A poll
+  arriving under an id that was only announced is a new poll: its vote fields must be the
+  pusher's, its times are stamped by the relay, its close must be its author's, it is
+  counted against the rate limit whatever the heal flag says. A record from before the mark
+  existed says neither (the column is empty): a timed poll cannot be that old, so under such
+  an id it is never history; a poll of the older shape is, as the relay took it before.
+- What is left: a row the relay stored and then really lost can be restored by any member
+  with content of their choosing, under the recorded author's name. That takes a loss of the
+  relay's data, which no client can cause, and it is the older AF-599 note in `push_guard.rs`,
+  not something polls add. Pushing a *deleted* poll back is the correction above: removed.
+- A deletion for everyone (by a push, the delete route, a Matrix redaction, or the relay
+  dropping an agent's blank row) is recorded as `deleted_at` on the message's author record,
+  in the transaction of the row that deletes it, a device's push and a relay write alike
+  (`notices::write_doc_deleting`). There is no table of deletions to grow: the record adds no
+  rows to `message_authors`, which the relay keeps one row per message in anyway. A message
+  with no author record leaves none; pushed back, it is a message the relay has never seen,
+  with every rule of a new one.
+- A vote, a close or a new poll goes through the people gates like a message, whether or
+  not the push calls itself a heal: a silenced, blocked or rate-limited member does not vote
+  or close. Only a poll row arriving whole that is restored history is exempt.
+- An agent does not vote: a vote written by a box is refused (`bad_vote`). A box is one
+  principal for every agent its owner has in the chat.
+- A push that removes a message and inserts a row under the same id is refused
+  (`replaced_id`), and a row a push removed is never read as restored history in that push.
+  The record still says "stored, not deleted" while the push is judged; without this a
+  poll's author, or a moderator, could delete a poll and put it back with any votes on it.
+- Every relay write to a room (`notices::write_doc*`, the agent-link send in `export.rs`)
+  stores and broadcasts its row under the room's admission lock, the one a push holds while
+  it is stored with its correction and broadcast. So rows get their seq and leave in one
+  order: a relay row cannot be sent ahead of a push stored before it, nor land between a
+  push and its correction. The lock covers the store and the broadcast only; a relay write
+  reads the room and makes its edit before taking it, so an outside agent's stream (one
+  relay write per event) does not hold up the room's pushes while it builds each one.
+
+**What nothing enforces.** Under end-to-end encryption the relay reads no poll field, so none
+of the relay rules exist: times are then the writers' device clocks and a modified client can
+backdate its own vote or rewrite its own close, with only the reducer's rule left. Votes are
+not anonymous in storage in any mode: each is a field named after its voter, held by every
+member's device and by the relay.
+
+**Voter visibility.** When `showVoters` is `false`, `project_poll` gives the layer above it
+the counts (`counts`, `voters`) and the reader's own vote. It takes the other voters out of
+the poll part *and* takes their stored `vote|…` and `voteAt|…` fields off the projected row,
+so nothing it returns carries another voter's id. The reader is passed in by the caller
+(`projected_rows_for`, the FFI's `viewer` argument, the Mac's `read_all_as`); the relay's
+readers pass none. Of those, the agent export and read routes and the Matrix history mirror
+emit a row's text and its attachment, error, question and approval parts, never the poll
+part or a vote field. The ids are still in the document itself, which every member's device
+and the relay hold.
+
+**Older builds** read a poll through the strict validator, which rejects the new `showVoters`
+field, so a poll posted by a new build is plain text to them ("Poll: question / 1. … / 2. …"):
+readable, not votable, and nothing they write can alter the poll or its votes. One thing they
+can alter: the author, on an older build, sees their poll as an ordinary text message of their
+own and is offered Edit on it. An edit there changes the text part only — what previews,
+notifications, search, agents and other older builds read — while newer builds keep drawing
+the card from the unchanged `poll` field. This is deliberate. A build that
+does not know about closing would otherwise keep offering votes on a closed poll and would
+show voter names on hover (Mac) for a poll whose author hid them.
+
+**A new app against an older relay.** A relay without this change refuses the new shape as
+`bad_poll`, and a refused push is sent again for ever. Release order alone does not protect
+anyone, so the relay says what it takes: `features.poll_options` on `GET /me`. Without it
+(an older relay, or before `/me` has answered once) the apps offer no "Show who voted", no
+duration and no Close poll, and post polls in the older shape (`Poll::older`), which every
+relay takes. The relay should still be deployed first, so that the options appear.
+
+**Replies, closing and removal.** A poll row takes the ordinary message menu: Reply (the quote
+reads "Poll: <question>"), Close poll for its maker while it is open, Delete for its maker and
+the chat's moderators, no Edit. The iPhone asks before closing; the Mac closes at once, as its
+Delete does.
+
+**Creating one.** Both composers offer: single or multiple answers, "Show who voted", and how
+long it runs — no limit, 1 hour, 1 day, 1 week, or a custom time (a date and time on iPhone,
+a number of hours on the Mac), at most a week.
+
+**Not built:** editing a poll. The poll field is written once and the relay refuses a rewrite
+(`poll_fixed`); allowing it while there are no votes needs a rule for a vote and an edit
+written apart and merged later.
+
+## 12. Anonymous polls (design, not built)
+
+Asked for again on 2026-11-19: "anon or public". Section 11's "Show who voted" off is **not**
+anonymous and must not be called that: every vote is a field named after its voter in the
+chat's document (`vote|<sender>`), which every member's device holds and the relay stores.
+The core's reader leaves the names out of what it hands the apps, so no build draws them; a
+modified client, or anyone reading the device's store, has them. "Names hidden" is a display
+rule, not secrecy. A vote written
+into the shared document cannot be anonymous towards the other members, whatever the apps
+show, so anonymous polls need votes that never enter it.
+
+**Design: the relay holds the ballots and publishes only tallies.**
+
+- *Shape.* `poll.anonymous: true`, fixed with the poll like every other poll field. Such a
+  poll never carries `vote|…` or `voteAt|…` fields; the push guard refuses them on it
+  (`bad_vote` — no honest build writes them).
+- *Casting.* `PUT /chats/{chat}/polls/{message}/ballot` with `{ "selections": ["<option id>"] }`
+  (empty retracts), unknown fields rejected. The relay authenticates the device, requires
+  membership of the chat, reads the poll from its own copy of the room, checks the
+  selections against it (known options, no repeats, at most `max`) and refuses after the
+  deadline by its own clock. This is an ordinary request with an ordinary error, so a late or
+  refused vote strands nothing — unlike a refused push. Same rate limit as a message.
+- *Storage.* `poll_ballots(chat_id, message_id, user_id, selections, updated_at)`, one row per
+  voter. Deleted with the poll (the same transaction that records the deletion).
+- *Publishing.* After each accepted ballot the relay writes `tally: { counts, voters }` on the
+  message, as a row of its own under the room's admission lock. `tally` is the relay's field:
+  the guard refuses it from any device. Readers draw counts from it; the reducer has nothing
+  to count.
+- *Tally at close.* `poll.tallyAtClose: true`, the maker's choice in the composer and fixed
+  with the poll like the rest. The relay then takes ballots as above and writes no `tally`
+  until the poll's deadline has passed by its clock (the duration running out, or the maker's
+  close), and writes it once. Until then the card shows how many people voted, which the
+  relay publishes as `tally: { voters }`, and no counts. Only a poll that can close may ask
+  for it: one with a duration, or one its maker will close.
+- *My own vote.* `GET` on the same route returns the caller's selections; the app keeps them
+  per device. Nobody else's are ever returned.
+- *Closing and deleting* are unchanged: the maker's `pollClosed`, stamped by the relay.
+
+**What it does and does not hide.**
+
+- Other members and their devices: they see counts only. Nothing they hold names a voter.
+- The relay: sees everything — who voted, for what, when. So does anyone with the relay's
+  database. Hiding votes from the relay needs blind signatures or a mix, and is not proposed.
+- Inference from the counts stays possible and no design removes it: in a chat of three a
+  unanimous result names everyone; a member watching the count move while one other person
+  is online learns that person's vote. "Tally at close" removes the second: nobody sees a
+  count move.
+- End-to-end encrypted chats: the relay can read neither the poll nor write a tally, so
+  anonymous polls cannot exist there in this design.
+- Builds without this read the poll as plain text (unknown poll field), as with section 11.
+
+**Scope.** A new authenticated route, a table, a relay-written field with its guard rule, a
+second vote path in both apps and the tests for all of it: its own change, after section 11
+ships. Until then the composers offer "Show who voted" on or off and nothing named anonymous.

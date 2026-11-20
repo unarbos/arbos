@@ -277,7 +277,7 @@ pub struct DecodedFrame {
 /// are not a poll within bounds — the composer's one validity check (`docs/polls.md`).
 #[uniffi::export]
 pub fn poll_text(question: String, options: Vec<String>, multiple: bool) -> Option<String> {
-    Poll::new(&question, &options, multiple).map(|p| p.fallback_text())
+    Poll::older(&question, &options, multiple).map(|p| p.fallback_text())
 }
 
 /// Encode one binary room frame. `header_json` must be a JSON object.
@@ -786,7 +786,7 @@ impl ChatDoc {
     /// One projected message row (`project_hidden_parts` + `project_reactions`),
     /// same shape as an element of [`Self::read_rows_json`].
     pub fn read_message_json(&self, index: u64) -> Option<String> {
-        let row = self.lock_doc().projected_row(index as usize)?;
+        let row = self.lock_doc().projected_row(index as usize, None)?;
         Some(serde_json::to_string(&row).unwrap_or_else(|_| "null".into()))
     }
 
@@ -882,7 +882,7 @@ impl ChatDoc {
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
-        let poll = Poll::new(&question, &options, multiple)
+        let poll = Poll::older(&question, &options, multiple)
             .ok_or_else(|| write_err("not a poll within bounds"))?;
         self.lock_doc()
             .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
