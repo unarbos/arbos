@@ -28,6 +28,7 @@ Files:
 |---|---|
 | `docker-compose.yml` | the services above |
 | `prometheus/prometheus.yml` | scrape jobs |
+| `prometheus/available/`, `prometheus/enabled/` | scrape jobs that are ready but off (the per-box agentd job), and the empty folder Prometheus loads jobs from |
 | `prometheus/rules.yml` | alerts |
 | `prometheus/subnet-rules.yml`, `prometheus/subnet.yml` | the aggregates behind the Subnet view, and the Prometheus that holds only them |
 | `prometheus/rules_test.yml` | unit tests for both rule files |
@@ -233,7 +234,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
 | `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend), ten series per box |
-| `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
+| `arbos-agentd` (**off**: in `prometheus/available/`, see below) | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
 `/etc/arbos/relay.env` (`scripts/deploy/relay-server.sh` keeps the variable across deploys). The
@@ -242,6 +243,21 @@ the planned relay deploy and never by a restart of its own (runbook steps 8 and 
 relay and agent panels show "–", the two jobs are down or empty, and nothing alerts on them
 (`ScrapeTargetDown` ignores a target that has never answered). The agent metrics and box discovery
 arrive with a later relay release and with boxes on a newer image (#3096).
+
+**The per-box job is ready but switched off.** Boxes on the current image have no `/metrics`, so
+with the job on, every awake box would be a target that reads down. Its definition is
+`prometheus/available/agentd.yml`; Prometheus loads only what is in `prometheus/enabled/`, which is
+empty. Once the box image is rolled, on the host:
+
+```bash
+cd /etc/arbos-monitoring
+cp prometheus/available/agentd.yml prometheus/enabled/ && docker kill -s HUP arbos-mon-prometheus
+```
+
+and off again with `rm prometheus/enabled/agentd.yml` and the same `HUP`. Neither interrupts anyone.
+The Agents dashboard reads "–" until then; the relay's own numbers about boxes (the `relay` and
+`relay-boxes` jobs) do not depend on it. With the job on, a box that has gone to sleep since it was
+last listed answers 404 for a scrape or two; no alert reads that.
 
 A box on an image from before agentd had `/metrics` is listed but cannot be scraped. The relay
 counts awake boxes by how their last scrape ended (`arbos_relay_box_scrapes`), and the Agents
@@ -513,8 +529,8 @@ Undo, deleting data and images: `cd /etc/arbos-monitoring && docker compose --en
 ### 5. Check what could not be checked off the host — changes nothing
 
 ```bash
-# every target: 1 = scraped. relay reads 0 until step 9. No box target is listed until the relay
-# release with box discovery (#3096) is deployed and boxes run an image that reports.
+# every target: 1 = scraped. relay reads 0 until step 9. There is no per-box target: that job is
+# switched off until the box image is rolled (prometheus/available/agentd.yml).
 curl -s '127.0.0.1:9090/api/v1/query?query=up' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
 # every probe: 1 = answered. The relay on loopback and relay.arbos.life must be 1; arbos.life may be 0.
 curl -s '127.0.0.1:9090/api/v1/query?query=probe_success' | python3 -c 'import json,sys; [print(r["value"][1], r["metric"]["job"], r["metric"]["instance"]) for r in json.load(sys.stdin)["data"]["result"]]'
@@ -528,10 +544,6 @@ curl -s 127.0.0.1:9180/metrics | grep '^container_network_receive_bytes_total{.*
 # cAdvisor could open the kernel log: this prints nothing
 docker logs arbos-mon-cadvisor 2>&1 | grep -i 'disabling OOM events'
 ```
-
-Until box discovery exists, Prometheus logs one line a minute, `Unable to refresh target groups …
-config=arbos-agentd` (connection refused before step 9, HTTP 404 after it). That is the box job
-finding no list of boxes; it is expected and stops by itself with #3096.
 
 What each outcome means:
 
