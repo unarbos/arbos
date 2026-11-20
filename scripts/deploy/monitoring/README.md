@@ -31,6 +31,7 @@ Files:
 | `prometheus/rules.yml` | alerts |
 | `prometheus/subnet-rules.yml`, `prometheus/subnet.yml` | the aggregates behind the Subnet view, and the Prometheus that holds only them |
 | `prometheus/rules_test.yml` | unit tests for both rule files |
+| `check-rules.py` | reads `subnet-rules.yml` and fails if a rule could let a counter or a label leave, or passes a count of machines or an amount of tokens or calls on uncoarsened; the rounding numbers are named there |
 | `alertmanager/alertmanager.yml`, `blackbox/blackbox.yml` | their configs |
 | `grafana/provisioning/` | datasource and dashboard loading for the main organisation |
 | `grafana/dashboards/*.json`, `grafana/dashboards-subnet/subnet.json` | the dashboards, written by `dashboards.py` |
@@ -42,23 +43,37 @@ Files:
 
 ## Dashboards
 
-- **Arbos fleet** (home), three rows of single stats then time series. Service: relay and public
+- **Arbos** (home, in both organisations): the front page, one screen. Six numbers (service,
+  machines working, tokens per minute and in 24 hours, model calls succeeding, spend of the daily
+  cap), the fleet in the centre with machines by state and host use beside it, then tokens,
+  model calls and machine starts over time; below the fold spend, host and machines over time.
+  It is generated once and written twice, `grafana/dashboards/arbos.json` and
+  `grafana/dashboards-subnet/subnet.json`. The team's copy reads exact figures and the partner's
+  the same figures rounded. They differ in the centre: the team has the swarm, one dot per
+  box; the partner has machines by tokens per minute, as counts. See
+  [What the partner sees of the machines](#what-the-partner-sees-of-the-machines). The team's copy also splits tokens by
+  kind and links to the dashboards below.
+- **Arbos fleet**, three rows of single stats then time series. Service: relay and public
   probes, kill switch, today's spend against the daily cap, model errors and response time, relay
   restarts, targets down. Boxes: running, slots used against `max_boxes`, asleep, waitlisted, start
   failures, wake queue. Host: CPU, memory, disk free and days until full, load, relay memory,
   sockets, database writer wait.
 - **Boxes**: top-N boxes by CPU, memory, pids, disk IO and network; every box against its memory
   and pids limit; OOM kills and restarts; a drill-down by the `Box` variable.
+- **Swarm**: every box at once, refreshed every 5 s. One bubble per box: up is tokens per minute
+  its agents are using, right is CPU, area is memory, colour is state (working a turn, awake and
+  idle, waking, asleep, error). A busy fleet rises off the floor and an idle one sits along it.
+  Around it: tokens per second, per minute and per 24 hours, model calls, spend against the cap,
+  boxes by state, token rate by kind, the busiest boxes, a table of every box with tokens, calls
+  and spend beside CPU, memory, pids and network, and a drill-down by the `Box` variable. See
+  [Swarm and the relay](#swarm-and-the-relay) for what it shows on which relay.
 - **Agents**: turns started / finished / failed, turn duration percentiles, messages waiting,
   crashes, model calls, errors and response time, and how many awake boxes are reporting.
-- **Subnet view** (separate organisation), aggregates only, and only what the relay, the host and
-  the probes feed, which is what exists today: service up, reachable from outside (the relay's own
-  public name), machines running, machines working now, model calls succeeding and per minute,
-  model response time, machine starts succeeding, machine wake time, waiting for a machine, host
-  CPU and memory. A percentage with nothing to divide by reads 100 (nothing failed); a tile whose
-  source is not reporting says "no data yet" in grey, never a blank or a NaN. Turn counts and turn
-  duration can only come from the machines themselves; the rules for them exist and are tested, and
-  the panels are added when boxes run an image that reports them (#3096).
+- **Subnet view** is what this page calls the partner's copy of Arbos: the one dashboard of the
+  Subnet organisation and its home. A percentage with nothing to divide by reads 100 (nothing
+  failed); a figure whose source is not reporting says so in grey, never a blank or a NaN. Turn
+  counts and turn duration can only come from the machines themselves; the rules for them exist
+  and are tested, and the panels are added when boxes run an image that reports them (#3096).
 
 To change a panel: edit the query in `dashboards.py`, run `python3 dashboards.py`, commit both.
 Grafana reloads the files within a minute; the Subnet view is reloaded by `grafana-access.sh`.
@@ -134,13 +149,18 @@ It arrives within 30 seconds and resolves itself after five minutes.
 - **Why a second Prometheus.** A Grafana Viewer can send any query to any datasource of their
   organisation, whatever dashboards they are allowed to open; hiding a dashboard is not a
   boundary. So the Subnet organisation's datasource is an instance that only ever receives the
-  `subnet:*` recording rules, each of which aggregates every label away. There is no query that
-  returns a user id, a container name or a hostname, because that data is not there.
-  `prometheus/rules_test.yml` feeds the rules labelled input and fails if a label comes out;
+  `subnet:*` recording rules, each of which aggregates the identifying labels away. There is no
+  query that returns a user id, a container name, a box id or a hostname, because that data is
+  not there, and nothing in it is per machine. One label does leave: `bucket`, on a count of
+  machines ([What the partner sees of the machines](#what-the-partner-sees-of-the-machines)). It has no scrape job for the relay at all, so it
+  cannot be pointed at `/metrics/boxes` by changing a path; it federates and nothing else.
+  `prometheus/rules_test.yml` feeds the rules labelled input and lists their complete output;
   `grafana-access.sh` ends by logging in as the viewer and failing unless the admin dashboards
   and datasource refuse it.
-- Container names contain user ids. They appear on the Boxes dashboard only: not in the Subnet
-  view and not in alert messages. (The `box` label on agent metrics is an opaque id.)
+- Container names contain user ids. They appear on the Boxes and Swarm dashboards only: not in
+  the Subnet view and not in alert messages. (The `box` label on agent and relay metrics is an
+  opaque id; `arbos_relay_box_info` is the one series that ties it to a container, and it exists
+  only in the main Prometheus, which scrapes it from a path of its own.)
 
 ## What cAdvisor is given
 
@@ -213,6 +233,7 @@ through the relay's metrics listener, which is loopback-only and needs no creden
 | job | scrapes |
 |---|---|
 | `relay` | `http://127.0.0.1:9108/metrics` |
+| `relay-boxes` | `http://127.0.0.1:9108/metrics/boxes`, every 5 s: the relay's own view of each registered box (state, turn running, sockets, tokens, calls, spend), ten series per box |
 | `arbos-agentd` | one target per awake box, discovered from `http://127.0.0.1:9108/metrics/targets`; the relay proxies each scrape to that box's agentd. The `box` label is an opaque keyed id: it is not a user id and cannot be derived from one. A sleeping box is absent, not down. A box is its user's machine, so its answer is untrusted: the relay passes on only agentd's own lines, and the job caps a scrape at 500 samples and 512 KB. |
 
 The listener exists only when the relay runs with `ARBOS_RELAY_METRICS_LISTEN=127.0.0.1:9108` in
@@ -233,6 +254,108 @@ A counter with labels does not exist until its first event, so a healthy relay h
 series. Failure panels and the Subnet view read 0 in that case while the relay (or any agentd) is
 reporting, and stay empty when there is no data at all. Relay up,
 memory, CPU and restarts, and every host and container panel, do not depend on it.
+
+## Swarm and the relay
+
+The Swarm dashboard joins two sources per box: cAdvisor (CPU, memory, pids, network; there today)
+and the relay's `/metrics/boxes` (state, tokens, calls, spend; there once the relay runs a release
+with it, #3129). `arbos_relay_box_info{box, container}` is the join: `container` is the name
+cAdvisor reports.
+
+| | relay as deployed today | relay with `/metrics/boxes` |
+|---|---|---|
+| Swarm | every running box by CPU and memory, grey (state unknown), on the floor | tokens per minute on the vertical axis, colour by state, sleeping boxes at the origin |
+| Network against CPU | live | live |
+| Working, Running, Calls / min, Spend, Boxes by state | live (the relay's fleet gauges) | live |
+| Tokens / s, / min, / 24 h; token charts; table columns Tokens, Calls, Spend | "after the next relay update" | live |
+| Arbos, both copies: token numbers and token chart | "after the next relay update" | live |
+| Arbos, the team's swarm | as Swarm above | as Swarm above |
+| Arbos, the partner's machines by tokens per minute | "after the next relay update" | counts per group |
+| Arbos, everything else | live | live |
+
+Nothing is configured when the relay changes: the `relay-boxes` job answers 404 until then, alerts
+on nothing (`ScrapeTargetDown` leaves out the relay's jobs; `RelayMetricsOff` is the alert for the
+listener), and the panels fill by themselves.
+
+A model call is counted when it ends, because the provider reports usage last. Token rates
+therefore move in steps, one per finished call, not with the stream.
+
+For about half a minute after a relay restart its counters are there but have no rate yet. The
+token figures then say "relay just restarted", which is a different thing from "after the next
+relay update" (a relay that does not count tokens at all).
+
+The swarm's colour puts tokens first: a box that used tokens in the last minute is "working"
+whatever the relay believes about it. The relay's own state can be stale (it has just restarted
+and not heard from the box, or lost its heartbeat), and its turn flag drops at the first keepalive
+after a turn while that turn's tokens are still in the rate.
+
+"Tokens / 24 h" is the last 24 hours, not the calendar day, and counts from the relay's start if
+that is more recent: the counters live in the relay's memory and restart at zero with it.
+
+**Cost of the 5 s scrape.** Ten series per registered box: about 720 series for 72 boxes and 1,500
+at the cap of 150, roughly 60–120 KB per scrape, written by the relay from memory with no
+database read. In Prometheus that is 12–26 million samples a day; most are constants, so expect
+under 0.5 GB over the 15 days of retention. The scrape is the only thing here faster than 15 s;
+if it has to be slower, change `scrape_interval` of `relay-boxes` and the windows that are shorter
+than four scrapes (`[20s]` in `dashboards.py`).
+
+## What the partner sees of the machines
+
+The team's copy of Arbos has the swarm: one dot per box. The partner's copy has the same fleet as
+counts, **machines by tokens per minute**, and nothing per machine leaves the main Prometheus in
+any form.
+
+Why not anonymous dots. A dot per machine was built first, each under a random number redrawn
+every five minutes, with rounded values. The label was untraceable and the dots were not: a dot
+carries its machine's own numbers, the partner's Prometheus keeps 15 days of them, and a Viewer
+can ask it for ranges. The dot at 37,000 tokens a minute, 1.3 cores and 2.5 GiB under one number
+and the dot with the same figures under another, 30 seconds later, are one machine. Matching
+nearest neighbours re-links every active machine at every draw, which makes it a per-machine
+history under a pseudonym. So no per-machine series is exported, under any label.
+
+What leaves instead is coarse on purpose, so that comparing two samples does not show one
+machine arriving, leaving or changing what it does:
+
+- **Every count of machines** leaves as 0, as "<5" for one to four, or rounded to the nearest
+  five. That covers machines by tokens per minute (`subnet:boxes_by_token_rate{bucket}`: idle,
+  under 10K, 10K to 100K, 100K to 1M, over 1M; five-minute average) and machines by state
+  (working, awake and idle, waking, asleep, error, waiting, running). No exact total is exported
+  beside them. `bucket` is the only label any `subnet:*` series carries.
+- **Every amount of tokens or calls** leaves at two significant figures: tokens per minute,
+  tokens in 24 hours, model calls per minute. An exact running total would let a reader take
+  differences and get back a fine-grained rate. While fewer than 5 machines are using tokens the
+  token rate has one significant figure.
+- **Tokens are a total**, not split by kind. With public list prices, input, output and cache
+  tokens separately are a dollar figure; the split is on the team's copy only. The total still
+  bounds the spend loosely, and that is accepted.
+- **Spend** is a share of the daily cap rounded to the whole percent (`subnet:spend_cap_ratio`),
+  never an amount.
+- The team's copy reads the exact figures behind these (`arbos:*` rules of the same names), which
+  the partner's Prometheus does not have.
+
+What is hidden and what is not.
+
+- Hidden: any machine's own series; which machine is which; exact counts and exact totals, and
+  so the single step of one machine moving between groups or states in most cases.
+- Not hidden: a count crossing a rounding boundary (7 to 8 machines shows as 5 to 10; 4 to 5 as
+  "<5" to 5; 0 to 1 as 0 to "<5"). One such step can coincide with one machine's move, and a
+  reader sees that some machine moved, never which.
+- Not hidden: when one machine is active alone, a reader sees which token band it is in ("<5" in
+  one group, 0 in the other active groups) and the fleet's token rate to one figure. That is that
+  machine's activity, coarsely. Nothing names it.
+- Not hidden: events of the fleet as rates (machine starts and failed starts per minute, the
+  share of model calls that failed). They say that something happened, not to whom.
+- This is rounding, not a formal privacy guarantee.
+
+`check-rules.py` holds the numbers (5, nearest 5, two figures, one percent) and the exact
+expression every such rule must have; it fails if a rule could let a counter or a label leave or
+passes a count or an amount on uncoarsened. `prometheus/rules_test.yml` proves the same on
+labelled input, and `local/check-dashboards.py` asserts the label set of the running Subnet
+datasource.
+
+Not covered here: `subnet:turns_active` and `subnet:queue_depth` are exact sums of what agentd
+reports. They are on no dashboard and have no data until boxes report (#3096); coarsen them the
+same way before they are shown to the partner.
 
 ## Decisions
 
@@ -279,8 +402,12 @@ one network namespace instead of the host's; the public probes hit the real `rel
 `arbos.life` (two GETs every 30 s); the relay's systemd-service series are faked, since a Mac has
 no such cgroup; and the test boxes run on `runc`, so nothing here exercises gVisor.
 
-To see the Subnet view as it is before any box reports (relay metrics only), start with no boxes
-in the fake and check that no tile is blank:
+The fake also stands in for a fleet: 40 more boxes as cAdvisor and the relay would report them
+(`/metrics/boxes`), so the Swarm dashboard has a swarm to show.
+
+`FAKE_BOXES=0` makes the fake the relay production runs today: no box reports, no `/metrics/boxes`,
+no token counter. The Subnet view and the Swarm must then have data everywhere except the token
+figures, which say so:
 
 ```bash
 FAKE_BOXES=0 docker compose --env-file local/local.env -f docker-compose.yml -f docker-compose.local.yml up -d
@@ -448,7 +575,7 @@ Safari does not):
 ssh -N -L 3300:127.0.0.1:3300 <the relay host>
 ```
 
-then open `http://localhost:3300` and log in as `admin`: Arbos fleet is the home page. Host,
+then open `http://localhost:3300` and log in as `admin`: Arbos is the home page. Host,
 container, probe and relay-process panels have data now; the relay's own and the agent panels show
 "–" until step 9.
 
@@ -510,7 +637,9 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7700/healthz
 ```
 
 `exit 0` and `200`: deployed. `exit 75`: a canary smoke or another deploy holds the lane; nothing
-happened, run it again when that is done. `exit 1` with `set SHA to the full commit id first`: the commit
+happened, run it again when that is done. If it keeps answering 75 with no `relay.deploying`,
+`agentd.canary` or `www.reloading` file in `/var/lib/arbos-deploy`, a process left by an earlier lane
+command holds the lock: `find /proc/[0-9]*/fd -lname /var/lib/arbos-deploy/.lane.lock` names it. `exit 1` with `set SHA to the full commit id first`: the commit
 was not filled in and nothing ran (the deploy script would otherwise take main's head). Any other exit: the
 deploy script failed; its output is above, and the relay keeps running what it ran (the script
 never rolls back).
@@ -557,6 +686,29 @@ the viewer the address and their login, over a private channel.
 
 It does not show agent turns: those figures can only come from the machines, which do not report
 them yet (#3096 and an image roll). Say so when handing over; the panels are added then.
+
+## Updating a running stack — interrupts nobody
+
+For a change to dashboards, rules or scrape jobs (nothing in `docker-compose.yml`). On the relay
+host, as root, from a checkout of `main` at the merged commit:
+
+```bash
+REPO=/path/to/the/arbos/checkout
+git -c safe.directory="$REPO" -C "$REPO" archive HEAD scripts/deploy/monitoring | tar -x -C /etc/arbos-monitoring --strip-components=3
+docker exec arbos-mon-prometheus promtool check config /etc/prometheus/prometheus.yml
+docker kill -s HUP arbos-mon-prometheus
+/etc/arbos-monitoring/grafana-access.sh
+```
+
+`promtool` must end in `SUCCESS` before the next line; `HUP` makes Prometheus re-read its
+configuration and rules without restarting (no gap in the data). Grafana loads new and changed
+admin dashboards from the files within a minute. `grafana-access.sh` reloads the Subnet view; it
+is safe to run again. No container restarts, and nothing outside the stack is touched.
+
+If `docker-compose.yml` itself changed, `cd /etc/arbos-monitoring && docker compose --env-file
+/etc/arbos/monitoring.env up -d` re-creates only the services whose definition changed.
+
+Undo: the same commands from the previous commit.
 
 ## Rolling back everything
 

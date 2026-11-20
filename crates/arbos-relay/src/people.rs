@@ -4316,6 +4316,35 @@ pub fn resolve_mentions(
     out
 }
 
+/// Would [`on_room_push`] refuse this person's row? Read-only: it counts nothing and tells
+/// nobody, for a caller that has to answer a push it is not going to store.
+pub fn room_push_refusal(
+    state: &AppState,
+    principal: &Principal,
+    chat_id: &str,
+) -> Option<PushRefused> {
+    let Principal::Device { user_id, .. } = principal else {
+        return None;
+    };
+    let Ok(cm) = load_chat(state, chat_id) else {
+        return Some(PushRefused::NotAvailable);
+    };
+    if let Err(r) = sender_allowed(state, user_id, &cm) {
+        return Some(r);
+    }
+    let limit = if young_account(state, user_id) {
+        MSGS_PER_MIN / 2
+    } else {
+        MSGS_PER_MIN
+    };
+    // An unreadable count is "not over the limit" here: the caller refuses the push anyway.
+    (state.db.rate_count(user_id, "msg", 60_000).unwrap_or(0) >= limit).then(|| {
+        PushRefused::RateLimited {
+            retry_s: state.db.rate_retry_s(user_id, "msg", 60_000).unwrap_or(1),
+        }
+    })
+}
+
 /// Gates a person's row into a people chat and returns the agents whose boxes it must reach.
 pub fn on_room_push(
     state: &AppState,
