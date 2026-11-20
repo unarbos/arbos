@@ -14,9 +14,13 @@ use super::{Accent, Rgb};
 /// Number of disc colours.
 pub const COLOR_COUNT: u8 = 10;
 
-/// Bump when the index rule changes, so clients refresh cached defaults. 1 and 2 were the leaf
-/// avatars this replaced; a client that cached a leaf index sees a new version and re-derives.
-pub const DISC_RULE_VERSION: u32 = 3;
+/// Bump when anything `GET /avatar-discs` publishes changes — the index arithmetic, or what a
+/// stored value means — so a client that polls the rule and compares versions re-reads it
+/// instead of keeping the reading it cached. 1 and 2 were the leaf avatars this replaced; a
+/// client that cached a leaf index sees a new version and re-derives. 3 told third-party
+/// clients that [`NEUTRAL`] meant a grey lettered disc, which no client has drawn since
+/// 2026-11-06, so leaving the version there would have claimed a rule that changed had not.
+pub const DISC_RULE_VERSION: u32 = 4;
 
 /// "No picture" (Jacob, 2026-10-25): an agent, group or server created from the Create sheet
 /// without an uploaded or generated picture is stored with `avatar_disc_color` = `NEUTRAL` and
