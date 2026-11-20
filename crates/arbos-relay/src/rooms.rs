@@ -130,6 +130,33 @@ struct PendingRoomPush<'a> {
 }
 
 impl PendingRoomPush<'_> {
+    /// The relay's own writes in answer to this push (`push_guard::corrections`), applied to
+    /// the speculative doc and returned as the update to store right behind the push. Still
+    /// under the admission lock: the next push on any socket is diffed against the corrected
+    /// doc. An error here fails the push — nothing is stored and the device sends it again —
+    /// because a push stored without its correction would become the state the relay defends.
+    fn correct(&mut self, state: &AppState, chat_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let now = arbos_core::ids::now_ms();
+        let fixes = crate::push_guard::corrections(state, chat_id, &self.changes, now)?;
+        if fixes.is_empty() {
+            return Ok(None);
+        }
+        let doc = &self.cached.doc;
+        let base = doc.oplog_vv();
+        doc.transact(|doc| fixes.iter().try_for_each(|fix| fix.apply(doc)))?;
+        // Every field already held the value the relay would write (the document skips a
+        // field set to the value it has): no change was made, so there is no row to store.
+        // Told by the version, not by the bytes — an export of no changes is not empty.
+        if doc.oplog_vv() == base {
+            return Ok(None);
+        }
+        let bytes = doc.export_updates_since(&base);
+        self.cached
+            .message_ids
+            .retain(|(id, _)| !fixes.iter().any(|fix| fix.delete && fix.message_id == *id));
+        Ok(Some(bytes))
+    }
+
     /// Consuming publication is legal only after a successful nonduplicate append.
     fn commit(self, state: &AppState) -> anyhow::Result<()> {
         if !self.changes.unreadable {
@@ -291,7 +318,7 @@ pub async fn room_tail_rows(
         let list = cached.doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| cached.doc.projected_row(i))
+            .filter_map(|i| cached.doc.projected_row(i, None))
             .collect()
     })
     .await
@@ -849,7 +876,7 @@ async fn handle_frame(
                 .rsplit_once('/')
                 .map(|(_, c)| c)
                 .unwrap_or(room_name);
-            let pending =
+            let mut pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
             // A payload that imported and whose diff still cannot be read is refused: nothing
             // is known about what it does. The room's doc left the cache for this admission
@@ -918,21 +945,72 @@ async fn handle_frame(
                     }
                 }
             }
-            let (seq, dup) = state
-                .db
-                .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            // The push and the relay's answer to it are one write: stored together or not at
+            // all, before the admission lock is released.
+            let correction = pending.correct(state, chat_of_room)?;
+            let correction_id = arbos_core::ids::ulid();
+            let ids = |rows: &[arbos_core::doc::MessageIdentity]| -> Vec<String> {
+                rows.iter().map(|(id, _)| id.clone()).collect()
+            };
+            let (inserted, removed) = (
+                ids(&pending.changes.inserted),
+                ids(&pending.changes.removed),
+            );
+            // Whose message each new row carries is recorded from the socket that pushed it,
+            // with the row. The announce routes write an author record too, but they take
+            // the message id from a request body and are gated only on membership — so that
+            // record says who announced an id, never that the relay holds a row for it
+            // (`stored`). A message this push took out is remembered as deleted, so it cannot
+            // be pushed back under the same id (`push_guard::corrections`).
+            let (seq, dup, correction_seq) = state.db.append_row_with(
+                room_name,
+                device,
+                &p.batch_id,
+                &f.payload,
+                &crate::db::RowEffects {
+                    answer: correction
+                        .as_deref()
+                        .map(|bytes| (crate::notices::RELAY_DEVICE, correction_id.as_str(), bytes)),
+                    chat_id: chat_of_room,
+                    authors: &attributed,
+                    stored: &inserted,
+                    deleted: &removed,
+                },
+            )?;
             crate::metrics::room_push(dup);
-            // Whose message each new row carries, recorded from the socket that pushed it and
-            // before anyone can read the row. The announce routes write this record too, but
-            // they take the message id from a request body and are gated only on membership —
-            // so on a first-write-wins insert any member could become the author of record for
-            // a message that had none. Here the row and its author arrive together.
-            for (message_id, who) in &attributed {
-                if let Err(e) = state
-                    .db
-                    .record_message_author(chat_of_room, message_id, who)
-                {
-                    tracing::warn!(%room_name, %message_id, error = %e, "recording the author failed");
+            // Broadcast while the admission lock is still held: the push and the relay's row
+            // behind it leave in seq order, with no other push's row between or ahead of
+            // them. A receiver drops a row whose seq is not above the last one it sent on, so
+            // a correction overtaken by a later row would never arrive.
+            if !dup {
+                let mut rows = vec![(
+                    seq,
+                    device.as_str(),
+                    p.batch_id.as_str(),
+                    f.payload.clone(),
+                    conn_id,
+                )];
+                if let (Some(seq), Some(bytes)) = (correction_seq, correction) {
+                    rows.push((
+                        seq,
+                        crate::notices::RELAY_DEVICE,
+                        correction_id.as_str(),
+                        Bytes::from(bytes),
+                        0,
+                    ));
+                }
+                for (seq, device, batch_id, bytes, from_conn) in rows {
+                    let row = Frame::new(
+                        FrameType::Row,
+                        json!({ "seq": seq, "device": device, "batchId": batch_id }),
+                        bytes,
+                    )
+                    .encode();
+                    let _ = room.tx.send(RoomBroadcast {
+                        from_conn,
+                        bytes: row,
+                        seq,
+                    });
                 }
             }
             if dup {
@@ -947,17 +1025,6 @@ async fn handle_frame(
             ))
             .await?;
             if !dup {
-                let row = Frame::new(
-                    FrameType::Row,
-                    json!({ "seq": seq, "device": device, "batchId": p.batch_id }),
-                    f.payload,
-                )
-                .encode();
-                let _ = room.tx.send(RoomBroadcast {
-                    from_conn: conn_id,
-                    bytes: row,
-                    seq,
-                });
                 if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
                     // socket task.
@@ -3132,6 +3199,813 @@ mod covered_push_tests {
             rates_before,
             "covered dups must not count as messages"
         );
+    }
+
+    /// Late poll writes through the socket, one connection per push: each
+    /// is acknowledged — a refusal would be re-sent on every reconnect and cut the device off
+    /// the chat — and each is stored with the relay's correction right behind it, so the
+    /// second push is judged against the corrected row and never against the first one's
+    /// value (`push_guard::corrections`, `docs/polls.md` §11).
+    ///
+    /// Bob changes his vote and then retracts it after the close: without the correction
+    /// between them the retraction's "what it was" would be the changed vote. Alice moves her
+    /// close forward twice: the second move would otherwise defend the first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_poll_writes_are_acked_and_corrected_before_the_next_push() {
+        use arbos_core::doc::{POLL_CLOSED_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX};
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let now = arbos_core::ids::now_ms();
+        let (closed, year) = (now - 300_000, 365 * 24 * 3_600_000);
+        let (vote, at) = (
+            format!("{POLL_VOTE_PREFIX}user:{bob}"),
+            format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
+        );
+
+        // The room holds Alice's poll, Bob's vote for Lisbon ten minutes ago, and her close
+        // five minutes ago.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let poll = arbos_core::poll::Poll::new(
+            "Where?",
+            &["Lisbon".to_owned(), "Berlin".to_owned()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let opts = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &poll, "dev:alice", &opts)
+            .unwrap();
+        writer.set_message_fields(
+            "p1",
+            &[
+                (&vote, json!(["1"])),
+                (&at, json!(now - 600_000)),
+                (POLL_CLOSED_FIELD, json!(closed)),
+            ],
+        );
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:alice",
+                "seed",
+                &writer.export_updates_since(&base),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "p1", &format!("user:{alice}"))
+            .unwrap();
+        let poll = || {
+            let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            doc.projected_rows()[0]["parts"][1].clone()
+        };
+        assert_eq!(poll()["counts"], json!({ "1": 1 }));
+
+        // Each write is made on a replica of what the relay holds at that moment, as a
+        // device that has received the relay's last correction would make it.
+        let addr = serve(state.clone()).await;
+        let writes: [(&str, &str, &str, serde_json::Value); 4] = [
+            (&bob, "dev:bob", &vote, json!(["2"])),
+            (&bob, "dev:bob", &vote, json!([])),
+            (&alice, "dev:alice2", POLL_CLOSED_FIELD, json!(now + year)),
+            (
+                &alice,
+                "dev:alice2",
+                POLL_CLOSED_FIELD,
+                json!(now + 2 * year),
+            ),
+        ];
+        for (n, (who, device, key, value)) in writes.into_iter().enumerate() {
+            let held = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            let replica =
+                ChatDoc::from_snapshot(Some(20 + n as u64), false, &held.snapshot()).unwrap();
+            let before = replica.oplog_vv();
+            replica.set_message_fields("p1", &[(key, value.clone())]);
+            let batch = vec![(format!("late-{n}"), replica.export_updates_since(&before))];
+            let head = state.db.room_state(&room).unwrap().head;
+            let token = device_token(&state, who);
+            let frames = push_after_catchup(addr, &room, &token, device, &batch).await;
+            assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+            assert_eq!(
+                state.db.room_state(&room).unwrap().head,
+                head + 2,
+                "{key}={value}: the push is stored with the relay's row right behind it"
+            );
+            assert_eq!(poll()["counts"], json!({ "1": 1 }), "{key}={value}");
+            assert_eq!(poll()["deadline"], closed, "{key}={value}");
+        }
+
+        // Alice deletes her poll. Bob pushes it back under the same id, open again and with
+        // a vote in her name: acknowledged, and taken out again in the same step.
+        let held = |peer: u64| {
+            let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc");
+            ChatDoc::from_snapshot(Some(peer), false, &doc.snapshot()).unwrap()
+        };
+        let replica = held(30);
+        let before = replica.oplog_vv();
+        replica.transact(|d| d.delete_message("p1").unwrap());
+        let delete = vec![("delete".to_owned(), replica.export_updates_since(&before))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice2", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "p1").unwrap());
+
+        let replica = held(31);
+        let before = replica.oplog_vv();
+        let forged = arbos_core::poll::Poll::new(
+            "Where?",
+            &["Lisbon".to_owned(), "Berlin".to_owned()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        replica.transact(|d| {
+            d.append_poll_message("p1", &forged, "dev:bob", &opts)
+                .unwrap();
+            d.set_message_fields(
+                "p1",
+                &[
+                    (&format!("{POLL_VOTE_PREFIX}user:{alice}"), json!(["2"])),
+                    (&format!("{POLL_VOTE_AT_PREFIX}user:{alice}"), json!(now)),
+                ],
+            );
+        });
+        let back = vec![("back".to_owned(), replica.export_updates_since(&before))];
+        let token = device_token(&state, &bob);
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &back).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+            .unwrap()
+            .expect("the room's doc");
+        assert!(
+            doc.projected_rows().is_empty(),
+            "the deleted poll is not back"
+        );
+    }
+
+    /// The announce route records its caller as the author of any message id it is given,
+    /// row or no row. That record must not make a poll pushed under the id "history a heal
+    /// restores": Bob announces a fresh id, then pushes a closed poll under it with a vote in
+    /// Alice's name, claiming a heal. Refused. His own poll under an announced id, with his
+    /// own vote and a close, is a new message like any other: gated, and stamped by the relay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_announced_id_does_not_make_a_forged_poll_history() {
+        use arbos_core::doc::{POLL_CLOSED_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX};
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:alice",
+                "meta",
+                &writer.export_updates_since(&base),
+            )
+            .unwrap();
+        let poll = arbos_core::poll::Poll::new(
+            "Where?",
+            &["Lisbon".to_owned(), "Berlin".to_owned()],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+        let old = arbos_core::ids::now_ms() - 3_600_000;
+        let forged = |id: &str, voter: &str| {
+            let replica = ChatDoc::from_snapshot(Some(8), false, &writer.snapshot()).unwrap();
+            let before = replica.oplog_vv();
+            let opts = UserMessageOpts {
+                sender: Some(format!("user:{bob}")),
+                ..Default::default()
+            };
+            replica.transact(|d| {
+                d.append_poll_message(id, &poll, "dev:bob", &opts).unwrap();
+                d.set_message_fields(
+                    id,
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{voter}"), json!(["2"])),
+                        (&format!("{POLL_VOTE_AT_PREFIX}user:{voter}"), json!(old)),
+                        (POLL_CLOSED_FIELD, json!(old + 1)),
+                    ],
+                );
+            });
+            vec![(format!("push-{id}"), replica.export_updates_since(&before))]
+        };
+        let announce = |id: &str| {
+            state
+                .db
+                .insert_chat_event(&chat, None, id, Some(&bob), &format!("user:{bob}"))
+                .unwrap();
+            assert_eq!(
+                state.db.message_stored(&chat, id).unwrap(),
+                Some(false),
+                "announced, not stored"
+            );
+        };
+        let addr = serve(state.clone()).await;
+        let token = device_token(&state, &bob);
+
+        announce("p_forged");
+        let frames = push_after_catchup_with_heal(
+            addr,
+            &room,
+            &token,
+            "dev:bob",
+            &forged("p_forged", &alice),
+            true,
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(
+            frames[0].header["code"], "not_yours",
+            "a vote in Alice's name"
+        );
+        let held = || {
+            crate::matrix::backfill::load_doc(&state, &chat, None)
+                .unwrap()
+                .expect("the room's doc")
+                .projected_rows()
+        };
+        assert!(held().is_empty(), "nothing of it is stored");
+
+        // His own poll under an announced id, claiming a heal all the same.
+        announce("p_own");
+        let rates = state.db.rate_count(&bob, "msg", 60_000).unwrap();
+        let frames = push_after_catchup_with_heal(
+            addr,
+            &room,
+            &token,
+            "dev:bob",
+            &forged("p_own", &bob),
+            true,
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.rate_count(&bob, "msg", 60_000).unwrap(),
+            rates + 1,
+            "a new message, counted against the rate limit whatever the heal flag says"
+        );
+        assert_eq!(
+            state.db.message_stored(&chat, "p_own").unwrap(),
+            Some(true),
+            "stored now"
+        );
+        let part = held()[0]["parts"][1].clone();
+        assert!(
+            part["deadline"].as_i64().unwrap() > old + 1_000_000,
+            "the close carries the relay's time, not the hour-old one: {part}"
+        );
+        assert_eq!(
+            part["counts"],
+            json!({ "2": 1 }),
+            "his vote, cast before his close"
+        );
+    }
+
+    /// Two devices of one person write against the same state, neither having seen the
+    /// other or any correction: after the close, one changes the vote and the other retracts
+    /// it. Both are stored, in either order, and the count the poll closed with stands. The
+    /// second push is judged against what the relay wrote after the first, whichever of the
+    /// two the document's own last-write-wins would have kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_late_votes_written_against_the_same_state_both_leave_the_count_alone() {
+        use arbos_core::doc::{POLL_CLOSED_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX};
+        for first in [0usize, 1] {
+            let state = test_state(AuthMode::Github);
+            let (alice, _) = person(&state, 1);
+            let (bob, _) = person(&state, 2);
+            let chat = dm(&state, &alice, &bob);
+            let room = format!("people/{chat}");
+            let now = arbos_core::ids::now_ms();
+            let (vote, at) = (
+                format!("{POLL_VOTE_PREFIX}user:{bob}"),
+                format!("{POLL_VOTE_AT_PREFIX}user:{bob}"),
+            );
+            let writer = ChatDoc::new(Some(7), false);
+            let base = writer.oplog_vv();
+            writer.init_meta(&chat, "people", 1);
+            let poll = arbos_core::poll::Poll::new(
+                "Where?",
+                &["Lisbon".to_owned(), "Berlin".to_owned()],
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+            let opts = UserMessageOpts {
+                sender: Some(format!("user:{alice}")),
+                ..Default::default()
+            };
+            writer
+                .append_poll_message("p1", &poll, "dev:alice", &opts)
+                .unwrap();
+            writer.set_message_fields(
+                "p1",
+                &[
+                    (&vote, json!(["1"])),
+                    (&at, json!(now - 600_000)),
+                    (POLL_CLOSED_FIELD, json!(now - 300_000)),
+                ],
+            );
+            state
+                .db
+                .append_row(
+                    &room,
+                    "dev:alice",
+                    "seed",
+                    &writer.export_updates_since(&base),
+                )
+                .unwrap();
+            state
+                .db
+                .record_message_author(&chat, "p1", &format!("user:{alice}"))
+                .unwrap();
+
+            // Both replicas start from the seed. The second writes its field several times,
+            // so its last write outranks the relay's first correction in the document.
+            let snapshot = writer.snapshot();
+            let late = |peer: u64, value: serde_json::Value, writes: usize| {
+                let replica = ChatDoc::from_snapshot(Some(peer), false, &snapshot).unwrap();
+                let before = replica.oplog_vv();
+                for _ in 0..writes {
+                    replica.set_message_fields("p1", &[(&vote, json!(["1", "x"]))]);
+                }
+                replica.set_message_fields("p1", &[(&vote, value)]);
+                vec![(
+                    format!("late-{peer}"),
+                    replica.export_updates_since(&before),
+                )]
+            };
+            let mut pushes = [late(8, json!(["2"]), 0), late(9, json!([]), 6)];
+            pushes.rotate_left(first);
+            let addr = serve(state.clone()).await;
+            let token = device_token(&state, &bob);
+            for (n, batch) in pushes.iter().enumerate() {
+                let frames =
+                    push_after_catchup(addr, &room, &token, &format!("dev:bob{n}"), batch).await;
+                assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+                let doc = crate::matrix::backfill::load_doc(&state, &chat, None)
+                    .unwrap()
+                    .expect("the room's doc");
+                assert_eq!(
+                    doc.projected_rows()[0]["parts"][1]["counts"],
+                    json!({ "1": 1 }),
+                    "order {first}, push {n}"
+                );
+            }
+        }
+    }
+
+    /// A replica of what the relay holds for `chat`, as a device that is caught up has it.
+    fn held(state: &AppState, chat: &str, peer: u64) -> ChatDoc {
+        let doc = crate::matrix::backfill::load_doc(state, chat, None)
+            .unwrap()
+            .expect("the room's doc");
+        ChatDoc::from_snapshot(Some(peer), false, &doc.snapshot()).unwrap()
+    }
+
+    /// One push from `user`: `write` made on a caught-up replica, sent over a real socket.
+    /// The first frame the relay answers with.
+    async fn poll_push(
+        state: &AppState,
+        addr: SocketAddr,
+        chat: &str,
+        user: &str,
+        peer: u64,
+        write: impl FnOnce(&ChatDoc),
+    ) -> Frame {
+        poll_push_as(state, addr, chat, user, peer, false, write).await
+    }
+
+    /// [`poll_push`], with the push calling itself a heal or not.
+    async fn poll_push_as(
+        state: &AppState,
+        addr: SocketAddr,
+        chat: &str,
+        user: &str,
+        peer: u64,
+        heal: bool,
+        write: impl FnOnce(&ChatDoc),
+    ) -> Frame {
+        let replica = held(state, chat, peer);
+        let before = replica.oplog_vv();
+        replica.transact(write);
+        let batch = vec![(format!("b-{peer}"), replica.export_updates_since(&before))];
+        let token = device_token(state, user);
+        let device = format!("dev:{peer}");
+        let room = format!("people/{chat}");
+        push_after_catchup_with_heal(addr, &room, &token, &device, &batch, heal)
+            .await
+            .remove(0)
+    }
+
+    /// One write a test makes on a replica before pushing it.
+    type Write = Box<dyn FnOnce(&ChatDoc) + Send>;
+
+    fn open_poll() -> arbos_core::poll::Poll {
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        arbos_core::poll::Poll::new("Where?", &labels, false, false, None).unwrap()
+    }
+
+    /// The poll rules no honest device breaks are refused by the socket handler itself, with
+    /// nothing stored: a close by someone who is not the maker, a vote in another member's
+    /// name, more choices than the poll allows, an edited poll, and a new poll that closes
+    /// later than a poll may run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poll_writes_no_honest_device_makes_are_refused_on_the_socket() {
+        use arbos_core::doc::{
+            POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+        };
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let now = arbos_core::ids::now_ms();
+        let as_alice = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+
+        // Alice posts her poll through the socket, so the relay stored and attested it.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_alice)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+
+        let vote = |who: &str, picked: serde_json::Value| {
+            let (who, at) = (who.to_owned(), json!(now));
+            move |d: &ChatDoc| {
+                d.set_message_fields(
+                    "p1",
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{who}"), picked),
+                        (&format!("{POLL_VOTE_AT_PREFIX}user:{who}"), at),
+                    ],
+                )
+            }
+        };
+        let edited = arbos_core::poll::Poll {
+            question: "Where to?".to_owned(),
+            ..open_poll()
+        };
+        let hour = 3_600_000i64;
+        let timed = arbos_core::poll::Poll {
+            closes_in: Some(hour),
+            ..open_poll()
+        };
+        let late = arbos_core::poll::Poll {
+            closes_in: Some(arbos_core::poll::DURATION_MAX_MS + 1),
+            ..open_poll()
+        };
+        let as_alice_again = as_alice.clone();
+        let refused: [(&str, &str, &str, Write); 5] = [
+            (
+                "a close by a member who did not make the poll",
+                &bob,
+                "not_yours",
+                Box::new(move |d| d.set_message_fields("p1", &[(POLL_CLOSED_FIELD, json!(now))])),
+            ),
+            (
+                "a vote in another member's name",
+                &bob,
+                "not_yours",
+                Box::new(vote(&alice, json!(["1"]))),
+            ),
+            (
+                "two choices where the poll allows one",
+                &bob,
+                "bad_vote",
+                Box::new(vote(&bob, json!(["1", "2"]))),
+            ),
+            (
+                "an edited poll",
+                &alice,
+                "poll_fixed",
+                Box::new(move |d| {
+                    let edited = serde_json::to_value(&edited).unwrap();
+                    d.set_message_fields("p1", &[(POLL_FIELD, edited)])
+                }),
+            ),
+            (
+                "a new poll that runs longer than a week",
+                &alice,
+                "bad_poll",
+                Box::new(move |d| {
+                    d.append_poll_message("p2", &late, "dev:alice", &as_alice)
+                        .unwrap()
+                }),
+            ),
+        ];
+        let head = state.db.room_state(&room).unwrap().head;
+        for (n, (what, who, code, write)) in refused.into_iter().enumerate() {
+            let frame = poll_push(&state, addr, &chat, who, 40 + n as u64, write).await;
+            assert_eq!(frame.ty, FrameType::Error, "{what}: {}", frame.header);
+            assert_eq!(frame.header["code"], code, "{what}");
+            assert_eq!(state.db.room_state(&room).unwrap().head, head, "{what}");
+        }
+
+        // The same socket takes the honest version of each: Bob's own single vote.
+        let frame = poll_push(&state, addr, &chat, &bob, 50, vote(&bob, json!(["1"]))).await;
+        assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
+        let part = held(&state, &chat, 51).projected_rows()[0]["parts"][1].clone();
+        assert_eq!(part["counts"], json!({ "1": 1 }));
+
+        // A one-hour poll from a device half an hour slow, and one from a device more than
+        // a day fast: both are taken, and both close an hour from now by the relay's clock.
+        for (n, skew) in [-30 * 60_000i64, 26 * hour].into_iter().enumerate() {
+            let id = format!("p-skew-{n}");
+            let (poll, opts, row) = (timed.clone(), as_alice_again.clone(), id.clone());
+            let head = state.db.room_state(&room).unwrap().head;
+            let before = arbos_core::ids::now_ms();
+            let frame = poll_push(&state, addr, &chat, &alice, 60 + n as u64, move |d| {
+                d.append_poll_message(&row, &poll, "dev:alice", &opts)
+                    .unwrap();
+                let wrote = json!(arbos_core::ids::now_ms() + skew + hour);
+                d.set_message_fields(&row, &[(arbos_core::doc::POLL_CLOSES_FIELD, wrote)]);
+            })
+            .await;
+            assert_eq!(frame.ty, FrameType::Ack, "{skew}: {}", frame.header);
+            assert_eq!(state.db.room_state(&room).unwrap().head, head + 2, "{skew}");
+            let rows = held(&state, &chat, 70 + n as u64).projected_rows();
+            let row = rows.iter().find(|r| r["id"] == id.as_str()).unwrap();
+            let closes = row["parts"][1]["deadline"].as_i64().unwrap();
+            assert!(
+                (before + hour..=before + hour + 60_000).contains(&closes),
+                "{skew}: closes {} ms after posting",
+                closes - before
+            );
+        }
+    }
+
+    /// A member the people gates refuse does not vote or close by calling the push a heal.
+    /// Such a push carries no new message, and a heal used to skip the gates: a silenced or
+    /// blocked member's vote was stored and broadcast, with the relay's row behind it, at no
+    /// rate limit. Each is answered as a message of theirs would be, and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silenced_or_blocked_member_cannot_vote_or_close_as_a_heal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_alice = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_alice)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let head = state.db.room_state(&room).unwrap().head;
+
+        let (voter, maker) = (format!("user:{bob}"), format!("user:{alice}"));
+        let vote = |d: &ChatDoc| d.set_poll_vote("p1", &voter, &["1".to_owned()]).unwrap();
+        let close = |d: &ChatDoc| d.close_poll("p1", &maker).unwrap();
+
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, true, None)
+            .unwrap());
+        for heal in [true, false] {
+            let peer = 40 + u64::from(heal);
+            let frame = poll_push_as(&state, addr, &chat, &bob, peer, heal, vote).await;
+            assert_eq!(frame.ty, FrameType::Error, "heal={heal}: {}", frame.header);
+            assert_eq!(frame.header["code"], "not_available", "heal={heal}");
+            assert_eq!(frame.header["reason"], "silenced", "heal={heal}");
+        }
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, false, None)
+            .unwrap());
+
+        // Bob blocks Alice: her close is a write of hers in this chat, and is refused.
+        state.db.block(&bob, &alice).unwrap();
+        let frame = poll_push_as(&state, addr, &chat, &alice, 42, true, close).await;
+        assert_eq!(frame.ty, FrameType::Error, "header={}", frame.header);
+        assert_eq!(frame.header["code"], "not_available");
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head,
+            "nothing stored"
+        );
+    }
+
+    /// The app offers "Close poll" to the member whose name the row wears; the relay's record
+    /// names whoever pushed the row. Where the two differ — a row one member pushed under
+    /// another's name, with no record to check it against — the named maker's close is taken
+    /// and timed like any other. Refused, it would be re-sent on every reconnect with the rest
+    /// of that device's queue stuck behind it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_maker_named_on_a_poll_closes_it_whoever_the_record_names() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+
+        // Alice pushes a poll that names Bob as its sender. The record names Alice.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_bob = UserMessageOpts {
+            sender: Some(format!("user:{bob}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_bob)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "p1").unwrap(),
+            Some(format!("user:{alice}"))
+        );
+
+        // Bob's app closes it exactly as `ChatDoc::close_poll` writes it.
+        let head = state.db.room_state(&room).unwrap().head;
+        let me = format!("user:{bob}");
+        let before = arbos_core::ids::now_ms();
+        let frame = poll_push(&state, addr, &chat, &bob, 40, |d| {
+            d.close_poll("p1", &me).unwrap();
+        })
+        .await;
+        assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 2);
+        let part = held(&state, &chat, 41).projected_rows()[0]["parts"][1].clone();
+        assert!(part["deadline"].as_i64().is_some_and(|at| at >= before));
+    }
+
+    /// A map that is not a message cannot stand in for one. Bob hangs a map on his own
+    /// message that carries the poll's id, a poll, a vote in Alice's name and a later close,
+    /// then rewrites it. The relay judges and corrects a poll only from the row in the
+    /// `messages` list: both pushes are stored as they come, the relay writes nothing in
+    /// answer, and Alice's closed poll reads exactly as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_decoy_map_wearing_a_polls_id_changes_nothing_on_the_poll() {
+        use arbos_core::doc::{
+            POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+        };
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let now = arbos_core::ids::now_ms();
+        let closed = now - 300_000;
+
+        // Alice's poll, closed five minutes ago, and a message of Bob's, both stored.
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_user = |user: &str| UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_user(&alice))
+            .unwrap();
+        writer.set_message_fields("p1", &[(POLL_CLOSED_FIELD, json!(closed))]);
+        writer
+            .append_user_message("m-bob", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let seed = writer.export_updates_since(&base);
+        state
+            .db
+            .append_row(&room, "dev:alice", "seed", &seed)
+            .unwrap();
+        for (id, who) in [("p1", &alice), ("m-bob", &bob)] {
+            let author = format!("user:{who}");
+            state.db.record_message_author(&chat, id, &author).unwrap();
+        }
+        let poll = || held(&state, &chat, 60).projected_rows()[0]["parts"][1].clone();
+        let was = poll();
+        assert_eq!(was["deadline"], closed);
+
+        let value = |v: serde_json::Value| serde_json::from_value::<loro::LoroValue>(v).unwrap();
+        let (vote, at) = (
+            format!("{POLL_VOTE_PREFIX}user:{alice}"),
+            format!("{POLL_VOTE_AT_PREFIX}user:{alice}"),
+        );
+        let year = 365 * 24 * 3_600_000i64;
+        let writes: [Write; 2] = [
+            Box::new(move |d| {
+                let message = d.find_message("m-bob").unwrap();
+                let decoy = message
+                    .insert_container("decoy", loro::LoroMap::new())
+                    .unwrap();
+                decoy.insert("id", "p1").unwrap();
+                let poll = serde_json::to_value(open_poll()).unwrap();
+                decoy.insert(POLL_FIELD, value(poll)).unwrap();
+                decoy.insert(POLL_CLOSED_FIELD, now + year).unwrap();
+            }),
+            Box::new(move |d| {
+                let message = d.find_message("m-bob").unwrap();
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(decoy))) =
+                    message.get("decoy")
+                else {
+                    panic!("the decoy is a map on Bob's message");
+                };
+                decoy.insert(&vote, value(json!(["2"]))).unwrap();
+                decoy.insert(&at, now).unwrap();
+                decoy.insert(POLL_CLOSED_FIELD, now + 2 * year).unwrap();
+            }),
+        ];
+        for (n, write) in writes.into_iter().enumerate() {
+            let head = state.db.room_state(&room).unwrap().head;
+            let frame = poll_push(&state, addr, &chat, &bob, 61 + n as u64, write).await;
+            assert_eq!(frame.ty, FrameType::Ack, "push {n}: {}", frame.header);
+            assert_eq!(
+                state.db.room_state(&room).unwrap().head,
+                head + 1,
+                "push {n}: stored, and the relay wrote no row of its own"
+            );
+            assert_eq!(poll(), was, "push {n}");
+        }
+    }
+
+    /// What a push does to the record is written with its row, in one transaction: who each
+    /// new message is by, that the relay stored it (an announce cannot say that), and that a
+    /// message the push took out is deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_records_what_it_stored_and_what_it_deleted_with_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let token = device_token(&state, &bob);
+
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message("m1", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let post = vec![("post".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &post).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "m1").unwrap(),
+            Some(format!("user:{bob}"))
+        );
+        assert_eq!(state.db.message_stored(&chat, "m1").unwrap(), Some(true));
+        assert!(!state.db.message_deleted(&chat, "m1").unwrap());
+
+        let base = doc.oplog_vv();
+        doc.transact(|d| d.delete_message("m1").unwrap());
+        let delete = vec![("delete".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "m1").unwrap());
     }
 
     /// A batch id the room already stored is a dup before the gates (no rate event).

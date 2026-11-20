@@ -1957,6 +1957,39 @@ mod tests {
         );
     }
 
+    /// A push the relay refuses for what it holds ("not_yours", "bad_vote", …) is never
+    /// dropped by the client: the connection is closed and the same batch goes out first on
+    /// the next one. This is why the relay may refuse only what no honest device writes, and
+    /// corrects the rest (`push_guard::corrections` in the relay).
+    #[test]
+    fn a_push_refused_for_its_contents_is_sent_again_on_every_reconnect() {
+        let pending = vec![("batch-1".into(), b"x".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, pending);
+        for now in [1_000, 3_000] {
+            s.on_open(now);
+            let _ = s.drain_actions();
+            s.on_frame(&state_frame(0, Vec::new()));
+            let _ = s.drain_actions();
+            s.on_frame(&rows_done_with_vv(0, b"relay-vv"));
+            let _ = s.drain_actions();
+            s.on_heal(Vec::new());
+            let sent = take_sends(&s.drain_actions());
+            assert!(sent.iter().any(|f| f.ty == FrameType::Push), "at {now}");
+
+            s.on_frame(&error_frame(
+                "not_yours",
+                "the poll on p1 is its author's to close",
+                json!({ "batchId": "batch-1" }),
+            ));
+            let actions = s.drain_actions();
+            assert!(actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+            assert_eq!(s.pending().len(), 1, "the batch is kept");
+            s.prepare_reconnect();
+        }
+    }
+
     // ---- refused-send retry ([feedback 2005]) -------------------------------------------------
 
     /// Open a session, finish the handshake with no checkpoint and no version vector, drain.

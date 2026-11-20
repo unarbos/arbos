@@ -753,6 +753,11 @@ impl Db {
         Self::migrate_mono_avatar_defaults(&c)?;
         Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        // `stored`: NULL on rows from before the column — the relay cannot tell which of those
+        // it stored and which were only announced. An announce writes 0, a stored push 1.
+        // `deleted_at`: when the message was deleted for everyone.
+        add_column(&c, "message_authors", "stored INTEGER")?;
+        add_column(&c, "message_authors", "deleted_at INTEGER")?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
@@ -1921,8 +1926,43 @@ impl Db {
         )
         .optional()
     }
+}
 
+/// Add a column to a table, tolerating only that it is already there. Any other failure of
+/// the migration stops the relay from starting on a schema it did not expect.
+fn add_column(c: &Connection, table: &str, column: &str) -> Result<()> {
+    match c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column}"), []) {
+        Err(e) if !e.to_string().contains("duplicate column name") => {
+            Err(e).with_context(|| format!("adding {column} to {table}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// What a stored room push changes besides its own row, written in that row's transaction.
+#[derive(Default)]
+pub struct RowEffects<'a> {
+    /// `(device, batch id, bytes)` of the row the relay writes right behind the push: its
+    /// correction (`push_guard::corrections`).
+    pub answer: Option<(&'a str, &'a str, &'a [u8])>,
+    /// The chat the message ids below belong to.
+    pub chat_id: &'a str,
+    /// `(message id, author)` the push guard attributed to the pusher.
+    pub authors: &'a [(String, String)],
+    /// Message ids the push put in the chat: from here on the relay has stored them itself,
+    /// which an announce can never claim.
+    pub stored: &'a [String],
+    /// Message ids the row took out of the chat. Recorded on each one's author record, so
+    /// the record of deletions has no rows of its own and grows with nothing but the
+    /// messages the relay already keeps an author for. A message with no author record (a
+    /// system line, one older than the record) leaves none: pushed back, it is a message
+    /// the relay has never seen, with every rule of a new one.
+    pub deleted: &'a [String],
+}
+
+impl Db {
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
+    #[cfg(test)]
     pub fn append_row(
         &self,
         room: &str,
@@ -1930,6 +1970,23 @@ impl Db {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(i64, bool)> {
+        self.append_row_with(room, device, batch_id, bytes, &RowEffects::default())
+            .map(|(seq, dup, _)| (seq, dup))
+    }
+
+    /// [`Self::append_row`] with everything else a stored push changes, in the same
+    /// transaction ([`RowEffects`]): all of it is stored or none of it is, and no reader sees
+    /// the row without the relay's answer to it. Returns the answer row's seq too; a
+    /// duplicate first row stores nothing.
+    pub fn append_row_with(
+        &self,
+        room: &str,
+        device: &str,
+        batch_id: &str,
+        bytes: &[u8],
+        effects: &RowEffects<'_>,
+    ) -> Result<(i64, bool, Option<i64>)> {
+        let answer = effects.answer;
         let now = now_ms();
         self.with(|c| {
             // The room position and its row commit together: an insert failure must not leave
@@ -1938,17 +1995,41 @@ impl Db {
             let tx = crate::db::write_tx(c)?;
             if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
                 tx.commit()?;
-                return Ok((seq, true));
+                return Ok((seq, true, None));
             }
             tx.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
-            tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
-            let seq: i64 = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
-            tx.execute(
-                "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![room, seq, device, batch_id, bytes, now],
-            )?;
+            let mut seqs = [0i64; 2];
+            let rows = [Some((device, batch_id, bytes)), answer];
+            for (seq, (device, batch_id, bytes)) in seqs.iter_mut().zip(rows.into_iter().flatten()) {
+                tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
+                *seq = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
+                tx.execute(
+                    "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![room, *seq, device, batch_id, bytes, now],
+                )?;
+            }
+            for (message_id, sender) in effects.authors {
+                tx.execute(
+                    "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at, stored)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![effects.chat_id, message_id, sender, now],
+                )?;
+            }
+            for message_id in effects.stored {
+                tx.execute(
+                    "UPDATE message_authors SET stored = 1 WHERE chat_id = ?1 AND message_id = ?2",
+                    params![effects.chat_id, message_id],
+                )?;
+            }
+            for message_id in effects.deleted {
+                tx.execute(
+                    "UPDATE message_authors SET deleted_at = ?3
+                      WHERE chat_id = ?1 AND message_id = ?2 AND deleted_at IS NULL",
+                    params![effects.chat_id, message_id, now],
+                )?;
+            }
             tx.commit()?;
-            Ok((seq, false))
+            Ok((seqs[0], false, answer.map(|_| seqs[1])))
         })
     }
 
@@ -4451,6 +4532,59 @@ mod account_cap_migration_tests {
             .unwrap();
         assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod message_authors_migration_tests {
+    use super::*;
+
+    /// A database from before the stored mark and the deletion record gains both columns on
+    /// open, keeps its rows (their marks unknown, not false), and opens again unchanged.
+    #[test]
+    fn the_stored_and_deleted_columns_are_added_once_to_an_older_table() {
+        let dir =
+            std::env::temp_dir().join(format!("arbos-authors-mig-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE message_authors (
+                   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY (chat_id, message_id));
+                 INSERT INTO message_authors VALUES ('c1', 'm1', 'user:ana', 5);",
+            )
+            .unwrap();
+        }
+        for round in 0..2 {
+            let db = Db::open(&path).unwrap_or_else(|e| panic!("open {round}: {e:#}"));
+            let columns: Vec<String> = db
+                .with(|c| {
+                    let mut q =
+                        c.prepare("SELECT name FROM pragma_table_info('message_authors')")?;
+                    let names = q
+                        .query_map([], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    Ok(names)
+                })
+                .unwrap();
+            for column in ["stored", "deleted_at"] {
+                assert_eq!(
+                    columns.iter().filter(|c| *c == column).count(),
+                    1,
+                    "round {round}: {columns:?}"
+                );
+            }
+            assert_eq!(
+                db.message_author("c1", "m1").unwrap().as_deref(),
+                Some("user:ana")
+            );
+            assert_eq!(db.message_stored("c1", "m1").unwrap(), None, "unknown");
+            assert!(!db.message_deleted("c1", "m1").unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
