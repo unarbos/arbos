@@ -1370,7 +1370,7 @@ It ran as a real background job, not inline.";
             .join("approval-boxes")
             .join(ulid());
         assert_outside_scratch(&root);
-        test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
+        test_agent_full_in(axum::Router::new(), "/nonexistent/pi", NO_PRIME, None, root).await
     }
 
     /// The premise `test_agent_outside_scratch` promises, checked rather than assumed.
@@ -1498,12 +1498,29 @@ It ran as a real background job, not inline.";
         cgroup: Option<std::path::PathBuf>,
     ) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
-        test_agent_full_in(extra, pi_bin, cgroup, root).await
+        test_agent_full_in(extra, pi_bin, NO_PRIME, cgroup, root).await
+    }
+
+    /// The Prime binary of an ordinary test box: there is none, so a helper cannot be started.
+    const NO_PRIME: &str = "/nonexistent/prime-agent";
+
+    /// A test agent whose helpers (Prime workers) run `prime_bin`.
+    pub(crate) async fn test_agent_with_prime(prime_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
+        test_agent_full_in(
+            axum::Router::new(),
+            "/nonexistent/pi",
+            prime_bin,
+            None,
+            root,
+        )
+        .await
     }
 
     async fn test_agent_full_in(
         extra: axum::Router,
         pi_bin: &str,
+        prime_bin: &str,
         cgroup: Option<std::path::PathBuf>,
         root: std::path::PathBuf,
     ) -> (Arc<Agent>, std::path::PathBuf) {
@@ -1527,19 +1544,34 @@ It ran as a real background job, not inline.";
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin, cgroup, root).await
+        test_agent_on(
+            format!("http://127.0.0.1:{port}"),
+            pi_bin,
+            prime_bin,
+            cgroup,
+            root,
+        )
+        .await
     }
 
     pub(crate) async fn test_agent_on_relay_in(
         relay_url: &str,
         root: std::path::PathBuf,
     ) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_on(relay_url.to_owned(), "/nonexistent/pi", None, root).await
+        test_agent_on(
+            relay_url.to_owned(),
+            "/nonexistent/pi",
+            NO_PRIME,
+            None,
+            root,
+        )
+        .await
     }
 
     async fn test_agent_on(
         relay_url: String,
         pi_bin: &str,
+        prime_bin: &str,
         cgroup: Option<std::path::PathBuf>,
         root: std::path::PathBuf,
     ) -> (Arc<Agent>, std::path::PathBuf) {
@@ -1554,7 +1586,7 @@ It ran as a real background job, not inline.";
             port: 0,
             local_box: true,
             pi_bin: pi_bin.into(),
-            prime_bin: "/nonexistent/prime-agent".into(),
+            prime_bin: prime_bin.into(),
             claude_bin: "/nonexistent/claude".into(),
             pi_ext_override: None,
             device_id: "box:test".into(),

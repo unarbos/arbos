@@ -95,10 +95,13 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+mod metrics;
 #[cfg(test)]
 mod model_switch_tests;
 #[cfg(test)]
 mod model_usage_tests;
+#[cfg(test)]
+mod over_cap_agent_end_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
@@ -142,6 +145,8 @@ mod tree;
 mod truncate;
 #[cfg(test)]
 mod turn_end_race_tests;
+#[cfg(test)]
+mod turn_hung_tests;
 #[cfg(test)]
 mod turn_marks_tests;
 mod vault;
