@@ -1165,8 +1165,10 @@ pub async fn get_checkpoint(
     }
 }
 
-/// Least time between two checkpoint attempts on one room, whoever makes them. An attempt reads
-/// the whole room, and a box makes one per catch-up, so the next catch-up is soon enough.
+/// Least time between two checkpoint attempts by one caller on one room, and after a stored
+/// checkpoint between it and anyone's next attempt: an attempt reads the whole room, and a room
+/// that has just been folded needs no second folding. A caller's refused attempt holds back
+/// only that caller, so one box with a bad replica cannot keep a shared chat from compacting.
 const CHECKPOINT_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// `POST /room/{project}/{chat}/checkpoint?seqCovered=` — box only; body = snapshot.
@@ -1190,16 +1192,32 @@ pub async fn post_checkpoint(
         .get("seqCovered")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // As on the socket: a project's ACL covers every chat id under it, so the chat has to
+    // exist before the relay keeps anything in memory for its room.
+    if project_id != people::PEOPLE_PROJECT {
+        if state.db.project(&project_id).ok().flatten().is_none() {
+            return (StatusCode::NOT_FOUND, "no such project").into_response();
+        }
+        if chat_id != PROJECT_DOC_CHAT_ID
+            && !state.db.chat_exists(&project_id, &chat_id).unwrap_or(false)
+        {
+            return (StatusCode::NOT_FOUND, "no such chat").into_response();
+        }
+    }
     let room_name = wire::room_name(&project_id, &chat_id);
     let device = principal.device_name();
+    let room = state.room(&room_name).await;
     {
-        let room = state.room(&room_name).await;
+        let recent = |t: &std::time::Instant| t.elapsed() < CHECKPOINT_MIN_INTERVAL;
         let mut tried = room.checkpoint_tried.lock().unwrap();
-        if tried.is_some_and(|t| t.elapsed() < CHECKPOINT_MIN_INTERVAL) {
+        tried.callers.retain(|_, t| recent(t));
+        if tried.stored.as_ref().is_some_and(recent) || tried.callers.contains_key(&device) {
             crate::metrics::room_checkpoint("too_soon");
             return (StatusCode::TOO_MANY_REQUESTS, "checkpoint_too_soon").into_response();
         }
-        *tried = Some(std::time::Instant::now());
+        tried
+            .callers
+            .insert(device.clone(), std::time::Instant::now());
     }
     let (st, name) = (state.clone(), room_name.clone());
     let stored = tokio::task::spawn_blocking(move || {
@@ -1209,7 +1227,10 @@ pub async fn post_checkpoint(
     .map_err(anyhow::Error::from)
     .and_then(|r| r);
     let (result, response) = match stored {
-        Ok(Ok(true)) => ("stored", StatusCode::NO_CONTENT.into_response()),
+        Ok(Ok(true)) => {
+            room.checkpoint_tried.lock().unwrap().stored = Some(std::time::Instant::now());
+            ("stored", StatusCode::NO_CONTENT.into_response())
+        }
         Ok(Ok(false)) => (
             "below_floor",
             (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
@@ -2905,27 +2926,7 @@ mod covered_push_tests {
         let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
         let (alice, _) = person(&state, 1);
         let (bob, _) = person(&state, 2);
-        let box_token = format!("abx_{}", ulid().to_ascii_lowercase());
-        state
-            .db
-            .upsert_box(&crate::db::Sandbox {
-                user_id: alice,
-                provider: "gvisor".into(),
-                sandbox_id: None,
-                daytona_state: None,
-                device_id: "box:test".into(),
-                box_token_hash: arbos_core::auth::hash(&box_token),
-                mcp_token: "m".into(),
-                snapshot: None,
-                last_started_at: None,
-                last_stopped_at: None,
-                last_seen_at: None,
-                box_url: None,
-                preview_token: None,
-                local_pid: None,
-                migrated_from: Vec::new(),
-            })
-            .unwrap();
+        let box_token = box_token_of(&state, &alice);
         // The box's replica: everything the room holds, and on top of it a message in Bob's
         // name and an edit of Bob's own message, neither of them ever pushed.
         let mut box_doc = ChatDoc::new(Some(5), false);
@@ -2935,19 +2936,8 @@ mod covered_push_tests {
             .unwrap();
         box_doc.set_message_fields("m-bob", &[("preview", json!("edited"))]);
         let head = state.db.room_state(&room).unwrap().head;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = crate::app(state.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let post = |token: String, body: Vec<u8>| {
-            reqwest::Client::new()
-                .post(format!(
-                    "http://{addr}/room/{room}/checkpoint?seqCovered={head}"
-                ))
-                .bearer_auth(token)
-                .body(body)
-                .send()
-        };
+        let addr = serve_relay(&state).await;
+        let post = |token: String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token, body);
 
         // A device may not ask, and is turned away before the room is touched.
         let res = post(alice_token, box_doc.snapshot()).await.unwrap();
@@ -2972,6 +2962,109 @@ mod covered_push_tests {
         // The room was read once; asking again straight away is refused before any work.
         let res = post(box_token, b"nothing".to_vec()).await.unwrap();
         assert_eq!(res.status(), 429);
+    }
+
+    /// A box with the token it signs in with.
+    fn box_token_of(state: &AppState, user: &str) -> String {
+        let token = format!("abx_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .upsert_box(&crate::db::Sandbox {
+                user_id: user.to_owned(),
+                provider: "gvisor".into(),
+                sandbox_id: None,
+                daytona_state: None,
+                device_id: format!("box:{user}"),
+                box_token_hash: arbos_core::auth::hash(&token),
+                mcp_token: ulid(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        token
+    }
+
+    /// The relay's own router, on a loopback port.
+    async fn serve_relay(state: &AppState) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = crate::app(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    async fn ask_checkpoint(
+        addr: SocketAddr,
+        room: &str,
+        seq_covered: i64,
+        token: String,
+        body: Vec<u8>,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/room/{room}/checkpoint?seqCovered={seq_covered}"
+            ))
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+    }
+
+    /// A project's ACL covers every chat id under it. A checkpoint asked for a chat that does
+    /// not exist is answered 404 and the relay keeps nothing for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_checkpoint_for_a_chat_that_does_not_exist_leaves_no_room_behind() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = crate::people::tests_support::project_of(&state, &alice, "P");
+        let token = box_token_of(&state, &alice);
+        let addr = serve_relay(&state).await;
+        for _ in 0..3 {
+            let room = format!("{project}/{}", ulid());
+            let res = ask_checkpoint(addr, &room, 0, token.clone(), Vec::new())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 404);
+        }
+        assert!(state.rooms.read().await.is_empty());
+    }
+
+    /// A refused attempt holds back only the box that made it; a stored checkpoint holds back
+    /// everyone, since the room has just been folded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_checkpoint_does_not_keep_another_members_box_from_storing_one() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let (alice_box, bob_box) = (box_token_of(&state, &alice), box_token_of(&state, &bob));
+        let addr = serve_relay(&state).await;
+
+        let (room, doc, _, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        let ask =
+            |token: &String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token.clone(), body);
+        assert_eq!(
+            ask(&alice_box, b"nothing".to_vec()).await.unwrap().status(),
+            409
+        );
+        assert_eq!(ask(&alice_box, doc.snapshot()).await.unwrap().status(), 429);
+        assert_eq!(ask(&bob_box, doc.snapshot()).await.unwrap().status(), 204);
+
+        // In a second room: two good attempts inside the interval store once.
+        let (room, doc, _, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        let ask =
+            |token: &String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token.clone(), body);
+        assert_eq!(ask(&bob_box, doc.snapshot()).await.unwrap().status(), 204);
+        let first = state.db.checkpoint_full(&room).unwrap().unwrap();
+        assert_eq!(ask(&alice_box, doc.snapshot()).await.unwrap().status(), 429);
+        assert_eq!(state.db.checkpoint_full(&room).unwrap().unwrap(), first);
     }
 
     /// An upload that proves nothing is refused as the upload's fault, and one the room's own
