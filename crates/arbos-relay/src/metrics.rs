@@ -17,6 +17,11 @@
 //! Labels are bounded sets (route template, status class, state, result, refusal code). Never a
 //! user, chat, room, token or address: the dashboards are shared outside the team.
 //!
+//! The one exception has a path of its own: `GET /metrics/boxes` carries a series per box, and
+//! the info series there names each box's container (which holds its user id) so the team's own
+//! dashboards can join to cAdvisor. A Prometheus that scrapes only `/metrics` can never hold a
+//! per-box series, whatever it is later configured to share.
+//!
 //! The exposition is written by hand: the text format is a few lines, and the workspace has no
 //! metrics crate to reuse.
 
@@ -47,6 +52,9 @@ const MODEL_REQUESTS: &str = "arbos_relay_model_requests_total";
 const MODEL_SECONDS: &str = "arbos_relay_model_response_seconds";
 const BOX_DROPPED: &str = "arbos_relay_box_scrape_dropped_lines_total";
 const DB_WRITER_WAIT: &str = "arbos_relay_db_writer_wait_seconds";
+const TOKENS: &str = "arbos_relay_tokens_total";
+/// The meter's four disjoint buckets, in the order `usage` rows store them.
+const TOKEN_KINDS: [&str; 4] = ["input", "output", "cache_read", "cache_write"];
 
 /// Every family: name, type, help. Rendered in this order; `docs/metrics.md` names each one.
 #[rustfmt::skip]
@@ -74,16 +82,30 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_notifications_total", "counter", "Device notifications by outcome."),
     (MODEL_REQUESTS, "counter", "Upstream model calls by provider and status class (2xx..5xx, unreachable)."),
     (MODEL_SECONDS, "histogram", "Time for the model provider to answer with response headers."),
+    (TOKENS, "counter", "Tokens the proxy metered, by kind (input, output, cache_read, cache_write)."),
     ("arbos_relay_spend_today_usd", "gauge", "Relay-wide debits since 00:00 UTC, machine cost excluded."),
     ("arbos_relay_spend_daily_cap_usd", "gauge", "Global daily spend cap; reaching it trips the kill switch."),
     ("arbos_relay_kill_switch", "gauge", "1 while the kill switch is on (every spend is refused)."),
     (HTTP_REQUESTS, "counter", "HTTP requests by route template and status class."),
     (HTTP_SECONDS, "counter", "Seconds spent answering HTTP requests (to response headers), same labels."),
+    ("arbos_relay_db_bytes", "gauge", "Size of the database files on disk (db, wal)."),
     (DB_WRITER_WAIT, "histogram", "Wait for the database writer lock, probed every 10 s."),
     ("process_resident_memory_bytes", "gauge", "Resident memory."),
     ("process_open_fds", "gauge", "Open file descriptors."),
     ("process_cpu_seconds_total", "counter", "User and system CPU time."),
     ("process_start_time_seconds", "gauge", "Start time, seconds since the epoch."),
+];
+
+/// The families of `/metrics/boxes`: one series per registered box (`box`), never on `/metrics`.
+#[rustfmt::skip]
+const BOX_FAMILIES: &[(&str, &str, &str)] = &[
+    ("arbos_relay_box_info", "gauge", "Always 1; joins a box to its container."),
+    ("arbos_relay_box_state", "gauge", "Always 1; the state label is what the relay believes (awake, waking, asleep, error, unknown)."),
+    ("arbos_relay_box_turn_running", "gauge", "1 while the box's last keepalive said a turn is running."),
+    ("arbos_relay_box_sockets", "gauge", "Open room websockets of the box."),
+    ("arbos_relay_box_tokens_total", "counter", "Tokens metered for the box's own model calls, by kind."),
+    ("arbos_relay_box_model_calls_total", "counter", "Model calls of the box that ended and were metered."),
+    ("arbos_relay_box_spend_usd_total", "counter", "Metered cost of the box's successful model calls."),
 ];
 
 /// Upper bounds, in seconds, shared by every histogram: a lock wait is milliseconds, a cold
@@ -104,20 +126,48 @@ static HISTOGRAMS: Mutex<BTreeMap<&'static str, ([u64; BOUNDS.len() + 1], f64)>>
 /// Box id → how its last scrape through this relay ended. One short entry per box ever scraped;
 /// only the awake ones are counted.
 static BOX_SCRAPES: Mutex<BTreeMap<String, &'static str>> = Mutex::new(BTreeMap::new());
+/// Box id → user id of the awake boxes, as the last `/metrics/targets` listed them.
+static BOX_TARGETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 /// What the sampler last read from the database.
 static SAMPLED: Mutex<Vec<Series>> = Mutex::new(Vec::new());
 
+/// What one box's own model calls have used since the relay started.
+#[derive(Clone, Copy, Default)]
+struct BoxUse {
+    tokens: [f64; 4],
+    calls: f64,
+    usd: f64,
+}
+
+/// User id → use. The key never leaves the process: a scrape writes [`box_id`] in its place.
+static BOX_USE: Mutex<BTreeMap<String, BoxUse>> = Mutex::new(BTreeMap::new());
+/// The registered boxes as the sampler last read them: user id and container name.
+static BOXES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// A metrics map, whatever happened to the last thread that held it. These maps are counters and
+/// samples that stay usable after a panic mid-update, and the proxy counts a call on its way out:
+/// a poisoned lock must cost a number, never the call.
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What a scrape last read of each box from the relay's live maps: state, the last "turn
+/// running" stamp, open sockets. A scrape never waits for those maps; when one is busy its boxes
+/// keep what the scrape before saw instead of losing their series.
+#[derive(Clone, Default)]
+struct Live {
+    states: BTreeMap<String, BoxState>,
+    turns: BTreeMap<String, i64>,
+    sockets: BTreeMap<String, u32>,
+}
+static LIVE: Mutex<Option<Live>> = Mutex::new(None);
+
 fn add(name: &'static str, labels: String, v: f64) {
-    *COUNTERS
-        .lock()
-        .expect("metrics lock")
-        .entry((name, labels))
-        .or_default() += v;
+    *locked(&COUNTERS).entry((name, labels)).or_default() += v;
 }
 
 fn observe(name: &'static str, seconds: f64) {
     let slot = BOUNDS.partition_point(|b| *b < seconds);
-    let mut h = HISTOGRAMS.lock().expect("metrics lock");
+    let mut h = locked(&HISTOGRAMS);
     let (buckets, sum) = h.entry(name).or_default();
     buckets[slot] += 1;
     *sum += seconds;
@@ -181,6 +231,37 @@ pub fn model_request(url: &str, status: Option<u16>, took: Duration) {
     }
 }
 
+/// One metered model call, counted when it ends (the upstream reports usage last). `box_user`
+/// is the box that made it, `None` for a device or the admin: those count in the fleet total
+/// only. `usd` is what the call was charged, 0 for a failed one.
+pub fn model_usage(box_user: Option<&str>, tokens: [i64; 4], usd: f64) {
+    let tokens = tokens.map(|n| n.max(0) as f64);
+    for (kind, n) in TOKEN_KINDS.iter().zip(tokens) {
+        add(TOKENS, label("kind", kind), n);
+    }
+    let Some(user) = box_user else { return };
+    let mut all = locked(&BOX_USE);
+    let u = all.entry(user.to_owned()).or_default();
+    for (have, n) in u.tokens.iter_mut().zip(tokens) {
+        *have += n;
+    }
+    u.calls += 1.0;
+    if usd.is_finite() && usd > 0.0 {
+        u.usd += usd;
+    }
+}
+
+/// A box's name in metrics: stable across restarts, and not derivable from its user id without
+/// the relay key. User ids are public (`gh_<GitHub id>`), so a bare hash of one could be
+/// matched to its box by anyone who can read a dashboard.
+fn box_id(state: &AppState, user_id: &str) -> String {
+    use hmac::Mac;
+    let key = state.relay_key.subkey("metrics-box-id");
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("any key length");
+    mac.update(user_id.as_bytes());
+    hex::encode(&mac.finalize().into_bytes()[..6])
+}
+
 /// Count every request by route template and status class. The template, never the path: a path
 /// carries ids. The time is to the response headers, so an upgrade or a stream counts its start.
 pub async fn track_http(req: Request, next: Next) -> Response {
@@ -200,7 +281,7 @@ pub async fn track_http(req: Request, next: Next) -> Response {
     res
 }
 
-/// Serve `GET /metrics` on `listen`, which must be loopback, and start the database sampler.
+/// Serve `GET /metrics` and `GET /metrics/boxes` on `listen`, which must be loopback, and start the database sampler.
 pub async fn serve(state: AppState, listen: &str) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = listen
         .parse()
@@ -211,6 +292,8 @@ pub async fn serve(state: AppState, listen: &str) -> anyhow::Result<()> {
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%listen, "metrics listening");
+    // The fleet total reads 0, not nothing, until the first call ends.
+    model_usage(None, [0; 4], 0.0);
     spawn_sampler(state.clone());
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router(state)).await {
@@ -223,9 +306,22 @@ pub async fn serve(state: AppState, listen: &str) -> anyhow::Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(scrape))
+        .route("/metrics/boxes", get(scrape_boxes))
         .route("/metrics/targets", get(box_targets))
         .route("/metrics/box/{id}", get(box_scrape))
         .with_state(state)
+}
+
+/// The client the relay asks a box with. It follows no redirect: the request carries the box's
+/// token, and where a box says to go next is the box's word, not the relay's.
+fn box_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client with no redirects")
+    })
 }
 
 /// How long one box may take to answer a scrape; under Prometheus's own 10 s default.
@@ -235,66 +331,94 @@ const BOX_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 /// so what it answers is untrusted and must not be able to fill the relay's memory.
 const BOX_BODY_MAX: usize = 256 * 1024;
 
-/// The label names agentd's series carry (`docs/metrics.md`). A line with any other is dropped.
-const BOX_LABELS: [&str; 7] = [
-    "version", "health", "state", "result", "kind", "class", "le",
+/// Exactly what agentd writes (`crates/arbos-agentd/src/metrics.rs`, `docs/metrics.md`): every
+/// sample name with the one label it may carry. A box is its user's machine, so its answer is
+/// held to this list; a name or a label that is not here never reaches Prometheus.
+#[rustfmt::skip]
+const BOX_SAMPLES: &[(&str, &str)] = &[
+    ("arbos_agentd_build_info", "version"),
+    ("arbos_agentd_uptime_seconds", ""),
+    ("arbos_agentd_workspaces", "health"),
+    ("arbos_agentd_turns_running", ""),
+    ("arbos_agentd_sends_waiting", ""),
+    ("arbos_agentd_workers_running", ""),
+    ("arbos_agentd_jobs", "state"),
+    ("arbos_agentd_rooms_open", ""),
+    ("arbos_agentd_rooms_connected", ""),
+    ("arbos_agentd_turns_started_total", ""),
+    ("arbos_agentd_turns_finished_total", "result"),
+    ("arbos_agentd_turn_duration_seconds_bucket", "le"),
+    ("arbos_agentd_turn_duration_seconds_sum", ""),
+    ("arbos_agentd_turn_duration_seconds_count", ""),
+    ("arbos_agentd_worker_crashes_total", "kind"),
+    ("arbos_agentd_model_requests_total", "class"),
+    ("arbos_agentd_relay_reconnects_total", ""),
 ];
 
-/// A box's name in metrics: stable across restarts, and not derivable from its user id without
-/// the relay key. User ids are public (`gh_<GitHub id>`), so a bare hash of one could be
-/// matched to its box by anyone who can read a dashboard.
-fn box_id(state: &AppState, user_id: &str) -> String {
-    use hmac::Mac;
-    let key = state.relay_key.subkey("metrics-box-id");
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("any key length");
-    mac.update(user_id.as_bytes());
-    hex::encode(&mac.finalize().into_bytes()[..6])
+/// The values each of those labels may take. `version` has no list: it is three dotted numbers.
+#[rustfmt::skip]
+const BOX_LABEL_VALUES: &[(&str, &[&str])] = &[
+    ("health", &["healthy", "unhealthy"]),
+    ("state", &["running", "queued"]),
+    ("result", &["done", "error", "cancelled"]),
+    ("kind", &["main", "job"]),
+    ("class", &["1xx", "2xx", "3xx", "4xx", "5xx", "unreachable"]),
+    ("le", &["1", "2.5", "5", "10", "30", "60", "120", "300", "600", "1800", "+Inf"]),
+];
+
+/// `name` or `name{label="value"}` → the sample name, if it is one of agentd's with an allowed
+/// label value.
+fn box_series_name(series: &str) -> Option<&'static str> {
+    let (name, label) = match series.split_once('{') {
+        Some((name, rest)) => (name, Some(rest.strip_suffix("\"}")?.split_once("=\"")?)),
+        None => (series, None),
+    };
+    let (name, key) = BOX_SAMPLES.iter().find(|(n, _)| *n == name)?;
+    let ok = match label {
+        None => key.is_empty(),
+        Some((k, _)) if k != *key => false,
+        Some((_, v)) if *key == "version" => {
+            let parts: Vec<&str> = v.split('.').collect();
+            let number =
+                |p: &&str| (1..=4).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit());
+            parts.len() == 3 && parts.iter().all(number)
+        }
+        Some((k, v)) => BOX_LABEL_VALUES
+            .iter()
+            .any(|(key, values)| *key == k && values.contains(&v)),
+    };
+    ok.then_some(*name)
 }
 
-/// One line of a box's exposition, kept only if it is what agentd writes: a `# HELP`/`# TYPE`
-/// line or a sample of an `arbos_agentd_` family, with labels from [`BOX_LABELS`] and short plain
-/// values, and a numeric value. Everything else a box could put there — another family's name,
-/// a `box` or `job` label, a label value that is somebody's id — is dropped.
-fn box_line_ok(line: &str) -> bool {
-    let name_ok = |n: &str| {
-        n.starts_with("arbos_agentd_")
-            && n.len() <= 80
-            && n.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    };
-    if let Some(rest) = line
-        .strip_prefix("# HELP ")
-        .or(line.strip_prefix("# TYPE "))
-    {
-        let name = rest.split(' ').next().unwrap_or_default();
-        return name_ok(name)
-            && line.len() <= 300
-            && line.bytes().all(|b| (b' '..=b'~').contains(&b));
+/// A box's exposition, cut down to agentd's own samples: a known name, its one known label with
+/// a known value, a numeric value, each series once and one `build_info`. Comment lines are not
+/// passed on at all (their text is free), so the relay writes the histogram's type itself.
+/// Returns the text and how many lines were dropped.
+fn box_exposition(text: &str) -> (String, usize) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = String::from("# TYPE arbos_agentd_turn_duration_seconds histogram\n");
+    let mut dropped = 0;
+    for l in text.lines() {
+        let kept = l.rsplit_once(' ').is_some_and(|(series, value)| {
+            let Some(name) = box_series_name(series) else {
+                return false;
+            };
+            // One version per box: a box cannot mint a series per scrape by renaming its build.
+            let once = if name == "arbos_agentd_build_info" {
+                name
+            } else {
+                series
+            };
+            value.parse::<f64>().is_ok() && seen.insert(once.to_owned())
+        });
+        if kept {
+            out.push_str(l);
+            out.push('\n');
+        } else if !l.starts_with('#') {
+            dropped += 1;
+        }
     }
-    let Some((series, value)) = line.rsplit_once(' ') else {
-        return false;
-    };
-    let (name, labels) = match series.split_once('{') {
-        Some((name, rest)) => match rest.strip_suffix('}') {
-            Some(labels) => (name, labels),
-            None => return false,
-        },
-        None => (series, ""),
-    };
-    let label_ok = |kv: &str| {
-        kv.split_once('=').is_some_and(|(k, v)| {
-            let v = v.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
-            BOX_LABELS.contains(&k)
-                && v.is_some_and(|v| {
-                    (1..=32).contains(&v.len())
-                        && v.bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
-                })
-        })
-    };
-    name_ok(name)
-        && value.parse::<f64>().is_ok()
-        && (labels.is_empty() || labels.split(',').all(label_ok))
+    (out, dropped)
 }
 
 /// `GET /metrics/targets`: Prometheus HTTP service discovery for the boxes. One target per awake
@@ -312,28 +436,36 @@ async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderM
     let Some(host) = host else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    let targets: Vec<serde_json::Value> = state
+    let awake: BTreeMap<String, String> = state
         .box_states
         .read()
         .await
         .iter()
         .filter(|(_, (st, _))| *st == BoxState::Awake)
-        .map(|(user_id, _)| {
-            let id = box_id(&state, user_id);
+        .map(|(user_id, _)| (box_id(&state, user_id), user_id.clone()))
+        .collect();
+    let targets: Vec<serde_json::Value> = awake
+        .keys()
+        .map(|id| {
             serde_json::json!({
                 "targets": [host],
                 "labels": { "__metrics_path__": format!("/metrics/box/{id}"), "box": id },
             })
         })
         .collect();
+    // What a scrape looks its id up in: Prometheus only ever asks for a target it was handed.
+    *locked(&BOX_TARGETS) = awake;
     axum::Json(targets).into_response()
 }
 
 /// `GET /metrics/box/{id}`: one box's agentd `/metrics`, fetched with that box's own token.
 async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let user_id = {
-        let boxes = state.box_states.read().await;
-        boxes.keys().find(|u| box_id(&state, u) == id).cloned()
+    // Only a box that is awake now is asked. A sleeping box keeps its last `box_url`, and once
+    // its port is another box's the token would be sent to the wrong machine.
+    let user_id = locked(&BOX_TARGETS).get(&id).cloned();
+    let user_id = match user_id {
+        Some(u) if state.box_state(&u).await.0 == BoxState::Awake => Some(u),
+        _ => None,
     };
     // One row on a read connection: this runs once per awake box per scrape interval, and must
     // not stand in the queue for the writer lock.
@@ -350,8 +482,7 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
     let Some((Some(url), token)) = row else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
-    let sent = state
-        .http
+    let sent = box_client()
         .get(format!("{url}/metrics"))
         .bearer_auth(token)
         .timeout(BOX_SCRAPE_TIMEOUT)
@@ -374,12 +505,11 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
             };
             match (read, String::from_utf8(body)) {
                 ("ok", Ok(text)) => {
-                    let total = text.lines().count();
-                    let kept: Vec<&str> = text.lines().filter(|l| box_line_ok(l)).collect();
-                    if kept.len() < total {
-                        add(BOX_DROPPED, String::new(), (total - kept.len()) as f64);
+                    let (kept, dropped) = box_exposition(&text);
+                    if dropped > 0 {
+                        add(BOX_DROPPED, String::new(), dropped as f64);
                     }
-                    ("ok", exposition(kept.join("\n") + "\n"))
+                    ("ok", exposition(kept))
                 }
                 ("ok", Err(_)) => ("rejected", down()),
                 (failed, _) => (failed, down()),
@@ -397,6 +527,10 @@ async fn scrape(State(state): State<AppState>) -> Response {
     exposition(render(&state))
 }
 
+async fn scrape_boxes(State(state): State<AppState>) -> Response {
+    exposition(render_boxes(&state))
+}
+
 /// Prometheus refuses a scrape whose content type it cannot place.
 fn exposition(body: String) -> Response {
     let mut res = Response::new(body.into());
@@ -411,8 +545,12 @@ fn spawn_sampler(state: AppState) {
     tokio::spawn(async move {
         loop {
             let s = state.clone();
-            if let Ok(sampled) = tokio::task::spawn_blocking(move || sample_db(&s)).await {
-                *SAMPLED.lock().expect("metrics lock") = sampled;
+            let sample = move || {
+                sample_boxes(&s);
+                sample_db(&s)
+            };
+            if let Ok(sampled) = tokio::task::spawn_blocking(sample).await {
+                *locked(&SAMPLED) = sampled;
             }
             tokio::time::sleep(SAMPLE_EVERY).await;
         }
@@ -478,6 +616,25 @@ fn sample_db(state: &AppState) -> Vec<Series> {
         ));
     }
     out
+}
+
+/// The registered boxes, for `/metrics/boxes`: a box's series exist while its row does, so the
+/// cardinality is the number of boxes and a deleted box leaves with the next sample.
+fn sample_boxes(state: &AppState) {
+    let rows = state.db.read(|c| {
+        c.prepare("SELECT user_id, sandbox_id FROM boxes ORDER BY user_id")?
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    });
+    let Ok(rows) = rows else { return };
+    let boxes: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|(user, container)| (user, container.unwrap_or_default()))
+        .collect();
+    locked(&BOX_USE).retain(|user, _| boxes.iter().any(|(u, _)| u == user));
+    *locked(&BOXES) = boxes;
 }
 
 /// The gauges read at scrape time. Nothing here waits on a lock or touches the database.
@@ -582,6 +739,17 @@ fn gauges(state: &AppState) -> Vec<Series> {
             (since_epoch - state.started_at.elapsed()).as_secs_f64(),
         ));
     }
+    // One stat each, no SQLite call: a WAL that stays far above its checkpoint size means a read
+    // is being held open across many commits.
+    for (file, name) in [("db", "relay.db"), ("wal", "relay.db-wal")] {
+        if let Ok(meta) = std::fs::metadata(state.cfg.data_dir.join(name)) {
+            g.push((
+                "arbos_relay_db_bytes",
+                label("file", file),
+                meta.len() as f64,
+            ));
+        }
+    }
     process(&mut g);
     g
 }
@@ -629,10 +797,10 @@ fn line(out: &mut String, name: &str, labels: &str, value: f64) {
 /// The whole exposition.
 pub fn render(state: &AppState) -> String {
     let mut series = gauges(state);
-    series.extend(SAMPLED.lock().expect("metrics lock").iter().cloned());
-    let counters = COUNTERS.lock().expect("metrics lock").clone();
+    series.extend(locked(&SAMPLED).iter().cloned());
+    let counters = locked(&COUNTERS).clone();
     series.extend(counters.into_iter().map(|((n, l), v)| (n, l, v)));
-    let histograms = HISTOGRAMS.lock().expect("metrics lock").clone();
+    let histograms = locked(&HISTOGRAMS).clone();
 
     let mut out = String::new();
     for (name, kind, help) in FAMILIES {
@@ -661,6 +829,68 @@ pub fn render(state: &AppState) -> String {
             );
             line(&mut out, &format!("{name}_sum"), "", sum);
             line(&mut out, &format!("{name}_count"), "", count);
+        }
+    }
+    out
+}
+
+/// The exposition of `/metrics/boxes`. Like [`render`], it reads memory only and never waits.
+fn render_boxes(state: &AppState) -> String {
+    let boxes = locked(&BOXES).clone();
+    let used = locked(&BOX_USE).clone();
+    let live = {
+        let mut live = locked(&LIVE);
+        let seen = live.get_or_insert_with(Live::default);
+        if let Ok(states) = state.box_states.try_read() {
+            seen.states = states.iter().map(|(u, (st, _))| (u.clone(), *st)).collect();
+        }
+        if let Ok(turns) = state.turn_running.try_lock() {
+            seen.turns = turns.iter().map(|(u, at)| (u.clone(), *at)).collect();
+        }
+        if let Ok(conns) = state.box_conns.try_lock() {
+            seen.sockets = conns.iter().map(|(u, (n, _))| (u.clone(), *n)).collect();
+        }
+        seen.clone()
+    };
+    let fresh = arbos_core::ids::now_ms() - crate::fleet::TURN_FRESH_MS;
+
+    let mut series: Vec<Series> = Vec::new();
+    for (user, container) in &boxes {
+        let id = label("box", &box_id(state, user));
+        if !container.is_empty() {
+            let labels = format!("{id},{}", label("container", container));
+            series.push(("arbos_relay_box_info", labels, 1.0));
+        }
+        let st = match live.states.get(user) {
+            Some(BoxState::Awake) => "awake",
+            Some(BoxState::Waking) => "waking",
+            Some(BoxState::Asleep) => "asleep",
+            Some(BoxState::Error) => "error",
+            // Not heard of since the relay started.
+            None => "unknown",
+        };
+        let labels = format!("{id},{}", label("state", st));
+        series.push(("arbos_relay_box_state", labels, 1.0));
+        let running = live.turns.get(user).is_some_and(|at| *at >= fresh);
+        let v = f64::from(u8::from(running));
+        series.push(("arbos_relay_box_turn_running", id.clone(), v));
+        let n = live.sockets.get(user).copied().unwrap_or(0);
+        series.push(("arbos_relay_box_sockets", id.clone(), f64::from(n)));
+        // A box that has called nothing reads 0, so every box has a rate to plot.
+        let u = used.get(user).copied().unwrap_or_default();
+        for (kind, n) in TOKEN_KINDS.iter().zip(u.tokens) {
+            let labels = format!("{id},{}", label("kind", kind));
+            series.push(("arbos_relay_box_tokens_total", labels, n));
+        }
+        series.push(("arbos_relay_box_model_calls_total", id.clone(), u.calls));
+        series.push(("arbos_relay_box_spend_usd_total", id, u.usd));
+    }
+
+    let mut out = String::new();
+    for (name, kind, help) in BOX_FAMILIES {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
+        for (_, labels, value) in series.iter().filter(|(n, _, _)| n == name) {
+            line(&mut out, name, labels, *value);
         }
     }
     out
@@ -758,13 +988,15 @@ mod tests {
             Duration::ZERO,
         );
         state.db.waitlist_add(&user).unwrap();
-        *SAMPLED.lock().unwrap() = sample_db(&state);
+        *locked(&SAMPLED) = sample_db(&state);
 
         let text = fetch(addr, "/metrics").await;
         let after = parse(&text);
         assert_eq!(after["arbos_relay_boxes{state=\"awake\"}"], 1.0);
         assert_eq!(after["arbos_relay_rooms_open"], 1.0);
         assert_eq!(after["arbos_relay_waitlist_length"], 1.0);
+        assert!(after["arbos_relay_db_bytes{file=\"db\"}"] > 0.0);
+        assert!(after["arbos_relay_db_bytes{file=\"wal\"}"] > 0.0);
         assert_eq!(after["arbos_relay_wake_queue_depth"], 0.0);
         assert!(after["arbos_relay_box_starts_total{result=\"ok\"}"] >= 1.0);
         assert!(after["arbos_relay_box_starts_total{result=\"failed\"}"] >= 1.0);
@@ -880,6 +1112,11 @@ mod tests {
         assert!(!listed.contains(&awake), "a target must not name the user");
 
         assert_eq!(last_scrapes(&state)["pending"], 1.0);
+        let dropped = || {
+            let now = parse(&render(&state));
+            now.get(BOX_DROPPED).copied().unwrap_or(0.0)
+        };
+        let dropped_before = dropped();
         let scraped = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
         let last = last_scrapes(&state);
         assert_eq!((last["ok"], last["pending"]), (1.0, 0.0));
@@ -887,10 +1124,10 @@ mod tests {
             scraped.headers()["content-type"],
             "text/plain; version=0.0.4"
         );
-        // Only agentd's own lines come through; the rest are dropped and counted.
+        // Only agentd's own samples come through: a made-up family, a fresh label value, a
+        // second version, a repeat and anything foreign are dropped, and counted.
         assert_eq!(scraped.text().await.unwrap(), BOX_KEPT);
-        let dropped = parse(&render(&state))[BOX_DROPPED];
-        assert!(dropped >= 7.0, "{dropped}");
+        assert_eq!(dropped() - dropped_before, 12.0);
         // The id is keyed: the bare hash of a (public) user id does not find the box.
         let bare = {
             use sha2::Digest;
@@ -935,28 +1172,130 @@ mod tests {
         let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(down.status(), 502);
         assert_eq!(last_scrapes(&state)["rejected"], 1.0);
+
+        // Where the box's token may go. `other` stands for another user's box that now has the
+        // port: it records every request that reaches it.
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = reached.clone();
+        let other = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { "arbos_agentd_turns_running 0\n" }
+            }),
+        ))
+        .await;
+        // A redirect is not followed: the token stays with the box it belongs to.
+        let location = format!("http://{other}/metrics");
+        let redirecting = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(move || async move { axum::response::Redirect::temporary(&location) }),
+        ))
+        .await;
+        gone.box_url = Some(format!("http://{redirecting}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(
+            (down.status().as_u16(), reached.load(Ordering::SeqCst)),
+            (502, 0)
+        );
+        // A box that is not awake is not asked at all, though its row still holds an address.
+        gone.box_url = Some(format!("http://{other}"));
+        state.db.upsert_box(&gone).unwrap();
+        for st in [BoxState::Asleep, BoxState::Waking, BoxState::Error] {
+            state.set_box_state(&awake, st, None).await;
+            let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+            assert_eq!(
+                (res.status().as_u16(), reached.load(Ordering::SeqCst)),
+                (404, 0),
+                "{st:?}"
+            );
+        }
+        state.set_box_state(&awake, BoxState::Awake, None).await;
+        let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(
+            (res.status().as_u16(), reached.load(Ordering::SeqCst)),
+            (200, 1)
+        );
+    }
+
+    /// The list is agentd's own: every family its module names is one the relay lets through,
+    /// so a family added there and forgotten here fails this test and not a dashboard.
+    #[test]
+    fn every_family_agentd_writes_is_on_the_list() {
+        let agentd = include_str!("../../arbos-agentd/src/metrics.rs");
+        let named: std::collections::BTreeSet<&str> = agentd
+            .split('"')
+            .filter(|s| s.starts_with("arbos_agentd_") && !s.contains([' ', '{']))
+            .collect();
+        assert!(named.len() >= 15, "{named:?}");
+        for family in named {
+            let listed = |n: &str| BOX_SAMPLES.iter().any(|(name, _)| *name == n);
+            assert!(
+                listed(family) || listed(&format!("{family}_bucket")),
+                "{family} is not in BOX_SAMPLES"
+            );
+        }
+    }
+
+    /// The allowlist is exact: no family, label or value a box invents gets through, so a box
+    /// cannot mint series or put its own words on a dashboard.
+    #[test]
+    fn a_box_cannot_add_a_family_a_label_or_a_value() {
+        let minted: String = (0..6000)
+            .map(|n| format!("arbos_agentd_x{n} 1\narbos_agentd_jobs{{state=\"s{n}\"}} 1\n"))
+            .collect();
+        let (kept, dropped) = box_exposition(&minted);
+        assert_eq!(
+            kept,
+            "# TYPE arbos_agentd_turn_duration_seconds histogram\n"
+        );
+        assert_eq!(dropped, 12_000);
+        // Everything agentd really writes is on the list, each label value included.
+        for (name, key) in BOX_SAMPLES {
+            let values: &[&str] = match *key {
+                "" => &[],
+                "version" => &["0.6.422"],
+                key => BOX_LABEL_VALUES.iter().find(|(k, _)| *k == key).unwrap().1,
+            };
+            let series: Vec<String> = match values {
+                [] => vec![name.to_string()],
+                values => values
+                    .iter()
+                    .map(|v| format!("{name}{{{key}=\"{v}\"}}"))
+                    .collect(),
+            };
+            for s in series {
+                assert_eq!(box_series_name(&s), Some(*name), "{s}");
+            }
+        }
     }
 
     /// What a box answers: agentd's lines, and what a user who owns the port could add.
     const BOX_ANSWER: &str = "\
-# HELP arbos_agentd_turns_running Main-agent turns running now.
+# HELP arbos_agentd_turns_running any text a box likes
 # TYPE arbos_agentd_turns_running gauge
+arbos_agentd_build_info{version=\"0.6.422\"} 1
 arbos_agentd_turns_running 2
 arbos_agentd_turns_finished_total{result=\"done\"} 5
 arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
 arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
-# TYPE arbos_relay_kill_switch gauge
+arbos_agentd_build_info{version=\"9.9.9\"} 1
+arbos_agentd_build_info{version=\"any words\"} 1
+arbos_agentd_turns_running 3
+arbos_agentd_made_up_0001 1
+arbos_agentd_jobs{state=\"fresh-value-1\"} 1
+arbos_agentd_jobs{result=\"done\"} 1
+arbos_agentd_jobs{state=\"queued\",box=\"000000000000\"} 1
 arbos_relay_kill_switch 1
 up 1
-arbos_agentd_turns_running{box=\"000000000000\"} 9
 arbos_agentd_turns_running{user=\"gh_1\"} 9
-arbos_agentd_jobs{state=\"a user's words, at any length\"} 1
 arbos_agentd_turns_running not-a-number
 arbos_agentd_turns_running{result=\"done\" 1
 ";
     const BOX_KEPT: &str = "\
-# HELP arbos_agentd_turns_running Main-agent turns running now.
-# TYPE arbos_agentd_turns_running gauge
+# TYPE arbos_agentd_turn_duration_seconds histogram
+arbos_agentd_build_info{version=\"0.6.422\"} 1
 arbos_agentd_turns_running 2
 arbos_agentd_turns_finished_total{result=\"done\"} 5
 arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
@@ -1010,9 +1349,182 @@ arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
             res.status().as_u16()
         };
         assert_eq!(status("/healthz").await, 200);
-        for path in ["/metrics", "/metrics/targets", "/metrics/box/0"] {
+        for path in [
+            "/metrics",
+            "/metrics/boxes",
+            "/metrics/targets",
+            "/metrics/box/0",
+        ] {
             assert_eq!(status(path).await, 404, "{path}");
         }
+    }
+
+    /// A model call a box makes moves that box's series on `/metrics/boxes` and the fleet total
+    /// on `/metrics`; the box is named by its keyed id, and `/metrics` carries nothing per box.
+    #[tokio::test]
+    async fn a_metered_call_moves_its_box_and_the_fleet_total() {
+        use crate::people::tests_support::{person, project_of};
+        use axum::extract::Path;
+        let upstream = serve_on_loopback(Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"model": "m", "usage": {
+                    "prompt_tokens": 100, "completion_tokens": 20, "cost": 0.25,
+                    "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 10}}}))
+            }),
+        ))
+        .await;
+        let mut state = test_state(AuthMode::Github);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openai_base = format!("http://{upstream}");
+        cfg.openai_key = Some("test".into());
+        state.cfg = std::sync::Arc::new(cfg);
+        let (busy, _) = person(&state, 9871);
+        let (idle, _) = person(&state, 9872);
+        let project = project_of(&state, &busy, "Swarm");
+        state.db.grant_credits(&busy, 10.0, "test", "test").unwrap();
+        for user in [&busy, &idle] {
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "INSERT INTO boxes(user_id, provider, sandbox_id, device_id, box_token_hash, mcp_token)
+                         VALUES (?1, 'gvisor', ?2, 'd', 'h', 'm')",
+                        [user, &crate::fleet::container_name(user)],
+                    )
+                })
+                .unwrap();
+        }
+        state.set_box_state(&busy, BoxState::Awake, None).await;
+        let now = arbos_core::ids::now_ms();
+        state.turn_running.lock().await.insert(busy.clone(), now);
+        sample_boxes(&state);
+
+        let addr = serve_on_loopback(router(state.clone())).await;
+        let fleet = |m: &BTreeMap<String, f64>, kind: &str| {
+            let series = format!("{TOKENS}{{kind=\"{kind}\"}}");
+            m.get(&series).copied().unwrap_or(0.0)
+        };
+        let before = parse(&fetch(addr, "/metrics").await);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-arbos-project", project.parse().unwrap());
+        let res = crate::proxy::openai(
+            State(state.clone()),
+            crate::auth::Principal::Box {
+                user_id: busy.clone(),
+            },
+            Path("chat/completions".into()),
+            headers,
+            r#"{"model":"m"}"#.into(),
+        )
+        .await;
+        assert_eq!(res.status(), 200);
+        axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+
+        // The call is metered when its stream ends, a moment after the body is read.
+        let id = box_id(&state, &busy);
+        let calls = format!("arbos_relay_box_model_calls_total{{box=\"{id}\"}}");
+        let mut text = String::new();
+        for _ in 0..200 {
+            text = fetch(addr, "/metrics/boxes").await;
+            if parse(&text)[&calls] == 1.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let boxes = parse(&text);
+        let of = |name: &str, more: &str| boxes[&format!("{name}{{box=\"{id}\"{more}}}")];
+        assert_eq!(of("arbos_relay_box_model_calls_total", ""), 1.0);
+        // 100 prompt tokens, of which 60 were read from cache and 10 written to it.
+        let tokens = [
+            ("input", 30.0),
+            ("output", 20.0),
+            ("cache_read", 60.0),
+            ("cache_write", 10.0),
+        ];
+        let after = parse(&fetch(addr, "/metrics").await);
+        for (kind, n) in tokens {
+            let more = format!(",kind=\"{kind}\"");
+            assert_eq!(of("arbos_relay_box_tokens_total", &more), n, "{kind}");
+            assert!(fleet(&after, kind) - fleet(&before, kind) >= n, "{kind}");
+        }
+        assert_eq!(of("arbos_relay_box_spend_usd_total", ""), 0.25);
+        assert_eq!(of("arbos_relay_box_state", ",state=\"awake\""), 1.0);
+        assert_eq!(of("arbos_relay_box_turn_running", ""), 1.0);
+        let container = crate::fleet::container_name(&busy);
+        let info = format!(",container=\"{container}\"");
+        assert_eq!(of("arbos_relay_box_info", &info), 1.0);
+
+        // The other box is there too, at rest, and none of the call landed on it.
+        let other = box_id(&state, &idle);
+        let at_rest = |name: &str, more: &str| boxes[&format!("{name}{{box=\"{other}\"{more}}}")];
+        assert_eq!(
+            at_rest("arbos_relay_box_tokens_total", ",kind=\"input\""),
+            0.0
+        );
+        assert_eq!(at_rest("arbos_relay_box_state", ",state=\"unknown\""), 1.0);
+        assert_eq!(at_rest("arbos_relay_box_turn_running", ""), 0.0);
+
+        // The id is keyed: 12 hex characters that are neither the user id nor a bare hash of it.
+        use sha2::Digest;
+        assert!(id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(id, hex::encode(&sha2::Sha256::digest(busy.as_bytes())[..6]));
+        // Outside the info series, which exists to name the container, no line names the user.
+        let leaks = |l: &&str| !l.starts_with("arbos_relay_box_info{") && l.contains(&busy);
+        assert_eq!(text.lines().find(leaks), None);
+        // `/metrics` carries no per-box series and no user.
+        let fleet_text = fetch(addr, "/metrics").await;
+        assert!(!fleet_text.contains("box=\"") && !fleet_text.contains("arbos_relay_box_info"));
+        assert!(!fleet_text.contains(&busy) && !fleet_text.contains(&id));
+
+        // A scrape that finds the state map busy serves what the last one read.
+        let writer = state.box_states.write().await;
+        let held = fetch(addr, "/metrics/boxes").await;
+        drop(writer);
+        let awake = format!("arbos_relay_box_state{{box=\"{id}\",state=\"awake\"}} 1");
+        assert!(held.contains(&awake), "state kept while the map is locked");
+
+        // A deleted box leaves with the next sample, its counters with it.
+        state.db.delete_box_row(&busy).unwrap();
+        sample_boxes(&state);
+        let gone = fetch(addr, "/metrics/boxes").await;
+        assert!(!gone.contains(&id) && gone.contains(&other));
+        assert!(!locked(&BOX_USE).contains_key(&busy));
+    }
+
+    /// The proxy counts a call on its way out, and times it before it is charged. A panic that
+    /// poisoned a metrics lock must not make the next count, or the next scrape, panic too.
+    /// The assertions are on the fleet counters and the histogram, which no sampler prunes.
+    #[test]
+    fn counting_survives_poisoned_locks() {
+        fn poison<T: Send>(m: &'static Mutex<T>) {
+            let _ = std::thread::spawn(move || {
+                let _held = m.lock().unwrap();
+                panic!("poison the lock");
+            })
+            .join();
+            assert!(m.is_poisoned());
+        }
+        poison(&BOX_USE);
+        poison(&COUNTERS);
+        poison(&HISTOGRAMS);
+        poison(&SAMPLED);
+        let output = (TOKENS, label("kind", "output"));
+        let tokens = || locked(&COUNTERS).get(&output).copied().unwrap_or(0.0);
+        let answers = || locked(&HISTOGRAMS).get(MODEL_SECONDS).map_or(0, |h| h.0[2]);
+        let (before, answered) = (tokens(), answers());
+        model_usage(Some("gh_poison"), [1, 2, 3, 4], 0.5);
+        model_request(
+            "https://openrouter.ai/x",
+            Some(200),
+            Duration::from_millis(10),
+        );
+        assert!(tokens() >= before + 2.0);
+        assert!(answers() > answered);
+        let state = test_state(AuthMode::Github);
+        assert!(render(&state).contains(TOKENS));
+        assert!(render_boxes(&state).contains("arbos_relay_box_info"));
     }
 
     /// A listener that cannot start is an error for `main` to log, never a panic: a taken port
@@ -1028,7 +1540,7 @@ arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
     #[test]
     fn the_doc_names_every_family() {
         let doc = include_str!("../../../docs/metrics.md");
-        for (name, _, _) in FAMILIES {
+        for (name, _, _) in FAMILIES.iter().chain(BOX_FAMILIES) {
             assert!(
                 doc.contains(&format!("`{name}`")),
                 "docs/metrics.md lacks {name}"

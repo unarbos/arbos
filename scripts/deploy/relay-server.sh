@@ -147,6 +147,21 @@ fi
 find "$DATA_DIR" -xdev -not -path "$DATA_DIR/boxes/*/mnt" \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
 chmod 0750 "$DATA_DIR"
 
+# ---- 2b. host limits -------------------------------------------------------------------------------
+# containerd keeps one inotify instance per running container (its shim watches the container's cgroup
+# events, out-of-memory among them), all of them root's. The kernel default is 128 instances per user: on
+# 2026-11-18, with 131 containers, root held exactly 128, every further container start logged
+# "failed to create inotify fd: too many open files" and ran with nothing watching its cgroup, and
+# cAdvisor could not start. 8192 leaves room for a host full of sandboxes. Written only when it differs.
+say "host limits"
+SYSCTL_FILE=/etc/sysctl.d/60-arbos-inotify.conf
+SYSCTL_WANT='fs.inotify.max_user_instances = 8192'
+if [[ "$(cat "$SYSCTL_FILE" 2>/dev/null)" != "$SYSCTL_WANT" ]]; then
+  printf '%s\n' "$SYSCTL_WANT" > "$SYSCTL_FILE"
+  echo "wrote $SYSCTL_FILE"
+fi
+sysctl -q -p "$SYSCTL_FILE" || echo "WARNING: could not apply $SYSCTL_FILE; containers past the 128th start unwatched"
+
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
 # Items are referenced by id: `op read` rejects titles with parentheses ("invalid character in secret reference").

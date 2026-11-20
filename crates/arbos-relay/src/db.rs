@@ -32,6 +32,18 @@ pub struct Db(Arc<Mutex<Connection>>, Arc<Vec<Mutex<Connection>>>);
 /// sockets; a read that finds them all busy waits for one rather than opening more.
 const READERS: usize = 4;
 
+/// A transaction on the writer's connection.
+///
+/// It takes the write lock at `BEGIN` (`IMMEDIATE`), not at its first write. A deferred
+/// transaction that reads first holds a snapshot by the time it writes, and SQLite will not run
+/// the busy handler for a connection in that state: if a reader holds the WAL write lock at that
+/// instant (it takes it briefly to re-read a header it caught mid-change), the write fails with
+/// "database is locked" at once, whatever `busy_timeout` says. A room PUSH was refused that way.
+/// At `BEGIN` no snapshot is held yet, so the same collision waits for the reader instead.
+pub(crate) fn write_tx(c: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
+}
+
 const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
 
 const SCHEMA: &str = r#"
@@ -1919,7 +1931,7 @@ impl Db {
             // The room position and its row commit together: an insert failure must not leave
             // a head that promises bytes the relay never stored, and a reader beside the writer
             // ([`Db::read`]) must never see the head moved to a seq whose row is not there yet.
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
                 tx.commit()?;
                 return Ok((seq, true));
@@ -1981,7 +1993,7 @@ impl Db {
     pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
         let now = now_ms();
         self.with(|c| {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             let moved = tx.execute(
                 "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
                  SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
@@ -2041,7 +2053,7 @@ impl Db {
         self.with(|c| {
             // One transaction, for the same reason as `append_row`: the checkpoint, the rows it
             // replaces and the floor change together or not at all.
-            let c = c.unchecked_transaction()?;
+            let c = crate::db::write_tx(c)?;
             let floor: i64 = c
                 .query_row("SELECT floor FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))
                 .optional()?
@@ -4113,6 +4125,33 @@ mod reader_tests {
         // The scrub's truncating checkpoint is not held up by idle readers.
         db.flush_after_scrub().unwrap();
         assert_eq!(db.room_head("p/c").unwrap(), 20);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that reads before it writes (`append_row` looks the batch up first) must wait for
+    /// the write lock like any other write, not be refused. Readers take that lock for an instant
+    /// when they catch the WAL header mid-change, and SQLite does not run the busy handler for a
+    /// transaction that already holds a read snapshot: it answers "database is locked" at once.
+    #[test]
+    fn a_write_that_reads_first_is_never_refused_by_busy_readers() {
+        let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let (db, stop) = (db.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        db.room_position("p/c").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for n in 0..10_000 {
+            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        readers.into_iter().for_each(|r| r.join().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

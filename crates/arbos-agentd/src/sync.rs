@@ -2768,6 +2768,90 @@ mod tests {
         assert!(host.next_push().is_none());
     }
 
+    /// A backlog is cut by size, so the cut can fall between a message's row and the `id`,
+    /// `role` and `sender` written after it. Wherever among them the real cut lands, the two
+    /// frames read to the relay as that message arriving: no frame rewrites one of those
+    /// fields on a message, and the row ends up named and signed.
+    #[test]
+    fn a_backlog_cut_inside_a_messages_first_fields_reads_as_the_message_arriving() {
+        // Text that does not compress, so a character more is about a byte more.
+        fn filler(len: usize, seed: u64) -> String {
+            let mut x = 0x2545_F491_4F6C_DD1Du64 ^ (seed + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            (0..len)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    char::from(b'a' + (x % 26) as u8)
+                })
+                .collect()
+        }
+        let opts = arbos_core::doc::UserMessageOpts::default();
+        // Kept from one cut to the next: the three are a few bytes apart.
+        let mut pad = 16_384usize;
+        for target in 1..=3 {
+            let mut landed = None;
+            for _ in 0..12 {
+                // Most of a frame in a few hundred large fields, the rest in text that can
+                // be padded a character at a time.
+                let doc = ChatDoc::new(Some(7), false);
+                doc.append_user_message("m0", "hi", "mac", &opts).unwrap();
+                for i in 0..(PUSH_BUDGET - 32_768) / 4096 {
+                    let value = serde_json::json!(filler(4096, i as u64));
+                    doc.set_message_fields("m0", &[(format!("f{i}").as_str(), value)]);
+                }
+                doc.append_user_message("m1", &filler(pad, 0), "mac", &opts)
+                    .unwrap();
+                let row_at = doc.oplog_vv().get(&7).copied().unwrap();
+                doc.start_assistant_message("m_reply", "m1", "box");
+                let head = doc.oplog_vv();
+                let mut host = host_with(doc);
+                // The cut is the longest prefix that fits: pad until that is this one.
+                let fits = host.export_prefix(&head, 7, row_at + target).0.len();
+                let over = host.export_prefix(&head, 7, row_at + target + 1).0.len();
+                if fits > PUSH_BUDGET {
+                    pad = pad.saturating_sub(fits - PUSH_BUDGET);
+                } else if over <= PUSH_BUDGET {
+                    pad += PUSH_BUDGET - over + 1;
+                } else {
+                    let (batch, bytes) = host.next_push().expect("a first frame");
+                    let cut = host.inflight.as_ref().unwrap().1.get(&7).copied().unwrap();
+                    assert_eq!(cut - row_at, target, "where the real cut fell");
+                    landed = Some((host, batch, bytes));
+                    break;
+                }
+            }
+            let (mut host, mut batch, mut bytes) =
+                landed.unwrap_or_else(|| panic!("no cut landed {target} past the row"));
+
+            let mut room = ChatDoc::new(Some(1), false);
+            let mut mirror = room.message_identities();
+            loop {
+                let before = room.frontiers();
+                let status = room.import(&bytes).unwrap();
+                assert!(status.pending.is_none(), "a frame applies whole");
+                let changes = room.messages_changed(&before, &room.frontiers(), &mirror);
+                assert!(!changes.unreadable);
+                for (id, field) in &changes.rewritten {
+                    assert!(
+                        !["id", "role", "sender"].contains(&field.as_str()),
+                        "cut {target} past the row: {field} rewritten on {id:?}"
+                    );
+                }
+                mirror = changes.ids_after;
+                host.on_ack(&batch);
+                match host.next_push() {
+                    Some(next) => (batch, bytes) = next,
+                    None => break,
+                }
+            }
+            assert_eq!(
+                mirror.last(),
+                Some(&("m_reply".to_owned(), Some("agent".to_owned())))
+            );
+        }
+    }
+
     /// Jacob's rule (#1573): @mentions set the ORDER, never a filter. A fresh un-mentioned send
     /// still goes through the normal respond gate after a backlog drain, and the stale rows that
     /// were not gated stay in the doc, so the reply can be in context.
