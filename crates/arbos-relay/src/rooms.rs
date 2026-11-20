@@ -1147,13 +1147,16 @@ pub async fn get_checkpoint(
     }
 }
 
-/// `POST /room/{project}/{chat}/checkpoint?seqCovered=` — box only; body = snapshot; header `x-arbos-frontier` = base64 VV.
+/// `POST /room/{project}/{chat}/checkpoint?seqCovered=` — box only; body = snapshot.
+///
+/// The body is evidence, not content: it must hold every row it covers, which is how a box with
+/// an incomplete replica learns it. What is stored is the room's own doc (checkpoint ∪ rows), so
+/// a checkpoint adds nothing: every op in it came through a push.
 pub async fn post_checkpoint(
     State(state): State<AppState>,
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     if !state.allows(&principal, &acl_key(&project_id, &chat_id))
@@ -1165,33 +1168,40 @@ pub async fn post_checkpoint(
         .get("seqCovered")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let frontier = headers
-        .get("x-arbos-frontier")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| hex::decode(s).ok())
-        .unwrap_or_default();
     let room_name = wire::room_name(&project_id, &chat_id);
     let device = principal.device_name();
-    match checkpoint_covers_store(&state.db, &room_name, seq_covered, &body) {
-        Ok(CheckpointVerdict::Covers) => {}
-        Ok(CheckpointVerdict::Incomplete(why)) => {
-            tracing::warn!(
-                %room_name, %device, seq_covered, %why,
-                "checkpoint refused: the snapshot lacks ops the relay holds"
-            );
-            return (
-                StatusCode::CONFLICT,
-                format!("checkpoint_incomplete: {why}"),
-            )
-                .into_response();
+    let own = match crate::matrix::backfill::load_doc(&state, &chat_id, Some(&project_id)) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            return (StatusCode::CONFLICT, "checkpoint_incomplete: empty room").into_response()
         }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let (bytes, frontier) = (own.snapshot(), arbos_core::doc::encode_vv(&own.oplog_vv()));
+    // The room's own snapshot faces the same check as the upload: a row its doc could not apply
+    // is not in it, and storing it would delete that row.
+    for candidate in [&body[..], &bytes[..]] {
+        match checkpoint_covers_store(&state.db, &room_name, seq_covered, candidate) {
+            Ok(CheckpointVerdict::Covers) => {}
+            Ok(CheckpointVerdict::Incomplete(why)) => {
+                tracing::warn!(
+                    %room_name, %device, seq_covered, %why,
+                    "checkpoint refused: the snapshot lacks ops the relay holds"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    format!("checkpoint_incomplete: {why}"),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
         }
     }
     match state
         .db
-        .put_checkpoint(&room_name, seq_covered, &frontier, &body)
+        .put_checkpoint(&room_name, seq_covered, &frontier, &bytes)
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
@@ -2818,6 +2828,40 @@ mod covered_push_tests {
             sender: Some(format!("user:{user}")),
             ..Default::default()
         }
+    }
+
+    /// A checkpoint is the room's own history, folded. What a box uploads proves it holds every
+    /// row; anything more in it goes through a push or not at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_checkpoint_stores_what_the_room_holds_and_nothing_the_upload_adds() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, _) = chat_with_bobs_message(&state);
+        let chat = room.strip_prefix("people/").unwrap().to_owned();
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let mut box_doc = ChatDoc::new(Some(5), false);
+        box_doc.import(&bob_doc.snapshot()).unwrap();
+        box_doc
+            .append_user_message("m-extra", "never pushed", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let head = state.db.room_state(&room).unwrap().head;
+
+        let res = super::post_checkpoint(
+            axum::extract::State(state.clone()),
+            crate::auth::Principal::Box { user_id: alice },
+            axum::extract::Path(("people".to_owned(), chat.clone())),
+            axum::extract::Query([("seqCovered".to_owned(), head.to_string())].into()),
+            box_doc.snapshot().into(),
+        )
+        .await;
+
+        assert_eq!(res.status(), axum::http::StatusCode::NO_CONTENT);
+        let (seq, bytes) = state.db.checkpoint_bytes(&room).unwrap().unwrap();
+        assert_eq!(seq, head);
+        let stored = ChatDoc::from_snapshot(None, false, &bytes).unwrap();
+        let ids: Vec<String> = stored.messages().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["m-bob"]);
+        assert_eq!(stored.oplog_vv(), bob_doc.oplog_vv());
     }
 
     /// A whole snapshot is a payload like any other: applied in full, judged, stored.

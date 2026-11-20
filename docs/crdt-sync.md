@@ -289,7 +289,7 @@ After `STATE`, if `checkpointSeq > 0`:
 1. If the local doc **contains** the frontier (`ChatDoc::contains_frontier` / `contains_vv` / Swift `contains(frontier:)`), advance `cursor = max(cursor, checkpointSeq)` — compacted rows are already in the replica.
 2. Else **`GET /room/{project}/{chat}/checkpoint`** — body = snapshot bytes; response header `x-arbos-checkpoint-seq`. Import into Loro, then set cursor.
 
-Box (or admin) writes checkpoints: **`POST /room/{project}/{chat}/checkpoint?seqCovered=`** with body = snapshot and header `x-arbos-frontier` = hex-encoded VV. Conflict if `seqCovered` is below the floor.
+Box (or admin) asks for a checkpoint: **`POST /room/{project}/{chat}/checkpoint?seqCovered=`** with body = its snapshot. The body must hold every row it covers (409 `checkpoint_incomplete` otherwise); what the relay stores is its own doc for the room, so a checkpoint holds only ops that arrived as pushes. Conflict if `seqCovered` is below the floor.
 
 Also: **`GET /room/{project}/{chat}/stats`** returns the same counters as STATE (no frontier).
 
