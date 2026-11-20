@@ -212,7 +212,7 @@ groups:
       # The write-ahead log sits near 4 MB. One that stays this large means a read is being held open
       # across many commits, and writes get slower. Quiet while the relay does not export the series.
       - alert: RelayWalLarge
-        expr: arbos_relay_db_bytes{file="wal"} > 128e6
+        expr: arbos_relay_db_bytes{file="wal"} > 128 * 1024^2
         for: 10m
         labels:
           severity: warning
