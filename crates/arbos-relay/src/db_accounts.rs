@@ -886,14 +886,18 @@ impl Db {
 
     /// Device row as `(user_id, revoked)`; `None` when the id is unknown.
     pub fn device_status(&self, device_id: &str) -> Result<Option<(String, bool)>> {
-        self.read(|c| {
+        let status = |c: &rusqlite::Connection| {
             c.query_row(
                 "SELECT user_id, revoked_at IS NOT NULL FROM devices WHERE id = ?1",
                 params![device_id],
                 |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
             )
             .optional()
-        })
+        };
+        // Callers read an error as "signed out" (they must fail closed). A reader can fail for a
+        // moment, busy behind a truncating checkpoint, so the writer's connection is asked
+        // before a device is told its session is gone.
+        self.read(status).or_else(|_| self.with(status))
     }
 
     pub fn touch_device(&self, device_id: &str) -> Result<()> {
@@ -911,7 +915,7 @@ impl Db {
     /// the device since: `last_seen_at` only moves forward.
     pub fn touch_devices(&self, seen: &[(String, i64)]) -> Result<()> {
         self.with(|c| {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_tx(c)?;
             {
                 let mut st = tx.prepare(
                     "UPDATE devices SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2) WHERE id = ?1",

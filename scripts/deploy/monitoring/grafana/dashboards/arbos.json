@@ -1,0 +1,1928 @@
+{
+ "uid": "arbos",
+ "title": "Arbos",
+ "tags": [
+  "arbos"
+ ],
+ "editable": false,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "refresh": "10s",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "graphTooltip": 1,
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Service",
+   "description": "The relay answers, on the server and from outside through its public name.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "Down"
+        },
+        "1": {
+         "text": "Up"
+        },
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "#d55181"
+       },
+       {
+        "value": 1,
+        "color": "#199e70"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 1,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(subnet:relay_up * subnet:public_up) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Working now",
+   "description": "Agent machines with a turn running in the last 3 minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 2,
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arbos:boxes_working) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / min",
+   "description": "Tokens the agents' model calls use: input, output and cached, averaged over five minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 3,
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(60 * arbos:tokens:rate5m or (0 * subnet:relay_counts_tokens - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Tokens / 24 h",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "after the next relay update",
+         "color": "#6e7681"
+        },
+        "-2": {
+         "text": "relay just restarted",
+         "color": "#6e7681"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 4,
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arbos:tokens:increase24h or (0 * subnet:relay_counts_tokens - 2)) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Model calls OK",
+   "description": "Model calls answered successfully in the last five minutes.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 1,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "#d55181"
+       },
+       {
+        "value": 90,
+        "color": "#c98500"
+       },
+       {
+        "value": 98,
+        "color": "text"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 5,
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(100 * (1 - subnet:model_error_ratio) or 100 + 0 * subnet:box_start_failures:rate5m) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Spend of cap",
+   "description": "Today's model spend against the daily cap. At 100% every agent stops until 00:00 UTC.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-1": {
+         "text": "no data yet",
+         "color": "#6e7681"
+        },
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       },
+       {
+        "value": 60,
+        "color": "#c98500"
+       },
+       {
+        "value": 85,
+        "color": "#d55181"
+       }
+      ]
+     },
+     "noValue": "\u2013"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   },
+   "transparent": true,
+   "id": 6,
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(100 * subnet:spend_cap_ratio) or vector(-1)",
+     "legendFormat": "",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "title": "Swarm",
+   "description": "Every box is one dot. Up: tokens per minute its agents are using. Right: CPU cores. Area: memory. Colour: what it is doing, as in the list on the right. A busy fleet rises off the floor; an idle one sits along it; sleeping boxes are at the origin. Hover for the box; click to open it. Until the relay reports per box, every dot is grey and on the floor.",
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "name",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "renameByName": {
+       "Value #A": "CPU cores",
+       "Value #B": "Memory",
+       "Value #C": "State",
+       "Value #D": "Tokens / min",
+       "name": "Box"
+      },
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "__name__ 1": true,
+       "job 1": true,
+       "instance 1": true,
+       "Time 2": true,
+       "__name__ 2": true,
+       "job 2": true,
+       "instance 2": true,
+       "Time 3": true,
+       "__name__ 3": true,
+       "job 3": true,
+       "instance 3": true,
+       "Time 4": true,
+       "__name__ 4": true,
+       "job 4": true,
+       "instance 4": true,
+       "Time 5": true,
+       "__name__ 5": true,
+       "job 5": true,
+       "instance 5": true,
+       "Time 6": true,
+       "__name__ 6": true,
+       "job 6": true,
+       "instance 6": true,
+       "Time 7": true,
+       "__name__ 7": true,
+       "job 7": true,
+       "instance 7": true,
+       "Time 8": true,
+       "__name__ 8": true,
+       "job 8": true,
+       "instance 8": true,
+       "Time 9": true,
+       "__name__ 9": true,
+       "job 9": true,
+       "instance 9": true,
+       "Time 10": true,
+       "__name__ 10": true,
+       "job 10": true,
+       "instance 10": true,
+       "Time 11": true,
+       "__name__ 11": true,
+       "job 11": true,
+       "instance 11": true
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "min": 0,
+     "custom": {
+      "show": "points",
+      "pointSize": {
+       "fixed": 8,
+       "min": 6,
+       "max": 44
+      },
+      "pointShape": "circle",
+      "pointStrokeWidth": 1,
+      "fillOpacity": 55,
+      "axisPlacement": "auto",
+      "scaleDistribution": {
+       "type": "linear"
+      }
+     },
+     "links": [
+      {
+       "title": "Open this box",
+       "url": "/d/arbos-swarm/swarm?var-box=${__data.fields.Box}"
+      }
+     ],
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Memory"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "State"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "unknown",
+            "color": "#8b949e"
+           },
+           "1": {
+            "text": "asleep",
+            "color": "#57606a"
+           },
+           "2": {
+            "text": "awake, idle",
+            "color": "#3987e5"
+           },
+           "3": {
+            "text": "waking",
+            "color": "#c9d1d9"
+           },
+           "4": {
+            "text": "working",
+            "color": "#c98500"
+           },
+           "5": {
+            "text": "error",
+            "color": "#d55181"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "value": null,
+           "color": "#8b949e"
+          },
+          {
+           "value": 1,
+           "color": "#57606a"
+          },
+          {
+           "value": 2,
+           "color": "#3987e5"
+          },
+          {
+           "value": 3,
+           "color": "#c9d1d9"
+          },
+          {
+           "value": 4,
+           "color": "#c98500"
+          },
+          {
+           "value": 5,
+           "color": "#d55181"
+          }
+         ]
+        }
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "thresholds"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU cores"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "CPU cores"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tokens / min"
+      },
+      "properties": [
+       {
+        "id": "custom.axisLabel",
+        "value": "Tokens / min"
+       }
+      ]
+     }
+    ]
+   },
+   "type": "xychart",
+   "pluginVersion": "13.2.6",
+   "options": {
+    "mapping": "manual",
+    "series": [
+     {
+      "frame": {
+       "matcher": {
+        "id": "byIndex",
+        "options": 0
+       }
+      },
+      "x": {
+       "matcher": {
+        "id": "byName",
+        "options": "CPU cores"
+       }
+      },
+      "y": {
+       "matcher": {
+        "id": "byName",
+        "options": "Tokens / min"
+       }
+      },
+      "size": {
+       "matcher": {
+        "id": "byName",
+        "options": "Memory"
+       }
+      },
+      "color": {
+       "matcher": {
+        "id": "byName",
+        "options": "State"
+       }
+      },
+      "name": {
+       "fixed": "box"
+      }
+     }
+    ],
+    "legend": {
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   },
+   "transparent": true,
+   "id": 7,
+   "gridPos": {
+    "x": 0,
+    "y": 3,
+    "w": 16,
+    "h": 10
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (rate(container_cpu_usage_seconds_total{name=~\"arbos-box-.+\"}[2m])) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (container_memory_working_set_bytes{name=~\"arbos-box-.+\"}) or max by (name) (0 * label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\"))",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((max by (box) (4 * ((sum by (box) (rate(arbos_relay_box_tokens_total[1m])) > bool 0) == 1) or on (box) (0 * arbos_relay_box_state{state=\"unknown\"} or 1 * arbos_relay_box_state{state=\"asleep\"} or 3 * arbos_relay_box_state{state=\"waking\"} or 5 * arbos_relay_box_state{state=\"error\"} or (2 * arbos_relay_box_state{state=\"awake\"} + on (box) 2 * arbos_relay_box_turn_running)))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) ((60 * sum by (box) (rate(arbos_relay_box_tokens_total[1m]))) * on (box) group_left (name) label_replace(arbos_relay_box_info, \"name\", \"$1\", \"container\", \"(.+)\")) or max by (name) (0 * container_last_seen{name=~\"arbos-box-.+\"})",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ]
+  },
+  {
+   "type": "bargauge",
+   "title": "Machines",
+   "description": "Agent machines by what they are doing, each bar against the limit of machines this host admits.",
+   "transparent": true,
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "noValue": "\u2013",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "color": {
+      "mode": "fixed"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "text"
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "awake, idle"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "waking"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d1d9"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "asleep"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#57606a"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "error"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "waiting for one"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "orientation": "horizontal",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": true,
+    "namePlacement": "left",
+    "minVizHeight": 12,
+    "maxVizHeight": 22,
+    "text": {
+     "titleSize": 12,
+     "valueSize": 16
+    },
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "transformations": [
+    {
+     "id": "configFromData",
+     "options": {
+      "configRefId": "G",
+      "mappings": [
+       {
+        "fieldName": "max",
+        "handlerKey": "max"
+       },
+       {
+        "fieldName": "Time",
+        "handlerKey": "__ignore"
+       }
+      ]
+     }
+    }
+   ],
+   "id": 8,
+   "gridPos": {
+    "x": 16,
+    "y": 3,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_working",
+     "legendFormat": "working",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_idle",
+     "legendFormat": "awake, idle",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_waking",
+     "legendFormat": "waking",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_asleep",
+     "legendFormat": "asleep",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_error",
+     "legendFormat": "error",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "F",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_waitlisted",
+     "legendFormat": "waiting for one",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "G",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "subnet:boxes_max",
+     "legendFormat": "max",
+     "instant": true,
+     "range": false
+    }
+   ]
+  },
+  {
+   "type": "bargauge",
+   "title": "Host",
+   "description": "How much of the server is in use.",
+   "transparent": true,
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "decimals": 0,
+     "noValue": "\u2013",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "-5": {
+         "text": "<5"
+        }
+       }
+      }
+     ],
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "#6e7681"
+       },
+       {
+        "value": 75,
+        "color": "#c98500"
+       },
+       {
+        "value": 90,
+        "color": "#d55181"
+       }
+      ]
+     },
+     "max": 100
+    },
+    "overrides": []
+   },
+   "options": {
+    "orientation": "horizontal",
+    "displayMode": "basic",
+    "valueMode": "color",
+    "showUnfilled": true,
+    "namePlacement": "left",
+    "minVizHeight": 12,
+    "maxVizHeight": 22,
+    "text": {
+     "titleSize": 12,
+     "valueSize": 16
+    },
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "x": 16,
+    "y": 9,
+    "w": 8,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * subnet:host_cpu_used_ratio",
+     "legendFormat": "CPU",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * subnet:host_memory_used_ratio",
+     "legendFormat": "memory",
+     "instant": true,
+     "range": false
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk",
+     "instant": true,
+     "range": false
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Tokens per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 25,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "normal"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "cache read"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "cache write"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#199e70"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "input"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "output"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 10,
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_relay_tokens_total{kind=\"cache_read\"}[5m]))",
+     "legendFormat": "cache read",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_relay_tokens_total{kind=\"cache_write\"}[5m]))",
+     "legendFormat": "cache write",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_relay_tokens_total{kind=\"input\"}[5m]))",
+     "legendFormat": "input",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * sum(rate(arbos_relay_tokens_total{kind=\"output\"}[5m]))",
+     "legendFormat": "output",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Model calls per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "calls"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 11,
+   "gridPos": {
+    "x": 8,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * arbos:model_requests:rate5m",
+     "legendFormat": "calls",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * arbos:model_requests:rate5m * subnet:model_error_ratio",
+     "legendFormat": "failed",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Machine starts per minute",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "started"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#d55181"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 12,
+   "gridPos": {
+    "x": 16,
+    "y": 13,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * subnet:box_starts:rate5m",
+     "legendFormat": "started",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * subnet:box_start_failures:rate5m",
+     "legendFormat": "failed",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Spend of cap",
+   "description": "Climbs through the day and returns to 0 at 00:00 UTC.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "today"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 13,
+   "gridPos": {
+    "x": 0,
+    "y": 19,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * subnet:spend_cap_ratio",
+     "legendFormat": "today",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Host in use",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "CPU"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "memory"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#199e70"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "disk"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 14,
+   "gridPos": {
+    "x": 8,
+    "y": 19,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * subnet:host_cpu_used_ratio",
+     "legendFormat": "CPU",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * subnet:host_memory_used_ratio",
+     "legendFormat": "memory",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (1 - subnet:host_disk_free_ratio)",
+     "legendFormat": "disk",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Machines",
+   "description": "",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     },
+     "noValue": "after the next relay update"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "running"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#3987e5"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c98500"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "asleep"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#6e7681"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "limit"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d1d9"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "transparent": true,
+   "id": 15,
+   "gridPos": {
+    "x": 16,
+    "y": 19,
+    "w": 8,
+    "h": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_running",
+     "legendFormat": "running",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_working",
+     "legendFormat": "working",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "arbos:boxes_asleep",
+     "legendFormat": "asleep",
+     "instant": false,
+     "range": true
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "subnet:boxes_max",
+     "legendFormat": "limit",
+     "instant": false,
+     "range": true
+    }
+   ]
+  }
+ ],
+ "links": [
+  {
+   "type": "dashboards",
+   "tags": [
+    "arbos"
+   ],
+   "title": "Arbos",
+   "asDropdown": false,
+   "includeVars": false,
+   "keepTime": true
+  }
+ ]
+}

@@ -411,6 +411,7 @@ fn error_frame(code: &str, message: &str) -> Message {
 /// and agentd read that silence as a dead link and reconnected 10 s later (2026-11-04). The
 /// people-push refusal below has always carried `batchId`; this is the same courtesy for rooms.
 fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(code);
     frame(
         FrameType::Error,
         json!({ "code": code, "message": message, "batchId": batch_id }),
@@ -423,6 +424,7 @@ fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message
 /// `chat_unavailable`) and, on a block, `byHandle` (+ `byName`). The code set never grows:
 /// fielded clients only keep a room Live for these two codes.
 fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
+    crate::metrics::room_push_refused(refused.code());
     let mut header = json!({
         "code": refused.code(),
         "message": refused.message(),
@@ -861,8 +863,15 @@ async fn handle_frame(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
                     );
-                    sink.send(room_push_refused_frame(code, &detail, &p.batch_id))
-                        .await?;
+                    // In a people chat the gates answer first. A sender they refuse gets
+                    // their answer, the one a device stays connected on, whatever else is
+                    // wrong with the push.
+                    let refusal = room_name
+                        .strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+                        .and_then(|chat_id| people::room_push_refusal(state, principal, chat_id))
+                        .map(|r| push_refused_frame(&r, &p.batch_id))
+                        .unwrap_or_else(|| room_push_refused_frame(code, &detail, &p.batch_id));
+                    sink.send(refusal).await?;
                     return Ok(());
                 }
             };
@@ -894,6 +903,7 @@ async fn handle_frame(
             let (seq, dup) = state
                 .db
                 .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            crate::metrics::room_push(dup);
             // Whose message each new row carries, recorded from the socket that pushed it and
             // before anyone can read the row. The announce routes write this record too, but
             // they take the message id from a request body and are gated only on membership —
@@ -1040,11 +1050,11 @@ async fn handle_frame(
                 }
                 // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
                 // `flush_presence` writes every device's stamp in one transaction.
-                state
-                    .presence_seen
-                    .lock()
-                    .await
-                    .insert(id.clone(), arbos_core::ids::now_ms());
+                let now = arbos_core::ids::now_ms();
+                state.presence_seen.lock().await.insert(id.clone(), now);
+                if let Some(user) = principal.user_id() {
+                    state.user_seen.lock().unwrap().insert(user.to_owned(), now);
+                }
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
@@ -1462,9 +1472,8 @@ mod refusal_frame_tests {
 
 /// How often presence stamps reach `devices.last_seen_at`.
 ///
-/// Not free to raise: a person reads as online for `people::ONLINE_MS` (90 s) after the newest
-/// stamp in that column, and presence frames come every 15 s, so this plus one frame has to
-/// stay under it. Going past 60 s means answering `online` from `presence_seen` first.
+/// `online` does not wait for it: `AppState::seen_at` answers from the in-memory stamp first.
+/// The column is what survives a restart and what `last_seen_at` shows, floored to the minute.
 const PRESENCE_FLUSH: Duration = Duration::from_secs(60);
 
 /// Write every presence stamp newer than `since` to `devices.last_seen_at`, all in one
@@ -2622,6 +2631,14 @@ mod history_tests {
     }
 }
 
+/// The apps' room session, compiled from its own source so a test can drive the real one
+/// against this relay. `arbos-client` is app-only and the relay may not depend on it; the
+/// module needs nothing beyond `arbos-core` and serde, which the relay already has.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../arbos-client/src/room.rs"]
+mod client_room;
+
 #[cfg(test)]
 mod covered_push_tests {
     //! Reconnect storm (#1570): pending batches whose ops the room already holds must ACK as
@@ -2766,6 +2783,234 @@ mod covered_push_tests {
             }
         }
         out
+    }
+
+    fn chat_with_bobs_message(state: &AppState) -> (String, ChatDoc, String, String) {
+        let (alice, _) = person(state, 1);
+        let (bob, _) = person(state, 2);
+        let chat = dm(state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let bob_doc = ChatDoc::new(Some(7), false);
+        let base = bob_doc.oplog_vv();
+        bob_doc.init_meta(&chat, "people", 1);
+        bob_doc
+            .append_user_message("m-bob", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:bob",
+                "seed",
+                &bob_doc.export_updates_since(&base),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "m-bob", &format!("user:{bob}"))
+            .unwrap();
+        let (alice_token, bob_token) = (device_token(state, &alice), device_token(state, &bob));
+        (room, bob_doc, alice_token, bob_token)
+    }
+
+    fn as_user(user: &str) -> UserMessageOpts {
+        UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        }
+    }
+
+    /// A whole snapshot is a payload like any other: applied in full, judged, stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_pushed_as_a_row_is_judged_and_stored() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(frames[0].header["dup"], false);
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m-alice"]);
+
+        // And refused like any other when what it does is not the pusher's to do.
+        alice_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap-2".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_yours");
+    }
+
+    /// The record of who wrote what failing to read is not an empty record: the push is
+    /// refused and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_is_refused_while_the_author_record_cannot_be_read() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        state
+            .db
+            .with(|c| c.execute_batch("ALTER TABLE message_authors RENAME TO message_authors_gone"))
+            .unwrap();
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        let mark = alice_doc.oplog_vv();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("a1".into(), alice_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "unavailable");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+    }
+
+    /// In a people chat a sender the gates refuse gets the gates' answer for a push the guard
+    /// refuses too, so the device stays connected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sender_the_gates_refuse_gets_their_answer_for_a_push_the_guard_refuses() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let (bob, _) = person(&state, 2);
+        let chat = room.strip_prefix("people/").unwrap();
+        let me = format!("user:{bob}");
+        assert!(state.db.set_member_silenced(chat, &me, true, None).unwrap());
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("b1".into(), bob_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["reason"], "silenced");
+        assert_eq!(frames[0].header["batchId"], "b1");
+    }
+
+    /// Runs a real client session against the room until the relay has nothing more to say,
+    /// answering it as an app does. Returns what the session asked its host to do.
+    async fn run_session(
+        addr: SocketAddr,
+        token: &str,
+        session: &mut super::client_room::RoomSession,
+        doc: &mut ChatDoc,
+    ) -> Vec<super::client_room::RoomAction> {
+        use super::client_room::RoomAction;
+        let url = format!("ws://{addr}/room/{}?token={token}", session.room());
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        session.on_open(0);
+        let mut seen = Vec::new();
+        loop {
+            // Answering one action can queue more, so drain until the session is quiet.
+            let mut actions = std::collections::VecDeque::from(session.drain_actions());
+            while let Some(action) = actions.pop_front() {
+                match &action {
+                    RoomAction::SendFrame(bytes) => {
+                        sink.send(TMsg::Binary(bytes.clone().into())).await.unwrap()
+                    }
+                    RoomAction::ApplyBytes(bytes) => {
+                        doc.import(bytes).unwrap();
+                    }
+                    RoomAction::HealCheck { relay_vv } => {
+                        let vv = arbos_core::doc::decode_vv(relay_vv).unwrap();
+                        session.on_heal(doc.updates_beyond(&vv));
+                    }
+                    RoomAction::FetchCheckpoint { .. } => session.on_checkpoint_skipped(),
+                    _ => {}
+                }
+                seen.push(action);
+                actions.extend(session.drain_actions());
+            }
+            match tokio::time::timeout(Duration::from_millis(400), stream.next()).await {
+                Ok(Some(Ok(TMsg::Binary(bytes)))) => session.on_frame(&bytes),
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+        }
+        seen
+    }
+
+    /// What an app does today passes every rule: a device that comes back with several
+    /// messages written offline has each of them stored under its author, and its session
+    /// stays live with nothing refused and no redial asked for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_real_client_session_sends_what_it_wrote_offline_and_stays_connected() {
+        use super::client_room::{RoomAction, RoomSession};
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let (alice, _) = person(&state, 1);
+        let addr = serve(state.clone()).await;
+
+        let mut doc = ChatDoc::new(Some(5), false);
+        doc.import(&bob_doc.snapshot()).unwrap();
+        let mut session = RoomSession::new("dev:alice", room.clone(), 0, Vec::new());
+        for id in ["m1", "m2", "m3"] {
+            let mark = doc.oplog_vv();
+            doc.append_user_message(id, "hi", "dev:alice", &as_user(&alice))
+                .unwrap();
+            session.on_local_commit(doc.export_updates_since(&mark));
+        }
+        let seen = run_session(addr, &alice_token, &mut session, &mut doc).await;
+        // The heal on connect carries all three; the batches behind it ack as already held.
+        assert!(session.is_live() && session.pending().is_empty());
+        assert!(!seen.iter().any(|a| matches!(
+            a,
+            RoomAction::ScheduleReconnect { .. }
+                | RoomAction::SessionError { .. }
+                | RoomAction::PushRefused { .. }
+        )));
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m1", "m2", "m3"]);
+        for id in ["m1", "m2", "m3"] {
+            let chat = room.strip_prefix("people/").unwrap();
+            assert_eq!(
+                state.db.message_author(chat, id).unwrap(),
+                Some(format!("user:{alice}"))
+            );
+        }
     }
 
     /// 250 pending batches whose ops the room already holds → 250 dup ACKs, no new rows, no

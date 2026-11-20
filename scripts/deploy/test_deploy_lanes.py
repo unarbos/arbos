@@ -188,8 +188,16 @@ sed(){
     def test_existing_canary_defers_relay(self):
         self.run_shell('queue_request relay aaaaaaa >/dev/null || exit 1\nprintf canary > "$STATE/agentd.canary"\ndeploy_relay(){ touch "$ROOT/forbidden"; }\nhandle_request "$QUEUE/relay" || exit 1\n[[ ! -e "$ROOT/forbidden" ]] && grep -qx sha=aaaaaaa "$QUEUE/relay" || exit 1', self.request_helpers())
 
+    def test_a_process_left_behind_by_a_lane_command_does_not_keep_the_lane(self):
+        self.run_shell('LANE_MARKER_MAX_S=1800\nleave(){ /bin/sleep 30 >/dev/null 2>&1 & }\ndeploy_lane_run relay leave || exit 1\nrc=0; deploy_lane_run relay true || rc=$?\nprintf "OBSERVED next lane run exit=%s\\n" "$rc"\n[[ "$rc" == 0 ]] || exit 1')
+
+    def test_a_process_left_behind_by_a_tick_does_not_keep_the_worker_lock(self):
+        helpers = '\n'.join(function(self.worker, name) for name in ['tick', 'tick_locked'] if name + '() {' in self.worker)
+        helpers += '\nneed_root(){ :; }; dry(){ return 1; }; KILL_FILE="$ROOT/absent"; apply_pending_www_reload(){ :; }; ensure_repo(){ :; }; auto_requests(){ /bin/sleep 30 >/dev/null 2>&1 & }; prune_agent_image_tags(){ :; }; continue_roll_if_due(){ :; }\n'
+        self.run_shell('(tick) || exit 1\nrc=0; (exec 9> "$STATE/.lock"; flock -n 9) || rc=$?\nprintf "OBSERVED worker lock exit=%s\\n" "$rc"\n[[ "$rc" == 0 ]] || exit 1', helpers)
+
     def test_dry_tick_does_not_expire_real_markers(self):
-        helpers = '\n'.join(function(self.worker, name) for name in ['marker_fresh', 'canary_running', 'relay_deploying', 'apply_pending_www_reload', 'tick'])
+        helpers = '\n'.join(function(self.worker, name) for name in ['marker_fresh', 'canary_running', 'relay_deploying', 'apply_pending_www_reload', 'tick', 'tick_locked'])
         helpers += '\nneed_root(){ :; }; dry(){ return 0; }; log(){ :; }; event(){ :; }; stat(){ echo 0; }; systemctl(){ echo forbidden-systemctl; return 91; }; ensure_repo(){ :; }; auto_requests(){ :; }; prune_agent_image_tags(){ :; }; continue_roll_if_due(){ :; }; flock(){ :; }; mktemp(){ /usr/bin/mktemp -d "$ROOT/copy.XXXXXX"; }; LANE_MARKER_MAX_S=1800\n'
         self.run_shell('real_state="$STATE"\nprintf stale > "$STATE/agentd.canary"\nprintf pending > "$STATE/www.reload-pending"\ntick || exit 1\nprintf "OBSERVED original canary present=%s\\n" "$([[ -f "$real_state/agentd.canary" ]] && echo yes || echo no)"\n[[ -f "$real_state/agentd.canary" ]] && [[ -f "$real_state/www.reload-pending" ]] || exit 1', helpers)
 
