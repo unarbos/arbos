@@ -88,11 +88,16 @@ pub struct MessageChanges {
     /// from the doc by the time the diff is read — and it is what tells a box's own
     /// unattributed row apart from a person's. See `push_guard`'s removal arm.
     pub removed: Vec<MessageIdentity>,
-    /// Messages the update added, each with the `sender` written on it (`None` when absent).
+    /// Entries the update added, each with the `sender` written on it (`None` when absent).
+    /// One with no readable `id` is reported under the empty id.
+    /// A row that was missing `id` or `sender` and gained one is reported here again, under
+    /// the id and sender it now has: that is the message still arriving.
     pub inserted: Vec<(String, Option<String>)>,
     /// `(message id, field)` for each field written onto a message that was already in the
     /// list. Only messages are reported: an edit inside a message's `parts` is not a field on
     /// the message, and a part map carries its own `id` that must not be mistaken for one.
+    /// The id is the one the message had before the update, so a write to `id` itself is
+    /// reported here like any other field.
     pub rewritten: Vec<(String, String)>,
     /// Every message id, in list order, as the list stands at `to`.
     ///
@@ -2166,12 +2171,14 @@ impl ChatDoc {
         let msgs = self.messages_list();
         let mut out = Vec::with_capacity(msgs.len());
         for i in 0..msgs.len() {
-            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
-                continue;
-            };
-            if let Some(id) = map_str(&m, "id") {
-                out.push((id, map_str(&m, "sender")));
-            }
+            // Every entry takes a place, readable or not: [`Self::messages_changed`] names a
+            // row by its position here, exactly as the mirror it carries forward does.
+            out.push(match msgs.get(i) {
+                Some(ValueOrContainer::Container(Container::Map(m))) => {
+                    (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"))
+                }
+                _ => Default::default(),
+            });
         }
         out
     }
@@ -2208,22 +2215,25 @@ impl ChatDoc {
             out.unreadable = true;
             return out;
         };
-        let mut saw_list = false;
+        // Each place in the list at `to`: who is there, and whether the row was there at `from`.
+        let mut after: Vec<MessageIdentity> = before_ids.to_vec();
+        let mut existed = vec![true; before_ids.len()];
         for (cid, diff) in batch.iter() {
             match diff {
                 Diff::List(items) if is_messages_root(cid) => {
-                    saw_list = true;
                     // Delta encoding over the list as it stood at `from`: retain and delete
                     // both consume the old list, insert does not. Walking it is also how
                     // `ids_after` is built, since applying the delta is the only exact way to
                     // know the order the list ends up in.
-                    let mut after = Vec::with_capacity(before_ids.len());
+                    after.clear();
+                    existed.clear();
                     let mut old = 0usize;
                     for item in items {
                         match item {
                             ListDiffItem::Retain { retain } => {
                                 let end = (old + retain).min(before_ids.len());
                                 after.extend_from_slice(&before_ids[old.min(end)..end]);
+                                existed.resize(after.len(), true);
                                 old += retain;
                             }
                             ListDiffItem::Delete { delete } => {
@@ -2238,54 +2248,88 @@ impl ChatDoc {
                                         ValueOrContainer::Container(Container::Map(m)) => Some(m),
                                         _ => None,
                                     };
-                                    let id = m.and_then(|m| map_str(m, "id"));
-                                    // An entry with no readable id still takes up a position.
-                                    // Holding an unnameable placeholder keeps the mirror in
-                                    // step, so a later delete over it reports an id no message
-                                    // can have instead of a neighbour's.
-                                    after.push((
-                                        id.clone().unwrap_or_default(),
-                                        m.and_then(|m| map_str(m, "sender")),
-                                    ));
-                                    if let (Some(id), Some(m)) = (id, m) {
+                                    // An entry with no readable id still takes up a position
+                                    // and is still reported, under the empty id no message can
+                                    // have: the mirror stays in step, and the caller hears of
+                                    // an entry it cannot name instead of never hearing of it.
+                                    let id = m.and_then(|m| map_str(m, "id")).unwrap_or_default();
+                                    let sender = m.and_then(|m| map_str(m, "sender"));
+                                    after.push((id.clone(), sender.clone()));
+                                    existed.push(false);
+                                    if let Some(m) = m {
                                         let poll = poll_fields(m);
                                         if poll.as_object().is_some_and(|o| !o.is_empty()) {
                                             out.polls.push((id.clone(), poll));
                                         }
-                                        out.inserted.push((id, map_str(m, "sender")));
                                     }
+                                    out.inserted.push((id, sender));
                                 }
                             }
                         }
                     }
                     after.extend_from_slice(&before_ids[old.min(before_ids.len())..]);
-                    out.ids_after = after;
-                }
-                Diff::Map(delta) => {
-                    // A map somewhere in the doc. It is a message only if its own `id` is one
-                    // of the ids the list held at `from`; parts carry an `id` too.
-                    let Some(m) = self.doc.try_get_map(cid) else {
-                        continue;
-                    };
-                    let Some(id) = map_str(&m, "id") else {
-                        continue;
-                    };
-                    if !before_ids.iter().any(|(b, _)| *b == id) {
-                        continue;
-                    }
-                    for key in delta.updated.keys() {
-                        out.rewritten.push((id.clone(), key.to_string()));
-                    }
-                    if delta.updated.keys().any(|k| is_poll_key(k)) {
-                        out.polls.push((id, poll_fields(&m)));
-                    }
+                    existed.resize(after.len(), true);
                 }
                 _ => {}
             }
         }
-        if !saw_list {
-            out.ids_after = before_ids.to_vec();
+        for (cid, diff) in batch.iter() {
+            let Diff::Map(delta) = diff else { continue };
+            // A map somewhere in the doc. It is a message only if it sits directly in the
+            // `messages` list, and it is the message at that place: the `id` it carries is a
+            // field like any other, which this very update may have written. A row that
+            // arrived with the update is reported whole above.
+            // A map the doc cannot place could be a message: nothing can be said about it.
+            let Some(path) = self.doc.get_path_to_container(cid) else {
+                out.unreadable = true;
+                continue;
+            };
+            let [(root, _), (_, Index::Seq(i))] = path.as_slice() else {
+                continue;
+            };
+            if !is_messages_root(root) {
+                continue;
+            }
+            let (Some(true), Some(m)) = (existed.get(*i), self.doc.try_get_map(cid)) else {
+                if *i >= existed.len() {
+                    out.unreadable = true; // the mirror is not this list: nothing can be named
+                }
+                continue;
+            };
+            let (id, sender) = after[*i].clone();
+            let now = (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"));
+            // Every writer creates the row and then sets `id`, `role` and `sender`, in that
+            // order, and an update may end between any two of them (a box cuts a backlog by
+            // size). A header field the row did not have yet, written by the peer that
+            // created the row, is therefore the message still arriving, not a rewrite: once
+            // the row has its id it is reported as inserted, to be judged as one, under the
+            // name it now carries. Written by any other peer it is a rewrite like any other.
+            let creator = match cid {
+                ContainerID::Normal { peer, .. } => Some(*peer),
+                ContainerID::Root { .. } => None,
+            };
+            let mut arrived = false;
+            for key in delta.updated.keys() {
+                let missing = match key.as_ref() {
+                    "id" => id.is_empty(),
+                    "role" | "sender" => sender.is_none(),
+                    _ => false,
+                };
+                if missing && creator.is_some() && m.get_last_editor(key) == creator {
+                    arrived = true;
+                } else {
+                    out.rewritten.push((id.clone(), key.to_string()));
+                }
+            }
+            if arrived && !now.0.is_empty() {
+                out.inserted.push(now.clone());
+            }
+            if delta.updated.keys().any(|k| is_poll_key(k)) {
+                out.polls.push((id, poll_fields(&m)));
+            }
+            after[*i] = now;
         }
+        out.ids_after = after;
         out
     }
 
@@ -2877,7 +2921,8 @@ mod message_change_tests {
         doc.commit_now();
 
         let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
-        assert_eq!(changes.ids_after, ids);
+        assert_eq!(just_ids(&changes.ids_after), just_ids(&ids));
+        assert_eq!(changes.ids_after, doc.message_identities());
     }
 
     /// Editing a message's text touches a part, not the message, and parts carry their own
@@ -2900,6 +2945,127 @@ mod message_change_tests {
         );
         assert!(changes.removed.is_empty());
         assert!(changes.inserted.is_empty());
+    }
+
+    /// A message is the row at its place in the list. An update that rewrites or removes a
+    /// row's `id` is still reported against the id the row had, with every field it wrote,
+    /// and the mirror follows the row to whatever it is called afterwards.
+    #[test]
+    fn a_row_whose_id_is_written_is_reported_under_the_id_it_had() {
+        for new_id in [Some("mX"), None] {
+            let (doc, ids) = seeded();
+            let before = doc.frontiers();
+            let m2 = doc.find_message("m2").unwrap();
+            m2.insert("sender", "user:carol").unwrap();
+            match new_id {
+                Some(id) => m2.insert("id", id).unwrap(),
+                None => m2.delete("id").unwrap(),
+            }
+            doc.commit_now();
+
+            let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+            let mut rewritten = changes.rewritten.clone();
+            rewritten.sort();
+            assert_eq!(
+                rewritten,
+                [
+                    ("m2".to_owned(), "id".to_owned()),
+                    ("m2".to_owned(), "sender".to_owned())
+                ]
+            );
+            assert_eq!(
+                changes.ids_after[1],
+                (
+                    new_id.unwrap_or_default().to_owned(),
+                    Some("user:carol".to_owned())
+                )
+            );
+            assert_eq!(
+                changes.ids_after,
+                doc.message_identities(),
+                "a mirror rebuilt from the doc is the one carried forward"
+            );
+        }
+    }
+
+    /// A row with no readable id still takes up a place, in a mirror built from the doc as in
+    /// one carried forward, so a later delete names the message that went and not a neighbour.
+    #[test]
+    fn a_row_with_no_id_keeps_its_place_in_the_mirror() {
+        let (doc, _) = seeded();
+        doc.messages_list().insert(0, "not a message").unwrap();
+        doc.commit_now();
+        let ids = doc.message_identities();
+        assert_eq!(just_ids(&ids), ["", "m1", "m2", "m3"]);
+
+        let before = doc.frontiers();
+        doc.delete_message("m2").unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.removed,
+            [("m2".to_owned(), Some("user:bob".to_owned()))]
+        );
+    }
+
+    /// A mirror that is not this list cannot name the row a write landed on, so the diff says
+    /// it could not be read rather than naming a row by guesswork.
+    #[test]
+    fn a_mirror_out_of_step_with_the_list_makes_the_diff_unreadable() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.set_message_fields("m3", &[("preview", Value::from("off"))]);
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids[..2]);
+        assert!(changes.unreadable);
+    }
+
+    /// The import of a payload is exact when it applied all of the payload and nothing else.
+    /// A write to a message that is no longer in the list has no place in it, and that is an
+    /// ordinary thing to read: someone removed the message while the write was on its way.
+    #[test]
+    fn a_write_to_a_message_removed_meanwhile_is_readable() {
+        let mut room = ChatDoc::new(Some(1), false);
+        room.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let mut late = ChatDoc::new(Some(2), false);
+        late.import(&room.snapshot()).unwrap();
+        room.delete_message("m1").unwrap();
+        room.commit_now();
+        let mark = late.oplog_vv();
+        late.set_message_fields("m1", &[("preview", json!("x"))]);
+        late.set_reaction("m1", "👍", "user:a", true).unwrap();
+        late.append_user_message("m2", "yo", "dev", &UserMessageOpts::default())
+            .unwrap();
+        late.delete_message("m2").unwrap();
+        let update = late.export_updates_since(&mark);
+
+        let (before, mirror) = (room.frontiers(), room.message_identities());
+        assert!(room.import(&update).unwrap().pending.is_none());
+        let c = room.messages_changed(&before, &room.frontiers(), &mirror);
+        assert!(!c.unreadable);
+        assert!(c.ids_after.is_empty());
+    }
+
+    /// An entry that arrives without an id is reported as an insert with an empty id, so the
+    /// caller can refuse it rather than never hear of it.
+    #[test]
+    fn an_entry_inserted_without_an_id_is_reported() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        let m = doc.messages_list().push_container(LoroMap::new()).unwrap();
+        m.insert("sender", "user:bob").unwrap();
+        doc.messages_list().push("not a message").unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.inserted,
+            [
+                (String::new(), Some("user:bob".to_owned())),
+                (String::new(), None)
+            ]
+        );
     }
 }
 

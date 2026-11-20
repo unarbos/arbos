@@ -19,8 +19,8 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::widgets::{
-    card_frame, card_header, option_list, option_row, CardLook, CloseHandler, RowState, ROW_HEIGHT,
-    ROW_PAD_X,
+    card_frame, card_header, last_row, option_list, option_row, CardLook, CloseHandler, RowState,
+    ROW_HEIGHT, ROW_PAD_X,
 };
 
 /// What the card reads from its approval part each render.
@@ -242,6 +242,7 @@ impl SecretOfferCard {
             true,
             look,
         )
+        .map(last_row)
         .font_weight(FontWeight::SEMIBOLD)
         .debug_selector(|| "secret-offer-save".into())
         .when(can_save, |r| {

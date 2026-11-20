@@ -11,7 +11,8 @@ use gpui::{div, prelude::*, px, App, Div, SharedString, Stateful};
 use crate::model::{ApprovalRisk, ApprovalState};
 use crate::ui::theme::{Theme, TEXT_SMALL};
 use crate::ui::widgets::{
-    card_frame, card_header, option_list, option_row, CardLook, CloseHandler, RowState, ROW_PAD_X,
+    card_frame, card_header, last_row, option_list, option_row, CardLook, CloseHandler, RowState,
+    ROW_PAD_X,
 };
 
 /// Everything the card renders, flattened from `Part::Approval`.
@@ -305,6 +306,7 @@ pub fn approval_card(
                 ix > 0,
                 &look,
             )
+            .when(ix + 1 == shell.len(), last_row)
             .debug_selector({
                 let id = id.clone();
                 move || format!("shell-option-{id}")
@@ -359,6 +361,7 @@ pub fn approval_card(
             true,
             &look,
         )
+        .map(last_row)
         .when(pending, |el| {
             let on_reject = on_reject.clone();
             el.on_click(move |_, _, cx| on_reject(cx))
@@ -386,6 +389,7 @@ pub fn approval_card(
                     ix > 0,
                     &look,
                 )
+                .when(ix + 1 == answers.len(), last_row)
                 .when(pending, |el| {
                     el.on_click(move |_, _, cx| on_answer(&choice, cx))
                 }),
