@@ -3625,35 +3625,27 @@ impl Transcript {
                         (self.state.clone(), chat_id.clone(), row.message_id.clone());
                     let selector: SharedString = format!("poll-option#{id}").into();
                     list = list.child(
-                        option_row(
-                            format!("{}#{id}", row.id),
-                            Some(letter(ix)),
-                            label,
-                            if on { RowState::Chosen } else { RowState::Open },
-                            ix > 0,
-                            &look,
-                        )
-                        .when(ix + 1 == options.len(), last_row)
-                        .debug_selector(move || selector.to_string())
-                        .cursor_pointer()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
-                                .child(voters.len().to_string()),
-                        )
-                        // Who voted for it, behind a hover — the reaction chip's tip.
-                        .when(!voters.is_empty(), |el| {
-                            el.tooltip(move |_, cx| {
-                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                        poll_option_row(&row.id, ix, options.len(), id, label, on, &look)
+                            .debug_selector(move || selector.to_string())
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(voters.len().to_string()),
+                            )
+                            // Who voted for it, behind a hover — the reaction chip's tip.
+                            .when(!voters.is_empty(), |el| {
+                                el.tooltip(move |_, cx| {
+                                    cx.new(|_| ReactionSendersTip(names.clone())).into()
+                                })
                             })
-                        })
-                        .on_click(move |_, _, cx| {
-                            let (chat, message_id, next) =
-                                (chat.clone(), message_id.clone(), next.clone());
-                            state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
-                        }),
+                            .on_click(move |_, _, cx| {
+                                let (chat, message_id, next) =
+                                    (chat.clone(), message_id.clone(), next.clone());
+                                state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                            }),
                     );
                 }
                 let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
@@ -3994,6 +3986,28 @@ fn poll_pick(mine: &[String], id: &str, multiple: bool) -> Vec<String> {
         (false, true) => Vec::new(),
         (false, false) => vec![id.to_owned()],
     }
+}
+
+/// A poll's option row `ix` of `count`: lettered, mine chosen, the end rows rounded to the
+/// list's corners.
+fn poll_option_row(
+    row_id: &str,
+    ix: usize,
+    count: usize,
+    id: &str,
+    label: &str,
+    on: bool,
+    look: &CardLook,
+) -> gpui::Stateful<Div> {
+    option_row(
+        format!("{row_id}#{id}"),
+        Some(letter(ix)),
+        label,
+        if on { RowState::Chosen } else { RowState::Open },
+        ix > 0,
+        look,
+    )
+    .when(ix + 1 == count, last_row)
 }
 
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
@@ -12239,6 +12253,8 @@ mod poll_rows_tests {
         doc.transact(|d| {
             d.append_poll_message("p1", &poll, "dev", &from("user:gh_ana"))
                 .unwrap();
+            d.append_poll_message("p3", &poll, "dev", &from("user:gh_ana"))
+                .unwrap();
             d.append_poll_message("p2", &poll, "dev", &from(&me))
                 .unwrap();
         });
@@ -12297,9 +12313,34 @@ mod poll_rows_tests {
                 bubble.origin.x
             );
             assert!(mine.origin.x > theirs.origin.x, "{width} pt: sides differ");
+            // Her run: the disc and her name on its first poll, an empty lane on the next.
             let disc = bounds("disc#p1#poll");
             assert!(right(disc) < f32::from(theirs.origin.x));
+            let who = bounds("who#p1#poll");
+            assert!(who.origin.x >= theirs.origin.x && who.origin.y < disc.origin.y);
+            assert!(vcx.debug_bounds("disc#p3#poll").is_none());
+            assert!(vcx.debug_bounds("who#p3#poll").is_none());
+            assert!(
+                vcx.debug_bounds("who#p2#poll").is_none(),
+                "mine has no name"
+            );
         }
+    }
+
+    /// The fill of a poll's first and last option follows the list's rounded corners.
+    #[test]
+    fn a_polls_end_options_round_to_the_list() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let look = CardLook::of(&theme);
+        let corners = |ix: usize, count: usize| {
+            let mut row = poll_option_row("p1#poll", ix, count, "1", "Lisbon", false, &look);
+            let c = &row.style().corner_radii;
+            (c.top_left.is_some(), c.bottom_left.is_some())
+        };
+        assert_eq!(
+            [corners(0, 3), corners(1, 3), corners(2, 3), corners(0, 1)],
+            [(true, false), (false, false), (false, true), (true, true)]
+        );
     }
 
     /// A build without polls reads the row as the doc stores it — no projection, so no poll

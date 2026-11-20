@@ -1038,7 +1038,9 @@ mod me_picker_tests {
     //! Generate sends `GenerateImage { Me }`; the relay's answer previews; Set sends
     //! `SetMyAvatarKey`; Reset + Set sends `RemoveMyAvatar`.
     use futures::future::BoxFuture;
-    use gpui::{point, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+    use gpui::{
+        point, Bounds, Entity, Focusable, Modifiers, Pixels, TestAppContext, VisualTestContext,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -1864,10 +1866,100 @@ mod me_picker_tests {
         settle(&shell, vcx);
         assert_eq!(name(vcx), "Homex", "the keyboard is back in the Name field");
 
+        // A click outside the picker's card closes it alone too.
         click(vcx, &shell, "edit-avatar");
         assert_eq!(open(vcx), (true, true));
-        vcx.dispatch_action(crate::ui::shell::Escape);
+        let card = vcx.debug_bounds("avatar-card").expect("the card");
+        vcx.simulate_click(
+            point(card.left() - px(20.0), card.top()),
+            Modifiers::default(),
+        );
+        settle(&shell, vcx);
+        assert_eq!(
+            open(vcx),
+            (false, true),
+            "a click outside closes the picker alone"
+        );
+
+        // Esc typed in the Generate prompt, through the real keymap.
+        vcx.update(|_, cx| crate::bind_keys(cx));
+        click(vcx, &shell, "edit-avatar");
+        click(vcx, &shell, "avatar-tab-generate");
+        let prompt = shell.read_with(&*vcx, |sh, cx| {
+            sh.avatar_prompt_input.read(cx).focus_handle(cx)
+        });
+        vcx.update(|window, cx| window.focus(&prompt, cx));
+        vcx.simulate_input("a fox");
+        settle(&shell, vcx);
+        let typed = shell.read_with(&*vcx, |sh, cx| {
+            sh.avatar_prompt_input.read(cx).text().to_owned()
+        });
+        assert_eq!((typed.as_str(), name(vcx).as_str()), ("a fox", "Homex"));
+        vcx.simulate_keystrokes("escape");
         settle(&shell, vcx);
         assert_eq!(open(vcx), (false, true), "Esc closes the picker alone");
+
+        // Set avatar: the choice is stored, the picker goes, Edit Agent shows it.
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        click(vcx, &shell, "edit-avatar");
+        shell.update(vcx, |sh, _| {
+            sh.avatar_picker.as_mut().expect("open").color = Some(3)
+        });
+        settle(&shell, vcx);
+        click(vcx, &shell, "avatar-set");
+        assert_eq!(open(vcx), (false, true), "Set closes the picker alone");
+        let set = std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|c| matches!(c, ClientCommand::SetAvatarDisc { color: Some(3), .. }));
+        assert!(set, "the colour is sent");
+        // The sheet's picture is drawn from this record each frame.
+        let stored = state.read_with(&*vcx, |s, _| s.project("p1").map(|p| p.avatar_disc_color));
+        assert_eq!(stored, Some(Some(3)));
+        assert!(vcx.debug_bounds("edit-avatar").is_some());
+    }
+
+    /// A sheet drawn over the picker keeps the keyboard and Esc: Feedback (⌘⌥F) opened
+    /// while the picker is up can be typed into, and Esc closes Feedback, not the picker.
+    #[gpui::test]
+    fn a_sheet_over_the_picker_keeps_the_keyboard_and_escape(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        shell.update_in(vcx, |sh, window, cx| sh.open_feedback(window, cx));
+        settle(&shell, vcx);
+        let picker_owns = |vcx: &mut VisualTestContext| {
+            vcx.update(|window, cx| {
+                let focus = shell.read(cx).avatar_focus.clone();
+                focus.is_focused(window) || focus.contains_focused(window, cx)
+            })
+        };
+        assert!(shell.read_with(&*vcx, |sh, cx| sh.modal_focus(cx).is_none()));
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        let up = shell.read_with(&*vcx, |sh, cx| {
+            (sh.feedback.read(cx).is_open(), sh.avatar_picker.is_some())
+        });
+        assert_eq!(up, (false, true), "Esc closes Feedback, the picker stays");
+        assert!(picker_owns(vcx), "then the keyboard is the picker's again");
+
+        // The same for a server sheet (Restore keys opens by itself).
+        state.update(vcx, |s, cx| {
+            s.server_sheet = Some(crate::app::ServerSheet::RestoreKeys);
+            cx.notify();
+        });
+        settle(&shell, vcx);
+        assert!(!picker_owns(vcx), "Restore keys has the keyboard");
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        let up = shell.read_with(&*vcx, |sh, cx| {
+            (
+                sh.state.read(cx).server_sheet.is_some(),
+                sh.avatar_picker.is_some(),
+            )
+        });
+        assert_eq!(
+            up,
+            (false, true),
+            "Esc closes the server sheet, the picker stays"
+        );
     }
 }

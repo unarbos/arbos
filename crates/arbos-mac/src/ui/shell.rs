@@ -527,7 +527,7 @@ pub struct Shell {
     pub(crate) pip_offset: (f32, f32),
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
     /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
-    feedback: Entity<FeedbackSheet>,
+    pub(crate) feedback: Entity<FeedbackSheet>,
 }
 
 impl Shell {
@@ -1459,15 +1459,28 @@ impl Shell {
         if state.chart_viewer.is_some() {
             return Some(self.viewer_focus.clone());
         }
-        // Over Edit Agent the Name field under the picker must not type.
-        if self.avatar_picker.is_some() {
-            return Some(self.avatar_focus.clone());
-        }
         // It opens by itself (no click put the keyboard in its field).
         if state.server_sheet == Some(ServerSheet::RestoreKeys) {
             return Some(self.server_input.read(cx).focus_handle(cx));
         }
+        // Over Edit Agent the Name field under the picker must not type.
+        if self.avatar_picker_on_top(cx) {
+            return Some(self.avatar_focus.clone());
+        }
         None
+    }
+
+    /// The avatar picker is up with no sheet drawn over it (the render order: the Create
+    /// and server sheets, the reveals and Feedback come after it). Only then are the
+    /// keyboard and Esc its own.
+    fn avatar_picker_on_top(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        self.avatar_picker.is_some()
+            && !state.new_chat_open
+            && state.server_sheet.is_none()
+            && state.connect_reveal.is_none()
+            && state.agent_link_reveal.is_none()
+            && !self.feedback.read(cx).is_open()
     }
 
     /// Keep the keyboard inside the open sheet: whatever else took focus
@@ -3346,8 +3359,8 @@ impl Shell {
             }
             return;
         }
-        // The avatar picker is the top sheet (it opens over Edit Agent): Esc closes it alone.
-        if self.avatar_picker.is_some() {
+        // The avatar picker opens over Edit Agent: Esc closes it alone.
+        if self.avatar_picker_on_top(cx) {
             self.close_avatar_picker(cx);
             return;
         }
