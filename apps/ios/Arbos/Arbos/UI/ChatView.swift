@@ -3482,7 +3482,7 @@ struct ChatSession: View {
 
     /// Close poll is offered to a poll's maker while it is open (and can be closed at all).
     private func canClosePoll(_ row: Row) -> Bool {
-        guard case .poll(let poll, let by) = row.kind else { return false }
+        guard case .poll(let poll, let by, _, _) = row.kind else { return false }
         return by == nil && poll.closable && !poll.closed(now: nowMs())
     }
 
