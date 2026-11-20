@@ -1165,13 +1165,22 @@ pub async fn get_checkpoint(
     }
 }
 
-/// `POST /room/{project}/{chat}/checkpoint?seqCovered=` — box only; body = snapshot; header `x-arbos-frontier` = base64 VV.
+/// Least time between two checkpoint attempts by one caller on one room, and after a stored
+/// checkpoint between it and anyone's next attempt: an attempt reads the whole room, and a room
+/// that has just been folded needs no second folding. A caller's refused attempt holds back
+/// only that caller, so one box with a bad replica cannot keep a shared chat from compacting.
+const CHECKPOINT_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// `POST /room/{project}/{chat}/checkpoint?seqCovered=` — box only; body = snapshot.
+///
+/// The body is evidence, not content: it must hold every row it covers, which is how a box with
+/// an incomplete replica learns it. What is stored is the room's own doc (checkpoint ∪ rows), so
+/// a checkpoint adds nothing: every op in it came through a push.
 pub async fn post_checkpoint(
     State(state): State<AppState>,
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     if !state.allows(&principal, &acl_key(&project_id, &chat_id))
@@ -1183,38 +1192,108 @@ pub async fn post_checkpoint(
         .get("seqCovered")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let frontier = headers
-        .get("x-arbos-frontier")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| hex::decode(s).ok())
-        .unwrap_or_default();
+    // As on the socket: a project's ACL covers every chat id under it, so the chat has to
+    // exist before the relay keeps anything in memory for its room.
+    if project_id != people::PEOPLE_PROJECT {
+        if state.db.project(&project_id).ok().flatten().is_none() {
+            return (StatusCode::NOT_FOUND, "no such project").into_response();
+        }
+        if chat_id != PROJECT_DOC_CHAT_ID
+            && !state.db.chat_exists(&project_id, &chat_id).unwrap_or(false)
+        {
+            return (StatusCode::NOT_FOUND, "no such chat").into_response();
+        }
+    }
     let room_name = wire::room_name(&project_id, &chat_id);
     let device = principal.device_name();
-    match checkpoint_covers_store(&state.db, &room_name, seq_covered, &body) {
-        Ok(CheckpointVerdict::Covers) => {}
-        Ok(CheckpointVerdict::Incomplete(why)) => {
+    let room = state.room(&room_name).await;
+    {
+        let recent = |t: &std::time::Instant| t.elapsed() < CHECKPOINT_MIN_INTERVAL;
+        let mut tried = room.checkpoint_tried.lock().unwrap();
+        tried.callers.retain(|_, t| recent(t));
+        if tried.stored.as_ref().is_some_and(recent) || tried.callers.contains_key(&device) {
+            crate::metrics::room_checkpoint("too_soon");
+            return (StatusCode::TOO_MANY_REQUESTS, "checkpoint_too_soon").into_response();
+        }
+        tried
+            .callers
+            .insert(device.clone(), std::time::Instant::now());
+    }
+    let (st, name) = (state.clone(), room_name.clone());
+    let stored = tokio::task::spawn_blocking(move || {
+        store_own_checkpoint(&st, &project_id, &chat_id, &name, seq_covered, &body)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
+    let (result, response) = match stored {
+        Ok(Ok(true)) => {
+            room.checkpoint_tried.lock().unwrap().stored = Some(std::time::Instant::now());
+            ("stored", StatusCode::NO_CONTENT.into_response())
+        }
+        Ok(Ok(false)) => (
+            "below_floor",
+            (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
+        ),
+        Ok(Err((candidate, why))) => {
+            // `candidate` says whose snapshot fell short: the box's upload (its replica is
+            // incomplete) or the room's own doc (the relay holds a row it cannot apply, and
+            // the room does not compact until that is repaired).
             tracing::warn!(
-                %room_name, %device, seq_covered, %why,
+                %room_name, %device, seq_covered, candidate, %why,
                 "checkpoint refused: the snapshot lacks ops the relay holds"
             );
-            return (
-                StatusCode::CONFLICT,
-                format!("checkpoint_incomplete: {why}"),
+            (
+                candidate,
+                (
+                    StatusCode::CONFLICT,
+                    format!("checkpoint_incomplete: {why}"),
+                )
+                    .into_response(),
             )
-                .into_response();
         }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    }
-    match state
-        .db
-        .put_checkpoint(&room_name, seq_covered, &frontier, &body)
+        Err(e) => (
+            "error",
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        ),
+    };
+    crate::metrics::room_checkpoint(result);
+    response
+}
+
+/// The blocking half of [`post_checkpoint`]. `Ok(Err((candidate, why)))` names the snapshot that
+/// does not cover the room's rows: `upload_incomplete` or `room_incomplete`. The upload is
+/// checked first, so a body that proves nothing costs no rebuild of the room.
+fn store_own_checkpoint(
+    state: &AppState,
+    project_id: &str,
+    chat_id: &str,
+    room_name: &str,
+    seq_covered: i64,
+    upload: &[u8],
+) -> anyhow::Result<Result<bool, (&'static str, String)>> {
+    if let CheckpointVerdict::Incomplete(why) =
+        checkpoint_covers_store(&state.db, room_name, seq_covered, upload)?
     {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        return Ok(Err(("upload_incomplete", why)));
     }
+    let Some(own) = crate::matrix::backfill::load_doc(state, chat_id, Some(project_id))? else {
+        return Ok(Err(("room_incomplete", "the room holds no doc".to_owned())));
+    };
+    let (bytes, frontier) = (own.snapshot(), arbos_core::doc::encode_vv(&own.oplog_vv()));
+    // The room's own snapshot faces the same check as the upload: a row its doc could not apply
+    // is not in it, and storing it would delete that row.
+    if let CheckpointVerdict::Incomplete(why) =
+        checkpoint_covers_store(&state.db, room_name, seq_covered, &bytes)?
+    {
+        return Ok(Err(("room_incomplete", why)));
+    }
+    Ok(Ok(state.db.put_checkpoint(
+        room_name,
+        seq_covered,
+        &frontier,
+        &bytes,
+    )?))
 }
 
 /// Outcome of [`checkpoint_covers_store`].
@@ -2836,6 +2915,193 @@ mod covered_push_tests {
             sender: Some(format!("user:{user}")),
             ..Default::default()
         }
+    }
+
+    /// A checkpoint is the room's own history, folded. What a box uploads proves it holds every
+    /// row; anything more in it goes through a push or not at all. Asked through the relay's own
+    /// router with a box's token.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_checkpoint_stores_what_the_room_holds_and_nothing_the_upload_adds() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let box_token = box_token_of(&state, &alice);
+        // The box's replica: everything the room holds, and on top of it a message in Bob's
+        // name and an edit of Bob's own message, neither of them ever pushed.
+        let mut box_doc = ChatDoc::new(Some(5), false);
+        box_doc.import(&bob_doc.snapshot()).unwrap();
+        box_doc
+            .append_user_message("m-extra", "never pushed", "dev:bob", &as_user(&bob))
+            .unwrap();
+        box_doc.set_message_fields("m-bob", &[("preview", json!("edited"))]);
+        let head = state.db.room_state(&room).unwrap().head;
+        let addr = serve_relay(&state).await;
+        let post = |token: String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token, body);
+
+        // A device may not ask, and is turned away before the room is touched.
+        let res = post(alice_token, box_doc.snapshot()).await.unwrap();
+        assert_eq!(res.status(), 403);
+        assert!(state.db.checkpoint_bytes(&room).unwrap().is_none());
+
+        let res = post(box_token.clone(), box_doc.snapshot()).await.unwrap();
+        assert_eq!(res.status(), 204);
+        let (seq, bytes) = state.db.checkpoint_bytes(&room).unwrap().unwrap();
+        assert_eq!(seq, head);
+        let stored = ChatDoc::from_snapshot(None, false, &bytes).unwrap();
+        assert_eq!(
+            stored.oplog_vv(),
+            bob_doc.oplog_vv(),
+            "no op but the room's"
+        );
+        let messages = stored.messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "m-bob");
+        assert!(messages[0].rest.get("preview").is_none());
+
+        // The room was read once; asking again straight away is refused before any work.
+        let res = post(box_token, b"nothing".to_vec()).await.unwrap();
+        assert_eq!(res.status(), 429);
+    }
+
+    /// A box with the token it signs in with.
+    fn box_token_of(state: &AppState, user: &str) -> String {
+        let token = format!("abx_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .upsert_box(&crate::db::Sandbox {
+                user_id: user.to_owned(),
+                provider: "gvisor".into(),
+                sandbox_id: None,
+                daytona_state: None,
+                device_id: format!("box:{user}"),
+                box_token_hash: arbos_core::auth::hash(&token),
+                mcp_token: ulid(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        token
+    }
+
+    /// The relay's own router, on a loopback port.
+    async fn serve_relay(state: &AppState) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = crate::app(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    async fn ask_checkpoint(
+        addr: SocketAddr,
+        room: &str,
+        seq_covered: i64,
+        token: String,
+        body: Vec<u8>,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/room/{room}/checkpoint?seqCovered={seq_covered}"
+            ))
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+    }
+
+    /// A project's ACL covers every chat id under it. A checkpoint asked for a chat that does
+    /// not exist is answered 404 and the relay keeps nothing for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_checkpoint_for_a_chat_that_does_not_exist_leaves_no_room_behind() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = crate::people::tests_support::project_of(&state, &alice, "P");
+        let token = box_token_of(&state, &alice);
+        let addr = serve_relay(&state).await;
+        for _ in 0..3 {
+            let room = format!("{project}/{}", ulid());
+            let res = ask_checkpoint(addr, &room, 0, token.clone(), Vec::new())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 404);
+        }
+        assert!(state.rooms.read().await.is_empty());
+    }
+
+    /// A refused attempt holds back only the box that made it; a stored checkpoint holds back
+    /// everyone, since the room has just been folded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refused_checkpoint_does_not_keep_another_members_box_from_storing_one() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let (alice_box, bob_box) = (box_token_of(&state, &alice), box_token_of(&state, &bob));
+        let addr = serve_relay(&state).await;
+
+        let (room, doc, _, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        let ask =
+            |token: &String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token.clone(), body);
+        assert_eq!(
+            ask(&alice_box, b"nothing".to_vec()).await.unwrap().status(),
+            409
+        );
+        assert_eq!(ask(&alice_box, doc.snapshot()).await.unwrap().status(), 429);
+        assert_eq!(ask(&bob_box, doc.snapshot()).await.unwrap().status(), 204);
+
+        // In a second room: two good attempts inside the interval store once.
+        let (room, doc, _, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        let ask =
+            |token: &String, body: Vec<u8>| ask_checkpoint(addr, &room, head, token.clone(), body);
+        assert_eq!(ask(&bob_box, doc.snapshot()).await.unwrap().status(), 204);
+        let first = state.db.checkpoint_full(&room).unwrap().unwrap();
+        assert_eq!(ask(&alice_box, doc.snapshot()).await.unwrap().status(), 429);
+        assert_eq!(state.db.checkpoint_full(&room).unwrap().unwrap(), first);
+    }
+
+    /// An upload that proves nothing is refused as the upload's fault, and one the room's own
+    /// doc cannot back is refused as the room's: the two are told apart for whoever reads the
+    /// log and the counter.
+    #[test]
+    fn a_refused_checkpoint_names_the_snapshot_that_fell_short() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, _) = chat_with_bobs_message(&state);
+        let chat = room.strip_prefix("people/").unwrap();
+        let head = state.db.room_state(&room).unwrap().head;
+        let ask = |upload: &[u8], head| {
+            super::store_own_checkpoint(&state, "people", chat, &room, head, upload).unwrap()
+        };
+        assert_eq!(ask(b"nothing", head).unwrap_err().0, "upload_incomplete");
+
+        // A row the room's doc cannot apply: a change whose parent the room was never sent.
+        let mark = bob_doc.oplog_vv();
+        bob_doc
+            .append_user_message("m-2", "two", "dev:bob", &UserMessageOpts::default())
+            .unwrap();
+        let missing = bob_doc.oplog_vv();
+        bob_doc
+            .append_user_message("m-3", "three", "dev:bob", &UserMessageOpts::default())
+            .unwrap();
+        let late = bob_doc.export_updates_since(&missing);
+        let _ = mark;
+        state
+            .db
+            .append_row(&room, "dev:bob", "late", &late)
+            .unwrap();
+        assert_eq!(
+            ask(&bob_doc.snapshot(), head + 1).unwrap_err().0,
+            "room_incomplete"
+        );
+        assert!(state.db.checkpoint_bytes(&room).unwrap().is_none());
+        assert_eq!(state.db.room_state(&room).unwrap().row_count, 2);
     }
 
     /// A push that imports and whose diff the relay still cannot read is refused with the code

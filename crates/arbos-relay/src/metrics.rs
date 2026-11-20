@@ -48,6 +48,7 @@ const BOX_START_SECONDS: &str = "arbos_relay_box_start_duration_seconds";
 const BOX_WAKE_SECONDS: &str = "arbos_relay_box_wake_duration_seconds";
 const ROOM_PUSHES: &str = "arbos_relay_room_pushes_total";
 const ROOM_PUSH_REFUSALS: &str = "arbos_relay_room_push_refusals_total";
+const ROOM_CHECKPOINTS: &str = "arbos_relay_room_checkpoints_total";
 const MODEL_REQUESTS: &str = "arbos_relay_model_requests_total";
 const MODEL_SECONDS: &str = "arbos_relay_model_response_seconds";
 const BOX_DROPPED: &str = "arbos_relay_box_scrape_dropped_lines_total";
@@ -79,6 +80,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     (BOX_WAKE_SECONDS, "histogram", "Time from a wake starting to the box connecting back."),
     (ROOM_PUSHES, "counter", "Room pushes by result (stored, dup, refused)."),
     (ROOM_PUSH_REFUSALS, "counter", "Refused room pushes by refusal code."),
+    (ROOM_CHECKPOINTS, "counter", "Checkpoint requests by result (stored, too_soon, upload_incomplete, room_incomplete, below_floor, error)."),
     ("arbos_relay_notifications_total", "counter", "Device notifications by outcome."),
     (MODEL_REQUESTS, "counter", "Upstream model calls by provider and status class (2xx..5xx, unreachable)."),
     (MODEL_SECONDS, "histogram", "Time for the model provider to answer with response headers."),
@@ -216,6 +218,12 @@ pub fn room_push(dup: bool) {
 pub fn room_push_refused(code: &str) {
     add(ROOM_PUSHES, label("result", "refused"), 1.0);
     add(ROOM_PUSH_REFUSALS, label("code", code), 1.0);
+}
+
+/// A box asked for a room checkpoint. `room_incomplete` is the one to watch: the relay holds a
+/// row its own doc cannot apply, and that room does not compact.
+pub fn room_checkpoint(result: &str) {
+    add(ROOM_CHECKPOINTS, label("result", result), 1.0);
 }
 
 /// One upstream model call: the provider's status, or `None` when it could not be reached.

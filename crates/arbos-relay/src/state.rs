@@ -177,6 +177,15 @@ pub struct RoomDocCache {
     pub message_ids: Vec<arbos_core::doc::MessageIdentity>,
 }
 
+/// When a room's checkpoint was last stored, and when each caller last asked for one. The
+/// callers are the boxes that may reach the room, and entries older than the interval go at
+/// the next request.
+#[derive(Default)]
+pub(crate) struct CheckpointTried {
+    pub stored: Option<std::time::Instant>,
+    pub callers: HashMap<String, std::time::Instant>,
+}
+
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
     /// What each replica last told this relay about the room (room_health, #1470).
@@ -191,6 +200,8 @@ pub struct Room {
     pub(crate) doc_build: tokio::sync::Mutex<()>,
     /// One speculative push owns the message preimage through durable admission.
     pub(crate) push_admission: tokio::sync::Mutex<()>,
+    /// When a checkpoint was last asked for (`rooms::post_checkpoint` spaces the attempts).
+    pub(crate) checkpoint_tried: std::sync::Mutex<CheckpointTried>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
     /// agent live only through such a socket; without one the box is told to open the room
     /// (`boxes::after_person_row`, #2120).
@@ -580,6 +591,7 @@ impl AppState {
                     doc_cache: std::sync::Mutex::new(None),
                     doc_build: tokio::sync::Mutex::new(()),
                     push_admission: tokio::sync::Mutex::new(()),
+                    checkpoint_tried: Default::default(),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
