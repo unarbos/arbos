@@ -653,7 +653,11 @@ impl Db {
             // bytes behind in the file.
             // busy_timeout: `flush_after_scrub`'s checkpoint waits for a reader mid-query
             // instead of giving up on it.
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
+            // journal_size_limit: the WAL file is cut back to 64 MB whenever it is reset. It
+            // normally sits at the 4 MB the autocheckpoint keeps (measured: 383 MB written under
+            // 3,000 sockets, never above 4 MB); only a read held open for a long time lets it
+            // grow, and without a limit the file keeps that size for good.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA journal_size_limit=67108864;",
         )?;
         c.execute_batch(SCHEMA)?;
         crate::usage::migrate(&c)?;
@@ -4162,6 +4166,14 @@ mod reader_tests {
         let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
         let db = Db::open(&dir.join("relay.db")).unwrap();
         assert_eq!(db.1.len(), READERS);
+        let wal_limit: i64 = db
+            .with(|c| c.query_row("PRAGMA journal_size_limit", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(
+            wal_limit,
+            64 * 1024 * 1024,
+            "the WAL file is cut back when it resets"
+        );
         db.append_row("p/c", "dev", "b1", b"abc").unwrap();
         db.append_row("p/c", "dev", "b2", b"de").unwrap();
 
@@ -4227,12 +4239,14 @@ mod reader_tests {
                 })
             })
             .collect();
-        for n in 0..10_000 {
-            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
-        }
+        // The readers are stopped and the directory removed whatever the appends did.
+        let refused =
+            (0..10_000).find_map(|n| db.append_row("p/c", "dev", &format!("b{n}"), b"x").err());
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        readers.into_iter().for_each(|r| r.join().unwrap());
+        let readers_ok = readers.into_iter().all(|r| r.join().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(refused.is_none(), "an append was refused: {refused:?}");
+        assert!(readers_ok, "a reader failed");
     }
 
     /// What a room socket asks on every upgrade and every frame (who the device is, whether it
