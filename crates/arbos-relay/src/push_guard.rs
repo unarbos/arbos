@@ -2143,9 +2143,10 @@ mod tests {
         let _ = bob;
     }
 
-    /// A fix whose fields already hold the relay's values writes nothing: the document skips
-    /// a field set to the value it has. So an empty update after applying fixes is a real
-    /// case (a device whose vote time is the relay's to the millisecond), not an error.
+    /// A fix whose fields already hold the relay's values changes nothing: the document skips
+    /// a field set to the value it has, and its version does not move. That is a real case (a
+    /// device whose vote time is the relay's to the millisecond), and the version is how
+    /// `rooms.rs` tells it: the exported bytes are not empty even then.
     #[test]
     fn a_fix_that_changes_nothing_writes_nothing() {
         let state = test_state(AuthMode::Github);
@@ -2160,7 +2161,11 @@ mod tests {
         room.doc
             .transact(|d| fixes.iter().try_for_each(|fix| fix.apply(d)))
             .unwrap();
-        assert!(room.doc.export_updates_since(&before).is_empty());
+        assert!(room.doc.oplog_vv() == before, "no change was written");
+        assert!(
+            !room.doc.export_updates_since(&before).is_empty(),
+            "which the bytes alone would not show"
+        );
     }
 
     /// A poll the relay sees for the first time closes at most a week (and a day of clock

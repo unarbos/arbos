@@ -142,11 +142,13 @@ impl PendingRoomPush<'_> {
         let doc = &self.cached.doc;
         let base = doc.oplog_vv();
         doc.transact(|doc| fixes.iter().try_for_each(|fix| fix.apply(doc)))?;
-        let bytes = doc.export_updates_since(&base);
-        // Every field already held the value the relay would write: nothing to store.
-        if bytes.is_empty() {
+        // Every field already held the value the relay would write (the document skips a
+        // field set to the value it has): no change was made, so there is no row to store.
+        // Told by the version, not by the bytes — an export of no changes is not empty.
+        if doc.oplog_vv() == base {
             return Ok(None);
         }
+        let bytes = doc.export_updates_since(&base);
         self.cached
             .message_ids
             .retain(|(id, _)| !fixes.iter().any(|fix| fix.delete && fix.message_id == *id));
