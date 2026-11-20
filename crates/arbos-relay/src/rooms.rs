@@ -124,6 +124,8 @@ struct PendingRoomPush<'a> {
     room_name: &'a str,
     cached: crate::state::RoomDocCache,
     changes: arbos_core::doc::MessageChanges,
+    /// The payload imported; `changes` is then the room's own reading of it.
+    imported: bool,
     _admission: tokio::sync::MutexGuard<'a, ()>,
 }
 
@@ -181,12 +183,13 @@ async fn push_message_changes<'a>(
                 .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??
         }
     };
-    let changes = diff_pushed_row(&mut cached, payload);
+    let (changes, imported) = diff_pushed_row(&mut cached, payload);
     Ok(PendingRoomPush {
         room,
         room_name,
         cached,
         changes,
+        imported,
         _admission: admission,
     })
 }
@@ -195,16 +198,19 @@ async fn push_message_changes<'a>(
 fn diff_pushed_row(
     cached: &mut crate::state::RoomDocCache,
     payload: &[u8],
-) -> arbos_core::doc::MessageChanges {
+) -> (arbos_core::doc::MessageChanges, bool) {
     let before = cached.doc.frontiers();
     if cached.doc.import(payload).is_err() {
         // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
         // before, so this is not a rejection of malformed input — it is "nothing is known
         // about what this does", which the caller fails closed on.
-        return arbos_core::doc::MessageChanges {
-            unreadable: true,
-            ..Default::default()
-        };
+        return (
+            arbos_core::doc::MessageChanges {
+                unreadable: true,
+                ..Default::default()
+            },
+            false,
+        );
     }
     let changes =
         cached
@@ -213,7 +219,7 @@ fn diff_pushed_row(
     if !changes.unreadable {
         cached.message_ids = changes.ids_after.clone();
     }
-    changes
+    (changes, true)
 }
 
 /// Read the room's stored doc (checkpoint ∪ rows) from the cache the room keeps: head moves
@@ -845,14 +851,26 @@ async fn handle_frame(
                 .unwrap_or(room_name);
             let pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
-            let (carries_new_message, attributed) = match crate::push_guard::check_push(
-                state,
-                principal,
-                project_id,
-                chat_of_room,
-                p.heal,
-                &pending.changes,
-            ) {
+            // A payload that imported and whose diff still cannot be read is refused: nothing
+            // is known about what it does. The room's doc left the cache for this admission
+            // and is dropped with it, so the next push reads against a rebuilt one. The code is
+            // the one every client stays connected on.
+            let check = if pending.imported && pending.changes.unreadable {
+                crate::push_guard::PushCheck::Refuse {
+                    code: "not_available",
+                    detail: "this push cannot be applied as it stands".to_owned(),
+                }
+            } else {
+                crate::push_guard::check_push(
+                    state,
+                    principal,
+                    project_id,
+                    chat_of_room,
+                    p.heal,
+                    &pending.changes,
+                )
+            };
+            let (carries_new_message, attributed) = match check {
                 crate::push_guard::PushCheck::Allow {
                     carries_new_message,
                     attributed,
@@ -2833,6 +2851,42 @@ mod covered_push_tests {
             sender: Some(format!("user:{user}")),
             ..Default::default()
         }
+    }
+
+    /// A push that imports and whose diff the relay still cannot read is refused with the code
+    /// a device stays connected on, and nothing is stored. The room's doc is rebuilt for the
+    /// next push, so the same change sent again is taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_diff_that_cannot_be_read_is_refused_and_the_next_push_reads_a_rebuilt_doc() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        // The room's mirror of ids out of step with its list: no row can be named.
+        let mut cached = super::build_room_doc(&state, &room).unwrap();
+        cached.message_ids.clear();
+        *state.room(&room).await.doc_cache.lock().unwrap() = Some(cached);
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("preview", json!("x"))]);
+        let edit = bob_doc.export_updates_since(&mark);
+        let addr = serve(state.clone()).await;
+
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("edit".into(), edit.clone())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error, "{}", frames[0].header);
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["batchId"], "edit");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+
+        let frames =
+            push_after_catchup(addr, &room, &bob_token, "dev:bob", &[("edit".into(), edit)]).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "{}", frames[0].header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 1);
     }
 
     /// A whole snapshot is a payload like any other: applied in full, judged, stored.
