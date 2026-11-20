@@ -2974,8 +2974,8 @@ mod covered_push_tests {
     }
 
     /// What an app does today passes every rule: a device that comes back with several
-    /// messages written offline has each of them stored, stays connected, and a message whose
-    /// id is rewritten afterwards is refused without the session being told to redial.
+    /// messages written offline has each of them stored under its author, and its session
+    /// stays live with nothing refused and no redial asked for.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_real_client_session_sends_what_it_wrote_offline_and_stays_connected() {
         use super::client_room::{RoomAction, RoomSession};
