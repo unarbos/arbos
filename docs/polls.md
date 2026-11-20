@@ -445,3 +445,56 @@ a number of hours on the Mac), at most a week.
 **Not built:** editing a poll. The poll field is written once and the relay refuses a rewrite
 (`poll_fixed`); allowing it while there are no votes needs a rule for a vote and an edit
 written apart and merged later.
+
+## 12. Anonymous polls (design, not built)
+
+Asked for again on 2026-11-19: "anon or public". Section 11's "Show who voted" off is **not**
+anonymous and must not be called that: every vote is a field named after its voter in the
+chat's document, which every member's device holds and the relay stores. The apps do not draw
+the names; a modified client, or anyone reading the device's store, has them. A vote written
+into the shared document cannot be anonymous towards the other members, whatever the apps
+show, so anonymous polls need votes that never enter it.
+
+**Design: the relay holds the ballots and publishes only tallies.**
+
+- *Shape.* `poll.anonymous: true`, fixed with the poll like every other poll field. Such a
+  poll never carries `vote|…` or `voteAt|…` fields; the push guard refuses them on it
+  (`bad_vote` — no honest build writes them).
+- *Casting.* `PUT /chats/{chat}/polls/{message}/ballot` with `{ "selections": ["<option id>"] }`
+  (empty retracts), unknown fields rejected. The relay authenticates the device, requires
+  membership of the chat, reads the poll from its own copy of the room, checks the
+  selections against it (known options, no repeats, at most `max`) and refuses after the
+  deadline by its own clock. This is an ordinary request with an ordinary error, so a late or
+  refused vote strands nothing — unlike a refused push. Same rate limit as a message.
+- *Storage.* `poll_ballots(chat_id, message_id, user_id, selections, updated_at)`, one row per
+  voter. Deleted with the poll (the same transaction that records the deletion).
+- *Publishing.* After each accepted ballot the relay writes `tally: { counts, voters }` on the
+  message, as a row of its own under the room's admission lock. `tally` is the relay's field:
+  the guard refuses it from any device. Readers draw counts from it; the reducer has nothing
+  to count.
+- *Tally at close.* `poll.tallyAtClose: true`, the maker's choice in the composer and fixed
+  with the poll like the rest. The relay then takes ballots as above and writes no `tally`
+  until the poll's deadline has passed by its clock (the duration running out, or the maker's
+  close), and writes it once. Until then the card shows how many people voted, which the
+  relay publishes as `tally: { voters }`, and no counts. Only a poll that can close may ask
+  for it: one with a duration, or one its maker will close.
+- *My own vote.* `GET` on the same route returns the caller's selections; the app keeps them
+  per device. Nobody else's are ever returned.
+- *Closing and deleting* are unchanged: the maker's `pollClosed`, stamped by the relay.
+
+**What it does and does not hide.**
+
+- Other members and their devices: they see counts only. Nothing they hold names a voter.
+- The relay: sees everything — who voted, for what, when. So does anyone with the relay's
+  database. Hiding votes from the relay needs blind signatures or a mix, and is not proposed.
+- Inference from the counts stays possible and no design removes it: in a chat of three a
+  unanimous result names everyone; a member watching the count move while one other person
+  is online learns that person's vote. "Tally at close" removes the second: nobody sees a
+  count move.
+- End-to-end encrypted chats: the relay can read neither the poll nor write a tally, so
+  anonymous polls cannot exist there in this design.
+- Builds without this read the poll as plain text (unknown poll field), as with section 11.
+
+**Scope.** A new authenticated route, a table, a relay-written field with its guard rule, a
+second vote path in both apps and the tests for all of it: its own change, after section 11
+ships. Until then the composers offer "Show who voted" on or off and nothing named anonymous.
