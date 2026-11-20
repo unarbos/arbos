@@ -900,22 +900,48 @@ async fn handle_frame(
                     }
                 }
             }
-            let (seq, dup) = state
-                .db
-                .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            let ids = |rows: &[arbos_core::doc::MessageIdentity]| -> Vec<String> {
+                rows.iter().map(|(id, _)| id.clone()).collect()
+            };
+            let (inserted, removed) = (
+                ids(&pending.changes.inserted),
+                ids(&pending.changes.removed),
+            );
+            // Whose message each new row carries is recorded from the socket that pushed it,
+            // in the transaction that stores the row. The announce routes write an author
+            // record too, but they take the message id from a request body and are gated only
+            // on membership — so that record says who announced an id, never that the relay
+            // holds a row for it (`stored`). A message this push took out is remembered as
+            // deleted.
+            let (seq, dup, _) = state.db.append_row_with(
+                room_name,
+                device,
+                &p.batch_id,
+                &f.payload,
+                &crate::db::RowEffects {
+                    answer: None,
+                    chat_id: chat_of_room,
+                    authors: &attributed,
+                    stored: &inserted,
+                    deleted: &removed,
+                },
+            )?;
             crate::metrics::room_push(dup);
-            // Whose message each new row carries, recorded from the socket that pushed it and
-            // before anyone can read the row. The announce routes write this record too, but
-            // they take the message id from a request body and are gated only on membership —
-            // so on a first-write-wins insert any member could become the author of record for
-            // a message that had none. Here the row and its author arrive together.
-            for (message_id, who) in &attributed {
-                if let Err(e) = state
-                    .db
-                    .record_message_author(chat_of_room, message_id, who)
-                {
-                    tracing::warn!(%room_name, %message_id, error = %e, "recording the author failed");
-                }
+            // Broadcast while the admission lock is still held: rows leave in seq order, with
+            // no other push's row ahead of this one. A receiver drops a row whose seq is not
+            // above the last one it sent on.
+            if !dup {
+                let row = Frame::new(
+                    FrameType::Row,
+                    json!({ "seq": seq, "device": device, "batchId": p.batch_id }),
+                    f.payload.clone(),
+                )
+                .encode();
+                let _ = room.tx.send(RoomBroadcast {
+                    from_conn: conn_id,
+                    bytes: row,
+                    seq,
+                });
             }
             if dup {
                 drop(pending); // another stored row, not these speculative bytes
@@ -929,17 +955,6 @@ async fn handle_frame(
             ))
             .await?;
             if !dup {
-                let row = Frame::new(
-                    FrameType::Row,
-                    json!({ "seq": seq, "device": device, "batchId": p.batch_id }),
-                    f.payload,
-                )
-                .encode();
-                let _ = room.tx.send(RoomBroadcast {
-                    from_conn: conn_id,
-                    bytes: row,
-                    seq,
-                });
                 if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
                     // socket task.
@@ -3078,6 +3093,42 @@ mod covered_push_tests {
             rates_before,
             "covered dups must not count as messages"
         );
+    }
+
+    /// What a push does to the record is written with its row, in one transaction: who each
+    /// new message is by, that the relay stored it (an announce cannot say that), and that a
+    /// message the push took out is deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_records_what_it_stored_and_what_it_deleted_with_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let token = device_token(&state, &bob);
+
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message("m1", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let post = vec![("post".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &post).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "m1").unwrap(),
+            Some(format!("user:{bob}"))
+        );
+        assert_eq!(state.db.message_stored(&chat, "m1").unwrap(), Some(true));
+        assert!(!state.db.message_deleted(&chat, "m1").unwrap());
+
+        let base = doc.oplog_vv();
+        doc.transact(|d| d.delete_message("m1").unwrap());
+        let delete = vec![("delete".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "m1").unwrap());
     }
 
     /// A batch id the room already stored is a dup before the gates (no rate event).

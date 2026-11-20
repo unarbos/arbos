@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS chat_user_cursor (
 );
 CREATE TABLE IF NOT EXISTS message_authors (
   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, stored INTEGER, deleted_at INTEGER,
   PRIMARY KEY (chat_id, message_id)
 );
 "#;
@@ -187,9 +187,12 @@ impl Db {
             )?;
             // Written even when the event row is a duplicate: an announce that repeats still
             // attests the same author, and the caller stops at the `None` above.
+            // `stored = 0`: an announce names an id, it does not show the relay a row. Only a
+            // push the relay stored sets it ([`Db::append_row_with`]), and only then is a row
+            // arriving whole under this id history being healed (`push_guard`).
             c.execute(
-                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at, stored)
+                 VALUES (?1, ?2, ?3, ?4, 0)",
                 params![chat_id, message_id, sender, now],
             )?;
             c.execute(
@@ -223,13 +226,16 @@ impl Db {
         })
     }
 
-    /// Record who wrote a message, from the socket that pushed the row carrying it.
+    /// What a stored push records for a message it carried, for tests that set up history
+    /// without a socket: its author, and that the relay holds a row for it. The push path
+    /// writes both inside the row's own transaction ([`Db::append_row_with`]).
     ///
-    /// `INSERT OR IGNORE`, so the first attestation stands. The announce route reaches this
-    /// record too ([`Db::insert_chat_event`]), and the two can race for a message the client
-    /// announces and pushes at the same moment — but both resolve the author from the
-    /// authenticated principal, so a race between them agrees. What it stops is an announce
-    /// arriving *later*, for a message whose row the relay has already seen, and renaming it.
+    /// The first author stands. The announce route reaches this record too
+    /// ([`Db::insert_chat_event`]), and the two can race for a message the client announces
+    /// and pushes at the same moment — but both resolve the author from the authenticated
+    /// principal, so a race between them agrees. What it stops is an announce arriving
+    /// *later*, for a message whose row the relay has already seen, and renaming it.
+    #[cfg(test)]
     pub fn record_message_author(
         &self,
         chat_id: &str,
@@ -238,11 +244,45 @@ impl Db {
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO message_authors(chat_id, message_id, sender, created_at, stored)
+                 VALUES (?1, ?2, ?3, ?4, 1)
+                 ON CONFLICT(chat_id, message_id) DO UPDATE SET stored = 1",
                 params![chat_id, message_id, sender, now_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    /// Has the relay itself stored a row carrying this message — recorded from a push it
+    /// accepted, not from an announce? An announce records an author for any id a member
+    /// names, whether or not a row exists.
+    ///
+    /// `Some(true)` stored, `Some(false)` only announced (or no record at all), `None` a
+    /// record from before the relay kept the mark: it cannot say which.
+    pub fn message_stored(&self, chat_id: &str, message_id: &str) -> Result<Option<bool>> {
+        self.with(|c| {
+            let stored: Option<Option<bool>> = c
+                .query_row(
+                    "SELECT stored FROM message_authors WHERE chat_id = ?1 AND message_id = ?2",
+                    params![chat_id, message_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(stored.unwrap_or(Some(false)))
+        })
+    }
+
+    /// Did a push the relay stored take this message out? Read by tests only until the
+    /// push guard answers a row pushed back under a deleted id.
+    #[cfg(test)]
+    pub fn message_deleted(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message_authors
+                  WHERE chat_id = ?1 AND message_id = ?2 AND deleted_at IS NOT NULL)",
+                params![chat_id, message_id],
+                |r| r.get(0),
+            )
         })
     }
 

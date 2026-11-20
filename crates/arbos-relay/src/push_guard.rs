@@ -274,6 +274,17 @@ pub fn check_push(
     // with everything else, when the id arrives.
     let mut carries_new_message = changes.inserted.iter().any(|(id, _)| id.is_empty());
     let mut attributed = Vec::new();
+    // Has the relay stored this message itself? An announce records an author for any id a
+    // member names, so the author record alone does not make an arriving row history: only a
+    // row the relay stored and no longer holds is a heal, exempt from the people gates.
+    // A record from before the relay kept the mark reads as stored here, as it did before:
+    // this only decides the gates, and old history has to stay healable.
+    let stored = |id: &str| {
+        matches!(
+            state.db.message_stored(chat_id, id),
+            Ok(Some(true)) | Ok(None)
+        )
+    };
     for (id, sender) in changes.inserted.iter().filter(|(id, _)| !id.is_empty()) {
         let mut attest = || {
             if let Some(who) = me.attribution(state, sender.as_deref()) {
@@ -285,8 +296,11 @@ pub fn check_push(
         };
         match (author.as_deref(), sender.as_deref()) {
             // History the relay attested to you: your own old rows, which is most of what a
-            // device heals a room with.
-            (Some(a), _) if me.owns(state, a) => {}
+            // device heals a room with. A record the relay holds only from an announce is not
+            // that: the app announced this message and here is its row, arriving first.
+            (Some(a), _) if me.owns(state, a) => {
+                carries_new_message |= !stored(id);
+            }
             // History the relay attested to someone else. A heal may carry it, but only under
             // the name the relay recorded. Dropping that name or changing it is the forgery,
             // whether the row then reads as another member or as nobody.
@@ -300,6 +314,7 @@ pub fn check_push(
                         ),
                     };
                 }
+                carries_new_message |= !stored(id);
             }
             // No record, and no name or your own: a message the relay is seeing for the first
             // time. This is the push the people gates are for, and the moment to record whose
@@ -493,11 +508,15 @@ mod tests {
                 &serde_json::json!({}),
             )
             .unwrap();
+        // History the relay holds: announced by its author, and stored from the push that
+        // carried it (an announce alone names an id and is not history).
         for (id, who) in [("m_alice", &alice), ("m_bob", &bob)] {
+            let sender = format!("user:{who}");
             state
                 .db
-                .insert_chat_event(&chat, None, id, Some(who), &format!("user:{who}"))
+                .insert_chat_event(&chat, None, id, Some(who), &sender)
                 .unwrap();
+            state.db.record_message_author(&chat, id, &sender).unwrap();
         }
         (chat, alice, bob, alice_dev, bob_dev)
     }
@@ -884,6 +903,45 @@ mod tests {
     /// Finding 3: the kind of a push is decided from what it carries. A push with a message of
     /// the pusher's own is gated whatever the `heal` flag said; one that only carries attested
     /// history is not, which keeps the exemption a real heal depends on.
+    /// An announce writes an author record for whatever id a member names. That record alone
+    /// does not make a row arriving under the id history: only a row the relay stored itself
+    /// is a heal, exempt from the people gates.
+    #[test]
+    fn an_announced_id_is_a_new_message_until_the_relay_has_stored_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (chat, _alice, bob, _alice_dev, bob_dev) = chat_with_two(&state);
+        let me = format!("user:{bob}");
+        state
+            .db
+            .insert_chat_event(&chat, None, "m_new", Some(&bob), &me)
+            .unwrap();
+        assert_eq!(
+            state.db.message_stored(&chat, "m_new").unwrap(),
+            Some(false)
+        );
+        let mut c = changes();
+        c.inserted = vec![("m_new".to_owned(), Some(me.clone()))];
+        let gated = |heal| {
+            kind(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                heal,
+                &c,
+            ))
+        };
+        assert_eq!(
+            gated(true),
+            Some(true),
+            "announced only: gated, heal or not"
+        );
+
+        state.db.record_message_author(&chat, "m_new", &me).unwrap();
+        assert_eq!(state.db.message_stored(&chat, "m_new").unwrap(), Some(true));
+        assert_eq!(gated(true), Some(false), "stored by the relay: a heal");
+    }
+
     #[test]
     fn the_kind_of_a_push_comes_from_its_contents_not_its_flag() {
         let state = test_state(AuthMode::Github);
