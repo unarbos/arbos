@@ -81,6 +81,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_kill_switch", "gauge", "1 while the kill switch is on (every spend is refused)."),
     (HTTP_REQUESTS, "counter", "HTTP requests by route template and status class."),
     (HTTP_SECONDS, "counter", "Seconds spent answering HTTP requests (to response headers), same labels."),
+    ("arbos_relay_db_bytes", "gauge", "Size of the database files on disk (db, wal)."),
     (DB_WRITER_WAIT, "histogram", "Wait for the database writer lock, probed every 10 s."),
     ("process_resident_memory_bytes", "gauge", "Resident memory."),
     ("process_open_fds", "gauge", "Open file descriptors."),
@@ -498,6 +499,17 @@ fn gauges(state: &AppState) -> Vec<Series> {
             (since_epoch - state.started_at.elapsed()).as_secs_f64(),
         ));
     }
+    // One stat each, no SQLite call: a WAL that stays far above its checkpoint size means a read
+    // is being held open across many commits.
+    for (file, name) in [("db", "relay.db"), ("wal", "relay.db-wal")] {
+        if let Ok(meta) = std::fs::metadata(state.cfg.data_dir.join(name)) {
+            g.push((
+                "arbos_relay_db_bytes",
+                label("file", file),
+                meta.len() as f64,
+            ));
+        }
+    }
     process(&mut g);
     g
 }
@@ -743,6 +755,8 @@ mod tests {
         assert_eq!(after["arbos_relay_boxes{state=\"awake\"}"], 1.0);
         assert_eq!(after["arbos_relay_rooms_open"], 1.0);
         assert_eq!(after["arbos_relay_waitlist_length"], 1.0);
+        assert!(after["arbos_relay_db_bytes{file=\"db\"}"] > 0.0);
+        assert!(after["arbos_relay_db_bytes{file=\"wal\"}"] > 0.0);
         assert_eq!(after["arbos_relay_wake_queue_depth"], 0.0);
         assert!(after["arbos_relay_box_starts_total{result=\"ok\"}"] >= 1.0);
         assert!(after["arbos_relay_box_starts_total{result=\"failed\"}"] >= 1.0);
