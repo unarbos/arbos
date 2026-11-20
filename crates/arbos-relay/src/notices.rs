@@ -93,14 +93,76 @@ pub async fn write_doc_as(
     device: &str,
     edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
 ) -> anyhow::Result<i64> {
+    write_doc_deleting(state, project_id, chat_id, device, |doc| {
+        edit(doc).map(|()| Vec::new())
+    })
+    .await
+}
+
+/// How long a relay write waits for a room's admission lock before it gives up. A push holds
+/// the lock while it is judged and stored, which is milliseconds on a warm room; the first
+/// push after a restart also holds it across the rebuild of the room's doc, which reads the
+/// room's whole history and has no bound of its own. A relay write that cannot get in by
+/// then fails, as it does on a database error, and its caller retries or reports.
+const ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The room's admission lock for a relay write, or an error after [`ADMISSION_WAIT`].
+pub(crate) async fn admission(
+    room: &crate::state::Room,
+) -> anyhow::Result<tokio::sync::MutexGuard<'_, ()>> {
+    admission_within(room, ADMISSION_WAIT).await
+}
+
+async fn admission_within(
+    room: &crate::state::Room,
+    wait: std::time::Duration,
+) -> anyhow::Result<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(wait, room.push_admission.lock())
+        .await
+        .map_err(|_| anyhow::anyhow!("the room is busy storing a push"))
+}
+
+/// [`write_doc_as`] for an edit that may take messages out of the chat: `edit` returns the
+/// ids it deleted, and they are recorded as deleted in the same transaction as the row, so a
+/// deletion the relay made is never stored without its record (`push_guard::corrections`
+/// reads it to keep a deleted message from being pushed back).
+///
+/// The row is stored and broadcast under the room's admission lock, the one a device's push
+/// holds while it is stored with its correction and broadcast. So this row gets its seq and
+/// leaves in that order: never ahead of a push stored before it, never between a push and the
+/// relay's correction to it (a receiver drops a row whose seq is not above the last one it
+/// sent on). The lock is held for the store and the broadcast only. Reading the room's doc
+/// and making the edit happen before it, so a relay write that is slow to build — an outside
+/// agent's stream sends one per event — does not hold up the room's pushes while it does.
+/// The edit is made on the doc as it was read; a push stored in between is merged by the
+/// document, as it is for any two writers.
+pub async fn write_doc_deleting(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+    device: &str,
+    edit: impl FnOnce(&ChatDoc) -> anyhow::Result<Vec<String>>,
+) -> anyhow::Result<i64> {
     let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
     let doc = load_doc(state, chat_id, project_id)?.unwrap_or_else(|| ChatDoc::new(None, false));
     let base = doc.oplog_vv();
-    edit(&doc)?;
+    let deleted = edit(&doc)?;
     let bytes = doc.export_updates_since(&base);
     anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
-    let (seq, dup) = state.db.append_row(&room_name, device, &batch_id, &bytes)?;
+    let room = state.room(&room_name).await;
+    let _admission = admission(&room).await?;
+    let (seq, dup, _) = state.db.append_row_with(
+        &room_name,
+        device,
+        &batch_id,
+        &bytes,
+        &crate::db::RowEffects {
+            chat_id,
+            deleted: &deleted,
+            ..Default::default()
+        },
+    )?;
     if !dup {
         let frame = Frame::new(
             FrameType::Row,
@@ -108,7 +170,6 @@ pub async fn write_doc_as(
             Bytes::from(bytes),
         )
         .encode();
-        let room = state.room(&room_name).await;
         let _ = room.tx.send(RoomBroadcast {
             from_conn: 0,
             bytes: frame,
@@ -224,5 +285,74 @@ mod tests {
         );
         assert_eq!(added_line("Jacob", &[]), None);
         assert_eq!(left_line("Alice"), "Alice left");
+    }
+
+    /// A relay write does not wait for ever behind a push that holds the room: after
+    /// its wait it fails, and gets in at once when the room is free.
+    #[tokio::test]
+    async fn a_relay_write_gives_up_on_a_room_held_too_long() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let room = state.room("people/c1").await;
+        let held = room.push_admission.lock().await;
+        let wait = std::time::Duration::from_millis(20);
+        assert!(admission_within(&room, wait).await.is_err());
+        drop(held);
+        assert!(admission(&room).await.is_ok());
+    }
+
+    /// A relay write reads the room and makes its edit without the room's admission lock,
+    /// and takes the lock only to store and broadcast its row. While a push holds the lock
+    /// the edit still runs — a stream of relay writes does not queue pushes behind its
+    /// reading and editing — and nothing is stored until the push lets go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_write_edits_outside_the_room_lock_and_stores_under_it() {
+        use crate::people::tests_support::{dm, person};
+        use crate::state::test_support::test_state;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let state = test_state(crate::state::AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room_name = wire::room_name(PEOPLE_PROJECT, &chat);
+        let room = state.room(&room_name).await;
+        let head = || state.db.room_state(&room_name).map(|s| s.head).unwrap_or(0);
+        let before = head();
+
+        let push_being_stored = room.push_admission.lock().await;
+        let edited = Arc::new(AtomicBool::new(false));
+        let (state2, chat2, edited2) = (state.clone(), chat.clone(), edited.clone());
+        let write = tokio::spawn(async move {
+            write_doc(&state2, None, &chat2, move |doc| {
+                doc.append_system_line("n1", "a notice", RELAY_DEVICE, None)?;
+                edited2.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+        for _ in 0..500 {
+            if edited.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            edited.load(Ordering::SeqCst),
+            "the edit does not wait for the lock"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            head(),
+            before,
+            "nothing is stored while a push holds the lock"
+        );
+        assert!(!write.is_finished());
+
+        drop(push_being_stored);
+        let seq = write.await.unwrap().unwrap();
+        assert_eq!(seq, before + 1);
+        assert_eq!(head(), before + 1);
     }
 }

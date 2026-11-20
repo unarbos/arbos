@@ -111,7 +111,8 @@ pub enum RoomAction {
     ScheduleReconnect { after: Duration },
     /// Relay error the host should know about. `lagging` is handled inside the session;
     /// `rate_limited` stays Live (no this action); `not_available` refuses pushes with no redial
-    /// and also emits [`RoomAction::PushRefused`].
+    /// and also emits [`RoomAction::PushRefused`]; a push refused for good is
+    /// [`RoomAction::Rebuild`] instead.
     SessionError { code: String, message: String },
     /// A `not_available` refusal for a push on this connection (`batchId` from the error
     /// header). Host: keep the room link live; show a per-chat notice. Cleared by the next
@@ -127,6 +128,21 @@ pub enum RoomAction {
         by_handle: Option<String>,
         by_name: Option<String>,
     },
+    /// The relay refused a push for what it holds and will refuse it every time
+    /// ([`refusal_is_final`]). The session has let go of every unacknowledged batch, set its
+    /// cursor back to 0 and closed for an immediate reconnect. Host: replace the room's
+    /// document with an empty one (a new Loro peer: the ops just let go of are still in the
+    /// old one, and everything written after them depends on them), drop its saved copy and
+    /// its "not sent yet" marks, and show the error once: "Couldn't `verb`. `why`". The next
+    /// connection reads the room back from the relay, and what is written after that is
+    /// delivered. `code` and `message` are the relay's own, for a details view or a log.
+    Rebuild {
+        batch_id: String,
+        code: String,
+        message: String,
+        verb: String,
+        why: String,
+    },
     /// Another device's presence / call / typing (host maps to UI events).
     /// `header` is the full inbound PRESENCE header (Swift reads `user` / `at`).
     Presence {
@@ -141,6 +157,42 @@ pub enum RoomAction {
     DroppedOversize { bytes: usize },
     /// A pending PUSH was acknowledged (host may clear UI “unacked” marks).
     Ack { batch_id: String, seq: i64 },
+}
+
+/// Whether a refusal that names a batch can never turn into an acceptance.
+///
+/// Four codes may be accepted later and keep the batch: `lagging` (not about a push),
+/// `rate_limited` (time lifts it), `not_available` (a person lifts it: a block, a mute, a
+/// chat coming back) and `unavailable` (the relay could not read its own record of who wrote
+/// what and says to send again). Every other code is the relay's verdict on the bytes
+/// themselves (`not_yours`, `bad_message`, `duplicate_id`, `replaced_id`, `bad_vote`,
+/// `bad_poll`, `poll_fixed`, `too_large`): the same bytes get the same answer for ever. A code
+/// this build does not know is read as final too. The other reading leaves the device unable
+/// to deliver anything in the room for good, and this one costs it only what the relay never
+/// took; a relay that adds a refusal which may lift has to reuse one of the four.
+pub fn refusal_is_final(code: &str) -> bool {
+    !matches!(
+        code,
+        "lagging" | "rate_limited" | "not_available" | "unavailable"
+    )
+}
+
+/// The words both apps show for [`RoomAction::Rebuild`]: what the user tried, as the
+/// infinitive phrase their error notes take ("Couldn't record your vote."), and what became
+/// of it. `others` is how many more unacknowledged batches went with the refused one.
+fn rebuild_words(code: &str, others: usize) -> (&'static str, &'static str) {
+    let verb = match code {
+        "bad_vote" => "record your vote",
+        "bad_poll" | "poll_fixed" => "change the poll",
+        "bad_message" | "duplicate_id" | "replaced_id" => "send your message",
+        _ => "save your last change",
+    };
+    let why = if others == 0 {
+        "The server did not accept it, so it was undone."
+    } else {
+        "The server did not accept it. It was undone, along with anything else here that had not been sent yet."
+    };
+    (verb, why)
 }
 
 /// How a `not_available` refusal is retried, read from the error frame's `reason`
@@ -774,6 +826,67 @@ impl RoomSession {
                 message: header.message,
             });
             return;
+        }
+        let held = header.batch_id.as_deref().is_some_and(|id| {
+            refusal_is_final(&header.code) && self.pending.iter().any(|(p, _)| p == id)
+        });
+        // A history heal refused for good is dropped by itself and the document is kept: it
+        // may carry other people's history that the relay lost and only this device holds.
+        // The next connection computes a new one. When it was refused for a write of this
+        // device's own, that write is in the ordinary batch behind it, whose refusal follows.
+        if held
+            && header
+                .batch_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with(HEAL_BATCH_PREFIX))
+        {
+            self.pending
+                .retain(|(id, _)| Some(id) != header.batch_id.as_ref());
+            self.push(RoomAction::Pending(self.pending.clone()));
+            self.push(RoomAction::SessionError {
+                code: header.code,
+                message: header.message,
+            });
+            return;
+        }
+        // A push refused for what it holds, for good. Sending it again gets the same answer,
+        // and it cannot be dropped alone: everything this device wrote after it depends on it.
+        // So the device lets go of all of it and reads the room back from the relay.
+        if held {
+            let (verb, why) = rebuild_words(&header.code, self.pending.len() - 1);
+            self.pending.clear();
+            self.cursor = 0;
+            self.cursor_before_apply = 0;
+            self.first_pending_seq = None;
+            self.push(RoomAction::Pending(Vec::new()));
+            self.push(RoomAction::Rebuild {
+                batch_id: header.batch_id.unwrap_or_default(),
+                code: header.code,
+                message: header.message,
+                verb: verb.into(),
+                why: why.into(),
+            });
+            // Not a transport fault: dial again at once, without growing the backoff.
+            self.reconnect_after = Some(Duration::ZERO);
+            self.phase = Phase::Closed;
+            self.opened_at_ms = None;
+            self.live_since_ms = None;
+            self.push(RoomAction::ScheduleReconnect {
+                after: Duration::ZERO,
+            });
+            return;
+        }
+        // A refusal that may lift (`unavailable`): the batch stays and goes out again on the
+        // next connection, and until one is acknowledged the apps say the chat is not
+        // delivering, as they do for a `not_available`.
+        if header.batch_id.is_some() {
+            self.push(RoomAction::PushRefused {
+                batch_id: header.batch_id,
+                code: header.code.clone(),
+                reason: header.reason,
+                by_handle: None,
+                by_name: None,
+            });
         }
         self.push(RoomAction::SessionError {
             code: header.code,
@@ -1955,6 +2068,217 @@ mod tests {
             !pushes.is_empty(),
             "pending resend goes out again on the new connection"
         );
+    }
+
+    // ---- a push refused for good ---------------------------------------------------------
+
+    /// Perform a session's queued actions against `doc` the way an app does: import rows,
+    /// answer the heal check, and on [`RoomAction::Rebuild`] start the document again empty.
+    fn host(s: &mut RoomSession, doc: &mut arbos_core::doc::ChatDoc) -> Vec<RoomAction> {
+        let mut seen = Vec::new();
+        loop {
+            let actions = s.drain_actions();
+            if actions.is_empty() {
+                return seen;
+            }
+            for action in &actions {
+                match action {
+                    RoomAction::ApplyBytes(bytes) => {
+                        doc.import(bytes).unwrap();
+                    }
+                    RoomAction::HealCheck { relay_vv } => {
+                        let vv = arbos_core::doc::decode_vv(relay_vv).unwrap();
+                        s.on_heal(doc.updates_beyond(&vv));
+                    }
+                    RoomAction::Rebuild { .. } => *doc = arbos_core::doc::ChatDoc::new(None, false),
+                    _ => {}
+                }
+            }
+            seen.extend(actions);
+        }
+    }
+
+    /// Connect and catch up from a relay that holds `relay` as one row.
+    fn catch_up(
+        s: &mut RoomSession,
+        doc: &mut arbos_core::doc::ChatDoc,
+        relay: &arbos_core::doc::ChatDoc,
+    ) -> Vec<RoomAction> {
+        s.on_open(1_000);
+        s.on_frame(&state_frame(0, Vec::new()));
+        s.on_frame(&row_frame(
+            1,
+            relay.export_updates_since(&Default::default()),
+        ));
+        s.on_frame(&rows_done_with_vv(
+            1,
+            &arbos_core::doc::encode_vv(&relay.oplog_vv()),
+        ));
+        host(s, doc)
+    }
+
+    /// One local message, as the bytes the app hands [`RoomSession::on_local_commit`].
+    fn write(doc: &arbos_core::doc::ChatDoc, id: &str) -> Vec<u8> {
+        let before = doc.oplog_vv();
+        doc.append_user_message(id, id, "dev:me", &Default::default())
+            .unwrap();
+        doc.export_updates_since(&before)
+    }
+
+    fn ids(doc: &arbos_core::doc::ChatDoc) -> Vec<String> {
+        doc.message_ids()
+    }
+
+    /// A push the relay refuses for what it holds is let go of, with everything queued behind
+    /// it, and the document is read back from the relay. What the device writes after that
+    /// is delivered, where before the refused batch went out again on every connection and
+    /// nothing behind it could.
+    #[test]
+    fn a_push_refused_for_good_is_let_go_and_the_room_is_read_back() {
+        let mut relay = arbos_core::doc::ChatDoc::new(None, false);
+        relay
+            .append_user_message("m0", "m0", "dev:other", &Default::default())
+            .unwrap();
+        let mut doc = arbos_core::doc::ChatDoc::new(None, false);
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        catch_up(&mut s, &mut doc, &relay);
+        assert_eq!(ids(&doc), ["m0"]);
+
+        // Two local writes go out; the relay refuses the first.
+        s.on_local_commit(write(&doc, "m1"));
+        s.on_local_commit(write(&doc, "m2"));
+        let sent = pushes_in(&host(&mut s, &mut doc));
+        assert_eq!(sent.len(), 2);
+        let refused = sent[0].header["batchId"].as_str().unwrap();
+        s.on_frame(&error_frame(
+            "not_yours",
+            "message m1 is not yours to write",
+            json!({ "batchId": refused }),
+        ));
+        let actions = host(&mut s, &mut doc);
+        let told: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                RoomAction::Rebuild {
+                    code, verb, why, ..
+                } => Some((code, verb, why)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), 1, "the app is told once");
+        assert_eq!(told[0].0, "not_yours");
+        assert_eq!(told[0].1, "save your last change");
+        assert!(told[0].2.contains("anything else"), "m2 went with it");
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Pending(p) if p.is_empty())));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { after } if after.is_zero())));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::PushRefused { .. })));
+        assert!(s.pending().is_empty());
+        assert_eq!(s.cursor(), 0);
+        assert!(ids(&doc).is_empty(), "the host started the document again");
+
+        // The next connection reads the room back and has nothing of its own to send.
+        s.prepare_reconnect();
+        let actions = catch_up(&mut s, &mut doc, &relay);
+        let hello = &take_sends(&actions)[0];
+        assert_eq!(
+            (hello.ty, &hello.header["cursor"]),
+            (FrameType::Hello, &json!(0))
+        );
+        assert!(pushes_in(&actions).is_empty(), "no resend and no heal");
+        assert_eq!(ids(&doc), ["m0"]);
+
+        // A later write is whole to the relay (nothing it depends on is missing) and is acked.
+        s.on_local_commit(write(&doc, "m3"));
+        let sent = pushes_in(&host(&mut s, &mut doc));
+        assert_eq!(sent.len(), 1);
+        assert!(relay.import(&sent[0].payload).unwrap().pending.is_none());
+        s.on_frame(&ack_frame(sent[0].header["batchId"].as_str().unwrap(), 2));
+        host(&mut s, &mut doc);
+        assert!(s.pending().is_empty());
+        assert_eq!(ids(&doc), ["m0", "m3"]);
+        assert_eq!(doc.projected_rows(), relay.projected_rows());
+    }
+
+    /// A refusal that may lift keeps its batch: `unavailable` is the relay failing to read its
+    /// own record, so the same bytes go out again on the next connection.
+    #[test]
+    fn a_refusal_that_may_lift_keeps_the_batch() {
+        assert!(!refusal_is_final("unavailable"));
+        assert!(refusal_is_final("not_yours") && refusal_is_final("a_code_from_the_future"));
+        let mut s = live_session(vec![("batch-1".into(), b"x".to_vec())]);
+        s.on_frame(&error_frame(
+            "unavailable",
+            "the record of who wrote what could not be read; send this again",
+            json!({ "batchId": "batch-1" }),
+        ));
+        let actions = s.drain_actions();
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Rebuild { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::PushRefused { code, .. } if code == "unavailable")));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+        assert_eq!(s.pending().len(), 1);
+    }
+
+    /// A history heal refused for good is dropped alone: the document may hold other
+    /// people's history that only this device still has, so nothing is rebuilt, and the
+    /// session stays connected to hear about the ordinary batch behind it.
+    #[test]
+    fn a_heal_refused_for_good_is_dropped_and_the_document_is_kept() {
+        let mut s = live_session(vec![
+            (format!("{HEAL_BATCH_PREFIX}1"), b"history".to_vec()),
+            ("batch-1".into(), b"x".to_vec()),
+        ]);
+        s.on_frame(&error_frame(
+            "not_yours",
+            "no",
+            json!({ "batchId": format!("{HEAL_BATCH_PREFIX}1") }),
+        ));
+        let actions = s.drain_actions();
+        assert!(!actions.iter().any(|a| matches!(
+            a,
+            RoomAction::Rebuild { .. } | RoomAction::ScheduleReconnect { .. }
+        )));
+        assert!(s.is_live());
+        assert_eq!(s.pending().len(), 1);
+        assert_eq!(s.pending()[0].0, "batch-1");
+
+        // The same write in its ordinary batch is what rebuilds.
+        s.on_frame(&error_frame(
+            "not_yours",
+            "no",
+            json!({ "batchId": "batch-1" }),
+        ));
+        assert!(s
+            .drain_actions()
+            .iter()
+            .any(|a| matches!(a, RoomAction::Rebuild { .. })));
+    }
+
+    /// A final refusal for a batch this session does not hold changes nothing it holds.
+    #[test]
+    fn a_final_refusal_for_an_unknown_batch_lets_go_of_nothing() {
+        let mut s = live_session(vec![("batch-1".into(), b"x".to_vec())]);
+        s.on_frame(&error_frame(
+            "not_yours",
+            "no",
+            json!({ "batchId": "other" }),
+        ));
+        assert!(!s
+            .drain_actions()
+            .iter()
+            .any(|a| matches!(a, RoomAction::Rebuild { .. })));
+        assert_eq!(s.pending().len(), 1);
     }
 
     // ---- refused-send retry ([feedback 2005]) -------------------------------------------------

@@ -2090,7 +2090,7 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let blank2 = blank.clone();
             let device = device_of(&pid);
             let device_in = device.clone();
-            let written = crate::notices::write_doc_as(
+            let written = crate::notices::write_doc_deleting(
                 state,
                 project_id.as_deref(),
                 chat_id,
@@ -2134,14 +2134,16 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
                         {
                             doc.delete_message(&m)?;
                             blank2.store(true, Ordering::Relaxed);
-                            return Ok(());
+                            // Recorded as deleted with the row, so the id cannot be pushed
+                            // back (`push_guard`).
+                            return Ok(vec![m]);
                         }
                         doc.finish_message(&m, MessageStatus::Done);
                         if let Some(row) = doc.message(&m) {
                             *full2.lock().unwrap() = row.text();
                         }
                     }
-                    Ok(())
+                    Ok(Vec::new())
                 },
             )
             .await;

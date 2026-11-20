@@ -224,6 +224,8 @@ final class RelayAPI {
         guard let http = response as? HTTPURLResponse else {
             throw RelayError(status: 0, message: "No HTTP response")
         }
+        // Polls are judged and counted down by the relay's clock, not this phone's.
+        if let date = http.value(forHTTPHeaderField: "Date") { pollSetRelayDate(dateHeader: date) }
         if http.statusCode >= 400 {
             throw RelayError.from(status: http.statusCode, body: data)
         }

@@ -1817,8 +1817,22 @@ pub enum Part {
         question: String,
         options: Vec<arbos_core::poll::PollOption>,
         max: usize,
+        /// Option id → senders. Everyone only where the poll shows who voted; otherwise my
+        /// own vote and nobody else's — the core hands this app no other name.
         #[serde(default)]
         votes: std::collections::BTreeMap<String, Vec<String>>,
+        /// Option id → how many hold it, and how many people voted.
+        #[serde(default)]
+        counts: std::collections::BTreeMap<String, usize>,
+        #[serde(default)]
+        voters: usize,
+        /// "Show who voted", fixed with the poll. `None` on a poll from before the flag,
+        /// which cannot be closed either.
+        #[serde(default)]
+        show_voters: Option<bool>,
+        /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
+        #[serde(default)]
+        deadline: Option<i64>,
     },
     #[serde(other)]
     Unknown,

@@ -117,6 +117,15 @@ pub enum RoomAction {
         by_handle: Option<String>,
         by_name: Option<String>,
     },
+    /// The relay refused a push for good: the session let go of every unacknowledged batch.
+    /// Start the room's document again empty and show "Couldn't `verb`. `why`" once.
+    Rebuild {
+        batch_id: String,
+        code: String,
+        message: String,
+        verb: String,
+        why: String,
+    },
     Presence {
         device: Option<String>,
         handle: Option<String>,
@@ -183,6 +192,19 @@ impl From<ClientAction> for RoomAction {
                 reason,
                 by_handle,
                 by_name,
+            },
+            ClientAction::Rebuild {
+                batch_id,
+                code,
+                message,
+                verb,
+                why,
+            } => Self::Rebuild {
+                batch_id,
+                code,
+                message,
+                verb,
+                why,
             },
             ClientAction::Presence {
                 device,
@@ -277,7 +299,41 @@ pub struct DecodedFrame {
 /// are not a poll within bounds — the composer's one validity check (`docs/polls.md`).
 #[uniffi::export]
 pub fn poll_text(question: String, options: Vec<String>, multiple: bool) -> Option<String> {
-    Poll::new(&question, &options, multiple).map(|p| p.fallback_text())
+    Poll::new(&question, &options, multiple, false, None).map(|p| p.fallback_text())
+}
+
+/// Whether a poll is closed at `now_ms`: the core's one rule (`arbos_core::poll::closed`).
+/// `deadline` is the projected poll part's `deadline`.
+#[uniffi::export]
+pub fn poll_closed(deadline: Option<i64>, now_ms: i64) -> bool {
+    arbos_core::poll::closed(deadline, now_ms)
+}
+
+/// The time by the relay's clock, as closely as this device knows it: the `now` for
+/// [`poll_closed`] and a poll's countdown (`arbos_core::poll::now`).
+#[uniffi::export]
+pub fn poll_now_ms() -> i64 {
+    arbos_core::poll::now()
+}
+
+/// Tell the poll rules the relay's clock, from the `Date` header of an answer it just gave
+/// (`arbos_core::poll::set_relay_date`).
+#[uniffi::export]
+pub fn poll_set_relay_date(date_header: String) {
+    arbos_core::poll::set_relay_date(&date_header);
+}
+
+/// The line under a poll's options (`arbos_core::poll::foot`).
+#[uniffi::export]
+pub fn poll_foot(
+    by: Option<String>,
+    voted: u32,
+    multiple: bool,
+    show_voters: bool,
+    closed: bool,
+    left_ms: Option<i64>,
+) -> String {
+    arbos_core::poll::foot(by.as_deref(), voted, multiple, show_voters, closed, left_ms)
 }
 
 /// Encode one binary room frame. `header_json` must be a JSON object.
@@ -773,8 +829,11 @@ impl ChatDoc {
 
     /// Message rows as a JSON array, with `project_hidden_parts` and
     /// `project_reactions` already applied.
-    pub fn read_rows_json(&self) -> String {
-        let rows = self.lock_doc().projected_rows();
+    ///
+    /// `viewer` is who is reading (`user:<id>`): a poll that hides its voters hands over
+    /// that reader's own vote and no other voter's id (`arbos_core::doc::project_poll`).
+    pub fn read_rows_json(&self, viewer: Option<String>) -> String {
+        let rows = self.lock_doc().projected_rows_for(viewer.as_deref());
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
     }
 
@@ -785,8 +844,10 @@ impl ChatDoc {
 
     /// One projected message row (`project_hidden_parts` + `project_reactions`),
     /// same shape as an element of [`Self::read_rows_json`].
-    pub fn read_message_json(&self, index: u64) -> Option<String> {
-        let row = self.lock_doc().projected_row(index as usize)?;
+    pub fn read_message_json(&self, index: u64, viewer: Option<String>) -> Option<String> {
+        let row = self
+            .lock_doc()
+            .projected_row(index as usize, viewer.as_deref())?;
         Some(serde_json::to_string(&row).unwrap_or_else(|_| "null".into()))
     }
 
@@ -872,18 +933,29 @@ impl ChatDoc {
     }
 
     /// Append a poll message (`docs/polls.md`): its text part is the poll in plain words.
-    /// Does not commit. Errors when the fields are not a poll within bounds.
+    /// `show_voters` is "Show who voted"; `closes_in_ms` is how long the poll runs from now
+    /// (at most a week), `None` until its author closes it. `show_voters: None` posts the
+    /// older shape, for a relay that does not take the newer fields (`features.poll_options`
+    /// absent); a duration is then an error. Does not commit. Errors when the fields are not
+    /// a poll within bounds.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_poll_message(
         &self,
         id: String,
         question: String,
         options: Vec<String>,
         multiple: bool,
+        show_voters: Option<bool>,
+        closes_in_ms: Option<i64>,
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
-        let poll = Poll::new(&question, &options, multiple)
-            .ok_or_else(|| write_err("not a poll within bounds"))?;
+        let poll = match show_voters {
+            Some(show) => Poll::new(&question, &options, multiple, show, closes_in_ms),
+            None if closes_in_ms.is_none() => Poll::older(&question, &options, multiple),
+            None => None,
+        }
+        .ok_or_else(|| write_err("not a poll within bounds"))?;
         self.lock_doc()
             .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
             .map_err(write_err)
@@ -898,6 +970,14 @@ impl ChatDoc {
     ) -> Result<(), FfiError> {
         self.lock_doc()
             .set_poll_vote(&message_id, &sender, &selections)
+            .map_err(write_err)
+    }
+
+    /// The author closes their poll, now: later votes do not count. Does not commit. Errors
+    /// when `sender` did not post it or it is not a poll that can be closed.
+    pub fn close_poll(&self, message_id: String, sender: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .close_poll(&message_id, &sender)
             .map_err(write_err)
     }
 
@@ -1087,7 +1167,7 @@ mod tests {
         }
         let snap = doc.snapshot();
         let loaded = ChatDoc::open_from_snapshot(snap).unwrap();
-        let rows: Value = serde_json::from_str(&loaded.read_rows_json()).unwrap();
+        let rows: Value = serde_json::from_str(&loaded.read_rows_json(None)).unwrap();
         assert_eq!(rows[0]["role"], "user");
         assert_eq!(rows[0]["parts"][0]["text"], "hi");
     }
@@ -1100,7 +1180,7 @@ mod tests {
     impl DocChangeListener for RecordingListener {
         fn on_change(&self, _touched: Touched) {
             // Re-enter the doc on the same thread; must not deadlock.
-            let json = self.doc.read_rows_json();
+            let json = self.doc.read_rows_json(None);
             let parsed: Value = serde_json::from_str(&json).unwrap();
             self.rows
                 .lock()
@@ -1177,7 +1257,7 @@ mod tests {
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["forwardedFrom"], "Sam Rivera");
         assert_eq!(row["replyRef"]["chatId"], "01SRC");
         assert_eq!(row["replyRef"]["messageId"], "01ORIG");
@@ -1220,7 +1300,7 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["id"], "keep");
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
@@ -1240,7 +1320,7 @@ mod tests {
         doc.edit_message("m1".into(), "hello edited".into())
             .unwrap();
         doc.commit();
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["parts"][0]["text"], "hello edited");
         assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
     }
@@ -1266,15 +1346,33 @@ mod tests {
                 " ".into(),
                 options.clone(),
                 false,
+                Some(false),
+                None,
                 "dev".into(),
                 opts.clone()
             )
             .is_err());
+        assert!(
+            doc.insert_poll_message(
+                "p0".into(),
+                "Where?".into(),
+                options.clone(),
+                false,
+                Some(false),
+                Some(arbos_core::poll::DURATION_MAX_MS + 1),
+                "dev".into(),
+                opts.clone()
+            )
+            .is_err(),
+            "longer than a week"
+        );
         doc.insert_poll_message(
             "p1".into(),
             "Where?".into(),
             options,
             false,
+            Some(true),
+            Some(3_600_000),
             "dev".into(),
             opts,
         )
@@ -1287,9 +1385,50 @@ mod tests {
             .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into(), "2".into()])
             .is_err());
         doc.commit();
-        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         assert_eq!(row["parts"][1]["kind"], "poll");
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
+        assert_eq!(row["parts"][1]["showVoters"], true);
+        let deadline = row["parts"][1]["deadline"].as_i64();
+        assert!(deadline.unwrap() > arbos_core::ids::now_ms());
+        assert!(!poll_closed(deadline, arbos_core::ids::now_ms()));
+
+        // Only its author closes it, and then it takes no vote.
+        assert!(doc.close_poll("p1".into(), "user:b".into()).is_err());
+        // A vote in the very millisecond of the close is not before it.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        doc.close_poll("p1".into(), "user:a".into()).unwrap();
+        assert!(doc
+            .set_poll_vote("p1".into(), "user:a".into(), vec!["1".into()])
+            .is_err());
+        let row: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
+        let deadline = row["parts"][1]["deadline"].as_i64();
+        assert!(poll_closed(deadline, arbos_core::ids::now_ms()));
+        assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
+
+        // For a relay without the poll options: the older shape, and no duration with it.
+        let older = ChatDoc::open();
+        let post = |closes_in: Option<i64>| {
+            older.insert_poll_message(
+                "p2".into(),
+                "Where?".into(),
+                vec!["Lisbon".into(), "Berlin".into()],
+                false,
+                None,
+                closes_in,
+                "dev".into(),
+                UserMessageOptsRecord::default(),
+            )
+        };
+        assert!(post(Some(3_600_000)).is_err());
+        post(None).unwrap();
+        older.commit();
+        let row: Value = serde_json::from_str(&older.read_message_json(0, None).unwrap()).unwrap();
+        assert!(row["poll"].get("showVoters").is_none(), "{row}");
+        assert!(
+            older.close_poll("p2".into(), "user".into()).is_err(),
+            "not closable"
+        );
     }
 
     #[test]
@@ -1307,7 +1446,7 @@ mod tests {
         doc.toggle_reaction("m-flat".into(), "👍".into(), "user:a".into())
             .unwrap();
         doc.commit();
-        let flat: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let flat: Value = serde_json::from_str(&doc.read_message_json(0, None).unwrap()).unwrap();
         let flat_reacts = flat.get("reactions").cloned().unwrap_or(json!({}));
         assert!(
             flat_reacts
@@ -1331,7 +1470,7 @@ mod tests {
         let mut found = false;
         for i in 0..n {
             let row: Value =
-                serde_json::from_str(&legacy_doc.read_message_json(i).unwrap()).unwrap();
+                serde_json::from_str(&legacy_doc.read_message_json(i, None).unwrap()).unwrap();
             if row["id"] == "msg-legacy-react" {
                 let reacts = row.get("reactions").cloned().unwrap_or(json!({}));
                 assert!(
@@ -1438,7 +1577,7 @@ mod tests {
         );
         let peer = ChatDoc::open();
         peer.apply(updates[0].clone()).unwrap();
-        assert_eq!(doc.read_rows_json(), peer.read_rows_json());
+        assert_eq!(doc.read_rows_json(None), peer.read_rows_json(None));
     }
 
     #[test]
@@ -1474,7 +1613,7 @@ mod tests {
 
     impl LocalUpdateListener for ReentrantLocalUpdate {
         fn on_local_update(&self, _update: Vec<u8>) {
-            let _ = self.doc.read_rows_json();
+            let _ = self.doc.read_rows_json(None);
             *self.saw_rows.lock().unwrap() = true;
         }
     }
@@ -1527,13 +1666,13 @@ mod tests {
         assert_eq!(doc.message_count(), rows as u64);
 
         let started = std::time::Instant::now();
-        let all = doc.read_rows_json();
+        let all = doc.read_rows_json(None);
         let one_shot = started.elapsed();
 
         let started = std::time::Instant::now();
         let mut per_index = Vec::with_capacity(rows);
         for i in 0..rows as u64 {
-            per_index.push(doc.read_message_json(i).expect("row exists"));
+            per_index.push(doc.read_message_json(i, None).expect("row exists"));
         }
         let indexed = started.elapsed();
 
