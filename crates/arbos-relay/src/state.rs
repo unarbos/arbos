@@ -592,9 +592,15 @@ impl AppState {
         self.revocations.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    /// When this user was last seen: the newer of the stored stamp and the one in memory.
+    /// When this user was last seen: the stored stamp, moved forward by the one in memory.
+    ///
+    /// The stored stamp is over the user's live devices only and every sign-in writes one, so
+    /// `None` means no device of theirs is signed in. The stamp in memory cannot say that (it
+    /// outlives the device that made it, and signing out is itself a request), so alone it
+    /// counts for nothing: a person whose last device signed out is offline at once.
     pub fn seen_at(&self, user_id: &str, stored: Option<i64>) -> Option<i64> {
-        stored.max(self.user_seen.lock().unwrap().get(user_id).copied())
+        let live = self.user_seen.lock().unwrap().get(user_id).copied();
+        stored.map(|at| at.max(live.unwrap_or(at)))
     }
 
     /// Is this device still a live session? `false` for a revoked row and for a row that is

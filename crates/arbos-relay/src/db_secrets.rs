@@ -1006,7 +1006,7 @@ impl Db {
             return Ok(None);
         }
         self.with(|c| {
-            let transaction = c.unchecked_transaction()?;
+            let transaction = crate::db::write_tx(c)?;
             let mut receipts = Vec::with_capacity(requests.len());
             for request in requests {
                 let n = transaction.execute(

@@ -232,7 +232,9 @@ deploy_lane_run() (
   trap 'exit 143' TERM
   trap 'exit 130' INT
   printf 'kind=%s\npid=%s\nat=%s\n' "$kind" "$$" "$(date -u +%FT%TZ)" > "$STATE/$marker" || return 76
-  if "$@"; then rc=0; else rc=$?; fi
+  # The command runs in a child that has closed the lock descriptor, and this shell keeps the lane:
+  # a daemon the command leaves behind (`op daemon`, 2026-11-19) must not hold the lane after it ends.
+  if (exec 7<&-; "$@"); then rc=0; else rc=$?; fi
   state="$(deploy_lane_transition "$state" Finished)" || return 76
   return "$rc"
 )

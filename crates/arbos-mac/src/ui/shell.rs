@@ -260,6 +260,8 @@ pub struct Shell {
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
+    /// The keyboard's owner while the avatar picker is up (`modal_focus`).
+    pub(crate) avatar_focus: FocusHandle,
     /// The Generate tab's prompt.
     pub(crate) avatar_prompt_input: Entity<ComposerInput>,
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
@@ -525,7 +527,7 @@ pub struct Shell {
     pub(crate) pip_offset: (f32, f32),
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
     /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
-    feedback: Entity<FeedbackSheet>,
+    pub(crate) feedback: Entity<FeedbackSheet>,
 }
 
 impl Shell {
@@ -1177,6 +1179,7 @@ impl Shell {
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
+            avatar_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
             chart_viewer_focused_generation: 0,
             forward_message_focused_for: None,
@@ -1460,7 +1463,24 @@ impl Shell {
         if state.server_sheet == Some(ServerSheet::RestoreKeys) {
             return Some(self.server_input.read(cx).focus_handle(cx));
         }
+        // Over Edit Agent the Name field under the picker must not type.
+        if self.avatar_picker_on_top(cx) {
+            return Some(self.avatar_focus.clone());
+        }
         None
+    }
+
+    /// The avatar picker is up with no sheet drawn over it (the render order: the Create
+    /// and server sheets, the reveals and Feedback come after it). Only then are the
+    /// keyboard and Esc its own.
+    fn avatar_picker_on_top(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        self.avatar_picker.is_some()
+            && !state.new_chat_open
+            && state.server_sheet.is_none()
+            && state.connect_reveal.is_none()
+            && state.agent_link_reveal.is_none()
+            && !self.feedback.read(cx).is_open()
     }
 
     /// Keep the keyboard inside the open sheet: whatever else took focus
@@ -3337,6 +3357,11 @@ impl Shell {
                     Composer::focus(&self.composer, window, cx);
                 }
             }
+            return;
+        }
+        // The avatar picker opens over Edit Agent: Esc closes it alone.
+        if self.avatar_picker_on_top(cx) {
+            self.close_avatar_picker(cx);
             return;
         }
         if self.state.read(cx).chat_search_open() {
@@ -5813,6 +5838,12 @@ impl Render for Shell {
         if self.skills.read(cx).is_floating() {
             root = root.child(self.skills.clone());
         }
+        // Under the pickers it opens: a later child paints over an earlier one.
+        if self.agent_edit_open {
+            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
+                root = root.child(sheet);
+            }
+        }
         if self.voice_picker_open {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
                 root = root.child(voicepicker::sheet(self, space, cx));
@@ -5820,10 +5851,15 @@ impl Render for Shell {
         }
         if let Some(picker) = self.avatar_picker.clone() {
             root = root.child(avatar_picker::sheet(self, &picker, cx));
-        }
-        if self.agent_edit_open {
-            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
-                root = root.child(sheet);
+        } else if self.avatar_focus.is_focused(window)
+            || self.avatar_focus.contains_focused(window, cx)
+        {
+            // Closed: the keyboard goes back to the sheet under it, else the composer.
+            if self.agent_edit_open {
+                let name = self.agent_name_input.read(cx).focus_handle(cx);
+                window.focus(&name, cx);
+            } else {
+                Composer::focus(&self.composer, window, cx);
             }
         }
         if new_chat_open {
