@@ -29,7 +29,7 @@ type B = Arc<Supervisor>;
 /// meaning — the workspaces that *are* running are well — so a reader that only ever asked
 /// "is this box up" reads the same thing it always did, and a reader that waited on a box can
 /// now tell "still starting" from "started and unwell" instead of inferring it from silence.
-async fn healthz(State(b): State<B>) -> Response {
+async fn healthz(State(b): State<B>, headers: HeaderMap) -> Response {
     let ws = b.list().await;
     let mut items = Vec::new();
     let mut all_ok = true;
@@ -52,6 +52,11 @@ async fn healthz(State(b): State<B>) -> Response {
         "isolation": { "enforced": b.isolation.enabled, "cross_read_blocked": *b.cross_read_blocked.read().await },
         "workspaces": items,
     });
+    // Liveness and where the boot is, for anyone who can reach the port (the image's
+    // HEALTHCHECK); who owns the box and what runs on it only for the bearer.
+    if !box_admin_authed(&b, &headers) {
+        body = json!({ "ok": all_ok });
+    }
     merge_boot(&mut body, b.boot.json());
     (
         if all_ok {
@@ -305,8 +310,32 @@ fn box_admin_authed(b: &Supervisor, headers: &HeaderMap) -> bool {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| !b.cfg.mcp_token.is_empty() && t.trim() == b.cfg.mcp_token)
+        .map(|t| !b.cfg.mcp_token.is_empty() && same_bytes(t.trim(), &b.cfg.mcp_token))
         .unwrap_or(false)
+}
+
+/// Equality that takes the same time wherever the first difference is, so the answer's timing
+/// says nothing about how much of a guessed token was right. The length is not hidden.
+fn same_bytes(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+            == 0
+}
+
+/// The gate on every route that hands out chat content, search, turn metrics or the browser's
+/// screen: the box bearer or a bare 401. The port is bound on every interface, and the network
+/// around the box is not the only thing that should stand between it and a neighbour.
+async fn require_box_bearer(
+    State(b): State<B>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !box_admin_authed(&b, request.headers()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
 }
 
 /// Worker threads the box surface gets. Two, not one: a `/w/{project}/history` page or a
@@ -362,6 +391,17 @@ pub fn serve_box(
 }
 
 pub fn box_router(sup: Arc<Supervisor>) -> Router {
+    let content = Router::new()
+        .route("/w/{project}/metrics", get(metrics))
+        .route("/w/{project}/history/{chat_id}", get(history))
+        .route("/w/{project}/t3/search", get(t3_search))
+        .route("/history/{chat_id}", get(history_legacy))
+        .route("/w/{project}/browser/stream", get(browser_stream_ws))
+        .route("/browser/stream", get(browser_stream))
+        .route_layer(axum::middleware::from_fn_with_state(
+            sup.clone(),
+            require_box_bearer,
+        ));
     Router::new()
         .route("/healthz", get(healthz))
         .route("/w/{project}/hold", axum::routing::post(workspace_hold))
@@ -369,16 +409,11 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
             "/w/{project}/release",
             axum::routing::post(workspace_release),
         )
-        .route("/w/{project}/metrics", get(metrics))
         .route("/w/{project}/inspect", get(workspace_inspect))
         .route("/w/{project}/jobs/{job_id}", get(workspace_job))
         .route("/box/state", get(box_state))
         .route("/box/prepare-sleep", axum::routing::post(box_prepare_sleep))
-        .route("/w/{project}/history/{chat_id}", get(history))
-        .route("/w/{project}/t3/search", get(t3_search))
-        .route("/history/{chat_id}", get(history_legacy))
-        .route("/w/{project}/browser/stream", get(browser_stream_ws))
-        .route("/browser/stream", get(browser_stream))
+        .merge(content)
         .with_state(sup)
 }
 
@@ -635,6 +670,78 @@ mod tests {
         assert!(
             body.contains("\"state\":\"ready\"") && body.contains("\"ready\":true"),
             "answer was: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every route that hands out chat content, search, turn metrics or the browser's screen
+    /// answers a bare 401 without the box bearer, and with a wrong one. With the right one the
+    /// request reaches the handler, which on a box with no workspaces is a 404 for the routes
+    /// that name one.
+    #[tokio::test]
+    async fn the_content_routes_ask_for_the_box_bearer() {
+        let (_sup, port, root) = box_surface("content-auth");
+        let ask = |path: &'static str, bearer: Option<&'static str>| {
+            tokio::task::spawn_blocking(move || http_get(port, path, bearer))
+        };
+        for path in [
+            "/w/p1/history/c1",
+            "/history/c1",
+            "/w/p1/t3/search?q=secret",
+            "/w/p1/metrics",
+            "/w/p1/browser/stream",
+            "/browser/stream",
+        ] {
+            for bearer in [None, Some("wrong"), Some("test-mcq"), Some("")] {
+                let answer = ask(path, bearer).await.unwrap();
+                assert!(
+                    answer.starts_with("HTTP/1.1 401") && answer.ends_with("\r\n\r\n"),
+                    "{path} with {bearer:?} must be a 401 with no body: {answer}"
+                );
+            }
+            let answer = ask(path, Some("test-mcp")).await.unwrap();
+            assert!(
+                !answer.starts_with("HTTP/1.1 401"),
+                "{path} refused the box's own bearer: {answer}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `/healthz` without the bearer is liveness and boot state only: nothing that names the
+    /// owner, the device, the version or a project. With the bearer it is the full report.
+    #[tokio::test]
+    async fn healthz_names_nobody_without_the_bearer() {
+        let (_sup, port, root) = box_surface("healthz-auth");
+        let open = tokio::task::spawn_blocking(move || http_get(port, "/healthz", None))
+            .await
+            .unwrap();
+        assert!(open.starts_with("HTTP/1.1 200"), "{open}");
+        assert!(
+            open.contains("\"ok\":true") && open.contains("\"state\""),
+            "{open}"
+        );
+        for private in [
+            "u-test",
+            "box:test",
+            "\"user\"",
+            "\"device\"",
+            "\"version\"",
+            "\"workspaces\"",
+            "\"isolation\"",
+        ] {
+            assert!(
+                !open.contains(private),
+                "{private} is in the open answer: {open}"
+            );
+        }
+        let full =
+            tokio::task::spawn_blocking(move || http_get(port, "/healthz", Some("test-mcp")))
+                .await
+                .unwrap();
+        assert!(
+            full.contains("u-test") && full.contains("\"workspaces\""),
+            "{full}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
