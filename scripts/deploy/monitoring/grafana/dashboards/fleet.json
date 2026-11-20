@@ -2490,6 +2490,66 @@
   },
   {
    "type": "timeseries",
+   "title": "Relay database",
+   "description": "Size on disk of relay.db and its write-ahead log. The log sits near 4 MB; one that stays far above 64 MB means a read is held open across many commits, and writes get slower.",
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "min": 0,
+     "max": null,
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 37,
+   "gridPos": {
+    "x": 0,
+    "y": 60,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (file) (arbos_relay_db_bytes)",
+     "legendFormat": "{{file}}",
+     "instant": false,
+     "range": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
    "title": "Relay HTTP requests per second",
    "description": "",
    "fieldConfig": {
@@ -2523,9 +2583,9 @@
      "sort": "desc"
     }
    },
-   "id": 37,
+   "id": 38,
    "gridPos": {
-    "x": 0,
+    "x": 12,
     "y": 60,
     "w": 12,
     "h": 8
@@ -2583,10 +2643,10 @@
      "sort": "desc"
     }
    },
-   "id": 38,
+   "id": 39,
    "gridPos": {
-    "x": 12,
-    "y": 60,
+    "x": 0,
+    "y": 68,
     "w": 12,
     "h": 8
    },
@@ -2640,9 +2700,9 @@
      "sort": "desc"
     }
    },
-   "id": 39,
+   "id": 40,
    "gridPos": {
-    "x": 0,
+    "x": 12,
     "y": 68,
     "w": 12,
     "h": 8
@@ -2708,10 +2768,10 @@
      "sort": "desc"
     }
    },
-   "id": 40,
+   "id": 41,
    "gridPos": {
-    "x": 12,
-    "y": 68,
+    "x": 0,
+    "y": 76,
     "w": 12,
     "h": 8
    },

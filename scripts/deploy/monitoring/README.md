@@ -104,6 +104,7 @@ Grafana reloads the files within a minute; the Subnet view is reloaded by `grafa
 | `ModelSlow` | p95 over 30 s to first byte | warning |
 | `BoxOOMKilled` | the kernel OOM-killed anything on the host | critical |
 | `RelayRestarted` | the relay restarted in the last 15 min | warning |
+| `RelayWalLarge` | the relay database's write-ahead log over 128 MB for 10 min (quiet until the relay exports `arbos_relay_db_bytes`) | warning |
 | `RelayMemoryHigh` | relay memory over 40 GiB (it sat at ~22 GB when this was written; tune the number in the rule) | warning |
 
 Disk alerts and the disk figures on the dashboards watch `/` and `/var/lib/docker` only, so `/boot`
