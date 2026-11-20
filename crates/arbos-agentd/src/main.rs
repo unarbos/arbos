@@ -99,6 +99,8 @@ mod memory;
 mod model_switch_tests;
 #[cfg(test)]
 mod model_usage_tests;
+#[cfg(test)]
+mod over_cap_agent_end_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
