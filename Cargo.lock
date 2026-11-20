@@ -557,6 +557,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "arbos-core",
+ "arbos-wallet",
  "axum",
  "base64 0.22.1",
  "blake2",

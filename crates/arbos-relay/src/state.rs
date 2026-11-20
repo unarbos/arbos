@@ -81,6 +81,11 @@ pub struct Config {
     /// whole: scheme, host and port. A path on an entry is ignored, and no entry is ever
     /// matched against the start of a redirect (`signin::redirect_allowed`).
     pub auth_redirects: Vec<String>,
+    /// The cold wallet that takes TAO and alpha for credits (`ARBOS_DEPOSIT_ADDRESS`); unset,
+    /// the relay takes no deposits (`deposits.rs`).
+    pub deposit_address: Option<String>,
+    /// The Bittensor node the deposit watcher reads (`ARBOS_CHAIN_RPC`).
+    pub chain_rpc: String,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
@@ -808,6 +813,8 @@ pub(crate) mod test_support {
             github_client_id: Some("id".into()),
             github_client_secret: Some("secret".into()),
             auth_redirects: Vec::new(),
+            deposit_address: None,
+            chain_rpc: String::new(),
             default_grant_usd: 100.0,
             default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,

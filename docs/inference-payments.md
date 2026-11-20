@@ -105,6 +105,8 @@ Both are small because the payer is already resolved in one place.
 
 ## 7. TAO Top-Up (Optional, Later)
 
+**Implemented** (2026-11-19) in `crates/arbos-relay/src/deposits.rs`, for TAO and any subnet's alpha, ahead of the card path above. The points below are the design it followed.
+
 For users who already hold TAO and linked an address (#2933):
 
 - The relay publishes one deposit address. A **finalized** `Balances.transfer` to it from a user's *linked* address credits that user a `purchase` row at the spot rate when finality is observed, `idem` = block hash + extrinsic index.

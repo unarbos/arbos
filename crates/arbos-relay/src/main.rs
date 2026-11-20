@@ -35,6 +35,7 @@ mod db_push;
 mod db_secrets;
 mod db_voice;
 mod debug_api;
+mod deposits;
 mod diag;
 mod export;
 mod features;
@@ -250,6 +251,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("ARBOS_AUTH_MODE=github needs ARBOS_GITHUB_CLIENT_ID and ARBOS_GITHUB_CLIENT_SECRET (or the ARBOS_GITHUB_OAUTH_CLIENT_* names)");
     }
 
+    let deposit_address = env_nonempty("ARBOS_DEPOSIT_ADDRESS");
+    if let Some(a) = &deposit_address {
+        anyhow::ensure!(
+            wallets::public_key(a).is_some(),
+            "ARBOS_DEPOSIT_ADDRESS is not a Bittensor address"
+        );
+    }
+
     let cfg = Config {
         public_url,
         data_dir: args.data.clone(),
@@ -302,6 +311,10 @@ async fn main() -> anyhow::Result<()> {
         github_client_id,
         github_client_secret,
         auth_redirects: auth_redirects_from_env(),
+        deposit_address,
+        // An archive node: catching up after downtime reads blocks a pruning node has dropped.
+        chain_rpc: env_nonempty("ARBOS_CHAIN_RPC")
+            .unwrap_or_else(|| "https://archive.sub.latent.to".to_owned()),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
         default_account_limit: credits::SpendLimit::from_env("ARBOS_DEFAULT_DAILY_CAP_USD"),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
@@ -416,6 +429,7 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    deposits::spawn_watcher(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     boxd::spawn_idle_sleeper(state.clone()).await;
@@ -702,6 +716,7 @@ fn app(state: AppState) -> Router {
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
         .route("/users/{id}/wallet", get(wallets::user_wallet))
+        .route("/me/credits/deposit", get(deposits::info))
         .route(
             "/me/wallet",
             put(wallets::put_wallet).delete(wallets::delete_wallet),

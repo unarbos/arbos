@@ -9,6 +9,8 @@ description = "The one service outside the boxes: registry, pairing, sync rooms,
 
 [dependencies]
 arbos-core.workspace = true
+# The deposit watcher (`deposits.rs`) reads finalized blocks through the wallet's chain client.
+arbos-wallet.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
