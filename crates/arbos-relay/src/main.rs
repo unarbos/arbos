@@ -257,6 +257,29 @@ async fn main() -> anyhow::Result<()> {
         openrouter_key,
         anthropic_key,
         openai_key,
+        subnets: [
+            (
+                "saygm",
+                "SAYGM_API_KEY",
+                "ARBOS_SAYGM_BASE",
+                "https://api.saygm.com",
+            ),
+            (
+                "engy",
+                "ENGY_API_KEY",
+                "ARBOS_ENGY_BASE",
+                "https://api.engy.ai",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, key, base, default)| {
+            Some(state::Subnet {
+                name,
+                key: env_nonempty(key)?,
+                base: env_nonempty(base).unwrap_or_else(|| default.to_owned()),
+            })
+        })
+        .collect(),
         openai_base: args.openai_base.clone(),
         openai_direct_base: env_nonempty("ARBOS_OPENAI_DIRECT_BASE")
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),

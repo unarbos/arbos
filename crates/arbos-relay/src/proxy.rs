@@ -155,6 +155,18 @@ fn is_openai_model(model: &str) -> bool {
         || l.starts_with("o4")
 }
 
+/// The subnet provider a model id names, and the id that provider knows it by: `engy/glm-5.3`
+/// is Engy's `glm-5.3`. Only a provider the relay holds a key for; any other id, an
+/// OpenRouter `vendor/model` included, is `None` and takes the routes below.
+fn subnet_of<'a>(
+    cfg: &'a crate::state::Config,
+    model: &'a str,
+) -> Option<(&'a crate::state::Subnet, &'a str)> {
+    let (name, leaf) = model.split_once('/')?;
+    let subnet = cfg.subnets.iter().find(|s| s.name == name)?;
+    (!leaf.is_empty()).then_some((subnet, leaf))
+}
+
 /// Send this OpenAI model straight to OpenAI (first-party key) instead of through OpenRouter?
 /// Yes when the relay has an `OPENAI_API_KEY` and the route is `direct` or `auto`; the model id
 /// then loses its `openai/` prefix. OpenRouter's OpenAI route refuses our account.
@@ -499,7 +511,39 @@ async fn forward(
         "model call in"
     );
 
+    // The subnet that serves this call, for its usage row: these providers name none themselves.
+    let subnet_name = match api {
+        Api::OpenAi | Api::Anthropic => subnet_of(&state.cfg, &model).map(|(s, _)| s.name),
+        Api::Decisions => None,
+    };
     let (url, key, key_header): (String, String, &str) = match api {
+        _ if subnet_name.is_some() => {
+            let (subnet, leaf) = subnet_of(&state.cfg, &model).expect("checked by the guard");
+            // The provider gets its own bare id.
+            if let Some(v) = req_json.as_mut() {
+                v["model"] = json!(leaf);
+                if matches!(api, Api::OpenAi) {
+                    normalize_openai_reasoning_body(leaf, v);
+                    if is_stream && path_tail.ends_with("chat/completions") {
+                        v["stream_options"] = json!({ "include_usage": true });
+                    }
+                }
+                body = Bytes::from(v.to_string());
+            }
+            let base = subnet.base.trim_end_matches('/');
+            match api {
+                Api::OpenAi => (
+                    format!("{base}/v1/{path_tail}"),
+                    subnet.key.clone(),
+                    "authorization",
+                ),
+                _ => (
+                    format!("{base}/{path_tail}"),
+                    subnet.key.clone(),
+                    "x-api-key",
+                ),
+            }
+        }
         Api::OpenAi => {
             let direct = openai_goes_direct(&state.cfg, &model);
             let base = if direct {
@@ -669,7 +713,8 @@ async fn forward(
             ..Default::default()
         };
         let mut ttfb: Option<i64> = None;
-        let mut generation: (Option<String>, Option<String>) = (None, None);
+        let mut generation: (Option<String>, Option<String>) =
+            (None, subnet_name.map(str::to_owned));
         let mut stream = upstream.bytes_stream();
         let mut carry = String::new();
         let mut interrupted = false;
@@ -1444,11 +1489,55 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
         Ok(r) => {
             let status =
                 StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let b = r.bytes().await.unwrap_or_default();
+            let mut b = r.bytes().await.unwrap_or_default();
+            if let (true, Ok(mut list)) = (
+                status.is_success() && !state.cfg.subnets.is_empty(),
+                serde_json::from_slice::<Value>(&b),
+            ) {
+                if let Some(data) = list.get_mut("data").and_then(Value::as_array_mut) {
+                    for subnet in &state.cfg.subnets {
+                        data.extend(subnet_models(&state.http, subnet).await);
+                    }
+                    b = Bytes::from(list.to_string());
+                }
+            }
             (status, [("content-type", "application/json")], b).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     }
+}
+
+/// A subnet provider's chat models, each id prefixed with the provider's name so a pick routes
+/// back to it ([`subnet_of`]). A provider that does not answer in time lists nothing: the
+/// catalog is the main upstream's and must not wait on, or fail with, a subnet.
+async fn subnet_models(http: &reqwest::Client, subnet: &crate::state::Subnet) -> Vec<Value> {
+    let url = format!("{}/v1/models", subnet.base.trim_end_matches('/'));
+    let list = async {
+        let r = http.get(url).bearer_auth(&subnet.key).send().await.ok()?;
+        r.error_for_status().ok()?.json::<Value>().await.ok()
+    };
+    let Ok(Some(list)) = tokio::time::timeout(Duration::from_secs(5), list).await else {
+        tracing::warn!(subnet = subnet.name, "subnet model list unavailable");
+        return Vec::new();
+    };
+    let models = list.get("data").and_then(Value::as_array);
+    models
+        .into_iter()
+        .flatten()
+        // The agents speak chat completions. A provider that names what each model speaks
+        // (SayGM's `api_shapes`: its Claude models are messages-only) lists only those that do.
+        .filter(|m| {
+            m.get("api_shapes")
+                .and_then(Value::as_array)
+                .is_none_or(|shapes| shapes.iter().any(|s| s == "chat.completions"))
+        })
+        .filter_map(|m| {
+            let mut m = m.clone();
+            let id = format!("{}/{}", subnet.name, m.get("id")?.as_str()?);
+            m["id"] = json!(id);
+            Some(m)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1897,6 +1986,162 @@ mod usage_tests {
         assert!(m.finished);
         m.absorb_cost(&json!({"cost": -1}));
         assert_eq!(m.cost, Some(0.01));
+    }
+
+    /// A model named for a subnet provider goes to that provider under its bare id, with the
+    /// provider's key in the header its API reads; any other id takes the main upstream. The
+    /// catalog offers the provider's chat models under the prefixed id.
+    #[tokio::test]
+    async fn a_subnet_model_goes_to_its_provider_and_is_listed_under_its_name() {
+        use crate::state::{test_support::test_state, AuthMode, Subnet};
+        async fn chat(
+            headers: HeaderMap,
+            axum::Json(body): axum::Json<Value>,
+        ) -> impl IntoResponse {
+            assert_eq!(headers["authorization"], "Bearer engy-key");
+            assert_eq!(body["model"], "glm-5.3", "the provider's own id");
+            assert_eq!(body["stream_options"]["include_usage"], true);
+            axum::Json(
+                json!({"model":"glm-5.3","usage":{"prompt_tokens":100,"completion_tokens":20,"cost":0.002}}),
+            )
+        }
+        async fn messages(
+            headers: HeaderMap,
+            axum::Json(body): axum::Json<Value>,
+        ) -> impl IntoResponse {
+            assert_eq!(headers["x-api-key"], "engy-key");
+            assert!(headers.get("authorization").is_none());
+            assert_eq!(body["model"], "kimi-k3");
+            axum::Json(
+                json!({"model":"kimi-k3","usage":{"input_tokens":10,"output_tokens":2,"cost":0.001}}),
+            )
+        }
+        let app = axum::Router::new()
+            .route("/engy/v1/chat/completions", axum::routing::post(chat))
+            .route("/engy/v1/messages", axum::routing::post(messages))
+            .route(
+                "/engy/v1/models",
+                axum::routing::get(|| async {
+                    axum::Json(json!({"data":[
+                        {"id":"glm-5.3"},
+                        {"id":"gpt-6-sol","api_shapes":["chat.completions","responses"]},
+                        {"id":"claude-opus-5-5","api_shapes":["messages"]},
+                    ]}))
+                }),
+            )
+            .route(
+                "/main/models",
+                axum::routing::get(|| async { axum::Json(json!({"data":[{"id":"anthropic/claude-haiku-5.5"}]})) }),
+            )
+            .route(
+                "/main/chat/completions",
+                axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                    assert_eq!(body["model"], "saygm/unkeyed", "no key for that provider: untouched");
+                    axum::Json(json!({"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.0001}}))
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let mut state = test_state(AuthMode::Paircode);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openai_base = format!("{base}/main");
+        cfg.openai_key = Some("main-key".into());
+        cfg.subnets = vec![Subnet {
+            name: "engy",
+            base: format!("{base}/engy/"),
+            key: "engy-key".into(),
+        }];
+        assert_eq!(
+            subnet_of(&cfg, "engy/glm-5.3").map(|(s, m)| (s.name, m)),
+            Some(("engy", "glm-5.3"))
+        );
+        for other in [
+            "glm-5.3",
+            "engy/",
+            "saygm/glm-5.3",
+            "anthropic/claude-haiku-5.5",
+            "",
+        ] {
+            assert!(subnet_of(&cfg, other).is_none(), "{other}");
+        }
+        state.cfg = std::sync::Arc::new(cfg);
+        let project = || {
+            let mut h = HeaderMap::new();
+            h.insert("x-arbos-project", HeaderValue::from_static("p"));
+            h
+        };
+        let call = |body: &'static str| {
+            openai(
+                State(state.clone()),
+                Principal::Admin,
+                Path("chat/completions".into()),
+                project(),
+                Bytes::from_static(body.as_bytes()),
+            )
+        };
+        let r = call(r#"{"model":"engy/glm-5.3","stream":true,"messages":[]}"#).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let r = call(r#"{"model":"saygm/unkeyed","messages":[]}"#).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let r = anthropic(
+            State(state.clone()),
+            Principal::Admin,
+            Path("v1/messages".into()),
+            project(),
+            Bytes::from_static(br#"{"model":"engy/kimi-k3","max_tokens":5,"messages":[]}"#),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+
+        let r = openai_models(State(state.clone()), Principal::Admin).await;
+        let list: Value =
+            serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap())
+                .unwrap();
+        let ids: Vec<&str> = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "anthropic/claude-haiku-5.5",
+                "engy/glm-5.3",
+                "engy/gpt-6-sol"
+            ]
+        );
+
+        // The provider's reported cost is what was metered, and the row names the subnet.
+        for _ in 0..50 {
+            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r["model"].as_str().unwrap(),
+                    r["provider"].as_str(),
+                    r["usd"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        for want in [
+            ("glm-5.3", Some("engy"), 0.002),
+            ("kimi-k3", Some("engy"), 0.001),
+            ("m", None, 0.0001),
+        ] {
+            assert!(seen.contains(&want), "{want:?} in {seen:?}");
+        }
     }
 
     #[tokio::test]

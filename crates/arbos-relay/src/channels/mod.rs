@@ -787,6 +787,7 @@ mod tests {
             openrouter_key: None,
             anthropic_key: None,
             openai_key: None,
+            subnets: Vec::new(),
             openai_base: String::new(),
             anthropic_base: String::new(),
             default_snapshot: String::new(),
