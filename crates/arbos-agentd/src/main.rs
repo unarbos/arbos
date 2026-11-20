@@ -95,6 +95,7 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+mod metrics;
 #[cfg(test)]
 mod model_switch_tests;
 #[cfg(test)]

@@ -1,7 +1,8 @@
 # Metrics
 
-Prometheus metrics for the relay. The code is `crates/arbos-relay/src/metrics.rs`; a test there
-fails when a family is missing from this page.
+Prometheus metrics for the relay and for each box's agentd. The code is `metrics.rs` in
+`crates/arbos-relay/src` and in `crates/arbos-agentd/src`; a test in each fails when a family is
+missing from this page.
 
 ## Scraping
 
@@ -20,6 +21,58 @@ the internet cannot reach it, and a box is on a bridge network, so a box cannot 
 has to run on the relay host itself (a host service, or a container with host networking).
 
 `scripts/deploy/relay-server.sh` keeps the variable from `/etc/arbos/relay.env` across deploys.
+
+### Boxes
+
+Prometheus does not talk to a box. The relay's metrics listener lists the awake boxes and proxies
+each scrape, because only the relay knows a box's port and token:
+
+| what | value |
+|---|---|
+| discovery | `http://127.0.0.1:9108/metrics/targets` (Prometheus `http_sd_configs`) |
+| each target | address = the listener itself, `__metrics_path__` = `/metrics/box/<id>`, label `box` = `<id>` |
+| auth | none on the Prometheus side; the relay sends the box's own bearer to agentd's `GET /metrics` |
+
+```yaml
+- job_name: arbos-agentd
+  http_sd_configs:
+    - url: http://127.0.0.1:9108/metrics/targets
+```
+
+`<id>` is the same keyed id as on `/metrics/boxes` (below): 12 hex characters, an HMAC of the
+box's owner under a key derived from the relay key, stable across restarts. On its own it cannot
+be turned into a user without that key. It is not anonymous to everyone, though: a Prometheus
+that also scrapes `/metrics/boxes` holds `arbos_relay_box_info`, which joins the id to the box's
+container name, and that name contains the user id. Treat the agentd series like the
+`/metrics/boxes` series: for the team's own dashboards, not for sharing outside.
+
+A box is its user's machine, so the relay does not trust what one answers:
+
+- It asks only a box that is awake right now, and answers 404 for any other id. A sleeping box
+  keeps its last address, which may since belong to another box.
+- It follows no redirect: the request carries the box's token.
+- It reads at most 256 KB.
+- It passes on only the samples in the agentd table below, by exact name, with that family's one
+  label and one of that label's listed values, each series once, with a numeric value. Comment
+  lines are not passed on. Anything else is dropped and counted in
+  `arbos_relay_box_scrape_dropped_lines_total`.
+- `arbos_agentd_build_info` is not taken from the box at all: the relay writes it, with the
+  version of the image it gave that box (the box row's snapshot, `arbos-agent-<version>`, so a
+  pre-release such as `0.7.0-rc1` reads as it is). A version a box reports about itself is a
+  string of its own choosing; this one is bounded by the images ever rolled.
+
+So a box cannot add a family, a label or a label value, and its answer is at most about forty
+series. Set `sample_limit` and `body_size_limit` on the Prometheus job as well.
+
+**Do not add the `arbos-agentd` job to the monitoring config before the box image is rolled.** The
+relay half is live as soon as the relay is deployed, but a box on an older image has no
+`/metrics`: every box would read down (`502`, `old_image`).
+
+Use the listener's IP address in the discovery URL
+(`127.0.0.1`, not `localhost`): the relay hands that address back as the scrape target. Only awake
+boxes are listed, so a sleeping box is absent, not down. A listed box that answers `502` is
+unreachable, or runs an image from before agentd had `/metrics`; `arbos_relay_box_scrapes` on the
+relay says which, and how many.
 
 A scrape never waits on the relay: gauges are read from memory with `try_lock` (a busy map leaves its
 series out of that one scrape), and the database numbers come from a sampler that runs every 10 s.
@@ -41,6 +94,8 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_rooms_open` | gauge | | sync rooms held in memory |
 | `arbos_relay_sockets` | gauge | `kind` = `client` `box` | open room websockets |
 | `arbos_relay_boxes` | gauge | `state` = `awake` `waking` `asleep` `error` | boxes by the state the relay believes. A box the relay has not heard of since it started is in no state yet |
+| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake and never asked, which is every awake box while the per-box scrape job is off; it is not a failure and no rule counts it as one |
+| `arbos_relay_box_scrape_dropped_lines_total` | counter | | lines in a box's answer that are not agentd's and were not passed on; above zero means a box is sending something it should not |
 | `arbos_relay_boxes_registered` | gauge | `provider` | box rows in the database |
 | `arbos_relay_boxes_max` | gauge | | resident box cap (`max_boxes`) |
 | `arbos_relay_boxes_turn_running` | gauge | | boxes whose keepalive said a turn is running in the last 3 min |
@@ -70,7 +125,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `process_cpu_seconds_total` | counter | | user + system CPU time (Linux) |
 | `process_start_time_seconds` | gauge | | start time, seconds since the epoch |
 
-Every histogram uses the same buckets, in seconds: 0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5,
+Every relay histogram uses the same buckets, in seconds: 0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5,
 10, 30, 60, 120, 300.
 
 Counters and histograms start at zero when the relay starts. A series with labels appears with its
@@ -105,3 +160,27 @@ The counters start at zero with the relay and are counted in memory where the pr
 the call, after the call has been charged; nothing is read from or written to the database for
 them. State, turn running and sockets are read from the relay's live maps without waiting: when
 one is busy, a box keeps what the scrape before read.
+
+## agentd
+
+One set of series per box (label `box`, see above).
+
+| name | type | labels | meaning |
+|---|---|---|---|
+| `arbos_agentd_build_info` | gauge | `version` | always 1. Through the relay, `version` is the image the relay gave the box, not what the box says it runs |
+| `arbos_agentd_uptime_seconds` | gauge | | seconds since agentd booted |
+| `arbos_agentd_workspaces` | gauge | `health` = `healthy` `unhealthy` | workspaces on the box; unhealthy = its main agent has no working child |
+| `arbos_agentd_turns_running` | gauge | | main-agent turns running now |
+| `arbos_agentd_sends_waiting` | gauge | | user messages waiting for a turn |
+| `arbos_agentd_workers_running` | gauge | | worker (subagent) turns running now |
+| `arbos_agentd_jobs` | gauge | `state` = `running` `queued` | background jobs |
+| `arbos_agentd_rooms_open` | gauge | | rooms the box holds open |
+| `arbos_agentd_rooms_connected` | gauge | | open rooms whose relay session is up; lower than `rooms_open` means the relay link is down or the room is busy |
+| `arbos_agentd_turns_started_total` | counter | | main-agent turns started |
+| `arbos_agentd_turns_finished_total` | counter | `result` = `done` `error` `cancelled` | main-agent turns finished |
+| `arbos_agentd_turn_duration_seconds` | histogram | | main-agent turn duration; buckets 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800 |
+| `arbos_agentd_worker_crashes_total` | counter | `kind` = `main` `job` | `main`: the main agent's child died and was respawned; `job`: a job's worker failed and got a fresh one |
+| `arbos_agentd_model_requests_total` | counter | `class` = `2xx`…`5xx` `unreachable` | model calls the box forwarded to the relay |
+| `arbos_agentd_relay_reconnects_total` | counter | | room sessions dialled again after the first |
+
+agentd's counters start at zero when the box boots.

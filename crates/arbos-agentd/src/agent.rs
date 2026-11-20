@@ -3656,6 +3656,7 @@ impl Agent {
             self.report_pi_child_exit(&dead, "ready").await;
         }
         let deaths = self.pi_deaths.fetch_add(1, Ordering::SeqCst) + 1;
+        crate::metrics::worker_crashed("main");
         tracing::warn!(deaths, "pi main child is gone; respawning");
         if deaths >= Self::PI_CRASH_LOOP_DEATHS {
             self.escalate_pi_crash_loop(&chat, deaths).await;
@@ -7688,6 +7689,7 @@ impl Agent {
                         &e.to_string(),
                     )
                     .await;
+                    crate::metrics::worker_crashed("job");
                     tracing::warn!(job = %j.id, error = %e, attempt = j.attempt, "job worker failed; fresh worker");
                     // Bug V: whatever takes the main pi child takes worker children with it.
                     // Round 7's job lost both of its workers inside that window — 00:09:50.965
@@ -8614,6 +8616,7 @@ impl Agent {
             streaming_behavior: StreamingBehavior::FollowUp,
         });
         self.turn_running.store(true, Ordering::SeqCst);
+        crate::metrics::turn_started();
         let keepalive = self.spawn_keepalive();
         // A relay turn is stamped so the extension lets a `send_message` that comes before
         // `route` stand as the `reply` route instead of blocking it (the result turn then wrote
@@ -9193,6 +9196,7 @@ impl Agent {
         if !turn.unposted_text.trim().is_empty() {
             usage_rec["unposted_chars"] = json!(turn.unposted_text.chars().count());
         }
+        crate::metrics::turn_finished(final_status.as_str(), total_ms);
         let _ = self.store.record_turn(
             chat_id,
             user_msg_id,
