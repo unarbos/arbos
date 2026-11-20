@@ -71,7 +71,8 @@ relay half is live as soon as the relay is deployed, but a box on an older image
 Use the listener's IP address in the discovery URL
 (`127.0.0.1`, not `localhost`): the relay hands that address back as the scrape target. Only awake
 boxes are listed, so a sleeping box is absent, not down. A listed box that answers `502` is
-unreachable, or runs an image from before agentd had `/metrics`; `arbos_relay_box_scrapes` on the
+unreachable, runs an image from before agentd had `/metrics`, or answered something the relay
+rejected; `arbos_relay_box_scrapes{result="unreachable"|"old_image"|"rejected"}` on the
 relay says which, and how many.
 
 A scrape never waits on the relay: gauges are read from memory with `try_lock` (a busy map leaves its
@@ -94,7 +95,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_rooms_open` | gauge | | sync rooms held in memory |
 | `arbos_relay_sockets` | gauge | `kind` = `client` `box` | open room websockets |
 | `arbos_relay_boxes` | gauge | `state` = `awake` `waking` `asleep` `error` | boxes by the state the relay believes. A box the relay has not heard of since it started is in no state yet |
-| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake and never asked, which is every awake box while the per-box scrape job is off; it is not a failure and no rule counts it as one |
+| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake and not asked in the last 5 minutes, which is every awake box while the per-box scrape job is off; it is not a failure and no rule counts it as one. A result is only held for those 5 minutes, so a job that was on and is switched off again stops reading as boxes failing |
 | `arbos_relay_box_scrape_dropped_lines_total` | counter | | lines in a box's answer that are not agentd's and were not passed on; above zero means a box is sending something it should not |
 | `arbos_relay_boxes_registered` | gauge | `provider` | box rows in the database |
 | `arbos_relay_boxes_max` | gauge | | resident box cap (`max_boxes`) |

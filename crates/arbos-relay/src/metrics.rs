@@ -125,9 +125,14 @@ static COUNTERS: Mutex<BTreeMap<(&'static str, String), f64>> = Mutex::new(BTree
 /// Per-bucket counts (the last slot is +Inf) and the sum.
 static HISTOGRAMS: Mutex<BTreeMap<&'static str, ([u64; BOUNDS.len() + 1], f64)>> =
     Mutex::new(BTreeMap::new());
-/// Box id → how its last scrape through this relay ended. One short entry per box ever scraped;
-/// only the awake ones are counted.
-static BOX_SCRAPES: Mutex<BTreeMap<String, &'static str>> = Mutex::new(BTreeMap::new());
+/// User id → how the box's last scrape through this relay ended, and when. A result older than
+/// [`BOX_SCRAPE_FRESH_MS`] says nothing about the box now: it reads as `pending` and is dropped by
+/// the next scrape, so a box that is gone, or a scrape job switched off, leaves nothing behind.
+/// The key never leaves the process.
+static BOX_SCRAPES: Mutex<BTreeMap<String, (&'static str, i64)>> = Mutex::new(BTreeMap::new());
+/// A few scrape intervals: longer than any interval the job would be given, short enough that a
+/// job switched off stops reading as boxes failing within minutes.
+const BOX_SCRAPE_FRESH_MS: i64 = 5 * 60_000;
 /// Box id → user id of the awake boxes, as the last `/metrics/targets` listed them.
 static BOX_TARGETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 /// What the sampler last read from the database.
@@ -490,11 +495,11 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
     };
     // One row on a read connection: this runs once per awake box per scrape interval, and must
     // not stand in the queue for the writer lock.
-    let row = user_id.and_then(|u| {
+    let row = user_id.as_ref().and_then(|u| {
         let read = state.db.read(|c| {
             c.query_row(
                 "SELECT box_url, mcp_token, snapshot FROM boxes WHERE user_id = ?1",
-                [&u],
+                [u],
                 |r| {
                     Ok((
                         r.get::<_, Option<String>>(0)?,
@@ -546,7 +551,12 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
         Ok(r) if r.status() == axum::http::StatusCode::NOT_FOUND => ("old_image", down()),
         _ => ("unreachable", down()),
     };
-    locked(&BOX_SCRAPES).insert(id, result);
+    if let Some(user_id) = user_id {
+        let mut last = locked(&BOX_SCRAPES);
+        let now = arbos_core::ids::now_ms();
+        last.retain(|_, (_, at)| now - *at < BOX_SCRAPE_FRESH_MS);
+        last.insert(user_id, (result, now));
+    }
     res
 }
 
@@ -703,17 +713,15 @@ fn gauges(state: &AppState) -> Vec<Series> {
         }
         // The awake boxes by how their last scrape ended, so "not on a metrics image yet" is a
         // number on the dashboard instead of an empty panel.
-        let awake: std::collections::BTreeSet<String> = states
-            .iter()
-            .filter(|(_, (st, _))| *st == BoxState::Awake)
-            .map(|(user_id, _)| box_id(state, user_id))
-            .collect();
         let last = locked(&BOX_SCRAPES);
+        let now = arbos_core::ids::now_ms();
+        let last_of = |user_id: &String| match last.get(user_id) {
+            Some((result, at)) if now - *at < BOX_SCRAPE_FRESH_MS => *result,
+            _ => "pending",
+        };
+        let awake = || states.iter().filter(|(_, (st, _))| *st == BoxState::Awake);
         for result in ["ok", "old_image", "unreachable", "rejected", "pending"] {
-            let n = awake
-                .iter()
-                .filter(|id| last.get(*id).copied().unwrap_or("pending") == result)
-                .count();
+            let n = awake().filter(|(u, _)| last_of(u) == result).count();
             g.push(("arbos_relay_box_scrapes", label("result", result), n as f64));
         }
     }
@@ -1202,6 +1210,15 @@ mod tests {
         let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(down.status(), 502);
         assert_eq!(last_scrapes(&state)["rejected"], 1.0);
+        // Scraped once, then never again (the job was switched off): the old result must not
+        // stand for the box for ever. Past a few intervals the box is `pending` again, which no
+        // rule counts as failing, and the next scrape of any box forgets the stale entry.
+        let aged = arbos_core::ids::now_ms() - BOX_SCRAPE_FRESH_MS - 1_000;
+        locked(&BOX_SCRAPES).get_mut(&awake).unwrap().1 = aged;
+        let last = last_scrapes(&state);
+        assert_eq!((last["rejected"], last["pending"]), (0.0, 1.0));
+        let deleted = arbos_core::ids::ulid();
+        locked(&BOX_SCRAPES).insert(deleted.clone(), ("old_image", aged));
 
         // Where the box's token may go. `other` stands for another user's box that now has the
         // port: it records every request that reaches it.
@@ -1228,6 +1245,10 @@ mod tests {
         assert_eq!(
             (down.status().as_u16(), reached.load(Ordering::SeqCst)),
             (502, 0)
+        );
+        assert!(
+            !locked(&BOX_SCRAPES).contains_key(&deleted),
+            "stale entries go"
         );
         // A box that is not awake is not asked at all, though its row still holds an address.
         gone.box_url = Some(format!("http://{other}"));
