@@ -978,6 +978,8 @@ pub struct Transcript {
     people: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
+    /// The poll deadline a redraw is scheduled for ([`Self::watch_poll_deadlines`]).
+    poll_redraw_at: Option<i64>,
     /// The code card Copy pill reading "Copied" right now (its id, when).
     code_copied: Option<(SharedString, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
@@ -1074,6 +1076,7 @@ impl Transcript {
             multi_party: false,
             people: false,
             copied_feedback: None,
+            poll_redraw_at: None,
             code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
@@ -1767,6 +1770,7 @@ impl Transcript {
 
         if chat_changed {
             self.rows = new_rows;
+            self.watch_poll_deadlines(cx);
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.revealed = None;
@@ -1808,6 +1812,7 @@ impl Transcript {
         }
         let old_len = self.rows.len();
         self.rows = new_rows;
+        self.watch_poll_deadlines(cx);
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
         if crate::model::trace_rows() {
             eprintln!(
@@ -1954,6 +1959,34 @@ impl Transcript {
                         cx.notify();
                     }
                 });
+        })
+        .detach();
+    }
+
+    /// Redraw when the next open poll's time runs out, so its card closes by itself instead
+    /// of at the next unrelated redraw. One timer, for the nearest deadline on screen.
+    fn watch_poll_deadlines(&mut self, cx: &mut Context<Self>) {
+        let now = arbos_core::ids::now_ms();
+        let next = next_poll_deadline(&self.rows, now);
+        if next == self.poll_redraw_at {
+            return;
+        }
+        self.poll_redraw_at = next;
+        let Some(at) = next else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis((at - now).max(0) as u64 + 50))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Still the deadline being waited for: a newer timer owns any other.
+                if this.poll_redraw_at == Some(at) {
+                    this.poll_redraw_at = None;
+                    cx.notify();
+                    this.watch_poll_deadlines(cx);
+                }
+            });
         })
         .detach();
     }
@@ -3973,6 +4006,19 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
     } else {
         assistant_slot(bubble)
     }
+}
+
+/// The nearest deadline still ahead among the polls in `rows`: when the transcript next has
+/// a card to close.
+fn next_poll_deadline(rows: &[Row], now: i64) -> Option<i64> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::Poll {
+                deadline: Some(at), ..
+            } if *at > now => Some(*at),
+            _ => None,
+        })
+        .min()
 }
 
 /// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
@@ -12245,6 +12291,30 @@ mod poll_rows_tests {
         let message: Message = serde_json::from_value(row).expect("the row still reads");
         assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
         assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
+    /// The transcript redraws at the nearest poll deadline still ahead; closed polls and
+    /// polls with no time limit ask for nothing.
+    #[test]
+    fn the_next_redraw_is_the_nearest_deadline_still_ahead() {
+        let poll = |deadline: Option<i64>| Row {
+            id: "r".into(),
+            message_id: "m".into(),
+            version: 0,
+            kind: RowKind::Poll {
+                question: "Q".into(),
+                options: vec![],
+                multiple: false,
+                by: None,
+                show_voters: false,
+                voted: 0,
+                deadline,
+            },
+        };
+        let rows = [poll(None), poll(Some(50)), poll(Some(300)), poll(Some(200))];
+        assert_eq!(next_poll_deadline(&rows, 100), Some(200));
+        assert_eq!(next_poll_deadline(&rows, 300), None, "all closed");
+        assert_eq!(next_poll_deadline(&[], 0), None);
     }
 
     /// A poll that hides its voters reaches this Mac with counts and the reader's own vote:

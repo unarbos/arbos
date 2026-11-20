@@ -242,6 +242,9 @@ pub enum SyncEvent {
         /// `features.voice_mode`: spoken replies, voice picker, reply playback. Absent on an
         /// older relay = off (Jacob, 2026-10-22: hidden everywhere until it works end to end).
         voice_mode: bool,
+        /// `features.poll_options`: the relay takes polls with a visibility flag, a duration
+        /// and a close. Absent on a relay from before them = no.
+        poll_options: bool,
     },
     /// `GET /users/search` results for the new-chat sheet (D72).
     PeopleSearch {

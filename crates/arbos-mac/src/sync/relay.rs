@@ -2189,6 +2189,7 @@ async fn refresh_me(shared: &Arc<Shared>) {
     // Voice mode is a relay-side kill switch; absent = off.
     let _ = shared.events.send(SyncEvent::Features {
         voice_mode: dto.features.voice_mode.unwrap_or(false),
+        poll_options: dto.features.poll_options.unwrap_or(false),
     });
     let m = &dto.machine;
     // D89: provider and waitlist place ride along with `always_on`.

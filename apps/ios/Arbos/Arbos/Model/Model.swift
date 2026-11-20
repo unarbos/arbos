@@ -723,11 +723,43 @@ struct Poll: Equatable {
         return multiple ? mine + [id] : [id]
     }
 
+    /// The most voters the line under the card names; the rest are a count.
+    static let votersNamed = 12
+
+    /// The line that lists an option's voters: "Lisbon: Ana, Ben and 3 others". `names` is
+    /// one entry per voter, nil for someone the reader is not shown by name — no longer in
+    /// the chat, or blocked. At most `votersNamed` names, so a large group stays one line
+    /// or two.
+    static func voterLine(label: String, names: [String?]) -> String {
+        let named = names.compactMap { $0 }.prefix(votersNamed)
+        let others = names.count - named.count
+        if names.isEmpty { return "\(label): no votes" }
+        let rest = others == 0 ? nil : named.isEmpty ? "\(others) \(others == 1 ? "person" : "people")"
+            : "\(others) \(others == 1 ? "other" : "others")"
+        let list = named.joined(separator: ", ")
+        return "\(label): " + [list.isEmpty ? nil : list, rest].compactMap { $0 }.joined(separator: " and ")
+    }
+
     /// The card's foot, in the core's words (`arbos_core::poll::foot`): "Ana's poll · 3 voted ·
     /// pick one · names shown · closes in 2 h", or "… · closed" once it is.
     func foot(by name: String?, now: Int64 = nowMs()) -> String {
         pollFoot(by: name, voted: UInt32(voters), multiple: multiple, showVoters: showVoters == true,
                  closed: closed(now: now), leftMs: deadline.map { $0 - now })
+    }
+}
+
+/// Remote flag `features.poll_options` from `GET /me`: the relay takes polls with "Show who
+/// voted", a duration and a close. Off on a relay from before them (it refuses such a poll,
+/// and a refused push is sent again for ever) and until `/me` has answered once: the sheet
+/// then offers none of the three and the poll is posted in the older shape.
+final class PollOptionsFlag: ObservableObject {
+    static let shared = PollOptionsFlag()
+    @Published private(set) var on: Bool = UserDefaults.standard.object(forKey: "features.poll_options") as? Bool ?? false
+
+    func set(_ value: Bool) {
+        guard value != on else { return }
+        on = value
+        UserDefaults.standard.set(value, forKey: "features.poll_options")
     }
 }
 

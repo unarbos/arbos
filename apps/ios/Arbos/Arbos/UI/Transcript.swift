@@ -2278,16 +2278,26 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
             if let option = namesFor {
-                let names = (poll.votes[option.id] ?? []).map(reactionSenderLabel).joined(separator: ", ")
-                Text("\(option.label): \(names.isEmpty ? "no votes" : names)")
+                Text(Poll.voterLine(label: option.label, names: (poll.votes[option.id] ?? []).map(pollVoterName)))
                     .font(theme.font(12))
                     .foregroundStyle(theme.muted)
+                    .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, lane)
                     .accessibilityIdentifier("poll-voters")
             }
         }
+    }
+
+    /// A poll voter's name for the list under the card, from the chat's roster: nil for
+    /// someone who is no longer a member or whom I blocked — they are counted, not named.
+    private func pollVoterName(_ sender: String) -> String? {
+        if sender == model.myUserId { return "You" }
+        guard let member = model.peopleChat(chatId)?.members.first(where: { $0.member == sender }),
+              BlockRow.entry(in: model.blocked, id: member.id, handle: member.handle) == nil
+        else { return nil }
+        return member.displayName
     }
 
     /// Display name for a reaction sender id (`user:…` / `agent:…`).

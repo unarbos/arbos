@@ -1006,6 +1006,10 @@ pub struct AppState {
     /// Relay flag `features.voice_mode` (kill switch, default off): while off, no voice-mode
     /// UI (switch, picker, speaker rows, composer note) and no TTS request leaves the app.
     pub voice_mode_feature: bool,
+    /// Relay flag `features.poll_options`: the relay takes polls with "Show who voted", a
+    /// duration and a close. While off (a relay from before them, or before `/me` answers)
+    /// the poll form offers none of the three and posts the older shape.
+    pub poll_options: bool,
     /// F11: assistant messages whose speech is cached (speaker icon replays).
     pub spoken: HashSet<Id>,
     /// F11: replies whose speech failed to arrive, decode or play, with the
@@ -1439,6 +1443,7 @@ impl AppState {
             local: LocalView::default(),
             voice_mode: false,
             voice_mode_feature: false,
+            poll_options: false,
             spoken: HashSet::new(),
             speech_failed: HashMap::new(),
             awaiting_new_project: false,
@@ -1961,6 +1966,7 @@ impl AppState {
         self.channels = ChannelsView::default();
         self.voice_mode = false;
         self.voice_mode_feature = false;
+        self.poll_options = false;
         self.spoken.clear();
         self.speech_failed.clear();
         self.awaiting_new_project = false;
@@ -2149,7 +2155,11 @@ impl AppState {
                 self.begin_onboarding(cx);
                 cx.notify();
             }
-            SyncEvent::Features { voice_mode } => {
+            SyncEvent::Features {
+                voice_mode,
+                poll_options,
+            } => {
+                self.poll_options = poll_options;
                 self.voice_mode_feature = voice_mode;
                 if !voice_mode && self.voice_mode {
                     self.set_voice_mode(false, cx);
@@ -7472,9 +7482,13 @@ impl AppState {
         closes_in_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(poll) =
+        // A relay from before the poll options refuses the newer shape: post the older one.
+        let poll = if self.poll_options {
             arbos_core::poll::Poll::new(question, options, multiple, show_voters, closes_in_ms)
-        else {
+        } else {
+            arbos_core::poll::Poll::older(question, options, multiple)
+        };
+        let Some(poll) = poll else {
             return false;
         };
         self.command(ClientCommand::SendPoll {

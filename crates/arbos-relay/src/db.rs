@@ -749,9 +749,11 @@ impl Db {
         Self::migrate_mono_avatar_defaults(&c)?;
         Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
-        // NULL on rows from before the column: the relay cannot tell which of those it stored
-        // and which were only announced. An announce writes 0, a stored push 1.
-        let _ = c.execute("ALTER TABLE message_authors ADD COLUMN stored INTEGER", []);
+        // `stored`: NULL on rows from before the column — the relay cannot tell which of those
+        // it stored and which were only announced. An announce writes 0, a stored push 1.
+        // `deleted_at`: when the message was deleted for everyone.
+        add_column(&c, "message_authors", "stored INTEGER")?;
+        add_column(&c, "message_authors", "deleted_at INTEGER")?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
@@ -1922,6 +1924,17 @@ impl Db {
     }
 }
 
+/// Add a column to a table, tolerating only that it is already there. Any other failure of
+/// the migration stops the relay from starting on a schema it did not expect.
+fn add_column(c: &Connection, table: &str, column: &str) -> Result<()> {
+    match c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column}"), []) {
+        Err(e) if !e.to_string().contains("duplicate column name") => {
+            Err(e).with_context(|| format!("adding {column} to {table}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// What a stored room push changes besides its own row, written in that row's transaction.
 #[derive(Default)]
 pub struct RowEffects<'a> {
@@ -1935,7 +1948,11 @@ pub struct RowEffects<'a> {
     /// Message ids the push put in the chat: from here on the relay has stored them itself,
     /// which an announce can never claim.
     pub stored: &'a [String],
-    /// Message ids the push took out of the chat.
+    /// Message ids the row took out of the chat. Recorded on each one's author record, so
+    /// the record of deletions has no rows of its own and grows with nothing but the
+    /// messages the relay already keeps an author for. A message with no author record (a
+    /// system line, one older than the record) leaves none: pushed back, it is a message
+    /// the relay has never seen, with every rule of a new one.
     pub deleted: &'a [String],
 }
 
@@ -2001,7 +2018,8 @@ impl Db {
             }
             for message_id in effects.deleted {
                 tx.execute(
-                    "INSERT OR IGNORE INTO deleted_messages(chat_id, message_id, deleted_at) VALUES (?1, ?2, ?3)",
+                    "UPDATE message_authors SET deleted_at = ?3
+                      WHERE chat_id = ?1 AND message_id = ?2 AND deleted_at IS NULL",
                     params![effects.chat_id, message_id, now],
                 )?;
             }

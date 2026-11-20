@@ -162,9 +162,10 @@ final class CoreChatDoc {
     }
 
     /// A poll message (`docs/polls.md`); its text part is the poll in plain words. Does not
-    /// commit. Throws when the fields are not a poll within bounds.
+    /// commit. Throws when the fields are not a poll within bounds. `showVoters: nil` posts the
+    /// older shape, for a relay that does not take the newer fields (`PollOptionsFlag`).
     func insertPollMessage(
-        id: Id, question: String, options: [String], multiple: Bool, showVoters: Bool = false,
+        id: Id, question: String, options: [String], multiple: Bool, showVoters: Bool? = false,
         closesInMs: Int64? = nil, deviceId: String, author: Author?, mentions: [String] = []
     ) throws {
         let opts = UserMessageOptsRecord(

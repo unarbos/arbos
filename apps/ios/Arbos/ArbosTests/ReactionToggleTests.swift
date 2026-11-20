@@ -184,6 +184,20 @@ final class PollTests: XCTestCase {
         XCTAssertNotNil(SendPollSheet.durations.first { $0.ms == SendPollSheet.custom })
     }
 
+    /// The voters line names at most twelve people and counts the rest; someone with no name
+    /// to show (left the chat, blocked) is counted, never named.
+    func testTheVotersLineIsBoundedAndNamesOnlyThoseItMay() {
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: []), "Lisbon: no votes")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: ["Ana", "You"]), "Lisbon: Ana, You")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: ["Ana", nil, "Ben", nil]), "Lisbon: Ana, Ben and 2 others")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: [nil]), "Lisbon: 1 person")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: [nil, nil]), "Lisbon: 2 people")
+        let many = (1...40).map { Optional("P\($0)") }
+        let line = Poll.voterLine(label: "Lisbon", names: many)
+        XCTAssertTrue(line.hasSuffix("P12 and 28 others"), line)
+        XCTAssertFalse(line.contains("P13"), line)
+    }
+
     /// A reply quotes a poll by its question: the strip above the composer and the header in
     /// the reply's bubble both read "Poll: <question>", not the list of options.
     func testAReplyQuotesAPollByItsQuestion() throws {

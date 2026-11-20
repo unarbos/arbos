@@ -488,6 +488,7 @@ struct SendPollSheet: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     @State private var draft = PollDraft(question: "", options: ["", ""], multiple: false)
+    @ObservedObject private var pollOptions = PollOptionsFlag.shared
     /// "Custom…": when the poll closes, picked on the calendar wheel.
     @State private var customCloses = Date().addingTimeInterval(2 * 3600)
     @FocusState private var focused: Int?
@@ -575,6 +576,8 @@ struct SendPollSheet: View {
                         .tint(theme.accent)
                         .padding(.horizontal, Controls.textInset)
                         .accessibilityIdentifier("poll-multiple")
+                    // The rest only where the relay takes it (`PollOptionsFlag`).
+                    if pollOptions.on {
                     // Off: the card shows counts only. Fixed once sent, so nobody's vote is
                     // shown after the fact.
                     Toggle("Show who voted", isOn: $draft.showVoters)
@@ -608,6 +611,7 @@ struct SendPollSheet: View {
                             .padding(.horizontal, Controls.textInset)
                             .frame(minHeight: Controls.height)
                             .accessibilityIdentifier("poll-custom-closes")
+                    }
                     }
                 }
             }

@@ -1443,12 +1443,17 @@ public struct MeFeaturesDto: Codable {
 	/// Voice mode — spoken replies, the voice picker, reply playback (default off since
 	/// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
 	public let voice_mode: Bool?
+	/// The relay takes polls with a visibility flag, a duration and a close (`docs/polls.md`
+	/// §11). Absent on a relay from before them, which refuses such a poll: a client then
+	/// posts polls of the older shape and offers none of the three.
+	public let poll_options: Bool?
 
-	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?, voice_mode: Bool?) {
+	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?, voice_mode: Bool?, poll_options: Bool?) {
 		self.vault_connect = vault_connect
 		self.leaf_avatars = leaf_avatars
 		self.leaf_lottie = leaf_lottie
 		self.voice_mode = voice_mode
+		self.poll_options = poll_options
 	}
 }
 

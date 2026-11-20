@@ -230,6 +230,7 @@ impl SyncSource for FixtureSource {
             let _ = events.send(SyncEvent::Features {
                 voice_mode: std::env::var("ARBOS_FIXTURE_VOICE_MODE")
                     .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on" | "yes")),
+                poll_options: true,
             });
             emit_projects(&shared);
             emit_people_seed(&shared);

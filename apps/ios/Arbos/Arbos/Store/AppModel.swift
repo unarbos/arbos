@@ -1778,6 +1778,8 @@ final class AppModel: ObservableObject {
             // picture is a solid disc with nothing to animate, so there is no flag to read.
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Whether the relay takes the newer poll fields (absent on an older relay = no).
+            PollOptionsFlag.shared.set(features?.poll_options ?? false)
             // Who may add me to groups (absent on an older relay = anyone).
             if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
                 groupAddPolicy = policy
@@ -4279,10 +4281,12 @@ final class AppModel: ObservableObject {
         }
         do {
             if let poll {
+                // A relay from before the poll options refuses the newer shape: the older one.
+                let options = PollOptionsFlag.shared.on
                 try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
-                                          multiple: poll.multiple, showVoters: poll.showVoters,
-                                          closesInMs: poll.closesInMs, deviceId: deviceId, author: author,
-                                          mentions: mentions)
+                                          multiple: poll.multiple, showVoters: options ? poll.showVoters : nil,
+                                          closesInMs: options ? poll.closesInMs : nil, deviceId: deviceId,
+                                          author: author, mentions: mentions)
             } else {
                 try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                           author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,

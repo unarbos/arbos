@@ -122,6 +122,9 @@ impl Composer {
     /// custom hours field does not hold a duration.
     fn drafted_duration(&self, cx: &App) -> Option<Option<i64>> {
         let draft = self.poll.as_ref()?;
+        if !self.state.read(cx).poll_options {
+            return Some(None);
+        }
         match DURATIONS.get(draft.duration) {
             Some((_, closes_in)) => Some(*closes_in),
             None => custom_duration(draft.custom_hours.read(cx).text()).map(Some),
@@ -236,6 +239,7 @@ impl Composer {
                 })
         };
         let ready = self.drafted_poll(cx).is_some();
+        let poll_options = self.state.read(cx).poll_options;
         let header = div()
             .flex()
             .items_center()
@@ -329,37 +333,43 @@ impl Composer {
                     cx.notify();
                 })),
             )
-            .child(
-                quiet_row(
-                    "poll-show-voters",
-                    tick_box(draft.show_voters),
-                    "Show who voted",
+            // The two below only where the relay takes them (`features.poll_options`): a
+            // relay from before them refuses such a poll, so the form does not offer it.
+            .when(poll_options, |el| {
+                el.child(
+                    quiet_row(
+                        "poll-show-voters",
+                        tick_box(draft.show_voters),
+                        "Show who voted",
+                    )
+                    .debug_selector(|| "composer-poll-show-voters".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(draft) = this.poll.as_mut() {
+                            draft.show_voters = !draft.show_voters;
+                        }
+                        cx.notify();
+                    })),
                 )
-                .debug_selector(|| "composer-poll-show-voters".into())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(draft) = this.poll.as_mut() {
-                        draft.show_voters = !draft.show_voters;
-                    }
-                    cx.notify();
-                })),
-            )
-            .child(
-                quiet_row(
-                    "poll-duration",
-                    sf_symbols::glyph("clock", 14.0, theme.text_muted),
-                    DURATIONS
-                        .get(draft.duration)
-                        .map_or("Closes in a number of hours", |d| d.0),
+            })
+            .when(poll_options, |el| {
+                el.child(
+                    quiet_row(
+                        "poll-duration",
+                        sf_symbols::glyph("clock", 14.0, theme.text_muted),
+                        DURATIONS
+                            .get(draft.duration)
+                            .map_or("Closes in a number of hours", |d| d.0),
+                    )
+                    .debug_selector(|| "composer-poll-duration".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(draft) = this.poll.as_mut() {
+                            draft.duration = (draft.duration + 1) % (CUSTOM + 1);
+                        }
+                        cx.notify();
+                    })),
                 )
-                .debug_selector(|| "composer-poll-duration".into())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(draft) = this.poll.as_mut() {
-                        draft.duration = (draft.duration + 1) % (CUSTOM + 1);
-                    }
-                    cx.notify();
-                })),
-            )
-            .when(draft.duration == CUSTOM, |el| {
+            })
+            .when(poll_options && draft.duration == CUSTOM, |el| {
                 el.child(field(&draft.custom_hours).debug_selector(|| "composer-poll-hours".into()))
             })
             .child(

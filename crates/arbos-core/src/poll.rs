@@ -115,6 +115,22 @@ impl Poll {
             return None;
         }
         let closes_at = closes_in_ms.map(|d| crate::ids::now_ms() + d);
+        Self::build(question, labels, multiple, Some(show_voters), closes_at)
+    }
+
+    /// A poll of the older shape — no visibility flag, no duration, cannot be closed — for a
+    /// relay that does not take the newer fields (`features.poll_options` absent).
+    pub fn older(question: &str, labels: &[String], multiple: bool) -> Option<Self> {
+        Self::build(question, labels, multiple, None, None)
+    }
+
+    fn build(
+        question: &str,
+        labels: &[String],
+        multiple: bool,
+        show_voters: Option<bool>,
+        closes_at: Option<i64>,
+    ) -> Option<Self> {
         let options: Vec<PollOption> = labels
             .iter()
             .map(|l| l.trim())
@@ -129,7 +145,7 @@ impl Poll {
             question: question.trim().to_owned(),
             max: if multiple { options.len() } else { 1 },
             options,
-            show_voters: Some(show_voters),
+            show_voters,
             closes_at,
         };
         poll.is_valid().then_some(poll)
@@ -383,6 +399,13 @@ mod tests {
         assert!(Poll::new("Q", &labels(2), false, false, Some(DURATION_MAX_MS + 1)).is_none());
         assert!(Poll::new("Q", &labels(2), false, false, Some(0)).is_none());
         assert!(Poll::new("Q", &labels(2), false, false, Some(-1)).is_none());
+        // The older shape, for a relay that does not take the new fields: as it was stored
+        // before them, field for field.
+        let older = Poll::older(" Q ", &labels(2), true).unwrap();
+        assert!(!older.timed() && older.max == 2);
+        let stored = serde_json::to_value(&older).unwrap();
+        assert!(stored.get("showVoters").is_none() && stored.get("closesAt").is_none());
+        assert!(Poll::older(" ", &labels(2), false).is_none());
         // Whoever first sees a poll bounds its closing time the same way, a day of clock
         // difference allowed; a poll already past its time is only a closed poll.
         assert!(!hour.closes_too_late(now));

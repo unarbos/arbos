@@ -41,11 +41,7 @@ CREATE TABLE IF NOT EXISTS chat_user_cursor (
 );
 CREATE TABLE IF NOT EXISTS message_authors (
   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
-  created_at INTEGER NOT NULL, stored INTEGER,
-  PRIMARY KEY (chat_id, message_id)
-);
-CREATE TABLE IF NOT EXISTS deleted_messages (
-  chat_id TEXT NOT NULL, message_id TEXT NOT NULL, deleted_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, stored INTEGER, deleted_at INTEGER,
   PRIMARY KEY (chat_id, message_id)
 );
 "#;
@@ -291,7 +287,8 @@ impl Db {
     pub fn message_deleted(&self, chat_id: &str, message_id: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM deleted_messages WHERE chat_id = ?1 AND message_id = ?2)",
+                "SELECT EXISTS (SELECT 1 FROM message_authors
+                  WHERE chat_id = ?1 AND message_id = ?2 AND deleted_at IS NOT NULL)",
                 params![chat_id, message_id],
                 |r| r.get(0),
             )

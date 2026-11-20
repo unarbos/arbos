@@ -543,8 +543,9 @@ pub async fn send_message(
     }
     let bytes = doc.export_updates_since(&base);
     let batch_id = ulid();
-    // Stored and broadcast under the room's admission lock, like a push and every other
-    // relay write (`notices::write_doc_deleting`): rows leave in the order they were stored.
+    // Stored and broadcast under the room's admission lock, as a push is and as
+    // `notices::write_doc_deleting` does: the row leaves in the order it was stored, never
+    // ahead of a push stored before it or between a push and its correction.
     let room = state.room(&room_name).await;
     let admission = room.push_admission.lock().await;
     let seq = match state

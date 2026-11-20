@@ -898,8 +898,10 @@ impl ChatDoc {
 
     /// Append a poll message (`docs/polls.md`): its text part is the poll in plain words.
     /// `show_voters` is "Show who voted"; `closes_in_ms` is how long the poll runs from now
-    /// (at most a week), `None` until its author closes it. Does not commit. Errors when the
-    /// fields are not a poll within bounds.
+    /// (at most a week), `None` until its author closes it. `show_voters: None` posts the
+    /// older shape, for a relay that does not take the newer fields (`features.poll_options`
+    /// absent); a duration is then an error. Does not commit. Errors when the fields are not
+    /// a poll within bounds.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_poll_message(
         &self,
@@ -907,13 +909,17 @@ impl ChatDoc {
         question: String,
         options: Vec<String>,
         multiple: bool,
-        show_voters: bool,
+        show_voters: Option<bool>,
         closes_in_ms: Option<i64>,
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
-        let poll = Poll::new(&question, &options, multiple, show_voters, closes_in_ms)
-            .ok_or_else(|| write_err("not a poll within bounds"))?;
+        let poll = match show_voters {
+            Some(show) => Poll::new(&question, &options, multiple, show, closes_in_ms),
+            None if closes_in_ms.is_none() => Poll::older(&question, &options, multiple),
+            None => None,
+        }
+        .ok_or_else(|| write_err("not a poll within bounds"))?;
         self.lock_doc()
             .append_poll_message(&id, &poll, &device_id, &doc::UserMessageOpts::from(opts))
             .map_err(write_err)
@@ -1304,7 +1310,7 @@ mod tests {
                 " ".into(),
                 options.clone(),
                 false,
-                false,
+                Some(false),
                 None,
                 "dev".into(),
                 opts.clone()
@@ -1316,7 +1322,7 @@ mod tests {
                 "Where?".into(),
                 options.clone(),
                 false,
-                false,
+                Some(false),
                 Some(arbos_core::poll::DURATION_MAX_MS + 1),
                 "dev".into(),
                 opts.clone()
@@ -1329,7 +1335,7 @@ mod tests {
             "Where?".into(),
             options,
             false,
-            true,
+            Some(true),
             Some(3_600_000),
             "dev".into(),
             opts,
@@ -1363,6 +1369,30 @@ mod tests {
         let deadline = row["parts"][1]["deadline"].as_i64();
         assert!(poll_closed(deadline, arbos_core::ids::now_ms()));
         assert_eq!(row["parts"][1]["votes"], json!({ "2": ["user:a"] }));
+
+        // For a relay without the poll options: the older shape, and no duration with it.
+        let older = ChatDoc::open();
+        let post = |closes_in: Option<i64>| {
+            older.insert_poll_message(
+                "p2".into(),
+                "Where?".into(),
+                vec!["Lisbon".into(), "Berlin".into()],
+                false,
+                None,
+                closes_in,
+                "dev".into(),
+                UserMessageOptsRecord::default(),
+            )
+        };
+        assert!(post(Some(3_600_000)).is_err());
+        post(None).unwrap();
+        older.commit();
+        let row: Value = serde_json::from_str(&older.read_message_json(0, None).unwrap()).unwrap();
+        assert!(row["poll"].get("showVoters").is_none(), "{row}");
+        assert!(
+            older.close_poll("p2".into(), "user".into()).is_err(),
+            "not closable"
+        );
     }
 
     #[test]

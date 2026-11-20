@@ -348,7 +348,8 @@ retraction once the device's own clock is past the deadline; a close only by the
     back to what it was (a first vote becomes an empty one): no vote, change, retraction or
     backdated time after the close;
   - a message inserted under an id the relay saw deleted is taken out again, whoever pushes
-    it. The relay keeps a record of deleted message ids (`deleted_messages`) for this.
+    it. The relay records the deletion on the message's author record
+    (`message_authors.deleted_at`) for this.
 
   These are corrections and not refusals because honest devices produce every one of them: a
   vote cast offline or in the second the author closed, a phone whose clock is off, a close
@@ -384,15 +385,20 @@ retraction once the device's own clock is past the deadline; a close only by the
   with content of their choosing, under the recorded author's name. That takes a loss of the
   relay's data, which no client can cause, and it is the older AF-599 note in `push_guard.rs`,
   not something polls add. Pushing a *deleted* poll back is the correction above: removed.
-- `deleted_messages` holds one row per message deleted for everyone (by a push, the delete
-  route, a Matrix redaction, or the relay dropping an agent's blank row). Each is written in
-  the transaction of the row that deletes the message, a device's push and a relay write
-  alike (`notices::write_doc_deleting`). It is never pruned, like `message_authors`:
-  forgetting a deletion would let the id be pushed back. Its size is the number of deletions.
+- A deletion for everyone (by a push, the delete route, a Matrix redaction, or the relay
+  dropping an agent's blank row) is recorded as `deleted_at` on the message's author record,
+  in the transaction of the row that deletes it, a device's push and a relay write alike
+  (`notices::write_doc_deleting`). There is no table of deletions to grow: the record adds no
+  rows to `message_authors`, which the relay keeps one row per message in anyway. A message
+  with no author record leaves none; pushed back, it is a message the relay has never seen,
+  with every rule of a new one.
 - Every relay write to a room (`notices::write_doc*`, the agent-link send in `export.rs`)
-  holds the room's admission lock from before it reads the doc until its row is broadcast,
-  as a push does. So rows are stored and broadcast in one order: a relay row cannot be sent
-  ahead of a push stored before it, nor land between a push and its correction.
+  stores and broadcasts its row under the room's admission lock, the one a push holds while
+  it is stored with its correction and broadcast. So rows get their seq and leave in one
+  order: a relay row cannot be sent ahead of a push stored before it, nor land between a
+  push and its correction. The lock covers the store and the broadcast only; a relay write
+  reads the room and makes its edit before taking it, so an outside agent's stream (one
+  relay write per event) does not hold up the room's pushes while it builds each one.
 
 **What nothing enforces.** Under end-to-end encryption the relay reads no poll field, so none
 of the relay rules exist: times are then the writers' device clocks and a modified client can
@@ -418,9 +424,14 @@ own and is offered Edit on it. An edit there changes the text part only — what
 notifications, search, agents and other older builds read — while newer builds keep drawing
 the card from the unchanged `poll` field. This is deliberate. A build that
 does not know about closing would otherwise keep offering votes on a closed poll and would
-show voter names on hover (Mac) for a poll whose author hid them. **Deploy order:** the relay
-has to run this change before any client that writes the new fields; a relay without it
-refuses the new shape as `bad_poll` and that client's push is stuck.
+show voter names on hover (Mac) for a poll whose author hid them.
+
+**A new app against an older relay.** A relay without this change refuses the new shape as
+`bad_poll`, and a refused push is sent again for ever. Release order alone does not protect
+anyone, so the relay says what it takes: `features.poll_options` on `GET /me`. Without it
+(an older relay, or before `/me` has answered once) the apps offer no "Show who voted", no
+duration and no Close poll, and post polls in the older shape (`Poll::older`), which every
+relay takes. The relay should still be deployed first, so that the options appear.
 
 **Replies, closing and removal.** A poll row takes the ordinary message menu: Reply (the quote
 reads "Poll: <question>"), Close poll for its maker while it is open, Delete for its maker and
