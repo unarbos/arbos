@@ -25,9 +25,9 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 use arbos_core::ids::now_ms;
-use arbos_wallet::chain::{Chain, Deposit};
 
 use crate::auth::Principal;
+use crate::chain::{Chain, Deposit};
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -214,7 +214,7 @@ pub async fn spawn_watcher(state: AppState) {
         loop {
             tick_at.tick().await;
             if chain.is_none() {
-                match Chain::connect(&state.cfg.chain_rpc).await {
+                match Chain::connect(&state.cfg.chain_rpc, state.http.clone()).await {
                     Ok(c) => chain = Some(c),
                     Err(error) => {
                         tracing::warn!(%error, "deposits: chain node");
@@ -301,9 +301,12 @@ mod tests {
     #[ignore = "needs the network"]
     async fn live_a_tick_reads_the_head_and_a_price_is_sane() {
         let state = test_state(AuthMode::Github);
-        let chain = Chain::connect(&std::env::var("ARBOS_CHAIN_RPC").expect("ARBOS_CHAIN_RPC"))
-            .await
-            .unwrap();
+        let chain = Chain::connect(
+            &std::env::var("ARBOS_CHAIN_RPC").expect("ARBOS_CHAIN_RPC"),
+            state.http.clone(),
+        )
+        .await
+        .unwrap();
         tick(&state, &chain, ALICE).await.unwrap();
         let first = state.db.deposit_cursor().unwrap().expect("a cursor");
         tokio::time::sleep(PERIOD * 2).await;

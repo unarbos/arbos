@@ -339,7 +339,7 @@ fn inspect_at(
 // ---- online -----------------------------------------------------------------------------------
 
 struct HttpRpc {
-    url: String,
+    url: &'static str,
     http: reqwest13::Client,
 }
 
@@ -358,7 +358,7 @@ impl subxt::rpcs::RpcClientT for HttpRpc {
             );
             let text = self
                 .http
-                .post(&self.url)
+                .post(self.url)
                 .header("Content-Type", "application/json")
                 .body(body)
                 .send()
@@ -408,7 +408,7 @@ fn http() -> crate::Result<reqwest13::Client> {
 
 fn rpc(net: Net) -> crate::Result<subxt::rpcs::RpcClient> {
     Ok(subxt::rpcs::RpcClient::new(HttpRpc {
-        url: net.url().to_owned(),
+        url: net.url(),
         http: http()?,
     }))
 }
@@ -627,189 +627,9 @@ fn unhex(s: &str) -> crate::Result<Vec<u8>> {
     hex::decode(s.trim_start_matches("0x")).map_err(|_| err("bad hex"))
 }
 
-// ---- deposits ---------------------------------------------------------------------------------
-
-/// Money that arrived at a treasury address in one finalized block, read from the block's
-/// events, so a transfer made through a proxy, a batch or a multisig is seen like any other.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Deposit {
-    /// The event's position in its block: with the block hash, the deposit's identity.
-    pub index: u32,
-    /// Who paid: the account the TAO left, or the coldkey the stake left.
-    pub from: String,
-    /// `None` for TAO; the subnet whose alpha stake was handed over otherwise.
-    pub netuid: Option<u16>,
-    /// What the chain says moved, in rao of TAO (for alpha: its TAO value at the block's price).
-    pub rao: u64,
-    /// What it is worth to the treasury, in rao: `rao` for TAO, [`alpha_value`] for alpha.
-    pub valued_rao: u64,
-}
-
-/// Blocks in the hour an alpha deposit's price is checked against.
-const PRICE_LOOKBACK: u64 = 300;
-
-/// Alpha handed over inside one subnet is valued by the chain at that block's pool price, which
-/// whoever sends it can push up for a block with a trade of their own. So it is worth the lower
-/// of that price and the price an hour earlier: holding a pool up for an hour means selling to
-/// everyone who notices. Prices are rao of TAO per alpha.
-fn alpha_value(rao: u64, price_at: u64, price_before: u64) -> u64 {
-    if price_at == 0 {
-        return 0;
-    }
-    (rao as u128 * price_before.min(price_at) as u128 / price_at as u128) as u64
-}
-
-/// A chain node by URL (the relay's deposit watcher; the wallet itself uses [`Net`]).
-#[derive(Clone)]
-pub struct Chain(Api);
-
-impl Chain {
-    pub async fn connect(url: &str) -> crate::Result<Self> {
-        let rpc = subxt::rpcs::RpcClient::new(HttpRpc {
-            url: url.to_owned(),
-            http: http()?,
-        });
-        let backend = LegacyBackend::builder().build(rpc);
-        Ok(Self(
-            Api::from_backend(Arc::new(backend)).await.map_err(err)?,
-        ))
-    }
-
-    /// The newest finalized block. Nothing above it is ever read.
-    pub async fn finalized(&self) -> crate::Result<u64> {
-        Ok(self.0.at_current_block().await.map_err(err)?.block_number())
-    }
-
-    async fn alpha_price(&self, number: u64, netuid: u16) -> crate::Result<u64> {
-        let at = self.0.at_block(number).await.map_err(err)?;
-        let raw = at
-            .runtime_apis()
-            .call_raw(
-                "SwapRuntimeApi_current_alpha_price",
-                Some(&netuid.to_le_bytes()),
-            )
-            .await
-            .map_err(err)?;
-        let raw: [u8; 8] = raw[..].try_into().map_err(|_| err("bad alpha price"))?;
-        Ok(u64::from_le_bytes(raw))
-    }
-
-    /// Block `number`'s hash and every payment in it: `(to, same_subnet_alpha, deposit)`, with
-    /// alpha not yet valued. An event that does not decode is an error, never skipped: a
-    /// runtime that changed an event's shape must stop the watcher, not lose deposits.
-    async fn payments(
-        &self,
-        number: u64,
-    ) -> crate::Result<(String, Vec<([u8; 32], bool, Deposit)>)> {
-        let at = self.0.at_block(number).await.map_err(err)?;
-        let hash = format!("0x{}", hex::encode(at.block_hash().0));
-        let mut out = Vec::new();
-        for ev in at.events().fetch().await.map_err(err)?.iter() {
-            let ev = ev.map_err(err)?;
-            let (to, from, netuid, same_subnet, rao) = match (ev.pallet_name(), ev.event_name()) {
-                ("Balances", "Transfer") => {
-                    let (from, to, rao) = ev
-                        .decode_fields_unchecked_as::<([u8; 32], [u8; 32], u64)>()
-                        .map_err(err)?;
-                    (to, from, None, false, rao)
-                }
-                ("SubtensorModule", "StakeTransferred") => {
-                    let (from, to, _hotkey, origin, netuid, rao) = ev
-                        .decode_fields_unchecked_as::<([u8; 32], [u8; 32], [u8; 32], u16, u16, u64)>()
-                        .map_err(err)?;
-                    // Across subnets the amount is TAO a real swap paid out; root alpha is TAO.
-                    (to, from, Some(netuid), origin == netuid && netuid != 0, rao)
-                }
-                _ => continue,
-            };
-            let deposit = Deposit {
-                index: ev.index(),
-                from: ss58(&from),
-                netuid,
-                rao,
-                valued_rao: rao,
-            };
-            out.push((to, same_subnet, deposit));
-        }
-        Ok((hash, out))
-    }
-
-    /// Block `number`'s hash and what it paid `treasury`. The caller keeps `number` at or below
-    /// [`Chain::finalized`].
-    pub async fn deposits(
-        &self,
-        number: u64,
-        treasury: &str,
-    ) -> crate::Result<(String, Vec<Deposit>)> {
-        let treasury = parse_address(treasury)?;
-        let (hash, payments) = self.payments(number).await?;
-        let mut out = Vec::new();
-        for (to, same_subnet, mut deposit) in payments {
-            if to != treasury {
-                continue;
-            }
-            if let (true, Some(netuid)) = (same_subnet, deposit.netuid) {
-                let before = number.saturating_sub(PRICE_LOOKBACK);
-                deposit.valued_rao = alpha_value(
-                    deposit.rao,
-                    self.alpha_price(number, netuid).await?,
-                    self.alpha_price(before, netuid).await?,
-                );
-            }
-            out.push(deposit);
-        }
-        Ok((hash, out))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn alpha_is_worth_the_lower_of_two_prices() {
-        // Steady or fallen price: what the chain said. Pumped tenfold for the block: a tenth.
-        assert_eq!(alpha_value(1_000, 50, 50), 1_000);
-        assert_eq!(alpha_value(1_000, 50, 80), 1_000);
-        assert_eq!(alpha_value(1_000, 500, 50), 100);
-        assert_eq!(alpha_value(1_000, 0, 50), 0);
-        assert_eq!(alpha_value(u64::MAX, u64::MAX, u64::MAX), u64::MAX);
-    }
-
-    /// Live: recent finalized Finney blocks decode, and hold both kinds of payment.
-    /// `ARBOS_CHAIN_RPC=https://archive.sub.latent.to cargo test -p arbos-wallet live_ -- --ignored --nocapture`
-    #[tokio::test]
-    #[ignore = "needs the network"]
-    async fn live_recent_blocks_decode() {
-        let url = std::env::var("ARBOS_CHAIN_RPC").expect("ARBOS_CHAIN_RPC");
-        let chain = Chain::connect(&url).await.unwrap();
-        let head = chain.finalized().await.unwrap();
-        let (mut tao, mut alpha) = (0, 0);
-        for n in (head - 40..=head).rev() {
-            for (to, same_subnet, d) in chain.payments(n).await.unwrap().1 {
-                match d.netuid {
-                    None => tao += 1,
-                    Some(netuid) => {
-                        alpha += 1;
-                        let price = chain.alpha_price(n, netuid).await.unwrap();
-                        println!(
-                            "{n}#{} sn{netuid} {} rao same={same_subnet} price={price} to {}",
-                            d.index,
-                            d.rao,
-                            ss58(&to)
-                        );
-                        // And through the public door, as that payee's treasury.
-                        let (_, mine) = chain.deposits(n, &ss58(&to)).await.unwrap();
-                        assert!(mine
-                            .iter()
-                            .any(|m| m.index == d.index && m.valued_rao <= d.rao));
-                    }
-                }
-            }
-        }
-        println!("{tao} TAO transfers, {alpha} stake transfers in 41 blocks");
-        assert!(tao > 0, "no TAO transfer in 41 blocks");
-    }
 
     /// A snapshot over Finney's real metadata (`tests/finney-metadata.scale`, fetched with
     /// `state_getMetadata`), so signing and reading are tested with no network. The block,

@@ -21,6 +21,7 @@ mod boxd;
 mod boxes;
 mod browser;
 mod calls;
+mod chain;
 mod channels;
 mod connectors;
 mod credits;

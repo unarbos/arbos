@@ -9,8 +9,6 @@ description = "The one service outside the boxes: registry, pairing, sync rooms,
 
 [dependencies]
 arbos-core.workspace = true
-# The deposit watcher (`deposits.rs`) reads finalized blocks through the wallet's chain client.
-arbos-wallet.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -21,7 +19,7 @@ tower-http.workspace = true
 reqwest = { workspace = true, features = ["http2"] }
 tokio-tungstenite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 bytes.workspace = true
 rusqlite.workspace = true
 clap.workspace = true
@@ -35,6 +33,8 @@ hex.workspace = true
 # Wallet links (`wallets.rs`): verify an sr25519 proof over an SS58 address; no keys here.
 schnorrkel = "0.11"
 bs58 = "0.5"
+# The deposit watcher reads finalized blocks (`chain.rs`): the online client only, no signer.
+subxt = { version = "0.51", default-features = false, features = ["native", "runtime"] }
 blake2 = "0.10"
 nix.workspace = true
 base64.workspace = true
