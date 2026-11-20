@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufR
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
+use serde_json::Value;
+
 use arbos_core::rpc::{self, Command as RpcCommand, Event, Record, Response};
 
 /// The longest line a child's stdout may hand agentd. A record is one line of JSON, and a line
@@ -25,8 +27,10 @@ const OVER_CAP_KEEP: usize = 4096;
 /// The next line of a child's stdout, `None` at its end.
 ///
 /// A line over `max` bytes is read past without being held, and what comes back in its place
-/// depends on what it was (see [`over_cap_line`]): the record a run ends on is kept as a record,
-/// anything else comes back empty, which no reader parses, and the stream goes on.
+/// depends on what it was (see [`over_cap_line`]): the record a run ends on and the answer to a
+/// call are kept as records, anything else comes back empty, which no reader parses, and the
+/// stream goes on. A stream that ends inside such a line has simply ended: the child went
+/// before it finished saying what it was saying, and nothing is made of the half it sent.
 pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
     stdout: &mut R,
     max: usize,
@@ -44,11 +48,13 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
         loop {
             chunk.clear();
             let mut part = (&mut *stdout).take(64 * 1024);
-            let read = part.read_until(b'\n', &mut chunk).await?;
+            if part.read_until(b'\n', &mut chunk).await? == 0 {
+                return Ok(None);
+            }
             tail.extend_from_slice(&chunk);
             let excess = tail.len().saturating_sub(OVER_CAP_KEEP);
             tail.drain(..excess);
-            if read == 0 || chunk.last() == Some(&b'\n') {
+            if chunk.last() == Some(&b'\n') {
                 return Ok(Some(over_cap_line(&head, &tail, max)));
             }
         }
@@ -61,36 +67,172 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
     })))
 }
 
-/// What stands in for a line that was over the cap, from its first and last few KiB.
-///
-/// `agent_end` is the record a Prime worker's run ends on, and it carries the run's whole
-/// message list, so it is the record most likely to be over the cap (a run with forty
-/// screenshots is). agentd reads one thing from it, `willRetry`, and nothing from `messages`. So
-/// it is handed on with that flag and an empty list: the run settles as it would have. Reading
-/// it as a lost child instead would give the finished job's brief to a fresh worker, which would
-/// do the work again and end on the same line.
-///
-/// Any other record is dropped: none of them ends a run, and the stream carries on after it.
-///
-/// The type and the flag are looked for as the bytes a top-level key is written with. Inside a
-/// message they would be inside a JSON string, with their quotes escaped, and would not match.
-fn over_cap_line(head: &[u8], tail: &[u8], max: usize) -> String {
-    let has = |needle: &[u8]| {
-        [head, tail]
-            .iter()
-            .any(|end| end.windows(needle.len()).any(|w| w == needle))
-    };
-    if has(br#""type":"agent_end""#) {
-        let will_retry = has(br#""willRetry":true"#);
-        tracing::warn!(
-            max,
-            will_retry,
-            "an agent_end over the line cap was settled without its messages"
-        );
-        return format!(r#"{{"type":"agent_end","messages":[],"willRetry":{will_retry}}}"#);
+/// The members of a JSON object that can be read from its first bytes: its scalar values, in
+/// order, up to the first array or object value or the end of `head`. These are the object's
+/// own members and nothing nested, because the scan starts at the opening brace and stops at
+/// the first value that would have to be descended into.
+fn leading_scalars(head: &[u8]) -> Vec<(String, Value)> {
+    fn skip_ws(bytes: &[u8]) -> &[u8] {
+        let n = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
+        &bytes[n..]
     }
-    tracing::warn!(max, "a line from a child was over the cap and was dropped");
-    String::new()
+    /// One JSON value off the front of `bytes`, and what follows it.
+    fn value<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<(T, &[u8])> {
+        let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<T>();
+        let v = stream.next()?.ok()?;
+        Some((v, &bytes[stream.byte_offset()..]))
+    }
+    let mut out = Vec::new();
+    let Some(mut rest) = skip_ws(head).strip_prefix(b"{") else {
+        return out;
+    };
+    loop {
+        let Some((key, after)) = value::<String>(skip_ws(rest)) else {
+            return out;
+        };
+        let Some(after) = skip_ws(after).strip_prefix(b":") else {
+            return out;
+        };
+        let after = skip_ws(after);
+        if matches!(after.first(), None | Some(b'[' | b'{')) {
+            return out;
+        }
+        let Some((v, after)) = value::<Value>(after) else {
+            return out;
+        };
+        // A number cut off by the end of `head` parses as a shorter number: only a value that
+        // is followed by something is known to be whole.
+        let after = skip_ws(after);
+        if after.is_empty() {
+            return out;
+        }
+        out.push((key, v));
+        let Some(after) = after.strip_prefix(b",") else {
+            return out;
+        };
+        rest = after;
+    }
+}
+
+/// The members of a JSON object that can be read from its last bytes: `"key": true`, `false`,
+/// `null` or a plain string, one after another, immediately before the closing brace.
+///
+/// Read backwards from the end of the line, so these too are the object's own members: the
+/// line's last brace closes the object itself, and nothing here steps over a `]` or a `}`. A
+/// string with a backslash in it, or a number, ends the scan; so does anything unexpected.
+fn trailing_scalars(tail: &[u8]) -> Vec<(String, Value)> {
+    fn trim(bytes: &[u8]) -> &[u8] {
+        let n = bytes
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
+        &bytes[..bytes.len() - n]
+    }
+    /// A string with no escapes off the end of `bytes`, and what precedes it.
+    fn plain_string(bytes: &[u8]) -> Option<(&str, &[u8])> {
+        let inner = bytes.strip_suffix(b"\"")?;
+        let open = inner.iter().rposition(|b| *b == b'"')?;
+        let text = &inner[open + 1..];
+        if text.contains(&b'\\') || open.checked_sub(1).is_some_and(|i| inner[i] == b'\\') {
+            return None;
+        }
+        Some((std::str::from_utf8(text).ok()?, &inner[..open]))
+    }
+    let mut out = Vec::new();
+    let Some(mut rest) = trim(tail).strip_suffix(b"}") else {
+        return out;
+    };
+    loop {
+        rest = trim(rest);
+        let (v, before) = if let Some(b) = rest.strip_suffix(b"true") {
+            (Value::Bool(true), b)
+        } else if let Some(b) = rest.strip_suffix(b"false") {
+            (Value::Bool(false), b)
+        } else if let Some(b) = rest.strip_suffix(b"null") {
+            (Value::Null, b)
+        } else if let Some((text, b)) = plain_string(rest) {
+            (Value::String(text.to_owned()), b)
+        } else {
+            return out;
+        };
+        let Some(before) = trim(before).strip_suffix(b":") else {
+            return out;
+        };
+        let Some((key, before)) = plain_string(trim(before)) else {
+            return out;
+        };
+        out.push((key.to_owned(), v));
+        let Some(before) = trim(before).strip_suffix(b",") else {
+            return out;
+        };
+        rest = before;
+    }
+}
+
+/// What stands in for a line that was over the cap, read from its first and last few KiB.
+///
+/// Only the record's own members are read ([`leading_scalars`], [`trailing_scalars`]), so a
+/// record that merely carries another one inside it is never taken for that other one.
+///
+/// - `agent_end` is the record a Prime worker's run ends on. It carries the run's whole message
+///   list, so it is the record most likely to be over the cap (a run with forty screenshots
+///   is). agentd reads one thing from it, `willRetry`, and nothing from `messages`, so it is
+///   handed on with that flag and an empty list and the run settles as it would have. Reading
+///   it as a lost child instead would give the finished job's brief to a fresh worker.
+/// - A `response` is the answer to a call somebody is waiting on. It is handed on as a failed
+///   answer to that call, so the caller hears now, with the reason, and not at its timeout.
+/// - Anything else is dropped: none of them ends a run or answers a call.
+///
+/// What this cannot see: a member that sits behind an array or object at both ends of the line.
+/// An `agent_end` whose `type` is neither among its first scalar members nor its last is
+/// dropped, and that run ends at its cap; a `willRetry: true` hidden the same way reads as
+/// false; a `response` whose `id` is hidden the same way is dropped, and its call times out.
+fn over_cap_line(head: &[u8], tail: &[u8], max: usize) -> String {
+    let (leading, trailing) = (leading_scalars(head), trailing_scalars(tail));
+    let member = |key: &str| {
+        leading
+            .iter()
+            .chain(&trailing)
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+    };
+    match member("type").and_then(Value::as_str) {
+        Some("agent_end") => {
+            let will_retry = member("willRetry").and_then(Value::as_bool) == Some(true);
+            tracing::warn!(
+                max,
+                will_retry,
+                "an agent_end over the line cap was settled without its messages"
+            );
+            serde_json::json!({ "type": "agent_end", "messages": [], "willRetry": will_retry })
+                .to_string()
+        }
+        Some("response") if member("id").is_some_and(Value::is_string) => {
+            let command = member("command").and_then(Value::as_str).unwrap_or("");
+            tracing::warn!(
+                max,
+                command,
+                "an answer over the line cap was not read; its call fails"
+            );
+            serde_json::json!({
+                "type": "response",
+                "id": member("id"),
+                "command": command,
+                "success": false,
+                "error": format!("the answer was over {max} bytes and was not read"),
+            })
+            .to_string()
+        }
+        kind => {
+            tracing::warn!(
+                max,
+                ?kind,
+                "a line from a child was over the cap and was dropped"
+            );
+            String::new()
+        }
+    }
 }
 
 pub struct RpcChild {
@@ -481,6 +623,7 @@ impl RpcChild {
 #[cfg(test)]
 mod capped_line_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     async fn lines(input: &str, max: usize) -> Vec<String> {
         let mut stdout = BufReader::new(input.as_bytes());
@@ -491,11 +634,23 @@ mod capped_line_tests {
         out
     }
 
+    fn big() -> String {
+        "x".repeat(200_000)
+    }
+
+    /// The one over-long line, as the reader hands it on.
+    async fn over_cap(line: String) -> String {
+        let read = lines(&format!("{line}\nnext\n"), 64).await;
+        assert_eq!(read.len(), 2, "{read:?}");
+        assert_eq!(read[1], "next", "the stream goes on after it");
+        read[0].clone()
+    }
+
     #[tokio::test]
     async fn a_line_over_the_cap_is_dropped_and_the_stream_goes_on() {
+        let big = big();
         let input = format!(
-            "first\n{{\"type\":\"message_end\",\"x\":\"{}\"}}\n{{\"type\":\"agent_start\"}}\r\nlast",
-            "x".repeat(200_000)
+            "first\n{{\"type\":\"message_end\",\"x\":\"{big}\"}}\n{{\"type\":\"agent_start\"}}\r\nlast"
         );
         assert_eq!(
             lines(&input, 64).await,
@@ -503,43 +658,181 @@ mod capped_line_tests {
         );
     }
 
-    /// The record a run ends on, over the cap, still ends the run: it parses as an `agent_end`
-    /// with no messages and the flag it was sent with, whichever end of the line the keys are at.
+    /// The record a run ends on, over the cap, still ends the run: an `agent_end` with no
+    /// messages and the flag it was sent with, however the sender spaces its JSON and whichever
+    /// end of the line its own members are at.
     #[tokio::test]
     async fn an_agent_end_over_the_cap_is_still_an_agent_end() {
-        let big = "x".repeat(200_000);
-        // A message that quotes the words themselves must not be taken for the record's own keys.
-        let quoted = r#"{\"type\":\"agent_end\",\"willRetry\":true}"#;
+        let big = big();
         for (line, retry) in [
             (
                 format!(r#"{{"type":"agent_end","messages":["{big}"]}}"#),
                 false,
             ),
             (
+                format!(r#"{{ "type" : "agent_end" , "messages" : [ "{big}" ] }}"#),
+                false,
+            ),
+            (
+                format!(r#"{{"type":"agent_end","willRetry":true,"messages":["{big}"]}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"type": "agent_end", "messages": ["{big}"], "willRetry": true}}"#),
+                true,
+            ),
+            (
                 format!(r#"{{"messages":["{big}"],"willRetry":true,"type":"agent_end"}}"#),
                 true,
             ),
             (
-                format!(r#"{{"type":"agent_end","messages":["{quoted}{big}"]}}"#),
+                format!(
+                    "{{\"messages\": [\"{big}\"], \"willRetry\": false, \"type\": \"agent_end\" }}"
+                ),
                 false,
             ),
         ] {
-            let read = lines(&format!("{line}\nnext\n"), 64).await;
-            assert_eq!(read.len(), 2, "{read:?}");
-            assert_eq!(read[1], "next");
-            match rpc::parse_line(&read[0]) {
+            match rpc::parse_line(&over_cap(line.clone()).await) {
                 Some(Record::Event(Event::AgentEnd {
                     messages,
                     will_retry,
                 })) => {
                     assert!(messages.is_empty());
-                    assert_eq!(will_retry, retry, "{}", &line[..60]);
+                    assert_eq!(
+                        will_retry,
+                        retry,
+                        "{}…{}",
+                        &line[..50],
+                        &line[line.len() - 50..]
+                    );
                 }
-                _ => panic!("not an agent_end: {:?}", read[0]),
+                other => panic!("not an agent_end: {other:?} for {}", &line[..50]),
             }
         }
-        // Another record that merely quotes those words is dropped, not turned into an end.
-        let other = format!(r#"{{"type":"message_end","text":"{quoted}{big}"}}"#);
-        assert_eq!(lines(&format!("{other}\n"), 64).await, [""]);
+    }
+
+    /// Only the record's own members count. Words inside a message, a record carried inside
+    /// another, and a flag inside a message are none of them this record's type or flag.
+    #[tokio::test]
+    async fn what_an_over_cap_record_carries_inside_it_is_not_what_it_is() {
+        let big = big();
+        let quoted = r#"{\"type\":\"agent_end\",\"willRetry\":true}"#;
+        for other in [
+            // Another record that quotes the words, at either end.
+            format!(r#"{{"type":"message_end","text":"{quoted}{big}"}}"#),
+            format!(r#"{{"type":"message_end","text":"{big}{quoted}"}}"#),
+            // Another record that carries a real `agent_end` object inside it, at either end.
+            format!(
+                r#"{{"type":"tool_execution_end","result":{{"type":"agent_end"}},"x":"{big}"}}"#
+            ),
+            format!(
+                r#"{{"type":"tool_execution_end","x":"{big}","result":{{"type":"agent_end"}}}}"#
+            ),
+            // No type of its own at all, only a nested one.
+            format!(r#"{{"result":[{{"type":"agent_end"}}],"x":"{big}"}}"#),
+        ] {
+            assert_eq!(over_cap(other.clone()).await, "", "{}", &other[..60]);
+        }
+        // A finished run whose last message happens to carry the flag is still finished.
+        for line in [
+            format!(r#"{{"type":"agent_end","messages":["{big}",{{"willRetry":true}}]}}"#),
+            format!(r#"{{"type":"agent_end","messages":[{{"willRetry":true}},"{big}"]}}"#),
+            format!(r#"{{"type":"agent_end","messages":["{big}\"willRetry\":true"]}}"#),
+        ] {
+            match rpc::parse_line(&over_cap(line.clone()).await) {
+                Some(Record::Event(Event::AgentEnd { will_retry, .. })) => {
+                    assert!(!will_retry, "{}", &line[line.len() - 60..])
+                }
+                other => panic!("not an agent_end: {other:?}"),
+            }
+        }
+    }
+
+    /// The answer to a call, over the cap, is a failed answer to that call, with the reason.
+    #[tokio::test]
+    async fn an_answer_over_the_cap_fails_its_own_call() {
+        let big = big();
+        for line in [
+            format!(
+                r#"{{"type":"response","id":"ge-7","command":"get_entries","success":true,"data":{{"entries":["{big}"]}}}}"#
+            ),
+            format!(
+                r#"{{ "type": "response", "command": "get_entries", "data": ["{big}"], "success": true, "id": "ge-7" }}"#
+            ),
+        ] {
+            match rpc::parse_line(&over_cap(line).await) {
+                Some(Record::Response(r)) => {
+                    assert_eq!(r.id.as_deref(), Some("ge-7"));
+                    assert!(!r.success);
+                    assert!(r.error.unwrap_or_default().contains("was not read"));
+                }
+                other => panic!("not a response: {other:?}"),
+            }
+        }
+    }
+
+    /// A stream that ends inside an over-long line has ended, whatever the line was going to be.
+    #[tokio::test]
+    async fn a_stream_that_ends_inside_an_over_cap_line_has_just_ended() {
+        let cut = format!(
+            r#"first
+{{"type":"agent_end","messages":["{}"#,
+            big()
+        );
+        assert_eq!(lines(&cut, 64).await, ["first"]);
+    }
+
+    /// End to end on a real child: the caller of the call whose answer was over the cap hears
+    /// at once, and not at the call's timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_whose_answer_is_over_the_cap_fails_at_once() {
+        let dir = std::env::temp_dir().join(format!("arbos-line-cap-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("child.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    c = json.loads(line)
+    sys.stdout.write('{{"type": "response", "id": ' + json.dumps(c.get("id")) + ', "command": "get_state", "success": true, "data": "' + "x" * {} + '"}}\n')
+    sys.stdout.flush()
+"#,
+                CHILD_LINE_MAX + 1024
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let child = RpcChild::spawn(
+            "fake-pi-line-cap",
+            &script.display().to_string(),
+            &[],
+            &[],
+            &dir,
+            &dir.join("child.log"),
+            None,
+        )
+        .await
+        .unwrap();
+        let asked = std::time::Instant::now();
+        let answer = child
+            .call_ok(RpcCommand::GetState {
+                id: child.next_id("gs"),
+            })
+            .await;
+        let took = asked.elapsed();
+        let alive = child.is_alive();
+        child.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = answer
+            .expect_err("an answer that was not read is not a success")
+            .to_string();
+        assert!(error.contains("was not read"), "{error}");
+        assert!(took < Duration::from_secs(30), "the call waited {took:?}");
+        assert!(
+            alive,
+            "the child is still serving; only that answer was lost"
+        );
     }
 }
