@@ -760,8 +760,6 @@ pub enum RowKind {
         by: Option<String>,
         /// "Show who voted": the author's choice, fixed with the poll. Off shows counts only.
         show_voters: bool,
-        /// It can be closed (every poll posted since closing exists).
-        timed: bool,
         /// How many people voted.
         voted: usize,
         /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
@@ -3608,7 +3606,6 @@ impl Transcript {
                 multiple,
                 by,
                 show_voters,
-                timed,
                 voted,
                 deadline,
             } => {
@@ -3676,7 +3673,6 @@ impl Transcript {
                         }),
                     );
                 }
-                let mine_to_close = by.is_none() && timed && !closed;
                 let foot = arbos_core::poll::foot(
                     by.as_deref(),
                     voted as u32,
@@ -3685,9 +3681,6 @@ impl Transcript {
                     closed,
                     deadline.map(|t| t - now),
                 );
-                let (state, chat, message_id) =
-                    (self.state.clone(), chat_id.clone(), row.message_id.clone());
-                let close_id = SharedString::from(format!("{}-close", row.id));
                 let card = card_frame(format!("{}-card", row.id), &look.palette)
                     .debug_selector(|| "poll-card".into())
                     .child(card_header("", &question, None, &look.palette, &theme))
@@ -3695,37 +3688,12 @@ impl Transcript {
                     .child(
                         div()
                             .px(px(1.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
                             .text_size(px(TEXT_SMALL))
                             .text_color(look.palette.badge_ink)
-                            .child(div().min_w_0().child(foot))
-                            // The author's close: quiet text on the foot's line, no confirm
-                            // step (the card says "closed" at once).
-                            .when(mine_to_close, |el| {
-                                el.child(
-                                    div()
-                                        .id(close_id)
-                                        .debug_selector(|| "poll-close".into())
-                                        .flex_shrink_0()
-                                        .text_color(theme.text)
-                                        .cursor_pointer()
-                                        .hover(|s| s.opacity(0.7))
-                                        .child("Close poll")
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            let (chat, message_id) =
-                                                (chat.clone(), message_id.clone());
-                                            state.update(cx, |s, cx| {
-                                                s.close_poll(chat, message_id, cx)
-                                            });
-                                        }),
-                                )
-                            }),
+                            .child(foot),
                     );
-                // Right-click is the message menu, as on a bubble: its author deletes it there.
+                // Right-click is the message menu, as on a bubble: its maker closes or deletes
+                // it there.
                 let card = self.menu_target(card, &row.message_id, cx);
                 card_row(card, true).into_any_element()
             }
@@ -4941,7 +4909,6 @@ pub fn build_rows_with_cache(
                         ..
                     } => Some(RowKind::Poll {
                         show_voters: *show_voters == Some(true),
-                        timed: show_voters.is_some(),
                         voted: *voters,
                         deadline: *deadline,
                         question: question.clone(),
@@ -12222,17 +12189,13 @@ mod poll_rows_tests {
             multiple,
             by,
             show_voters,
-            timed,
             voted,
             deadline,
         } = &rows[1].kind
         else {
             panic!("the poll row is a poll card");
         };
-        assert!(
-            *show_voters && *timed,
-            "the author's choice rides on the row"
-        );
+        assert!(*show_voters, "the author's choice rides on the row");
         assert_eq!(
             (*voted, *deadline),
             (2, None),

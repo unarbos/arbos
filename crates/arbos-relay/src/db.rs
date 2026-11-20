@@ -749,11 +749,9 @@ impl Db {
         Self::migrate_mono_avatar_defaults(&c)?;
         Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
-        // Rows from before the column are history the relay held: stored. An announce writes 0.
-        let _ = c.execute(
-            "ALTER TABLE message_authors ADD COLUMN stored INTEGER NOT NULL DEFAULT 1",
-            [],
-        );
+        // NULL on rows from before the column: the relay cannot tell which of those it stored
+        // and which were only announced. An announce writes 0, a stored push 1.
+        let _ = c.execute("ALTER TABLE message_authors ADD COLUMN stored INTEGER", []);
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;

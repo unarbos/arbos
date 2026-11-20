@@ -42,6 +42,9 @@ pub enum MessageMenuItem {
     /// The message shows a link preview card and the user may edit the message: drop the
     /// card for everyone ([feedback link-embeds-mac-2026-10-27]).
     RemovePreview,
+    /// The maker's own open poll: close it for good. Not one of [`ITEMS`] — a bubble never
+    /// has it; [`render`] adds it above Delete on a poll ([`can_close_poll`]).
+    ClosePoll,
     Delete,
 }
 
@@ -54,6 +57,7 @@ impl MessageMenuItem {
             MessageMenuItem::ReplyInDm => "Reply in DM",
             MessageMenuItem::Edit => "Edit",
             MessageMenuItem::RemovePreview => "Remove preview",
+            MessageMenuItem::ClosePoll => "Close poll",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -67,6 +71,7 @@ impl MessageMenuItem {
             MessageMenuItem::ReplyInDm => "bubble.left",
             MessageMenuItem::Edit => "pencil",
             MessageMenuItem::RemovePreview => "link",
+            MessageMenuItem::ClosePoll => "lock",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -100,6 +105,16 @@ pub fn can_edit_message(me_id: &str, message: &Message) -> bool {
     // A poll is not editable (`docs/polls.md`); its text is only the poll in plain words.
     let poll = message.parts.iter().any(|p| matches!(p, Part::Poll { .. }));
     mine && !poll && !message.plain_text().trim().is_empty()
+}
+
+/// The maker may close this poll now: it is theirs, it can be closed at all (every poll
+/// posted since closing exists), and it is still open by the core's one rule.
+pub fn can_close_poll(me_id: &str, message: &Message, now_ms: i64) -> bool {
+    message.sender == format!("user:{me_id}")
+        && message.parts.iter().any(|p| {
+            matches!(p, Part::Poll { show_voters: Some(_), deadline, .. }
+                if !arbos_core::poll::closed(*deadline, now_ms))
+        })
 }
 
 /// The items for one bubble: Copy, Reply and Forward always; Reply in DM only
@@ -247,7 +262,19 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             }),
         )
     };
-    let items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let mut items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let closes_poll = {
+        let state = shell.state.read(cx);
+        let message = state
+            .messages_of(&chat_id)
+            .iter()
+            .find(|m| m.id == message_id);
+        message.is_some_and(|m| can_close_poll(&state.me_id(), m, arbos_core::ids::now_ms()))
+    };
+    if closes_poll {
+        let above_delete = items.iter().position(|i| i.danger()).unwrap_or(items.len());
+        items.insert(above_delete, MessageMenuItem::ClosePoll);
+    }
     let origin = place(at, menu_size_for(items.len()), window.viewport_size());
     let mut reaction_row = div()
         .h(px(MENU_ROW_HEIGHT))
@@ -360,6 +387,12 @@ fn run(
                 c.input.update(cx, |input, cx| input.set_text(text, cx));
             });
         }
+        MessageMenuItem::ClosePoll => {
+            // At once, like Delete: no confirm card on the Mac.
+            shell
+                .state
+                .update(cx, |s, cx| s.close_poll(chat_id, message_id, cx));
+        }
         MessageMenuItem::RemovePreview => {
             shell
                 .state
@@ -379,6 +412,38 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Close poll is the maker's, on a poll that can be closed and is still open.
+    #[test]
+    fn close_poll_is_offered_to_the_maker_of_an_open_poll() {
+        let poll = |sender: &str, show_voters: serde_json::Value, deadline: serde_json::Value| {
+            let row = serde_json::json!({ "id": "p1", "role": "user", "sender": sender,
+                "status": "done", "createdAt": 1,
+                "parts": [{ "id": "poll", "kind": "poll", "question": "Q", "max": 1,
+                    "options": [{ "id": "1", "label": "A" }, { "id": "2", "label": "B" }],
+                    "showVoters": show_voters, "deadline": deadline }] });
+            serde_json::from_value::<Message>(row).expect("a message")
+        };
+        let null = serde_json::Value::Null;
+        let open = poll("user:me", false.into(), null.clone());
+        assert!(can_close_poll("me", &open, 100));
+        assert!(!can_close_poll("ana", &open, 100), "not hers");
+        assert!(can_close_poll(
+            "me",
+            &poll("user:me", true.into(), 200.into()),
+            100
+        ));
+        assert!(
+            !can_close_poll("me", &poll("user:me", true.into(), 100.into()), 100),
+            "closed"
+        );
+        assert!(
+            !can_close_poll("me", &poll("user:me", null.clone(), null), 100),
+            "an older poll"
+        );
+        assert_eq!(MessageMenuItem::ClosePoll.label(), "Close poll");
+        assert!(!MessageMenuItem::ClosePoll.danger());
+    }
 
     const WIN: (f32, f32) = (1180.0, 780.0);
 

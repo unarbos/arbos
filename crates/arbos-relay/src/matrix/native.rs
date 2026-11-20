@@ -396,17 +396,14 @@ async fn removal(state: &AppState, chat_id: &str, event_id: &str) -> MxResult<()
     if !has_row {
         return Ok(());
     }
-    write_doc_as(state, None, chat_id, crate::notices::RELAY_DEVICE, |doc| {
+    // The deletion is recorded with the row that makes it (`push_guard`).
+    crate::notices::write_doc_deleting(state, None, chat_id, crate::notices::RELAY_DEVICE, |doc| {
         doc.transact(|d| d.delete_message(&message_id))?;
-        Ok(())
+        Ok(vec![message_id.clone()])
     })
     .await
-    .map_err(db_err)?;
-    // Remembered, so the row cannot be pushed back under the same id (`push_guard`).
-    state
-        .db
-        .note_message_deleted(chat_id, &message_id)
-        .map_err(db_err)
+    .map(drop)
+    .map_err(db_err)
 }
 
 #[cfg(test)]

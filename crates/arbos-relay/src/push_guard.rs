@@ -255,7 +255,14 @@ pub fn check_push(
     // Has the relay stored this message itself? An announce records an author for any id a
     // member names, so the author record alone does not make an arriving row history: only a
     // row the relay stored and no longer holds is a heal, exempt from the people gates.
-    let stored = |id: &str| state.db.message_stored(chat_id, id).unwrap_or(false);
+    // A record from before the relay kept the mark reads as stored here, as it did before:
+    // this only decides the gates, and old history has to stay healable.
+    let stored = |id: &str| {
+        matches!(
+            state.db.message_stored(chat_id, id),
+            Ok(Some(true)) | Ok(None)
+        )
+    };
     for (id, sender) in &changes.inserted {
         let mut attest = || {
             if let Some(who) = me.attribution(state, sender.as_deref()) {
@@ -347,10 +354,11 @@ pub fn check_push(
 /// - A vote is the field `vote|<voter>`, and the voter has to be a name this socket may write
 ///   under and a member of the chat. The name in the key is never taken on trust.
 /// - One vote per person is the storage itself: one key each, last write wins.
-/// - A vote's time (`voteAt|<voter>`) is the voter's to write like the vote, and a vote on a
-///   timed poll has to carry one.
+/// - A vote's time (`voteAt|<voter>`) is a field only its voter may write, and a vote on a
+///   timed poll has to carry one. What it says does not last: the relay replaces it with its
+///   own time when it stores the vote ([`corrections`]).
 /// - The manual close (`pollClosed`) is the author's alone to write, is a time, and is never
-///   taken back off.
+///   taken back off. Its time is the relay's too.
 ///
 /// What is *not* refused is anything an honest device can push in a race: a vote that reaches
 /// the relay after the poll closed, a vote whose device clock is off, a second close from the
@@ -358,9 +366,10 @@ pub fn check_push(
 /// in that device's queue can go, so a refusal there would cut an honest device off the chat.
 /// Those pushes are stored and, in the same step, put right by the relay: see [`corrections`].
 ///
-/// The one allowance is the one the insert arms make: a row arriving whole that the relay has
-/// already attested is history a heal carries, and it carries the votes on it. A device cannot
-/// push its own vote and leave out everyone else's when it restores a row the relay lost.
+/// The one allowance: a poll row arriving whole under an id the relay stored a row for itself,
+/// and nobody deleted, is history a heal carries ([`healed`]), and it carries the votes on it.
+/// A device cannot push its own vote and leave out everyone else's when it restores a row the
+/// relay lost. An author record alone is not that: an announce writes one for any id.
 fn check_polls(
     state: &AppState,
     me: &Pusher,
@@ -394,7 +403,7 @@ fn check_polls(
                 format!("{id} does not hold a poll within bounds"),
             );
         };
-        let attested = arrives && healed(state, chat_id, id);
+        let attested = arrives && healed(state, chat_id, id, &poll);
         // A poll the relay sees for the first time may close at most a week (and a day of
         // clock difference) from now, as every composer bounds it.
         if arrives && !attested && poll.closes_too_late(arbos_core::ids::now_ms()) {
@@ -486,13 +495,21 @@ fn check_polls(
     None
 }
 
-/// A row arriving whole that is history a heal restores: the relay stored a row under this
-/// id itself (`message_authors.stored`, set in the transaction of a push it accepted) and
-/// nobody deleted it since. The relay lost it, which no client can make happen. An author
+/// A poll row arriving whole that is history a heal restores: the relay stored a row under
+/// this id itself (`message_authors.stored`, set in the transaction of a push it accepted)
+/// and nobody deleted it since. The relay lost it, which no client can make happen. An author
 /// record written by an announce does not count: any member can announce any id.
-fn healed(state: &AppState, chat_id: &str, id: &str) -> bool {
-    state.db.message_stored(chat_id, id).unwrap_or(false)
-        && !state.db.message_deleted(chat_id, id).unwrap_or(true)
+///
+/// A record from before the relay kept the mark says neither. No timed poll can be that old —
+/// they did not exist — so a timed poll under such an id is never history. A poll of the
+/// older shape under such an id is taken as history, as the relay took it before the mark.
+fn healed(state: &AppState, chat_id: &str, id: &str, poll: &Poll) -> bool {
+    let stored = match state.db.message_stored(chat_id, id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => !poll.timed(),
+        Err(_) => false,
+    };
+    stored && !state.db.message_deleted(chat_id, id).unwrap_or(true)
 }
 
 /// What the relay writes back onto a message, in the same step as it stores the push that
@@ -573,7 +590,7 @@ pub fn corrections(
         let arrives = changes.inserted.iter().any(|(i, _)| i == id);
         if !poll.timed()
             || fixes.iter().any(|fix| fix.message_id == *id)
-            || (arrives && healed(state, chat_id, id))
+            || (arrives && healed(state, chat_id, id, &poll))
         {
             continue;
         }
@@ -1951,7 +1968,21 @@ mod tests {
         assert_eq!(corrections(&state, &chat, &c, NOW).unwrap(), []);
         assert_eq!(lost.poll()["counts"], json!({ "1": 1 }));
 
-        state.db.note_message_deleted(&chat, "p1").unwrap();
+        // As a stored row that deletes it records the deletion, in its own transaction.
+        state
+            .db
+            .append_row_with(
+                "people/any",
+                "relay",
+                "the-delete",
+                b"x",
+                &crate::db::RowEffects {
+                    chat_id: &chat,
+                    deleted: &["p1".to_owned()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let (lost, c) = arrive();
         let fixes = corrections(&state, &chat, &c, NOW).unwrap();
         assert_eq!(
@@ -1994,7 +2025,7 @@ mod tests {
             })
         };
         // `p1` the relay stored (`chat_with_a_poll` records it as the push path does).
-        assert!(state.db.message_stored(&chat, "p1").unwrap());
+        assert_eq!(state.db.message_stored(&chat, "p1").unwrap(), Some(true));
         let c = arrive("p1");
         assert_eq!(
             kind(&check_push(
@@ -2015,7 +2046,7 @@ mod tests {
             .db
             .insert_chat_event(&chat, None, "p9", Some(&alice), &format!("user:{alice}"))
             .unwrap();
-        assert!(!state.db.message_stored(&chat, "p9").unwrap());
+        assert_eq!(state.db.message_stored(&chat, "p9").unwrap(), Some(false));
         let c = arrive("p9");
         assert_eq!(
             code(&check_push(
@@ -2056,6 +2087,80 @@ mod tests {
                 fields: vec![(POLL_CLOSED_FIELD.into(), json!(NOW))],
             }]
         );
+    }
+
+    /// An author record from before the relay kept the stored mark says neither "stored"
+    /// nor "announced". A timed poll cannot be that old, so under such an id it is never
+    /// history; a poll of the older shape is, as the relay took it before the mark existed.
+    #[test]
+    fn a_record_older_than_the_stored_mark_heals_only_the_older_poll_shape() {
+        let state = test_state(AuthMode::Github);
+        let (_room, chat, alice, bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
+        state
+            .db
+            .insert_chat_event(&chat, None, "p_old", Some(&alice), &format!("user:{alice}"))
+            .unwrap();
+        state.db.forget_stored_mark_for_test(&chat, "p_old");
+        assert_eq!(state.db.message_stored(&chat, "p_old").unwrap(), None);
+        let arrive = |poll: &Poll| {
+            let mut lost = Room::new();
+            lost.push(|d| {
+                d.append_poll_message("p_old", poll, "dev", &as_user(&alice))
+                    .unwrap();
+                d.set_message_fields(
+                    "p_old",
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{alice}"), json!(["1"])),
+                        (&format!("{POLL_VOTE_AT_PREFIX}user:{alice}"), json!(NOW)),
+                    ],
+                );
+            })
+        };
+        let heal = |c: &MessageChanges| {
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                c,
+            ))
+        };
+        let older = Poll {
+            show_voters: None,
+            ..poll()
+        };
+        assert_eq!(
+            heal(&arrive(&older)),
+            None,
+            "Bob restores an old poll with Alice's vote"
+        );
+        assert_eq!(
+            heal(&arrive(&poll())),
+            Some("not_yours"),
+            "a timed poll under an old id is not history: Alice's vote is not Bob's to bring"
+        );
+        let _ = bob;
+    }
+
+    /// A fix whose fields already hold the relay's values writes nothing: the document skips
+    /// a field set to the value it has. So an empty update after applying fixes is a real
+    /// case (a device whose vote time is the relay's to the millisecond), not an error.
+    #[test]
+    fn a_fix_that_changes_nothing_writes_nothing() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _alice, bob, ..) = chat_with_a_poll(&state);
+        let vote = format!("{POLL_VOTE_PREFIX}user:{bob}");
+        let at = format!("{POLL_VOTE_AT_PREFIX}user:{bob}");
+        let c =
+            room.push(|d| d.set_message_fields("p1", &[(&vote, json!(["1"])), (&at, json!(NOW))]));
+        let fixes = corrections(&state, &chat, &c, NOW).unwrap();
+        assert_eq!(fixes, stamp(&[(&at, json!(NOW))]), "stamped all the same");
+        let before = room.doc.oplog_vv();
+        room.doc
+            .transact(|d| fixes.iter().try_for_each(|fix| fix.apply(d)))
+            .unwrap();
+        assert!(room.doc.export_updates_since(&before).is_empty());
     }
 
     /// A poll the relay sees for the first time closes at most a week (and a day of clock

@@ -3121,8 +3121,9 @@ mod covered_push_tests {
                 .db
                 .insert_chat_event(&chat, None, id, Some(&bob), &format!("user:{bob}"))
                 .unwrap();
-            assert!(
-                !state.db.message_stored(&chat, id).unwrap(),
+            assert_eq!(
+                state.db.message_stored(&chat, id).unwrap(),
+                Some(false),
                 "announced, not stored"
             );
         };
@@ -3175,8 +3176,9 @@ mod covered_push_tests {
             rates + 1,
             "a new message, counted against the rate limit whatever the heal flag says"
         );
-        assert!(
+        assert_eq!(
             state.db.message_stored(&chat, "p_own").unwrap(),
+            Some(true),
             "stored now"
         );
         let part = held()[0]["parts"][1].clone();

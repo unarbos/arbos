@@ -40,8 +40,6 @@ struct QuestionCard: View {
     var foot: String? = nil
     /// A poll that shows who voted: a tap on a row's count hands the option's id here.
     var onHint: ((String) -> Void)? = nil
-    /// The author's own open poll: "Close poll" at the end of the foot line.
-    var onClosePoll: (() -> Void)? = nil
 
     @State private var dismissed = false
     @State private var selected: Set<String> = []
@@ -81,31 +79,16 @@ struct QuestionCard: View {
                 } else if !options.isEmpty {
                     list
                 }
-                // A poll's foot stays on a closed card (it is where the card says "closed") and
-                // carries the author's "Close poll". Every other card's foot is the block below.
+                // A poll's foot stays on a closed card: it is where the card says "closed".
+                // Every other card's foot is the block below.
                 if let foot, onPick != nil {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(foot)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(palette.badgeInk)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier("question-card-foot")
-                        if let onClosePoll {
-                            // No confirm step: the card says "closed" at once.
-                            Button("Close poll") {
-                                guard account.accepts(model) else { return }
-                                onClosePoll()
-                            }
-                            .buttonStyle(.plain)
-                            .font(theme.font(Theme.small, weight: .medium))
-                            .foregroundStyle(theme.text)
-                            .contentShape(Rectangle().inset(by: -12))
-                            .accessibilityIdentifier("poll-close")
-                        }
-                    }
-                    .padding(.top, 4)
-                    .padding(.leading, 1)
+                    Text(foot)
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(palette.badgeInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                        .padding(.leading, 1)
+                        .accessibilityIdentifier("question-card-foot")
                 } else if open && !options.isEmpty {
                     Text(foot ?? (shellCard
                          ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
@@ -505,6 +488,8 @@ struct SendPollSheet: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     @State private var draft = PollDraft(question: "", options: ["", ""], multiple: false)
+    /// "Custom…": when the poll closes, picked on the calendar wheel.
+    @State private var customCloses = Date().addingTimeInterval(2 * 3600)
     @FocusState private var focused: Int?
 
     /// The most options a poll holds (`arbos_core::poll::OPTIONS_MAX`).
@@ -514,7 +499,17 @@ struct SendPollSheet: View {
     /// How long a poll may run: the menu's rows. nil runs until its author closes it.
     static let durations: [(label: String, ms: Int64?)] = [
         ("No time limit", nil), ("1 hour", 3_600_000), ("1 day", 86_400_000), ("1 week", 604_800_000),
+        ("Custom…", custom),
     ]
+    /// The menu's tag for "Custom…": the time comes from the date row under it.
+    static let custom: Int64 = -1
+    /// The longest a poll runs (`arbos_core::poll::DURATION_MAX_MS`).
+    static let durationMaxMs: Int64 = 604_800_000
+
+    /// How long a poll closing at `closes` runs from `now`: at least a minute, at most a week.
+    static func customDuration(until closes: Date, from now: Date = Date()) -> Int64 {
+        min(durationMaxMs, max(60_000, Int64(closes.timeIntervalSince(now) * 1000)))
+    }
 
     private var valid: Bool {
         pollText(question: draft.question, options: draft.options, multiple: draft.multiple) != nil
@@ -604,6 +599,16 @@ struct SendPollSheet: View {
                     }
                     .padding(.leading, Controls.textInset)
                     .frame(minHeight: Controls.height)
+                    if draft.closesInMs == Self.custom {
+                        DatePicker("Closes", selection: $customCloses,
+                                   in: Date().addingTimeInterval(60)...Date().addingTimeInterval(Double(Self.durationMaxMs) / 1000))
+                            .font(theme.font(Theme.body))
+                            .foregroundStyle(theme.text)
+                            .tint(theme.accent)
+                            .padding(.horizontal, Controls.textInset)
+                            .frame(minHeight: Controls.height)
+                            .accessibilityIdentifier("poll-custom-closes")
+                    }
                 }
             }
         }
@@ -614,6 +619,8 @@ struct SendPollSheet: View {
     }
 
     private func send() {
-        if model.sendPoll(chatId: chatId, draft: draft) { dismiss() }
+        var poll = draft
+        if poll.closesInMs == Self.custom { poll.closesInMs = Self.customDuration(until: customCloses) }
+        if model.sendPoll(chatId: chatId, draft: poll) { dismiss() }
     }
 }

@@ -93,14 +93,49 @@ pub async fn write_doc_as(
     device: &str,
     edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
 ) -> anyhow::Result<i64> {
+    write_doc_deleting(state, project_id, chat_id, device, |doc| {
+        edit(doc).map(|()| Vec::new())
+    })
+    .await
+}
+
+/// [`write_doc_as`] for an edit that may take messages out of the chat: `edit` returns the
+/// ids it deleted, and they are recorded as deleted in the same transaction as the row, so a
+/// deletion the relay made is never stored without its record (`push_guard::corrections`
+/// reads it to keep a deleted message from being pushed back).
+///
+/// Every relay write holds the room's admission lock from before it reads the doc until its
+/// row is broadcast, as a device's push does. Rows are stored and broadcast in one order, so
+/// a relay row can never be sent ahead of a push stored before it, nor between a push and
+/// the relay's correction to it — a receiver drops a row whose seq is not above the last one
+/// it sent on.
+pub async fn write_doc_deleting(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+    device: &str,
+    edit: impl FnOnce(&ChatDoc) -> anyhow::Result<Vec<String>>,
+) -> anyhow::Result<i64> {
     let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
+    let room = state.room(&room_name).await;
+    let _admission = room.push_admission.lock().await;
     let doc = load_doc(state, chat_id, project_id)?.unwrap_or_else(|| ChatDoc::new(None, false));
     let base = doc.oplog_vv();
-    edit(&doc)?;
+    let deleted = edit(&doc)?;
     let bytes = doc.export_updates_since(&base);
     anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
-    let (seq, dup) = state.db.append_row(&room_name, device, &batch_id, &bytes)?;
+    let (seq, dup, _) = state.db.append_row_with(
+        &room_name,
+        device,
+        &batch_id,
+        &bytes,
+        &crate::db::RowEffects {
+            chat_id,
+            deleted: &deleted,
+            ..Default::default()
+        },
+    )?;
     if !dup {
         let frame = Frame::new(
             FrameType::Row,
@@ -108,7 +143,6 @@ pub async fn write_doc_as(
             Bytes::from(bytes),
         )
         .encode();
-        let room = state.room(&room_name).await;
         let _ = room.tx.send(RoomBroadcast {
             from_conn: 0,
             bytes: frame,

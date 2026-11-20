@@ -27,6 +27,16 @@ const DURATIONS: [(&str, Option<i64>); 4] = [
     ("Closes in 1 day", Some(24 * HOUR_MS)),
     ("Closes in 1 week", Some(7 * 24 * HOUR_MS)),
 ];
+/// The step after the last of [`DURATIONS`]: a number of hours typed into a field.
+const CUSTOM: usize = DURATIONS.len();
+
+/// A custom duration as typed: whole hours, from one to the week a poll may run.
+fn custom_duration(hours: &str) -> Option<i64> {
+    let hours: i64 = hours.trim().parse().ok()?;
+    (1..=arbos_core::poll::DURATION_MAX_MS / HOUR_MS)
+        .contains(&hours)
+        .then_some(hours * HOUR_MS)
+}
 
 pub struct PollDraft {
     question: Entity<ComposerInput>,
@@ -34,8 +44,10 @@ pub struct PollDraft {
     multiple: bool,
     /// "Show who voted". Off: the card shows counts only.
     pub(super) show_voters: bool,
-    /// Index into [`DURATIONS`].
+    /// Index into [`DURATIONS`], or [`CUSTOM`].
     pub(super) duration: usize,
+    /// The hours field shown under the duration row at [`CUSTOM`].
+    custom_hours: Entity<ComposerInput>,
 }
 
 impl Composer {
@@ -73,6 +85,7 @@ impl Composer {
         let options = (1..=OPTIONS_MIN)
             .map(|n| self.poll_input(format!("Option {n}"), cx))
             .collect();
+        let custom_hours = self.poll_input("Hours, 1 to 168".into(), cx);
         window.focus(&question.read(cx).focus_handle(cx), cx);
         self.poll = Some(PollDraft {
             question,
@@ -80,6 +93,7 @@ impl Composer {
             multiple: false,
             show_voters: false,
             duration: 0,
+            custom_hours,
         });
         cx.notify();
     }
@@ -104,6 +118,16 @@ impl Composer {
         cx.notify();
     }
 
+    /// How long the drafted poll runs: `Some(None)` with no time limit, `None` while the
+    /// custom hours field does not hold a duration.
+    fn drafted_duration(&self, cx: &App) -> Option<Option<i64>> {
+        let draft = self.poll.as_ref()?;
+        match DURATIONS.get(draft.duration) {
+            Some((_, closes_in)) => Some(*closes_in),
+            None => custom_duration(draft.custom_hours.read(cx).text()).map(Some),
+        }
+    }
+
     fn drafted_poll(&self, cx: &App) -> Option<(String, Vec<String>, bool)> {
         let draft = self.poll.as_ref()?;
         let question = draft.question.read(cx).text().to_owned();
@@ -112,7 +136,8 @@ impl Composer {
             .iter()
             .map(|o| o.read(cx).text().to_owned())
             .collect();
-        Poll::new(&question, &options, draft.multiple, false, None)
+        let closes_in = self.drafted_duration(cx)?;
+        Poll::new(&question, &options, draft.multiple, false, closes_in)
             .map(|_| (question, options, draft.multiple))
     }
 
@@ -120,10 +145,8 @@ impl Composer {
         let Some((question, options, multiple)) = self.drafted_poll(cx) else {
             return;
         };
-        let (show_voters, closes_in) = self
-            .poll
-            .as_ref()
-            .map_or((false, None), |d| (d.show_voters, DURATIONS[d.duration].1));
+        let show_voters = self.poll.as_ref().is_some_and(|d| d.show_voters);
+        let closes_in = self.drafted_duration(cx).flatten();
         let Some(chat) = self.state.read(cx).active_chat_id() else {
             return;
         };
@@ -324,16 +347,21 @@ impl Composer {
                 quiet_row(
                     "poll-duration",
                     sf_symbols::glyph("clock", 14.0, theme.text_muted),
-                    DURATIONS[draft.duration].0,
+                    DURATIONS
+                        .get(draft.duration)
+                        .map_or("Closes in a number of hours", |d| d.0),
                 )
                 .debug_selector(|| "composer-poll-duration".into())
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(draft) = this.poll.as_mut() {
-                        draft.duration = (draft.duration + 1) % DURATIONS.len();
+                        draft.duration = (draft.duration + 1) % (CUSTOM + 1);
                     }
                     cx.notify();
                 })),
             )
+            .when(draft.duration == CUSTOM, |el| {
+                el.child(field(&draft.custom_hours).debug_selector(|| "composer-poll-hours".into()))
+            })
             .child(
                 glass::primary_button("poll-send", "Send poll", &theme)
                     .debug_selector(|| "composer-poll-send".into())
@@ -341,5 +369,22 @@ impl Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.send_poll(cx))),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_custom_duration_is_whole_hours_up_to_a_week() {
+        assert_eq!(custom_duration(" 3 "), Some(3 * HOUR_MS));
+        assert_eq!(
+            custom_duration("168"),
+            Some(arbos_core::poll::DURATION_MAX_MS)
+        );
+        for bad in ["", "0", "169", "-2", "1.5", "two"] {
+            assert_eq!(custom_duration(bad), None, "{bad}");
+        }
     }
 }

@@ -543,6 +543,10 @@ pub async fn send_message(
     }
     let bytes = doc.export_updates_since(&base);
     let batch_id = ulid();
+    // Stored and broadcast under the room's admission lock, like a push and every other
+    // relay write (`notices::write_doc_deleting`): rows leave in the order they were stored.
+    let room = state.room(&room_name).await;
+    let admission = room.push_admission.lock().await;
     let seq = match state
         .db
         .append_row(&room_name, &device_id, &batch_id, &bytes)
@@ -556,12 +560,12 @@ pub async fn send_message(
         Bytes::from(bytes),
     )
     .encode();
-    let room = state.room(&room_name).await;
     let _ = room.tx.send(RoomBroadcast {
         from_conn: 0,
         bytes: frame,
         seq,
     });
+    drop(admission);
     let chat = ChatRef::people(&id);
     // What the socket path does after a person's row (rooms.rs): the sender's own cursor moves
     // past it, the Matrix safety net is armed, and every agent's box is woken — or, with no

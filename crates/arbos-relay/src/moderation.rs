@@ -250,17 +250,20 @@ pub async fn delete_message(
         Ok(None) => return StatusCode::NO_CONTENT.into_response(),
         Err(r) => return *r,
     };
-    match write_doc(&state, a.project_id.as_deref(), &chat_id, |doc| {
-        doc.delete_message(&message_id)?;
-        Ok(())
-    })
-    .await
-    {
+    // The deletion is recorded with the row that makes it, so the message cannot be pushed
+    // back under the same id (`push_guard`).
+    let deleting = crate::notices::write_doc_deleting(
+        &state,
+        a.project_id.as_deref(),
+        &chat_id,
+        crate::notices::RELAY_DEVICE,
+        |doc| {
+            doc.delete_message(&message_id)?;
+            Ok(vec![message_id.clone()])
+        },
+    );
+    match deleting.await {
         Ok(seq) => {
-            // Remembered, so the row cannot be pushed back under the same id (`push_guard`).
-            if let Err(e) = state.db.note_message_deleted(&chat_id, &message_id) {
-                tracing::warn!(chat = %chat_id, message = %message_id, error = %e, "deletion not recorded");
-            }
             tracing::info!(chat = %chat_id, message = %message_id, me = %a.me, sender = %a.sender, seq, "message deleted");
             StatusCode::NO_CONTENT.into_response()
         }

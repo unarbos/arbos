@@ -168,6 +168,22 @@ final class PollTests: XCTestCase {
         XCTAssertTrue(row.contains("vote|user:me"), "my own fields stay: \(row)")
     }
 
+    /// The maker closes a poll from its hold menu, above Delete; and a custom closing time is
+    /// a duration of at least a minute and at most the week the core allows.
+    func testClosePollIsOnTheMenuAndACustomTimeIsBounded() {
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true, inPrivateChat: true, canClosePoll: true),
+                       [.copy, .reply, .forward, .closePoll, .delete])
+        XCTAssertFalse(MessageMenu.items(forMessage: true, canDelete: true).contains(.closePoll))
+        XCTAssertFalse(MessageMenuItem.closePoll.isDestructive)
+
+        let now = Date()
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(3 * 3600), from: now), 3 * 3_600_000)
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(-5), from: now), 60_000)
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(30 * 86_400), from: now),
+                       SendPollSheet.durationMaxMs)
+        XCTAssertNotNil(SendPollSheet.durations.first { $0.ms == SendPollSheet.custom })
+    }
+
     /// A reply quotes a poll by its question: the strip above the composer and the header in
     /// the reply's bubble both read "Poll: <question>", not the list of options.
     func testAReplyQuotesAPollByItsQuestion() throws {

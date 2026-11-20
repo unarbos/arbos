@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS chat_user_cursor (
 );
 CREATE TABLE IF NOT EXISTS message_authors (
   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
-  created_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, stored INTEGER,
   PRIMARY KEY (chat_id, message_id)
 );
 CREATE TABLE IF NOT EXISTS deleted_messages (
@@ -257,35 +257,34 @@ impl Db {
         })
     }
 
-    /// A message was deleted from this chat for everyone by the relay's own hand (the delete
-    /// route, a Matrix redaction, a blank agent row); a push that deletes records it in its own
-    /// transaction ([`Db::append_row_with`]). Kept so `push_guard` can tell a deleted message
-    /// pushed back from a lost one being healed: the author record reads the same for both.
-    ///
-    /// One row per deleted message, never pruned, like `message_authors`: forgetting a
-    /// deletion would let that id be pushed back.
-    pub fn note_message_deleted(&self, chat_id: &str, message_id: &str) -> Result<()> {
+    /// Tests: make an author record look as one written before the stored mark existed.
+    #[cfg(test)]
+    pub fn forget_stored_mark_for_test(&self, chat_id: &str, message_id: &str) {
         self.with(|c| {
             c.execute(
-                "INSERT OR IGNORE INTO deleted_messages(chat_id, message_id, deleted_at)
-                 VALUES (?1, ?2, ?3)",
-                params![chat_id, message_id, now_ms()],
-            )?;
-            Ok(())
+                "UPDATE message_authors SET stored = NULL WHERE chat_id = ?1 AND message_id = ?2",
+                params![chat_id, message_id],
+            )
         })
+        .unwrap();
     }
 
     /// Has the relay itself stored a row carrying this message — recorded from a push it
     /// accepted, not from an announce? An announce records an author for any id a member
     /// names, whether or not a row exists.
-    pub fn message_stored(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+    ///
+    /// `Some(true)` stored, `Some(false)` only announced (or no record at all), `None` a
+    /// record from before the relay kept the mark: it cannot say which.
+    pub fn message_stored(&self, chat_id: &str, message_id: &str) -> Result<Option<bool>> {
         self.with(|c| {
-            c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM message_authors
-                  WHERE chat_id = ?1 AND message_id = ?2 AND stored = 1)",
-                params![chat_id, message_id],
-                |r| r.get(0),
-            )
+            let stored: Option<Option<bool>> = c
+                .query_row(
+                    "SELECT stored FROM message_authors WHERE chat_id = ?1 AND message_id = ?2",
+                    params![chat_id, message_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(stored.unwrap_or(Some(false)))
         })
     }
 
