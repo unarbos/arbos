@@ -368,6 +368,25 @@ fn poll_fields(m: &LoroMap) -> Value {
     Value::Object(out)
 }
 
+/// What a message's poll fields held before an update: `after` with every poll field the
+/// update wrote set back to the value the backwards diff of that message (`old`) names, or
+/// taken off where it did not exist. `None` without that diff: the fields cannot be told.
+fn poll_fields_before(after: &Value, old: Option<&loro::event::MapDelta>) -> Option<Value> {
+    let mut before = after.clone();
+    let fields = before.as_object_mut()?;
+    for (key, value) in old?.updated.iter().filter(|(k, _)| is_poll_key(k)) {
+        match value {
+            Some(ValueOrContainer::Value(v)) => {
+                fields.insert(key.to_string(), lv_to_json(v));
+            }
+            _ => {
+                fields.remove(key.as_ref() as &str);
+            }
+        }
+    }
+    Some(before)
+}
+
 /// Reader projection: a message carrying a valid poll gains a `poll` part with the tally
 /// folded in — `votes: { "<option id>": ["<sender>", …] }` — after its text part, which stays
 /// as the plain form for previews, search and copy. An invalid poll is left alone and the
@@ -380,8 +399,16 @@ fn poll_fields(m: &LoroMap) -> Value {
 /// row agree. For a people chat the relay keeps those times to its own clock (`push_guard`).
 ///
 /// The part carries `counts` (option id → how many hold it), `voters` (how many people voted)
-/// and `deadline` when it has one, beside `votes` (option id → senders).
-pub fn project_poll(json: &mut Value) {
+/// and `deadline` when it has one. `votes` (option id → senders) names everyone unless the
+/// author turned "Show who voted" off (`showVoters: false`). Then it holds `viewer`'s own vote
+/// and nobody else's, and the other voters' `vote|…` and `voteAt|…` fields are taken off the
+/// row as well, so nothing this function returns carries another voter's id. A poll from
+/// before the flag keeps naming its voters, as every build has shown them.
+///
+/// This hides names from every reader built on this function. It is not secrecy: the votes
+/// are still fields named after their voters in the document every member's device holds,
+/// and a modified client reads them there (`docs/polls.md` §12 is the design that fixes that).
+pub fn project_poll(json: &mut Value, viewer: Option<&str>) {
     let Some(obj) = json.as_object_mut() else {
         return;
     };
@@ -389,6 +416,7 @@ pub fn project_poll(json: &mut Value) {
         return;
     };
     let deadline = poll.deadline(obj.get(POLL_CLOSES_FIELD), obj.get(POLL_CLOSED_FIELD));
+    let shown = poll.show_voters != Some(false);
     // Sorted, so every reader lists an option's voters in the same order whatever order the
     // doc's map hands its keys over in.
     let mut votes: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
@@ -410,7 +438,9 @@ pub fn project_poll(json: &mut Value) {
         voters += usize::from(!picked.is_empty());
         for option in picked {
             *counts.entry(option.clone()).or_default() += 1;
-            votes.entry(option).or_default().push(sender);
+            if shown || viewer == Some(sender) {
+                votes.entry(option).or_default().push(sender);
+            }
         }
     }
     votes.values_mut().for_each(|who| who.sort_unstable());
@@ -423,6 +453,14 @@ pub fn project_poll(json: &mut Value) {
     part["voters"] = Value::from(voters);
     if let Some(deadline) = deadline {
         part["deadline"] = Value::from(deadline);
+    }
+    if !shown {
+        obj.retain(|key, _| {
+            let voter = key
+                .strip_prefix(POLL_VOTE_PREFIX)
+                .or_else(|| key.strip_prefix(POLL_VOTE_AT_PREFIX));
+            voter.is_none_or(|voter| viewer == Some(voter))
+        });
     }
     if let Some(Value::Array(parts)) = obj.get_mut("parts") {
         parts.push(part);
@@ -977,26 +1015,32 @@ impl ChatDoc {
     /// `read_rows_json`, fixture writer, and fixture tests so those
     /// projections cannot drift apart.
     pub fn projected_rows(&self) -> Vec<Value> {
+        self.projected_rows_for(None)
+    }
+
+    /// [`Self::projected_rows`] as `viewer` (`user:<id>`) reads them: a poll that hides its
+    /// voters hands over that reader's own vote and nobody else's ([`project_poll`]).
+    pub fn projected_rows_for(&self, viewer: Option<&str>) -> Vec<Value> {
         let list = self.messages_list();
         (0..list.len())
-            .filter_map(|i| Self::projected_row_in(&list, i))
+            .filter_map(|i| Self::projected_row_in(&list, i, viewer))
             .collect()
     }
 
     /// One projected message row by list index: the only row that is read and
     /// converted. Reading a long transcript one row at a time stays linear.
-    pub fn projected_row(&self, index: usize) -> Option<Value> {
-        Self::projected_row_in(&self.messages_list(), index)
+    pub fn projected_row(&self, index: usize, viewer: Option<&str>) -> Option<Value> {
+        Self::projected_row_in(&self.messages_list(), index, viewer)
     }
 
-    fn projected_row_in(list: &LoroList, index: usize) -> Option<Value> {
+    fn projected_row_in(list: &LoroList, index: usize, viewer: Option<&str>) -> Option<Value> {
         let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(index) else {
             return None;
         };
         let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
         project_hidden_parts(&mut json);
         project_reactions(&mut json);
-        project_poll(&mut json);
+        project_poll(&mut json, viewer);
         Some(json)
     }
 
@@ -2435,7 +2479,6 @@ impl ChatDoc {
                 // each one's old value (`None` where it did not exist). Done only for a push
                 // that writes a poll field, which is rare.
                 let fields = poll_fields(&m);
-                let mut before = fields.clone();
                 let back = self.doc.diff(to, from).ok();
                 let old = back.as_ref().and_then(|batch| {
                     batch.iter().find_map(|(c, d)| match d {
@@ -2443,22 +2486,16 @@ impl ChatDoc {
                         _ => None,
                     })
                 });
-                // No backwards diff is unreachable while the forward one read; `before`
-                // then says nothing changed, and the caller's checks still run.
-                if let (Some(old), Some(before)) = (old, before.as_object_mut()) {
-                    for (key, value) in old.updated.iter().filter(|(k, _)| is_poll_key(k)) {
-                        match value {
-                            Some(ValueOrContainer::Value(v)) => {
-                                before.insert(key.to_string(), lv_to_json(v));
-                            }
-                            _ => {
-                                before.remove(key.as_ref() as &str);
-                            }
-                        }
+                // Without the backwards diff nothing says what the fields held, and
+                // "unchanged" would be a guess that leaves a late vote or a rewritten close
+                // standing: the whole push is then one nothing can be said about.
+                match poll_fields_before(&fields, old) {
+                    Some(before) => {
+                        out.polls_before.push((id.clone(), before));
+                        out.polls.push((id, fields));
                     }
+                    None => out.unreadable = true,
                 }
-                out.polls_before.push((id.clone(), before));
-                out.polls.push((id, fields));
             }
             after[*i] = now;
         }
@@ -2972,8 +3009,7 @@ mod message_change_tests {
                 json!({ "id": "poll", "kind": "poll", "question": "Where?", "max": 1,
                     "showVoters": false,
                     "options": [{ "id": "1", "label": "Lisbon" }, { "id": "2", "label": "Berlin" }],
-                    "votes": { "2": ["user:alice", "user:bob"] },
-                    "counts": { "2": 2 }, "voters": 2 })
+                    "votes": {}, "counts": { "2": 2 }, "voters": 2 })
             );
         }
 
@@ -2981,14 +3017,92 @@ mod message_change_tests {
         let mut row = json!({ "poll": { "question": "Q", "options": [], "max": 1 },
             "parts": [{ "id": "t", "kind": "text", "text": "Poll: Q" }] });
         let untouched = row.clone();
-        project_poll(&mut row);
+        project_poll(&mut row, None);
         assert_eq!(row, untouched);
         // And a vote the poll does not allow counts for nothing.
         let mut row = json!({ "poll": poll, "vote|user:x": ["9"], "vote|user:y": ["1", "2"],
             "voteAt|user:x": 5, "voteAt|user:y": 5, "parts": [] });
-        project_poll(&mut row);
+        project_poll(&mut row, None);
         assert_eq!(row["parts"][0]["counts"], json!({}));
         assert_eq!(row["parts"][0]["voters"], 0);
+    }
+
+    /// What a poll's fields held before a push is read from the backwards diff. Without it
+    /// there is no answer, and "as they are now" must not stand in for one: the relay would
+    /// then see no change to correct.
+    #[test]
+    fn poll_fields_before_a_push_are_unknown_without_the_backwards_diff() {
+        let after = json!({ "poll": {}, "pollClosed": 9 });
+        assert_eq!(poll_fields_before(&after, None), None);
+        assert_eq!(poll_fields_before(&json!("not a map"), None), None);
+    }
+
+    /// Who voted leaves the projection only where the author chose to show it. Otherwise a
+    /// reader gets the counts and their own vote, and nobody else's name.
+    #[test]
+    fn voter_names_are_projected_only_when_the_poll_shows_them() {
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        let row = |show: bool, viewer: Option<&str>| {
+            let poll = Poll::new("Where?", &labels, true, show, None).unwrap();
+            let mut row = json!({ "poll": poll, "parts": [], "sender": "user:zoe",
+                "vote|user:ana": ["1", "2"], "voteAt|user:ana": 5,
+                "vote|user:ben": ["2"], "voteAt|user:ben": 6,
+                "vote|user:cat": [], "voteAt|user:cat": 7 });
+            project_poll(&mut row, viewer);
+            row
+        };
+        let part = |show: bool, viewer: Option<&str>| row(show, viewer)["parts"][0].clone();
+        // The whole row a caller receives, not only its poll part: the stored vote fields of
+        // the other voters are taken off it too.
+        for viewer in [None, Some("user:zed"), Some("user:ben")] {
+            let whole = row(false, viewer).to_string();
+            assert!(
+                !whole.contains("user:ana") && !whole.contains("user:cat"),
+                "{whole}"
+            );
+            assert_eq!(
+                whole.contains("user:ben"),
+                viewer == Some("user:ben"),
+                "{whole}"
+            );
+        }
+        let mine = row(false, Some("user:ben"));
+        assert_eq!(
+            mine["vote|user:ben"],
+            json!(["2"]),
+            "the reader's own fields stay"
+        );
+        assert!(
+            row(true, None).to_string().contains("vote|user:ana"),
+            "shown: as stored"
+        );
+        let shown = part(true, None);
+        assert_eq!(
+            shown["votes"],
+            json!({ "1": ["user:ana"], "2": ["user:ana", "user:ben"] })
+        );
+        for hidden in [part(false, None), part(false, Some("user:zed"))] {
+            assert_eq!(hidden["votes"], json!({}), "no names at all");
+            assert!(!hidden.to_string().contains("user:"), "{hidden}");
+        }
+        let mine = part(false, Some("user:ben"));
+        assert_eq!(
+            mine["votes"],
+            json!({ "2": ["user:ben"] }),
+            "my own vote only"
+        );
+        assert!(!mine.to_string().contains("user:ana"));
+        // The counts are the same whoever reads, and a retraction is nobody voting.
+        for p in [shown, mine] {
+            assert_eq!(p["counts"], json!({ "1": 1, "2": 2 }));
+            assert_eq!(p["voters"], 2);
+        }
+        // A poll from before the flag names its voters to every reader, as it always has.
+        let older = Poll::older("Where?", &labels, false).unwrap();
+        let mut row = json!({ "poll": older, "parts": [], "vote|user:ana": ["1"] });
+        project_poll(&mut row, None);
+        assert_eq!(row["parts"][0]["votes"], json!({ "1": ["user:ana"] }));
+        assert_eq!(row["vote|user:ana"], json!(["1"]));
     }
 
     fn timed_poll(show_voters: bool, closes_in: Option<i64>) -> Poll {
@@ -3003,7 +3117,7 @@ mod message_change_tests {
     fn a_closed_poll_counts_only_the_votes_written_before_it_closed() {
         let votes = |mut row: Value| {
             row["parts"] = json!([]);
-            project_poll(&mut row);
+            project_poll(&mut row, None);
             row["parts"][0].clone()
         };
         // Closed by its duration at 100.

@@ -312,7 +312,7 @@ pub async fn room_tail_rows(
         let list = cached.doc.messages_list();
         let len = list.len();
         (len.saturating_sub(n)..len)
-            .filter_map(|i| cached.doc.projected_row(i))
+            .filter_map(|i| cached.doc.projected_row(i, None))
             .collect()
     })
     .await
@@ -3550,6 +3550,19 @@ mod covered_push_tests {
         peer: u64,
         write: impl FnOnce(&ChatDoc),
     ) -> Frame {
+        poll_push_as(state, addr, chat, user, peer, false, write).await
+    }
+
+    /// [`poll_push`], with the push calling itself a heal or not.
+    async fn poll_push_as(
+        state: &AppState,
+        addr: SocketAddr,
+        chat: &str,
+        user: &str,
+        peer: u64,
+        heal: bool,
+        write: impl FnOnce(&ChatDoc),
+    ) -> Frame {
         let replica = held(state, chat, peer);
         let before = replica.oplog_vv();
         replica.transact(write);
@@ -3557,7 +3570,7 @@ mod covered_push_tests {
         let token = device_token(state, user);
         let device = format!("dev:{peer}");
         let room = format!("people/{chat}");
-        push_after_catchup(addr, &room, &token, &device, &batch)
+        push_after_catchup_with_heal(addr, &room, &token, &device, &batch, heal)
             .await
             .remove(0)
     }
@@ -3708,6 +3721,66 @@ mod covered_push_tests {
         }
     }
 
+    /// A member the people gates refuse does not vote or close by calling the push a heal.
+    /// Such a push carries no new message, and a heal used to skip the gates: a silenced or
+    /// blocked member's vote was stored and broadcast, with the relay's row behind it, at no
+    /// rate limit. Each is answered as a message of theirs would be, and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silenced_or_blocked_member_cannot_vote_or_close_as_a_heal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        let as_alice = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        writer
+            .append_poll_message("p1", &open_poll(), "dev:alice", &as_alice)
+            .unwrap();
+        let batch = vec![("post".to_owned(), writer.export_updates_since(&base))];
+        let token = device_token(&state, &alice);
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let head = state.db.room_state(&room).unwrap().head;
+
+        let (voter, maker) = (format!("user:{bob}"), format!("user:{alice}"));
+        let vote = |d: &ChatDoc| d.set_poll_vote("p1", &voter, &["1".to_owned()]).unwrap();
+        let close = |d: &ChatDoc| d.close_poll("p1", &maker).unwrap();
+
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, true, None)
+            .unwrap());
+        for heal in [true, false] {
+            let peer = 40 + u64::from(heal);
+            let frame = poll_push_as(&state, addr, &chat, &bob, peer, heal, vote).await;
+            assert_eq!(frame.ty, FrameType::Error, "heal={heal}: {}", frame.header);
+            assert_eq!(frame.header["code"], "not_available", "heal={heal}");
+            assert_eq!(frame.header["reason"], "silenced", "heal={heal}");
+        }
+        assert!(state
+            .db
+            .set_member_silenced(&chat, &voter, false, None)
+            .unwrap());
+
+        // Bob blocks Alice: her close is a write of hers in this chat, and is refused.
+        state.db.block(&bob, &alice).unwrap();
+        let frame = poll_push_as(&state, addr, &chat, &alice, 42, true, close).await;
+        assert_eq!(frame.ty, FrameType::Error, "header={}", frame.header);
+        assert_eq!(frame.header["code"], "not_available");
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head,
+            "nothing stored"
+        );
+    }
+
     /// The app offers "Close poll" to the member whose name the row wears; the relay's record
     /// names whoever pushed the row. Where the two differ — a row one member pushed under
     /// another's name, with no record to check it against — the named maker's close is taken
@@ -3843,6 +3916,42 @@ mod covered_push_tests {
             );
             assert_eq!(poll(), was, "push {n}");
         }
+    }
+
+    /// What a push does to the record is written with its row, in one transaction: who each
+    /// new message is by, that the relay stored it (an announce cannot say that), and that a
+    /// message the push took out is deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_records_what_it_stored_and_what_it_deleted_with_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let addr = serve(state.clone()).await;
+        let token = device_token(&state, &bob);
+
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message("m1", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let post = vec![("post".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &post).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(
+            state.db.message_author(&chat, "m1").unwrap(),
+            Some(format!("user:{bob}"))
+        );
+        assert_eq!(state.db.message_stored(&chat, "m1").unwrap(), Some(true));
+        assert!(!state.db.message_deleted(&chat, "m1").unwrap());
+
+        let base = doc.oplog_vv();
+        doc.transact(|d| d.delete_message("m1").unwrap());
+        let delete = vec![("delete".to_owned(), doc.export_updates_since(&base))];
+        let frames = push_after_catchup(addr, &room, &token, "dev:bob", &delete).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert!(state.db.message_deleted(&chat, "m1").unwrap());
     }
 
     /// A batch id the room already stored is a dup before the gates (no rate event).

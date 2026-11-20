@@ -308,9 +308,11 @@ a poll, an optional duration. Closing by hand was already planned.
 
 - `poll.showVoters: bool`, written by every build since. It is "Show who voted", fixed with
   the poll like the question. Its presence also marks a *timed* poll: one whose votes carry a
-  time and which can be closed. A poll without it is counts-only and never closes.
+  time and which can be closed. A poll without it (every poll from before the flag, and any
+  posted while the relay does not advertise the options) never closes and names its voters,
+  as every build has shown them.
 - `poll.closesIn: ms`, how long the poll runs before it closes by itself: what its author
-  picked, at most a week, valid only on a timed poll. Absent runs until closed by hand.
+  picked, one minute to a week, valid only on a timed poll. Absent runs until closed by hand.
 - `pollCloses: ms` on the message: when a poll with a duration closes. The composing device
   writes its own time plus the duration; the relay replaces it with its own time plus the
   duration when it first stores the poll, and nobody writes it again. So a poll runs for
@@ -403,6 +405,15 @@ only once.
   rows to `message_authors`, which the relay keeps one row per message in anyway. A message
   with no author record leaves none; pushed back, it is a message the relay has never seen,
   with every rule of a new one.
+- A vote, a close or a new poll goes through the people gates like a message, whether or
+  not the push calls itself a heal: a silenced, blocked or rate-limited member does not vote
+  or close. Only a poll row arriving whole that is restored history is exempt.
+- An agent does not vote: a vote written by a box is refused (`bad_vote`). A box is one
+  principal for every agent its owner has in the chat.
+- A push that removes a message and inserts a row under the same id is refused
+  (`replaced_id`), and a row a push removed is never read as restored history in that push.
+  The record still says "stored, not deleted" while the push is judged; without this a
+  poll's author, or a moderator, could delete a poll and put it back with any votes on it.
 - Every relay write to a room (`notices::write_doc*`, the agent-link send in `export.rs`)
   stores and broadcasts its row under the room's admission lock, the one a push holds while
   it is stored with its correction and broadcast. So rows get their seq and leave in one
@@ -417,7 +428,7 @@ backdate its own vote or rewrite its own close, with only the reducer's rule lef
 not anonymous in storage in any mode: each is a field named after its voter, held by every
 member's device and by the relay.
 
-**Voter visibility.** When `showVoters` is not true, `project_poll` gives the layer above it
+**Voter visibility.** When `showVoters` is `false`, `project_poll` gives the layer above it
 the counts (`counts`, `voters`) and the reader's own vote. It takes the other voters out of
 the poll part *and* takes their stored `vote|…` and `voteAt|…` fields off the projected row,
 so nothing it returns carries another voter's id. The reader is passed in by the caller

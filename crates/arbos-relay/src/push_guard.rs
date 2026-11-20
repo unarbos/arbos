@@ -231,9 +231,12 @@ pub fn check_push(
         }
     }
 
-    if let Some(refusal) = check_polls(state, &me, chat_id, changes) {
-        return refusal;
-    }
+    // A vote, a close or a new poll is a member acting in the chat, whatever the push calls
+    // itself: it goes through the people gates like a message.
+    let poll_written = match check_polls(state, &me, chat_id, changes) {
+        Ok(written) => written,
+        Err(refusal) => return refusal,
+    };
 
     // A second row wearing an id the list already holds. Nothing legitimate does this: a
     // message id is a ulid, and a heal re-inserts a row the list is *missing*, so after a real
@@ -382,7 +385,7 @@ pub fn check_push(
         carries_new_message = false;
     }
     PushCheck::Allow {
-        carries_new_message,
+        carries_new_message: carries_new_message || poll_written,
         attributed,
     }
 }
@@ -411,13 +414,18 @@ pub fn check_push(
 /// and nobody deleted, is history a heal carries ([`healed`]), and it carries the votes on it.
 /// A device cannot push its own vote and leave out everyone else's when it restores a row the
 /// relay lost. An author record alone is not that: an announce writes one for any id.
+///
+/// `Ok(true)` when the push wrote poll fields that are not such history: the caller gates it
+/// as a member acting in the chat, heal claim or not. A silenced, blocked or rate-limited
+/// member does not vote or close by calling the push a heal.
 fn check_polls(
     state: &AppState,
     me: &Pusher,
     chat_id: &str,
     changes: &MessageChanges,
-) -> Option<PushCheck> {
-    let refuse = |code, detail| Some(PushCheck::Refuse { code, detail });
+) -> Result<bool, PushCheck> {
+    let refuse = |code, detail| Err(PushCheck::Refuse { code, detail });
+    let mut written_here = false;
     for (id, fields) in &changes.polls {
         let arrives = changes.inserted.iter().any(|(i, _)| i == id);
         // A row pushed back under an id the relay saw deleted is taken out again in the same
@@ -446,7 +454,8 @@ fn check_polls(
                 format!("{id} does not hold a poll within bounds"),
             );
         };
-        let attested = arrives && healed(state, chat_id, id, &poll);
+        let attested = arrives && healed(state, chat_id, changes, id, &poll);
+        written_here |= !attested;
         // Every vote on a row that arrives whole; on a row already here, the ones this push
         // wrote — including one it removed, which is why this walks the written fields and
         // not the fields that are left.
@@ -512,6 +521,14 @@ fn check_polls(
             if attested {
                 continue;
             }
+            // An agent does not vote: a box serves every agent its owner has in the chat,
+            // so one owner would hold a vote for each. No agent build writes a vote.
+            if matches!(me, Pusher::BoxOf(_)) {
+                return refuse(
+                    "bad_vote",
+                    format!("the vote on {id} is written by a box; agents do not vote"),
+                );
+            }
             if !me.owns(state, voter) {
                 return refuse(
                     "not_yours",
@@ -528,7 +545,7 @@ fn check_polls(
             }
         }
     }
-    None
+    Ok(written_here)
 }
 
 /// A poll row arriving whole that is history a heal restores: the relay stored a row under
@@ -539,7 +556,21 @@ fn check_polls(
 /// A record from before the relay kept the mark says neither. No timed poll can be that old —
 /// they did not exist — so a timed poll under such an id is never history. A poll of the
 /// older shape under such an id is taken as history, as the relay took it before the mark.
-fn healed(state: &AppState, chat_id: &str, id: &str, poll: &Poll) -> bool {
+///
+/// A row this same push took out is never that. The deletion is recorded only when the push
+/// is stored, so the record still says "stored, not deleted" while the push is judged — and
+/// a push that deletes a poll and inserts a row under its id would otherwise carry any votes
+/// and any close it liked as history. (`check_push` refuses such a push outright.)
+fn healed(
+    state: &AppState,
+    chat_id: &str,
+    changes: &MessageChanges,
+    id: &str,
+    poll: &Poll,
+) -> bool {
+    if changes.removed.iter().any(|(removed, _)| removed == id) {
+        return false;
+    }
     let stored = match state.db.message_stored(chat_id, id) {
         Ok(Some(stored)) => stored,
         Ok(None) => !poll.timed(),
@@ -630,7 +661,7 @@ pub fn corrections(
         let arrives = changes.inserted.iter().any(|(i, _)| i == id);
         if !poll.timed()
             || fixes.iter().any(|fix| fix.message_id == *id)
-            || (arrives && healed(state, chat_id, id, &poll))
+            || (arrives && healed(state, chat_id, changes, id, &poll))
         {
             continue;
         }
@@ -1134,6 +1165,45 @@ mod tests {
     /// Finding 3: the kind of a push is decided from what it carries. A push with a message of
     /// the pusher's own is gated whatever the `heal` flag said; one that only carries attested
     /// history is not, which keeps the exemption a real heal depends on.
+    /// An announce writes an author record for whatever id a member names. That record alone
+    /// does not make a row arriving under the id history: only a row the relay stored itself
+    /// is a heal, exempt from the people gates.
+    #[test]
+    fn an_announced_id_is_a_new_message_until_the_relay_has_stored_its_row() {
+        let state = test_state(AuthMode::Github);
+        let (chat, _alice, bob, _alice_dev, bob_dev) = chat_with_two(&state);
+        let me = format!("user:{bob}");
+        state
+            .db
+            .insert_chat_event(&chat, None, "m_new", Some(&bob), &me)
+            .unwrap();
+        assert_eq!(
+            state.db.message_stored(&chat, "m_new").unwrap(),
+            Some(false)
+        );
+        let mut c = changes();
+        c.inserted = vec![("m_new".to_owned(), Some(me.clone()))];
+        let gated = |heal| {
+            kind(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                heal,
+                &c,
+            ))
+        };
+        assert_eq!(
+            gated(true),
+            Some(true),
+            "announced only: gated, heal or not"
+        );
+
+        state.db.record_message_author(&chat, "m_new", &me).unwrap();
+        assert_eq!(state.db.message_stored(&chat, "m_new").unwrap(), Some(true));
+        assert_eq!(gated(true), Some(false), "stored by the relay: a heal");
+    }
+
     #[test]
     fn the_kind_of_a_push_comes_from_its_contents_not_its_flag() {
         let state = test_state(AuthMode::Github);
@@ -1492,17 +1562,18 @@ mod tests {
         let me = format!("user:{bob}");
         for picked in [vec!["1".to_owned()], vec!["2".to_owned()], vec![]] {
             let c = room.push(|d| d.set_poll_vote("p1", &me, &picked).unwrap());
+            // Allowed, and gated like a message whether or not the push calls itself a heal.
             assert_eq!(
                 kind(&check_push(
                     &state,
                     &bob_dev,
                     PEOPLE_PROJECT,
                     &chat,
-                    false,
+                    true,
                     &c
                 )),
-                Some(false),
-                "a vote is not a new message: {picked:?}"
+                Some(true),
+                "a vote is a member acting in the chat: {picked:?}"
             );
         }
     }
@@ -2372,6 +2443,149 @@ mod tests {
 
     /// A poll cannot arrive with other people's votes already on it — unless the relay has
     /// attested that row before, which is a heal restoring it with the votes it had.
+    /// The forgery the stored mark alone let through: one push deletes a poll and inserts a
+    /// row under its id, with any poll, a vote in another member's name and a close. The
+    /// record still says "stored, not deleted" while that push is judged, so the new row
+    /// read as history a heal restores and nothing on it was checked. By the poll's author,
+    /// and by a moderator on someone else's poll; with and without a heal claim.
+    #[test]
+    fn a_poll_deleted_and_put_back_in_one_push_is_not_history() {
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, bob, alice_dev, _bob_dev) = chat_with_two(&state);
+        // Alice owns the DM: she moderates Bob's messages. One poll each, stored.
+        for (id, maker) in [("p_alice", &alice), ("p_bob", &bob)] {
+            let mut room = Room::new();
+            room.push(|d| {
+                d.append_poll_message(id, &poll(), "dev", &as_user(maker))
+                    .unwrap()
+            });
+            let author = format!("user:{maker}");
+            state.db.record_message_author(&chat, id, &author).unwrap();
+            assert_eq!(state.db.message_stored(&chat, id).unwrap(), Some(true));
+
+            let forged = room.push(|d| {
+                d.delete_message(id).unwrap();
+                d.append_poll_message(id, &poll(), "dev", &as_user(maker))
+                    .unwrap();
+                d.set_message_fields(
+                    id,
+                    &[
+                        (&format!("{POLL_VOTE_PREFIX}user:{bob}"), json!(["2"])),
+                        (&format!("{POLL_VOTE_AT_PREFIX}user:{bob}"), json!(5)),
+                        (POLL_CLOSED_FIELD, json!(6)),
+                    ],
+                );
+            });
+            assert_eq!((forged.removed.len(), forged.inserted.len()), (1, 1));
+            let fields = &forged.polls.iter().find(|(i, _)| i == id).unwrap().1;
+            let parsed = Poll::parse(&fields[POLL_FIELD]).unwrap();
+            assert!(
+                !healed(&state, &chat, &forged, id, &parsed),
+                "{id}: a row this push removed is never history"
+            );
+            for heal in [false, true] {
+                let check = check_push(&state, &alice_dev, PEOPLE_PROJECT, &chat, heal, &forged);
+                assert!(refused(&check), "{id} heal={heal}: {check:?}");
+            }
+        }
+    }
+
+    /// A push that only writes poll fields carries no new message, so with a heal claim it
+    /// used to skip the people gates: a silenced, blocked or rate-limited member could vote
+    /// and close. Every poll write that is not restored history is gated.
+    #[test]
+    fn a_vote_or_a_close_is_gated_whatever_the_push_calls_itself() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let gated = |c: &MessageChanges, who: &Principal| {
+            kind(&check_push(&state, who, PEOPLE_PROJECT, &chat, true, c))
+        };
+        let vote = room.push(|d| {
+            d.set_poll_vote("p1", &format!("user:{bob}"), &["1".into()])
+                .unwrap()
+        });
+        assert_eq!(gated(&vote, &bob_dev), Some(true), "a vote");
+        let close = room.push(|d| d.close_poll("p1", &format!("user:{alice}")).unwrap());
+        assert_eq!(gated(&close, &alice_dev), Some(true), "a close");
+        // Restored history is still a heal: the stored poll arriving whole on a fresh doc.
+        let mut lost = Room::new();
+        let healed = lost.push(|d| {
+            d.append_poll_message("p1", &poll(), "dev", &as_user(&alice))
+                .unwrap();
+            d.set_poll_vote("p1", &format!("user:{bob}"), &["1".into()])
+                .unwrap();
+        });
+        assert_eq!(
+            gated(&healed, &bob_dev),
+            Some(false),
+            "a heal of the stored poll"
+        );
+    }
+
+    /// An agent does not vote. A box is one principal for every agent its owner has in the
+    /// chat, so it could cast a vote for each; no agent build writes one.
+    #[test]
+    fn a_box_cannot_cast_a_vote() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, ..) = chat_with_a_poll(&state);
+        let the_box = Principal::Box {
+            user_id: alice.clone(),
+        };
+        for voter in [format!("user:{alice}"), "agent:p_any".to_owned()] {
+            let c = room.set("p1", &format!("{POLL_VOTE_PREFIX}{voter}"), json!(["1"]));
+            let check = check_push(&state, &the_box, PEOPLE_PROJECT, &chat, false, &c);
+            assert_eq!(code(&check), Some("bad_vote"), "{voter}");
+        }
+    }
+
+    /// A poll composed with a closing time already in the past (a slow device, or one that
+    /// was offline) and its author's own vote, in one push: the relay starts the poll's time
+    /// now, times the vote now, and the vote counts.
+    #[test]
+    fn a_new_poll_written_as_already_closed_runs_from_now_with_its_authors_vote() {
+        const HOUR: i64 = 60 * MINUTE;
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
+        let timed = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            Some(HOUR),
+        )
+        .unwrap();
+        let me = format!("user:{alice}");
+        let (vote, at) = (
+            format!("{POLL_VOTE_PREFIX}{me}"),
+            format!("{POLL_VOTE_AT_PREFIX}{me}"),
+        );
+        let mut room = Room::new();
+        let c = room.push(|d| {
+            d.append_poll_message("p1", &timed, "dev", &as_user(&alice))
+                .unwrap();
+            d.set_message_fields(
+                "p1",
+                &[
+                    (POLL_CLOSES_FIELD, json!(NOW - 2 * HOUR)),
+                    (&vote, json!(["1"])),
+                    (&at, json!(NOW - 3 * HOUR)),
+                ],
+            );
+        });
+        let check = check_push(&state, &alice_dev, PEOPLE_PROJECT, &chat, false, &c);
+        assert_eq!(code(&check), None);
+        let fixes = corrections(&state, &chat, &c, NOW).unwrap();
+        assert_eq!(
+            fixes,
+            stamp(&[(POLL_CLOSES_FIELD, json!(NOW + HOUR)), (&at, json!(NOW))])
+        );
+        room.doc
+            .transact(|doc| fixes.iter().try_for_each(|fix| fix.apply(doc)))
+            .unwrap();
+        assert_eq!(room.poll()["counts"], json!({ "1": 1 }));
+        assert_eq!(room.poll()["deadline"], NOW + HOUR);
+    }
+
     #[test]
     fn a_new_poll_cannot_arrive_with_someone_elses_vote_on_it() {
         let state = test_state(AuthMode::Github);

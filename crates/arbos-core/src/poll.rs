@@ -17,6 +17,8 @@ const OPTION_ID_MAX: usize = 8;
 pub const TIME_MAX: i64 = 4_102_444_800_000;
 /// The longest a poll may be posted to run: one week.
 pub const DURATION_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// The shortest: one minute.
+pub const DURATION_MIN_MS: i64 = 60 * 1000;
 
 /// How far the relay's clock is ahead of this device's, in ms. One relay per process: a
 /// second account on another relay would need this per relay.
@@ -122,7 +124,7 @@ fn sized(s: &str, max: usize) -> bool {
 impl Poll {
     /// A poll from what a composer collected, or `None` when it is out of bounds. Blank option
     /// rows are dropped; ids are the option's place in the list. `closes_in_ms` is how long it
-    /// runs, at most [`DURATION_MAX_MS`]; `None` runs until its author closes it.
+    /// runs, [`DURATION_MIN_MS`] to [`DURATION_MAX_MS`]; `None` runs until its author closes it.
     pub fn new(
         question: &str,
         labels: &[String],
@@ -186,7 +188,7 @@ impl Poll {
             // and nothing could be held against the close.
             && self
                 .closes_in
-                .is_none_or(|d| self.timed() && (1..=DURATION_MAX_MS).contains(&d))
+                .is_none_or(|d| self.timed() && (DURATION_MIN_MS..=DURATION_MAX_MS).contains(&d))
             && self.options.iter().enumerate().all(|(i, o)| {
                 id_ok(&o.id)
                     && sized(&o.label, LABEL_MAX)
@@ -383,6 +385,11 @@ mod tests {
         assert!(timed(json!(3_600_000)).is_some());
         assert!(timed(json!(DURATION_MAX_MS)).is_some());
         assert!(timed(json!(0)).is_none(), "not a duration");
+        assert!(
+            timed(json!(DURATION_MIN_MS - 1)).is_none(),
+            "under a minute"
+        );
+        assert!(timed(json!(DURATION_MIN_MS)).is_some());
         assert!(timed(json!(-5)).is_none());
         assert!(timed(json!(DURATION_MAX_MS + 1)).is_none(), "over a week");
         assert!(timed(json!("soon")).is_none());
