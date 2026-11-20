@@ -852,8 +852,8 @@ struct MachinePage: View {
                         switch row {
                         case .runningNow:
                             SettingsValueRow("Running now", value: MachineMetrics.runningNow(r))
-                        case .jobs:
-                            SettingsValueRow("Background jobs", value: MachineMetrics.jobsValue(r.jobsRunning ?? 0))
+                        case .outstanding:
+                            SettingsValueRow("Outstanding work", value: MachineMetrics.outstandingValue(r.outstanding ?? Outstanding()))
                         case .breakdown:
                             Button {
                                 withAnimation(.easeOut(duration: 0.2)) { breakdownOpen.toggle() }
