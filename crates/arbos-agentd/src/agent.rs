@@ -2199,6 +2199,13 @@ pub struct Agent {
     pub turn: Arc<Mutex<Option<TurnState>>>,
     adapters: HashMap<Harness, Arc<dyn HarnessAdapter>>,
     pub turn_running: AtomicBool,
+    /// The main turn's deadline when set (0: the environment's, per kind of turn), and how long
+    /// pi has to end its run after the abort that deadline sends before the child is replaced.
+    /// Fields so a test can shorten them for one box.
+    pub(crate) turn_deadline_ms: std::sync::atomic::AtomicU64,
+    pub(crate) turn_abort_grace_ms: std::sync::atomic::AtomicU64,
+    /// How long the turn loop waits without an event before it reads its limits (one second).
+    pub(crate) turn_quiet_tick_ms: std::sync::atomic::AtomicU64,
     /// Subagent turns in flight (keep-alive must cover them too, design §4.6).
     pub subagent_turns: std::sync::atomic::AtomicU32,
     /// How long one worker run may last before it is failed and stopped. A field so a test can
@@ -2530,6 +2537,9 @@ impl Agent {
             turn: Arc::new(Mutex::new(None)),
             adapters,
             turn_running: AtomicBool::new(false),
+            turn_deadline_ms: std::sync::atomic::AtomicU64::new(0),
+            turn_abort_grace_ms: std::sync::atomic::AtomicU64::new(60_000),
+            turn_quiet_tick_ms: std::sync::atomic::AtomicU64::new(1_000),
             subagent_turns: std::sync::atomic::AtomicU32::new(0),
             worker_deadline_ms: std::sync::atomic::AtomicU64::new(60 * 60 * 1000),
             pi_ready: AtomicBool::new(false),
@@ -9778,11 +9788,19 @@ impl Agent {
             .await
             .as_ref()
             .is_some_and(|t| t.reply_only);
-        let deadline = Duration::from_secs(if reply_only {
-            relay_turn_deadline_secs()
-        } else {
-            turn_deadline_secs()
-        });
+        let deadline = match self.turn_deadline_ms.load(Ordering::SeqCst) {
+            0 => Duration::from_secs(if reply_only {
+                relay_turn_deadline_secs()
+            } else {
+                turn_deadline_secs()
+            }),
+            ms => Duration::from_millis(ms),
+        };
+        let abort_grace = Duration::from_millis(self.turn_abort_grace_ms.load(Ordering::SeqCst));
+        let quiet_tick = Duration::from_millis(self.turn_quiet_tick_ms.load(Ordering::SeqCst));
+        // Since when the child has said nothing, counted only once the turn was told to end
+        // (the deadline's abort, or the conversion to a job). Any event starts it over.
+        let mut quiet_since: Option<Instant> = None;
         // Time the turn spends blocked on an approval card is the user's, not the agent's: it
         // does not count toward the turn deadline.
         let mut approval_paused = Duration::ZERO;
@@ -9790,7 +9808,7 @@ impl Agent {
         loop {
             let ev = tokio::select! {
                 e = events.recv() => e,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                _ = tokio::time::sleep(quiet_tick) => {
                     // `stop` / a typed send preempting a voice turn: leave the approval wait
                     // so the turn lock is released and later sends can run.
                     if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
@@ -9806,7 +9824,31 @@ impl Agent {
                         (true, Some(_)) | (false, None) => {}
                     }
                     if waiting {
+                        // A card is the user's time: it does not count as the child's silence.
+                        quiet_since = None;
                         continue;
+                    }
+                    // The abort was acknowledged or ignored, and the child has said nothing at
+                    // all since for the whole grace. Waiting longer holds the turn lock, and
+                    // every later message in this workspace, for as long as the child lives.
+                    // End the turn here and replace the child.
+                    //
+                    // Continuous silence, not time since the abort: a child that ignored the
+                    // abort and is still emitting is still working towards its answer, and is
+                    // left to deliver it as it always was.
+                    if deadline_announced
+                        && quiet_since.get_or_insert_with(Instant::now).elapsed() > abort_grace
+                    {
+                        // An event that arrived while this arm was running (it awaits the turn
+                        // and the approval state above) has not been seen yet. It may be the
+                        // answer: go round and read it, which also starts the silence over.
+                        if !events.is_empty() {
+                            quiet_since = None;
+                            continue;
+                        }
+                        self.end_hung_turn(chat_id, host, &pi, started).await;
+                        settled.store(true, Ordering::SeqCst);
+                        break;
                     }
                     let elapsed = started.elapsed().saturating_sub(approval_paused);
                     // A relay turn steps aside for a waiting user message, and never escalates:
@@ -9855,6 +9897,7 @@ impl Agent {
                     continue;
                 }
             };
+            quiet_since = None;
             let ev = match ev {
                 Ok(e) => e,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -9882,6 +9925,85 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    /// The main child was told to end its run and did not: say so unless a helper takes the work
+    /// over, and end the child and everything it started so the supervisor starts a fresh one
+    /// for the next message.
+    async fn end_hung_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        pi: &Arc<RpcChild>,
+        turn_started: Instant,
+    ) {
+        let handed_off = self.turn.lock().await.as_ref().is_some_and(helper_follows);
+        tracing::warn!(
+            chat_id,
+            handed_off,
+            "the main turn did not end after its abort"
+        );
+        self.append_audit(
+            "turn_hung",
+            json!({ "chat_id": chat_id, "handed_off": handed_off }),
+        );
+        if !handed_off {
+            self.post_limit_notice(host, TURN_HUNG_NOTICE).await;
+        }
+        // Asked while the child is still there to be read. The sweep below tells this turn's
+        // processes from older ones by start time, which is only right where the kernel's two
+        // clocks agree; the child's own age, which this process measured, is the check.
+        let clocks_agree = match pi.pid() {
+            Some(pid) => {
+                let age = pi.age();
+                tokio::task::spawn_blocking(move || crate::isolation::clocks_agree(pid, age))
+                    .await
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
+        // Closed in place, not taken out of the slot: the next send then meets a dead child,
+        // which is the loss the respawn path already answers without waiting on an empty slot.
+        pi.shutdown().await;
+        // The child alone is one pid. The tool call that hung it is a process of its own, and
+        // killing its parent only hands it to PID 1: it would keep its pids and memory, and
+        // keep writing beside the helper or the retry that follows.
+        //
+        // Only what this turn started. The child's session and cgroup leaf also hold what
+        // earlier turns left running on purpose, a dev server or a preview the user asked for,
+        // and those outlive a lost child today; they must outlive this one too. So the sweep
+        // takes the members that started after this turn did, and nothing older.
+        //
+        // Without the mark, which a worker's sweep does use. A worker's mark names its session;
+        // the main child's is the bare `pi-main`, the same in every workspace of the box, so a
+        // sweep by it would reach every other workspace's agent. Where there is no leaf (a box
+        // without isolation) a tool that called `setsid` itself is out of reach of this sweep.
+        let mut tree = pi.tree();
+        tree.mark = None;
+        if !clocks_agree {
+            // Killing by a start time this box reports on another clock could take every
+            // server the user has running, or nothing: so nothing, and it is said.
+            tracing::warn!(
+                chat_id,
+                "process start times and uptime do not agree on this box (or cannot be read); \
+                 nothing the hung turn started is swept"
+            );
+            self.append_audit("turn_hung_sweep_skipped", json!({ "chat_id": chat_id }));
+            self.pi_wake.notify_one();
+            return;
+        }
+        let age = turn_started.elapsed();
+        let survivors = tokio::task::spawn_blocking(move || tree.kill_started_within(age))
+            .await
+            .unwrap_or_default();
+        if !survivors.is_empty() {
+            tracing::warn!(
+                chat_id,
+                ?survivors,
+                "processes of the hung turn outlived its kill"
+            );
+        }
+        self.pi_wake.notify_one();
     }
 
     /// pi may still be running a turn agentd stopped listening to (`pi_run_orphaned`), or one
@@ -15309,6 +15431,24 @@ fn norm_head(s: &str, n: usize) -> String {
 /// keeps the announcement; #1357: in the user's words, not the harness's).
 pub(crate) const TURN_LIMIT_NOTICE: &str =
     "This is taking longer than one go; I'm continuing in the background and will keep posting updates here.";
+
+/// Does a helper take this turn's work over once the turn ends? The same cases as the hand-offs
+/// at the end of `drive_turn`: an act turn converted to a job or escalated at its limit, and a
+/// new or woken subagent. A reply, or a turn that never chose a route, has nobody behind it.
+pub(crate) fn helper_follows(t: &TurnState) -> bool {
+    if t.stopped {
+        return false;
+    }
+    match &t.route {
+        Some(ValidRoute::Act { .. }) => t.act_to_job || t.escalate,
+        Some(ValidRoute::New { .. } | ValidRoute::Wake { .. }) => !t.act_to_job,
+        Some(ValidRoute::Reply { .. }) | None => false,
+    }
+}
+
+/// What the user reads when a turn was told to stop at its limit and never did.
+pub(crate) const TURN_HUNG_NOTICE: &str =
+    "That stopped responding, so I ended it. Send your message again to retry.";
 
 /// The chat line for a helper that could not be started; the raw error stays in a hidden part.
 pub(crate) fn subagent_start_failure_line(err: &str) -> String {
