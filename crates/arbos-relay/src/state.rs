@@ -191,6 +191,8 @@ pub struct Room {
     pub(crate) doc_build: tokio::sync::Mutex<()>,
     /// One speculative push owns the message preimage through durable admission.
     pub(crate) push_admission: tokio::sync::Mutex<()>,
+    /// When a checkpoint was last asked for (`rooms::post_checkpoint` spaces the attempts).
+    pub(crate) checkpoint_tried: std::sync::Mutex<Option<std::time::Instant>>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
     /// agent live only through such a socket; without one the box is told to open the room
     /// (`boxes::after_person_row`, #2120).
@@ -580,6 +582,7 @@ impl AppState {
                     doc_cache: std::sync::Mutex::new(None),
                     doc_build: tokio::sync::Mutex::new(()),
                     push_admission: tokio::sync::Mutex::new(()),
+                    checkpoint_tried: std::sync::Mutex::new(None),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
