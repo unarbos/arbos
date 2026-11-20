@@ -33,7 +33,8 @@
 //! record of what it was told is the only part of the picture the pusher did not write.
 
 use arbos_core::doc::{
-    MessageChanges, POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
+    MessageChanges, POLL_CLOSED_FIELD, POLL_CLOSES_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX,
+    POLL_VOTE_PREFIX,
 };
 use arbos_core::poll::{self, Poll};
 
@@ -419,7 +420,9 @@ fn check_polls(
             .filter(|(i, _)| i == id)
             .map(|(_, field)| field.as_str())
             .collect();
-        if written.contains(&POLL_FIELD) {
+        // The poll and its closing time are written with the message and never again: no
+        // device moves a poll's end once it is posted.
+        if written.contains(&POLL_FIELD) || written.contains(&POLL_CLOSES_FIELD) {
             return refuse(
                 "poll_fixed",
                 format!("the poll on {id} is written with its message; it is not editable"),
@@ -432,14 +435,6 @@ fn check_polls(
             );
         };
         let attested = arrives && healed(state, chat_id, id, &poll);
-        // A poll the relay sees for the first time may close at most a week (and a day of
-        // clock difference) from now, as every composer bounds it.
-        if arrives && !attested && poll.closes_too_late(arbos_core::ids::now_ms()) {
-            return refuse(
-                "bad_poll",
-                format!("the poll on {id} closes later than a poll may run"),
-            );
-        }
         // Every vote on a row that arrives whole; on a row already here, the ones this push
         // wrote — including one it removed, which is why this walks the written fields and
         // not the fields that are left.
@@ -575,6 +570,10 @@ impl RowFix {
 ///
 /// - **A deleted message stays deleted.** A row inserted under an id the relay saw deleted is
 ///   taken out again, whoever pushes it and whatever it carries.
+/// - **A poll runs for what its author picked, by the relay's clock.** A poll with a duration
+///   arriving for the first time gets `pollCloses = now + closesIn`, whatever the device
+///   wrote: a device half an hour slow does not shorten its poll, and one a day fast is not
+///   refused for it. A poll composed offline starts running when the relay takes it.
 /// - **A close is final and timed by the relay.** A `pollClosed` written over an earlier one
 ///   is set back to the earlier one. A first close is set to `now`.
 /// - **No vote after the deadline.** Once the deadline that stood before the push has passed
@@ -629,8 +628,12 @@ pub fn corrections(
             .find(|(i, _)| i == id)
             .map_or(&empty, |(_, fields)| fields);
         let mut fields = Vec::new();
+        if let Some(runs) = poll.closes_in.filter(|_| arrives) {
+            fields.push((POLL_CLOSES_FIELD.to_owned(), (now + runs).into()));
+        }
 
-        let open = !poll::closed(poll.deadline(before.get(POLL_CLOSED_FIELD)), now);
+        let deadline = poll.deadline(before.get(POLL_CLOSES_FIELD), before.get(POLL_CLOSED_FIELD));
+        let open = !poll::closed(deadline, now);
         let voters: std::collections::BTreeSet<&str> = [after, before]
             .into_iter()
             .filter_map(|fields| fields.as_object())
@@ -1502,11 +1505,11 @@ mod tests {
             ("a visibility flag that is not a boolean", |p| {
                 p["showVoters"] = json!("yes")
             }),
-            ("a closing time that is not a time", |p| {
-                p["closesAt"] = json!("tomorrow")
+            ("a duration that is not a number", |p| {
+                p["closesIn"] = json!("tomorrow")
             }),
-            ("a closing time out of range", |p| {
-                p["closesAt"] = json!(arbos_core::poll::TIME_MAX + 1)
+            ("a duration over a week", |p| {
+                p["closesIn"] = json!(arbos_core::poll::DURATION_MAX_MS + 1)
             }),
             ("an unknown field", |p| p["anonymous"] = json!(true)),
             ("one option", |p| {
@@ -2277,44 +2280,59 @@ mod tests {
         );
     }
 
-    /// A poll the relay sees for the first time closes at most a week (and a day of clock
-    /// difference) from now. One already past its time is only a closed poll: a poll
-    /// composed offline may arrive late.
+    /// A poll runs for the duration its author picked, counted from the relay's clock when
+    /// the relay first stores it. What the device wrote as the closing time is replaced: a
+    /// Mac half an hour slow does not post a one-hour poll that closes in thirty minutes, and
+    /// a phone a day fast is not refused. Nobody moves the closing time afterwards.
     #[test]
-    fn a_new_polls_closing_time_is_bounded() {
-        use arbos_core::poll::{CLOSES_AT_ALLOWANCE_MS, DURATION_MAX_MS};
+    fn a_polls_closing_time_is_the_relays_clock_plus_its_duration() {
+        const HOUR: i64 = 60 * MINUTE;
         let state = test_state(AuthMode::Github);
         let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
-        let now = arbos_core::ids::now_ms();
-        for (closes_at, refused) in [
-            (now - 3_600_000, None),
-            (now + DURATION_MAX_MS, None),
-            (
-                now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + MINUTE,
-                Some("bad_poll"),
-            ),
+        let timed = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            Some(HOUR),
+        )
+        .unwrap();
+        for device_wrote in [
+            Some(json!(NOW + HOUR - 30 * MINUTE)), // half an hour slow
+            Some(json!(NOW + HOUR + 26 * HOUR)),   // more than a day fast
+            Some(json!("soon")),
+            None,
         ] {
             let mut room = Room::new();
-            let late = Poll {
-                closes_at: Some(closes_at),
-                ..poll()
-            };
             let c = room.push(|d| {
-                d.append_poll_message("p_new", &late, "dev", &as_user(&alice))
-                    .unwrap()
+                d.append_poll_message("p1", &timed, "dev", &as_user(&alice))
+                    .unwrap();
+                match &device_wrote {
+                    Some(at) => d.set_message_fields("p1", &[(POLL_CLOSES_FIELD, at.clone())]),
+                    None => d
+                        .find_message("p1")
+                        .unwrap()
+                        .delete(POLL_CLOSES_FIELD)
+                        .unwrap(),
+                }
             });
+            let check = check_push(&state, &alice_dev, PEOPLE_PROJECT, &chat, false, &c);
+            assert_eq!(code(&check), None, "{device_wrote:?}");
+            let fixes = corrections(&state, &chat, &c, NOW).unwrap();
             assert_eq!(
-                code(&check_push(
-                    &state,
-                    &alice_dev,
-                    PEOPLE_PROJECT,
-                    &chat,
-                    false,
-                    &c
-                )),
-                refused,
-                "{closes_at}"
+                fixes,
+                stamp(&[(POLL_CLOSES_FIELD, json!(NOW + HOUR))]),
+                "{device_wrote:?}"
             );
+            room.doc
+                .transact(|doc| fixes.iter().try_for_each(|fix| fix.apply(doc)))
+                .unwrap();
+            assert_eq!(room.poll()["deadline"], NOW + HOUR);
+
+            // Once posted, the closing time is not a device's to write.
+            let c = room.set("p1", POLL_CLOSES_FIELD, json!(NOW + 100 * HOUR));
+            let check = check_push(&state, &alice_dev, PEOPLE_PROJECT, &chat, false, &c);
+            assert_eq!(code(&check), Some("poll_fixed"));
         }
     }
 

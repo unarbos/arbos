@@ -342,9 +342,17 @@ pub const POLL_VOTE_AT_PREFIX: &str = "voteAt|";
 /// read, the relay replaces it with its own time when it stores the close.
 pub const POLL_CLOSED_FIELD: &str = "pollClosed";
 
+/// The message field holding when a poll with a duration ([`Poll::closes_in`]) closes by
+/// itself, in ms since the epoch. Written with the poll, as the composing device's time plus
+/// the duration; in a chat the relay can read, the relay replaces it with its own time plus
+/// the duration when it first stores the poll, so the poll runs for what its author picked
+/// whatever that device's clock says. Never written again.
+pub const POLL_CLOSES_FIELD: &str = "pollCloses";
+
 fn is_poll_key(key: &str) -> bool {
     key == POLL_FIELD
         || key == POLL_CLOSED_FIELD
+        || key == POLL_CLOSES_FIELD
         || key.starts_with(POLL_VOTE_PREFIX)
         || key.starts_with(POLL_VOTE_AT_PREFIX)
 }
@@ -380,7 +388,7 @@ pub fn project_poll(json: &mut Value) {
     let Some(poll) = obj.get(POLL_FIELD).and_then(Poll::parse) else {
         return;
     };
-    let deadline = poll.deadline(obj.get(POLL_CLOSED_FIELD));
+    let deadline = poll.deadline(obj.get(POLL_CLOSES_FIELD), obj.get(POLL_CLOSED_FIELD));
     // Sorted, so every reader lists an option's voters in the same order whatever order the
     // doc's map hands its keys over in.
     let mut votes: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
@@ -1238,7 +1246,11 @@ impl ChatDoc {
             .find_message(msg_id)
             .ok_or_else(|| CoreError::msg("poll message missing"))?;
         let value = serde_json::to_value(poll).map_err(|e| CoreError::msg(e.to_string()))?;
-        loro_err(m.insert(POLL_FIELD, json_to_lv(&value)))
+        loro_err(m.insert(POLL_FIELD, json_to_lv(&value)))?;
+        if let Some(runs) = poll.closes_in {
+            loro_err(m.insert(POLL_CLOSES_FIELD, crate::poll::now() + runs))?;
+        }
+        Ok(())
     }
 
     /// Client write: `sender`'s vote on a poll, replacing any earlier one; empty retracts.
@@ -1262,8 +1274,9 @@ impl ChatDoc {
         let Some(poll) = poll.filter(|_| !sender.is_empty()) else {
             return Err(CoreError::msg("not a vote this poll allows"));
         };
-        let now = now_ms();
-        if crate::poll::closed(poll.deadline(fields.get(POLL_CLOSED_FIELD)), now) {
+        let now = crate::poll::now();
+        let deadline = poll.deadline(fields.get(POLL_CLOSES_FIELD), fields.get(POLL_CLOSED_FIELD));
+        if crate::poll::closed(deadline, now) {
             return Err(CoreError::msg("this poll is closed"));
         }
         loro_err(m.insert(
@@ -1294,9 +1307,9 @@ impl ChatDoc {
         }
         // Closed already, by hand (even with a time still ahead) or by its own time: the
         // first close stands.
-        let now = now_ms();
-        if fields.get(POLL_CLOSED_FIELD).is_some() || crate::poll::closed(poll.deadline(None), now)
-        {
+        let now = crate::poll::now();
+        let closes = poll.deadline(fields.get(POLL_CLOSES_FIELD), None);
+        if fields.get(POLL_CLOSED_FIELD).is_some() || crate::poll::closed(closes, now) {
             return Ok(());
         }
         loro_err(m.insert(POLL_CLOSED_FIELD, now))
@@ -2978,12 +2991,9 @@ mod message_change_tests {
         assert_eq!(row["parts"][0]["voters"], 0);
     }
 
-    fn timed_poll(show_voters: bool, closes_at: Option<i64>) -> Poll {
+    fn timed_poll(show_voters: bool, closes_in: Option<i64>) -> Poll {
         let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
-        Poll {
-            closes_at,
-            ..Poll::new("Where?", &labels, false, show_voters, None).unwrap()
-        }
+        Poll::new("Where?", &labels, false, show_voters, closes_in).unwrap()
     }
 
     /// The reducer's close rule, over rows as any reader holds them: a vote counts when the
@@ -2997,8 +3007,8 @@ mod message_change_tests {
             row["parts"][0].clone()
         };
         // Closed by its duration at 100.
-        let timed = timed_poll(true, Some(100));
-        let part = votes(json!({ "poll": timed,
+        let timed = timed_poll(true, Some(60_000));
+        let part = votes(json!({ "poll": timed, "pollCloses": 100,
             "vote|user:early": ["1"], "voteAt|user:early": 99,
             "vote|user:edge": ["1"], "voteAt|user:edge": 100,
             "vote|user:late": ["2"], "voteAt|user:late": 101,
@@ -3009,14 +3019,16 @@ mod message_change_tests {
         assert_eq!(part["deadline"], 100);
 
         // Closed by its author at 50, before its duration ran out: the earlier one decides.
-        let part = votes(json!({ "poll": timed, "pollClosed": 50,
+        let part = votes(json!({ "poll": timed, "pollCloses": 100, "pollClosed": 50,
             "vote|user:early": ["1"], "voteAt|user:early": 49,
             "vote|user:late": ["2"], "voteAt|user:late": 50 }));
         assert_eq!(part["votes"], json!({ "1": ["user:early"] }));
         assert_eq!(part["deadline"], 50);
 
-        // A close that is not a time closes nothing.
+        // A close that is not a time closes nothing, and neither does a closing time on a
+        // poll that was posted without a duration.
         let part = votes(json!({ "poll": timed_poll(true, None), "pollClosed": "now",
+            "pollCloses": 1,
             "vote|user:a": ["1"], "voteAt|user:a": 7 }));
         assert_eq!(part["votes"], json!({ "1": ["user:a"] }));
         assert!(part.get("deadline").is_none());
@@ -3105,11 +3117,17 @@ mod message_change_tests {
         // a second time by hand.
         doc.append_poll_message(
             "p2",
-            &timed_poll(false, Some(1)),
+            &timed_poll(false, Some(60_000)),
             "dev",
             &with("user:alice"),
         )
         .unwrap();
+        let closes = doc.projected_rows()[1]["parts"][1]["deadline"]
+            .as_i64()
+            .unwrap();
+        let now = crate::ids::now_ms();
+        assert!((now..=now + 61_000).contains(&closes), "now plus a minute");
+        doc.set_message_fields("p2", &[(POLL_CLOSES_FIELD, json!(1))]);
         assert!(doc.set_poll_vote("p2", "user:bob", &["1".into()]).is_err());
         doc.close_poll("p2", "user:alice").unwrap();
         assert_eq!(doc.projected_rows()[1]["parts"][1]["deadline"], 1);

@@ -3579,7 +3579,6 @@ mod covered_push_tests {
         use arbos_core::doc::{
             POLL_CLOSED_FIELD, POLL_FIELD, POLL_VOTE_AT_PREFIX, POLL_VOTE_PREFIX,
         };
-        use arbos_core::poll::{CLOSES_AT_ALLOWANCE_MS, DURATION_MAX_MS};
         let state = test_state(AuthMode::Github);
         let (alice, _) = person(&state, 1);
         let (bob, _) = person(&state, 2);
@@ -3620,10 +3619,16 @@ mod covered_push_tests {
             question: "Where to?".to_owned(),
             ..open_poll()
         };
-        let late = arbos_core::poll::Poll {
-            closes_at: Some(now + DURATION_MAX_MS + CLOSES_AT_ALLOWANCE_MS + 60_000),
+        let hour = 3_600_000i64;
+        let timed = arbos_core::poll::Poll {
+            closes_in: Some(hour),
             ..open_poll()
         };
+        let late = arbos_core::poll::Poll {
+            closes_in: Some(arbos_core::poll::DURATION_MAX_MS + 1),
+            ..open_poll()
+        };
+        let as_alice_again = as_alice.clone();
         let refused: [(&str, &str, &str, Write); 5] = [
             (
                 "a close by a member who did not make the poll",
@@ -3653,7 +3658,7 @@ mod covered_push_tests {
                 }),
             ),
             (
-                "a new poll that closes later than a poll may run",
+                "a new poll that runs longer than a week",
                 &alice,
                 "bad_poll",
                 Box::new(move |d| {
@@ -3675,6 +3680,32 @@ mod covered_push_tests {
         assert_eq!(frame.ty, FrameType::Ack, "header={}", frame.header);
         let part = held(&state, &chat, 51).projected_rows()[0]["parts"][1].clone();
         assert_eq!(part["counts"], json!({ "1": 1 }));
+
+        // A one-hour poll from a device half an hour slow, and one from a device more than
+        // a day fast: both are taken, and both close an hour from now by the relay's clock.
+        for (n, skew) in [-30 * 60_000i64, 26 * hour].into_iter().enumerate() {
+            let id = format!("p-skew-{n}");
+            let (poll, opts, row) = (timed.clone(), as_alice_again.clone(), id.clone());
+            let head = state.db.room_state(&room).unwrap().head;
+            let before = arbos_core::ids::now_ms();
+            let frame = poll_push(&state, addr, &chat, &alice, 60 + n as u64, move |d| {
+                d.append_poll_message(&row, &poll, "dev:alice", &opts)
+                    .unwrap();
+                let wrote = json!(arbos_core::ids::now_ms() + skew + hour);
+                d.set_message_fields(&row, &[(arbos_core::doc::POLL_CLOSES_FIELD, wrote)]);
+            })
+            .await;
+            assert_eq!(frame.ty, FrameType::Ack, "{skew}: {}", frame.header);
+            assert_eq!(state.db.room_state(&room).unwrap().head, head + 2, "{skew}");
+            let rows = held(&state, &chat, 70 + n as u64).projected_rows();
+            let row = rows.iter().find(|r| r["id"] == id.as_str()).unwrap();
+            let closes = row["parts"][1]["deadline"].as_i64().unwrap();
+            assert!(
+                (before + hour..=before + hour + 60_000).contains(&closes),
+                "{skew}: closes {} ms after posting",
+                closes - before
+            );
+        }
     }
 
     /// The app offers "Close poll" to the member whose name the row wears; the relay's record

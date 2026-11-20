@@ -309,16 +309,25 @@ a poll, an optional duration. Closing by hand was already planned.
 - `poll.showVoters: bool`, written by every build since. It is "Show who voted", fixed with
   the poll like the question. Its presence also marks a *timed* poll: one whose votes carry a
   time and which can be closed. A poll without it is counts-only and never closes.
-- `poll.closesAt: ms`, when the poll closes by itself; absent runs until closed by hand. An
-  integer in `1..=TIME_MAX` (2100-01-01), valid only on a timed poll. `Poll::new` takes a
-  duration of at most a week; the composers offer 1 hour, 1 day, 1 week.
+- `poll.closesIn: ms`, how long the poll runs before it closes by itself: what its author
+  picked, at most a week, valid only on a timed poll. Absent runs until closed by hand.
+- `pollCloses: ms` on the message: when a poll with a duration closes. The composing device
+  writes its own time plus the duration; the relay replaces it with its own time plus the
+  duration when it first stores the poll, and nobody writes it again. So a poll runs for
+  what was picked whatever the composing device's clock says, and a poll composed offline
+  starts running when the relay takes it.
 - `"voteAt|<sender>": ms` on the message, written with each vote on a timed poll.
 - `pollClosed: ms` on the message: the author's manual close.
 
 **One rule for "closed".** `arbos_core::poll::closed(deadline, now)` is `now >= deadline`, where
-the deadline is the earlier of `closesAt` and `pollClosed`. The writers, the reducer, the relay
+the deadline is the earlier of `pollCloses` and `pollClosed`. The writers, the reducer, the relay
 and both apps (the iPhone over the FFI) call that one function; the apps read the deadline from
 the projected part.
+
+**One clock.** Every time on a poll is the relay's, so a device asks "closed?" and counts down
+against the relay's clock, not its own: `arbos_core::poll::now()` is the device's time moved
+by the difference it measured from the `Date` header of the relay's last `/me` answer
+(`set_relay_now`). Until that answer it is the device's own clock.
 
 **What the reducer enforces** (`project_poll`, on every device and on the relay's readers). On a
 timed poll a vote counts when it has a time and the poll was not closed at that time (a vote
@@ -328,18 +337,20 @@ whatever order a close and a vote were merged in. It is the tie-breaker, not a g
 believes the times on the row.
 
 **What the writers enforce** (`set_poll_vote`, `close_poll`, in the apps). No vote, change or
-retraction once the device's own clock is past the deadline; a close only by the row's
-`sender`, and only once.
+retraction once `poll::now()` is past the deadline; a close only by the row's `sender`, and
+only once.
 
 **What the relay enforces** (`push_guard`), for chats it can read, by its own clock:
 
-- Refused outright, because no honest device pushes them: a close by anyone but the poll's
-  author, by the relay's record of who posted the row (`not_yours`); a close that is not a
+- Refused outright, because no honest device pushes them: a close by someone who is
+  the poll's author neither by the relay's record of who posted the row nor by the name on
+  the row (`not_yours`); a close that is not a
   time, or its removal (`bad_poll`); a vote or a vote time under someone else's name
-  (`not_yours`); a vote on a timed poll with no time (`bad_vote`); a new poll that closes
-  more than a week and a day from now (`bad_poll`). There is no bound the other way: a poll
-  composed offline may arrive after its time ran out, and is then a closed poll.
+  (`not_yours`); a vote on a timed poll with no time (`bad_vote`); a duration over a week
+  (`bad_poll`); `pollCloses` written on a poll already posted (`poll_fixed`).
 - Corrected (`push_guard::corrections`) by a row the relay writes itself:
+  - a poll with a duration arriving for the first time gets `pollCloses` = the relay's time
+    plus `closesIn`;
   - every changed vote on an open poll gets `voteAt|x` = the relay's time, and every first
     `pollClosed` is set to the relay's time. No device time is kept, so the count depends on
     one clock: a phone running ahead and a Mac running behind are both counted right;
