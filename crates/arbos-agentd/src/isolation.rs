@@ -461,6 +461,114 @@ impl ProcessTree {
     }
 }
 
+/// Clock ticks since boot, the unit of a process's start time in `/proc/<pid>/stat`. `None`
+/// where there is no `/proc` to read.
+fn ticks_since_boot() -> Option<u64> {
+    let uptime = std::fs::read_to_string(proc_root().join("uptime")).ok()?;
+    let secs: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+    let per_sec = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK).ok()??;
+    Some((secs * per_sec as f64) as u64)
+}
+
+/// How far a process's age as `/proc` gives it may be from its age as this process measured
+/// it before the two are taken to disagree.
+const CLOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Do the two clocks [`ProcessTree::kill_started_within`] compares agree on this kernel?
+///
+/// That sweep decides what is new from a process's start time (`/proc/<pid>/stat`) set against
+/// the time since boot (`/proc/uptime`). On Linux they are one clock. Under a sandbox that
+/// implements `/proc` itself that is an assumption, and if it is wrong every process reads as
+/// new, or none does. So before trusting it the caller asks about a process whose age it knows
+/// for itself: `pid`, which it spawned `age` ago. An answer that is off by more than
+/// [`CLOCK_SLACK`], or that cannot be read at all, is a no.
+pub fn clocks_agree(pid: u32, age: std::time::Duration) -> bool {
+    let (Some(now), Ok(Some(per_sec)), Some(stat)) = (
+        ticks_since_boot(),
+        nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK),
+        read_stat(pid),
+    ) else {
+        return false;
+    };
+    // A start time after "now" is a disagreement in itself.
+    let Some(ticks) = now.checked_sub(stat.start) else {
+        return false;
+    };
+    let by_proc = std::time::Duration::from_secs_f64(ticks as f64 / per_sec as f64);
+    by_proc.abs_diff(age) <= CLOCK_SLACK
+}
+
+impl ProcessTree {
+    /// SIGKILL the members of this tree that started less than `age` ago, and leave every older
+    /// one alone. Returns the ones still alive after the reap wait.
+    ///
+    /// For ending one piece of work inside a child that has done others: the tree's handles
+    /// name everything the child ever started, and the start time is what tells this turn's
+    /// tool from a server an earlier turn left running. A new process whose parent, or any
+    /// ancestor inside the tree, is one of those older ones is spared with it: that is a
+    /// watcher restarting its program, not this turn's work. The signals go to the chosen pids only;
+    /// the group and the cgroup as wholes are not signalled, because they hold the older ones.
+    pub fn kill_started_within(&self, age: std::time::Duration) -> Vec<u32> {
+        let (Some(now), Ok(Some(per_sec))) = (
+            ticks_since_boot(),
+            nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK),
+        ) else {
+            return Vec::new();
+        };
+        let cutoff = now.saturating_sub((age.as_secs_f64() * per_sec as f64).ceil() as u64);
+        // The child itself, which every tool of this turn is a child of. It predates the turn
+        // and that must not spare them.
+        let leader = self.sid.or(self.pgid);
+        let recent = || -> Vec<Witness> {
+            let stats: std::collections::HashMap<u32, ProcStat> = self
+                .members()
+                .into_iter()
+                .filter_map(|pid| read_stat(pid).filter(ProcStat::running).map(|st| (pid, st)))
+                .collect();
+            // Under something an earlier turn left running? A watcher (`nodemon`, `cargo
+            // watch`) restarts its program whenever a file changes, so that program is new while
+            // the thing the user started is old; it belongs to the watcher, not to this turn.
+            let under_older = |st: &ProcStat| {
+                let mut parent = st.ppid;
+                loop {
+                    match stats.get(&parent) {
+                        Some(p) if p.start >= cutoff => parent = p.ppid,
+                        Some(_) => return Some(parent) != leader,
+                        None => return false,
+                    }
+                }
+            };
+            stats
+                .iter()
+                .filter(|(_, st)| st.start >= cutoff && !under_older(st))
+                .map(|(pid, st)| Witness {
+                    pid: *pid,
+                    start: st.start,
+                })
+                .collect()
+        };
+        let mut witnesses = recent();
+        let mut alive: Vec<u32> = witnesses.iter().map(|w| w.pid).collect();
+        for _ in 0..REAP_TRIES {
+            if alive.is_empty() {
+                break;
+            }
+            for pid in &alive {
+                signal(*pid);
+            }
+            std::thread::sleep(REAP_WAIT);
+            // Again from the kernel, so a process forked since the last pass is caught too.
+            for w in recent() {
+                if !witnesses.contains(&w) {
+                    witnesses.push(w);
+                }
+            }
+            alive = still_alive(&witnesses);
+        }
+        alive
+    }
+}
+
 /// The witnesses that are still the process they were, read one pid at a time. A pid the kernel
 /// has given to something else since is not a survivor, and signalling it again would be a kill
 /// aimed at a stranger.
@@ -530,6 +638,7 @@ impl Ids {
 /// The fields of `/proc/<pid>/stat` a sweep reads.
 struct ProcStat {
     state: char,
+    ppid: u32,
     pgrp: u32,
     session: u32,
     /// Clock ticks since boot at which the process started: what tells a pid from the same pid
@@ -552,6 +661,7 @@ fn parse_stat(stat: &str) -> Option<ProcStat> {
     let fields: Vec<&str> = after.split_whitespace().collect();
     Some(ProcStat {
         state: fields.first()?.chars().next()?,
+        ppid: fields.get(1)?.parse().ok()?,
         pgrp: fields.get(2)?.parse().ok()?,
         session: fields.get(3)?.parse().ok()?,
         // state is field 3 of the file, starttime is field 22, so 19 fields along from here.
@@ -1192,6 +1302,45 @@ pub fn reexec_as_root_if_needed(local_box: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The check the hung-turn sweep makes before it trusts start times: a process this test
+    /// spawned a moment ago reads as a moment old, and not as an hour old or as never having
+    /// existed. On a kernel where the two clocks are one, which is every Linux this runs on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_clocks_agree_about_a_process_whose_age_is_known() {
+        let spawned = std::time::Instant::now();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pid = child.id();
+        let (right, wrong_by_an_hour) = (
+            clocks_agree(pid, spawned.elapsed()),
+            clocks_agree(
+                pid,
+                spawned.elapsed() + std::time::Duration::from_secs(3600),
+            ),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(right, "a process spawned 300 ms ago must read as that old");
+        assert!(!wrong_by_an_hour, "an age an hour off is a disagreement");
+        assert!(
+            !clocks_agree(pid, std::time::Duration::ZERO),
+            "a reaped pid cannot be read"
+        );
+        // With no `/proc` to read there is no answer, and no answer is a no.
+        let empty = std::env::temp_dir().join(format!("arbos-no-proc-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&empty).unwrap();
+        blind_proc_walks_to(&empty);
+        assert!(!clocks_agree(
+            std::process::id(),
+            std::time::Duration::from_secs(1)
+        ));
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 
     /// The harness children's directories exist after the call (the re-own needs root and is
     /// exercised by the box: `subagent-sessions` writable by the workspace user).

@@ -5,9 +5,13 @@
 //! box sits on a bridge network, so neither the internet nor a box can reach it, and there is no
 //! token to leak or rotate.
 //!
+//! The same listener is how Prometheus reaches the boxes: `GET /metrics/targets` lists the awake
+//! ones and `GET /metrics/box/{id}` proxies a scrape to that box's agentd with its own token.
+//!
 //! Most series are gauges read at scrape time from state the relay already holds. A scrape never
 //! waits: in-memory maps are read with `try_lock` (a busy one leaves its series out of that
-//! scrape) and the database is asked by a sampler every [`SAMPLE_EVERY`], not by the scrape. The
+//! scrape) and the database is asked by a sampler every [`SAMPLE_EVERY`], not by the scrape. A
+//! box scrape reads that box's one row on a read connection, never through the writer lock. The
 //! few counters and histograms are where a scrape-time read cannot answer.
 //!
 //! Labels are bounded sets (route template, status class, state, result, refusal code). Never a
@@ -27,9 +31,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::{MatchedPath, Request, State};
+use axum::extract::{MatchedPath, Path, Request, State};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
@@ -46,6 +50,7 @@ const ROOM_PUSHES: &str = "arbos_relay_room_pushes_total";
 const ROOM_PUSH_REFUSALS: &str = "arbos_relay_room_push_refusals_total";
 const MODEL_REQUESTS: &str = "arbos_relay_model_requests_total";
 const MODEL_SECONDS: &str = "arbos_relay_model_response_seconds";
+const BOX_DROPPED: &str = "arbos_relay_box_scrape_dropped_lines_total";
 const DB_WRITER_WAIT: &str = "arbos_relay_db_writer_wait_seconds";
 const TOKENS: &str = "arbos_relay_tokens_total";
 /// The meter's four disjoint buckets, in the order `usage` rows store them.
@@ -59,6 +64,8 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("arbos_relay_rooms_open", "gauge", "Sync rooms held in memory."),
     ("arbos_relay_sockets", "gauge", "Open room websockets, by kind (client, box)."),
     ("arbos_relay_boxes", "gauge", "Boxes by the state the relay believes (awake, waking, asleep, error)."),
+    ("arbos_relay_box_scrapes", "gauge", "Awake boxes by how their last metrics scrape ended (ok, old_image, unreachable, rejected, pending)."),
+    (BOX_DROPPED, "counter", "Lines a box's exposition carried that are not agentd's, dropped by the relay."),
     ("arbos_relay_boxes_registered", "gauge", "Box rows by provider."),
     ("arbos_relay_boxes_max", "gauge", "Resident box cap on this host."),
     ("arbos_relay_boxes_turn_running", "gauge", "Boxes whose last keepalive said a turn is running."),
@@ -116,6 +123,16 @@ static COUNTERS: Mutex<BTreeMap<(&'static str, String), f64>> = Mutex::new(BTree
 /// Per-bucket counts (the last slot is +Inf) and the sum.
 static HISTOGRAMS: Mutex<BTreeMap<&'static str, ([u64; BOUNDS.len() + 1], f64)>> =
     Mutex::new(BTreeMap::new());
+/// User id → how the box's last scrape through this relay ended, and when. A result older than
+/// [`BOX_SCRAPE_FRESH_MS`] says nothing about the box now: it reads as `pending` and is dropped by
+/// the next scrape, so a box that is gone, or a scrape job switched off, leaves nothing behind.
+/// The key never leaves the process.
+static BOX_SCRAPES: Mutex<BTreeMap<String, (&'static str, i64)>> = Mutex::new(BTreeMap::new());
+/// A few scrape intervals: longer than any interval the job would be given, short enough that a
+/// job switched off stops reading as boxes failing within minutes.
+const BOX_SCRAPE_FRESH_MS: i64 = 5 * 60_000;
+/// Box id → user id of the awake boxes, as the last `/metrics/targets` listed them.
+static BOX_TARGETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 /// What the sampler last read from the database.
 static SAMPLED: Mutex<Vec<Series>> = Mutex::new(Vec::new());
 
@@ -295,7 +312,244 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(scrape))
         .route("/metrics/boxes", get(scrape_boxes))
+        .route("/metrics/targets", get(box_targets))
+        .route("/metrics/box/{id}", get(box_scrape))
         .with_state(state)
+}
+
+/// The client the relay asks a box with. It follows no redirect: the request carries the box's
+/// token, and where a box says to go next is the box's word, not the relay's.
+fn box_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client with no redirects")
+    })
+}
+
+/// How long one box may take to answer a scrape; under Prometheus's own 10 s default.
+const BOX_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most a box's exposition may weigh. agentd's is about 3 KB; a box is its user's machine,
+/// so what it answers is untrusted and must not be able to fill the relay's memory.
+const BOX_BODY_MAX: usize = 256 * 1024;
+
+/// Exactly what agentd writes (`crates/arbos-agentd/src/metrics.rs`, `docs/metrics.md`): every
+/// sample name with the one label it may carry. A box is its user's machine, so its answer is
+/// held to this list; a name or a label that is not here never reaches Prometheus.
+#[rustfmt::skip]
+const BOX_SAMPLES: &[(&str, &str)] = &[
+    ("arbos_agentd_uptime_seconds", ""),
+    ("arbos_agentd_workspaces", "health"),
+    ("arbos_agentd_turns_running", ""),
+    ("arbos_agentd_sends_waiting", ""),
+    ("arbos_agentd_workers_running", ""),
+    ("arbos_agentd_jobs", "state"),
+    ("arbos_agentd_rooms_open", ""),
+    ("arbos_agentd_rooms_connected", ""),
+    ("arbos_agentd_turns_started_total", ""),
+    ("arbos_agentd_turns_finished_total", "result"),
+    ("arbos_agentd_turn_duration_seconds_bucket", "le"),
+    ("arbos_agentd_turn_duration_seconds_sum", ""),
+    ("arbos_agentd_turn_duration_seconds_count", ""),
+    ("arbos_agentd_worker_crashes_total", "kind"),
+    ("arbos_agentd_model_requests_total", "class"),
+    ("arbos_agentd_relay_reconnects_total", ""),
+];
+
+/// The one family the relay does not take from the box. A version a box writes is a string of
+/// the box's choosing, a new series every time it changes; the version here is the image the
+/// relay itself gave the box, so the family is bounded by the images ever rolled.
+const BOX_BUILD_INFO: &str = "arbos_agentd_build_info";
+
+/// The values each of those labels may take.
+#[rustfmt::skip]
+const BOX_LABEL_VALUES: &[(&str, &[&str])] = &[
+    ("health", &["healthy", "unhealthy"]),
+    ("state", &["running", "queued"]),
+    ("result", &["done", "error", "cancelled"]),
+    ("kind", &["main", "job"]),
+    ("class", &["1xx", "2xx", "3xx", "4xx", "5xx", "unreachable"]),
+    ("le", &["1", "2.5", "5", "10", "30", "60", "120", "300", "600", "1800", "+Inf"]),
+];
+
+/// `name` or `name{label="value"}` → the sample name, if it is one of agentd's with an allowed
+/// label value.
+fn box_series_name(series: &str) -> Option<&'static str> {
+    let (name, label) = match series.split_once('{') {
+        Some((name, rest)) => (name, Some(rest.strip_suffix("\"}")?.split_once("=\"")?)),
+        None => (series, None),
+    };
+    let (name, key) = BOX_SAMPLES.iter().find(|(n, _)| *n == name)?;
+    let ok = match label {
+        None => key.is_empty(),
+        Some((k, _)) if k != *key => false,
+        Some((k, v)) => BOX_LABEL_VALUES
+            .iter()
+            .any(|(key, values)| *key == k && values.contains(&v)),
+    };
+    ok.then_some(*name)
+}
+
+/// A box's exposition, cut down to agentd's own samples: a known name, its one known label with
+/// a known value, a numeric value, each series once. Comment lines are not passed on at all
+/// (their text is free), so the relay writes the histogram's type itself, and `build_info` is
+/// the relay's own line: `snapshot` is the image it gave the box (`arbos-agent-<version>`).
+/// Returns the text and how many lines were dropped.
+fn box_exposition(text: &str, snapshot: Option<&str>) -> (String, usize) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = String::from("# TYPE arbos_agentd_turn_duration_seconds histogram\n");
+    let version = snapshot.map(|s| s.strip_prefix("arbos-agent-").unwrap_or(s));
+    let plain = |v: &&str| {
+        (1..=32).contains(&v.len())
+            && v.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if let Some(version) = version.filter(plain) {
+        let _ = writeln!(out, "{BOX_BUILD_INFO}{{{}}} 1", label("version", version));
+    }
+    let mut dropped = 0;
+    for l in text.lines() {
+        // agentd's own build_info and its comments are left out, not counted as foreign.
+        if l.starts_with('#') || l.starts_with(BOX_BUILD_INFO) {
+            continue;
+        }
+        let kept = l.rsplit_once(' ').is_some_and(|(series, value)| {
+            box_series_name(series).is_some() && value.parse::<f64>().is_ok() && seen.insert(series)
+        });
+        if kept {
+            out.push_str(l);
+            out.push('\n');
+        } else {
+            dropped += 1;
+        }
+    }
+    (out, dropped)
+}
+
+/// Box id → user id of the boxes that are awake now.
+async fn awake_boxes(state: &AppState) -> BTreeMap<String, String> {
+    let states = state.box_states.read().await;
+    states
+        .iter()
+        .filter(|(_, (st, _))| *st == BoxState::Awake)
+        .map(|(user_id, _)| (box_id(state, user_id), user_id.clone()))
+        .collect()
+}
+
+/// `GET /metrics/targets`: Prometheus HTTP service discovery for the boxes. One target per awake
+/// box, each this same listener with the box's own path, so Prometheus never learns a box's port
+/// or token. A sleeping box is not listed: scraping must not be what keeps a box looking alive.
+async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    // The address Prometheus reached this listener on is the address it scrapes the boxes on.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| {
+            h.parse::<std::net::SocketAddr>()
+                .is_ok_and(|a| a.ip().is_loopback())
+        });
+    let Some(host) = host else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    let awake = awake_boxes(&state).await;
+    let targets: Vec<serde_json::Value> = awake
+        .keys()
+        .map(|id| {
+            serde_json::json!({
+                "targets": [host],
+                "labels": { "__metrics_path__": format!("/metrics/box/{id}"), "box": id },
+            })
+        })
+        .collect();
+    // What a scrape looks its id up in: Prometheus only ever asks for a target it was handed.
+    *locked(&BOX_TARGETS) = awake;
+    axum::Json(targets).into_response()
+}
+
+/// `GET /metrics/box/{id}`: one box's agentd `/metrics`, fetched with that box's own token.
+async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    // Only a box that is awake now is asked. A sleeping box keeps its last `box_url`, and once
+    // its port is another box's the token would be sent to the wrong machine.
+    let mut user_id = locked(&BOX_TARGETS).get(&id).cloned();
+    if user_id.is_none() {
+        // Prometheus keeps its targets across a relay restart and this index does not: build it
+        // again on a miss, so a restart costs no scrape.
+        let awake = awake_boxes(&state).await;
+        user_id = awake.get(&id).cloned();
+        *locked(&BOX_TARGETS) = awake;
+    }
+    let user_id = match user_id {
+        Some(u) if state.box_state(&u).await.0 == BoxState::Awake => Some(u),
+        _ => None,
+    };
+    // One row on a read connection: this runs once per awake box per scrape interval, and must
+    // not stand in the queue for the writer lock.
+    let row = user_id.as_ref().and_then(|u| {
+        let read = state.db.read(|c| {
+            c.query_row(
+                "SELECT box_url, mcp_token, snapshot FROM boxes WHERE user_id = ?1",
+                [u],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+        });
+        read.ok()
+    });
+    let Some((Some(url), token, snapshot)) = row else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let sent = box_client()
+        .get(format!("{url}/metrics"))
+        .bearer_auth(token)
+        .timeout(BOX_SCRAPE_TIMEOUT)
+        .send()
+        .await;
+    let down = || axum::http::StatusCode::BAD_GATEWAY.into_response();
+    let (result, res) = match sent {
+        Ok(mut r) if r.status().is_success() => {
+            // Read to the cap and no further, then keep only agentd's own lines.
+            let mut body = Vec::new();
+            let read = loop {
+                match r.chunk().await {
+                    Ok(Some(chunk)) if body.len() + chunk.len() <= BOX_BODY_MAX => {
+                        body.extend_from_slice(&chunk)
+                    }
+                    Ok(Some(_)) => break "rejected",
+                    Ok(None) => break "ok",
+                    Err(_) => break "unreachable",
+                }
+            };
+            match (read, String::from_utf8(body)) {
+                ("ok", Ok(text)) => {
+                    let (kept, dropped) = box_exposition(&text, snapshot.as_deref());
+                    if dropped > 0 {
+                        add(BOX_DROPPED, String::new(), dropped as f64);
+                    }
+                    ("ok", exposition(kept))
+                }
+                ("ok", Err(_)) => ("rejected", down()),
+                (failed, _) => (failed, down()),
+            }
+        }
+        // agentd answers 404 for a route it does not have: an image from before `/metrics`.
+        Ok(r) if r.status() == axum::http::StatusCode::NOT_FOUND => ("old_image", down()),
+        _ => ("unreachable", down()),
+    };
+    if let Some(user_id) = user_id {
+        let mut last = locked(&BOX_SCRAPES);
+        let now = arbos_core::ids::now_ms();
+        last.retain(|_, (_, at)| now - *at < BOX_SCRAPE_FRESH_MS);
+        last.insert(user_id, (result, now));
+    }
+    res
 }
 
 async fn scrape(State(state): State<AppState>) -> Response {
@@ -448,6 +702,19 @@ fn gauges(state: &AppState) -> Vec<Series> {
         ] {
             let n = states.values().filter(|(s, _)| *s == st).count();
             g.push(("arbos_relay_boxes", label("state", name), n as f64));
+        }
+        // The awake boxes by how their last scrape ended, so "not on a metrics image yet" is a
+        // number on the dashboard instead of an empty panel.
+        let last = locked(&BOX_SCRAPES);
+        let now = arbos_core::ids::now_ms();
+        let last_of = |user_id: &String| match last.get(user_id) {
+            Some((result, at)) if now - *at < BOX_SCRAPE_FRESH_MS => *result,
+            _ => "pending",
+        };
+        let awake = || states.iter().filter(|(_, (st, _))| *st == BoxState::Awake);
+        for result in ["ok", "old_image", "unreachable", "rejected", "pending"] {
+            let n = awake().filter(|(u, _)| last_of(u) == result).count();
+            g.push(("arbos_relay_box_scrapes", label("result", result), n as f64));
         }
     }
     if let Ok(turns) = state.turn_running.try_lock() {
@@ -816,6 +1083,292 @@ mod tests {
         }
     }
 
+    /// Prometheus finds the awake boxes at `/metrics/targets` and scrapes each through the
+    /// relay, which is the one that holds the box's address and token.
+    #[tokio::test]
+    async fn awake_boxes_are_listed_and_scraped_through_the_relay() {
+        let state = test_state(AuthMode::Github);
+        // A box's agentd: `/metrics` behind its own bearer.
+        let agentd = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(|headers: axum::http::HeaderMap| async move {
+                match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                    Some("Bearer mcp-of-the-box") => BOX_ANSWER.into_response(),
+                    _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }),
+        ))
+        .await;
+        let (awake, asleep) = (arbos_core::ids::ulid(), arbos_core::ids::ulid());
+        state
+            .db
+            .upsert_box(&crate::db::Sandbox {
+                user_id: awake.clone(),
+                provider: "gvisor".into(),
+                sandbox_id: Some("arbos-box-test".into()),
+                daytona_state: None,
+                device_id: "box:test".into(),
+                box_token_hash: "hash".into(),
+                mcp_token: "mcp-of-the-box".into(),
+                snapshot: Some("arbos-agent-0.1.179".into()),
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: Some(format!("http://{agentd}")),
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        state.set_box_state(&awake, BoxState::Awake, None).await;
+        state.set_box_state(&asleep, BoxState::Asleep, None).await;
+        let addr = serve_on_loopback(router(state.clone())).await;
+
+        let listed = fetch(addr, "/metrics/targets").await;
+        let targets: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
+        assert_eq!(targets.len(), 1, "only the awake box: {listed}");
+        assert_eq!(targets[0]["targets"][0], addr.to_string());
+        let path = targets[0]["labels"]["__metrics_path__"].as_str().unwrap();
+        assert_eq!(
+            path,
+            format!(
+                "/metrics/box/{}",
+                targets[0]["labels"]["box"].as_str().unwrap()
+            )
+        );
+        assert!(!listed.contains(&awake), "a target must not name the user");
+
+        assert_eq!(last_scrapes(&state)["pending"], 1.0);
+        // A relay that restarted has no index, and Prometheus still has its targets: the first
+        // scrape after a restart must find the box all the same.
+        locked(&BOX_TARGETS).clear();
+        let dropped = || {
+            let now = parse(&render(&state));
+            now.get(BOX_DROPPED).copied().unwrap_or(0.0)
+        };
+        let dropped_before = dropped();
+        let scraped = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        let last = last_scrapes(&state);
+        assert_eq!((last["ok"], last["pending"]), (1.0, 0.0));
+        assert_eq!(
+            scraped.headers()["content-type"],
+            "text/plain; version=0.0.4"
+        );
+        // Only agentd's own samples come through: a made-up family, a fresh label value, a
+        // second version, a repeat and anything foreign are dropped, and counted.
+        assert_eq!(scraped.text().await.unwrap(), BOX_KEPT);
+        assert_eq!(dropped() - dropped_before, 10.0);
+        // The id is keyed: the bare hash of a (public) user id does not find the box.
+        let bare = {
+            use sha2::Digest;
+            hex::encode(&sha2::Sha256::digest(awake.as_bytes())[..6])
+        };
+        assert_ne!(targets[0]["labels"]["box"], bare);
+        assert_eq!(box_id(&state, &awake), box_id(&state, &awake));
+        let mut rekeyed = state.clone();
+        rekeyed.relay_key =
+            std::sync::Arc::new(crate::connectors::crypto::RelayKey::derive("another-key"));
+        assert_ne!(box_id(&state, &awake), box_id(&rekeyed, &awake));
+        let status = |path: &'static str| async move {
+            reqwest::get(format!("http://{addr}{path}"))
+                .await
+                .unwrap()
+                .status()
+        };
+        assert_eq!(status("/metrics/box/000000000000").await, 404);
+        // An unreachable box reads as a failed scrape, not as an empty one.
+        let mut gone = state.db.user_box(&awake).unwrap().unwrap();
+        gone.box_url = Some("http://127.0.0.1:1".into());
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
+        assert_eq!(last_scrapes(&state)["unreachable"], 1.0);
+        // A box that answers but has no `/metrics` runs an image from before agentd had it.
+        let old = serve_on_loopback(Router::new()).await;
+        gone.box_url = Some(format!("http://{old}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
+        let last = last_scrapes(&state);
+        assert_eq!((last["old_image"], last["unreachable"]), (1.0, 0.0));
+        // A box that answers with more than the cap is cut off, not buffered.
+        let huge = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(|| async { "arbos_agentd_turns_running 1\n".repeat(BOX_BODY_MAX / 16) }),
+        ))
+        .await;
+        gone.box_url = Some(format!("http://{huge}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(down.status(), 502);
+        assert_eq!(last_scrapes(&state)["rejected"], 1.0);
+        // Scraped once, then never again (the job was switched off): the old result must not
+        // stand for the box for ever. Past a few intervals the box is `pending` again, which no
+        // rule counts as failing, and the next scrape of any box forgets the stale entry.
+        let aged = arbos_core::ids::now_ms() - BOX_SCRAPE_FRESH_MS - 1_000;
+        locked(&BOX_SCRAPES).get_mut(&awake).unwrap().1 = aged;
+        let last = last_scrapes(&state);
+        assert_eq!((last["rejected"], last["pending"]), (0.0, 1.0));
+        let deleted = arbos_core::ids::ulid();
+        locked(&BOX_SCRAPES).insert(deleted.clone(), ("old_image", aged));
+
+        // Where the box's token may go. `other` stands for another user's box that now has the
+        // port: it records every request that reaches it.
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = reached.clone();
+        let other = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { "arbos_agentd_turns_running 0\n" }
+            }),
+        ))
+        .await;
+        // A redirect is not followed: the token stays with the box it belongs to.
+        let location = format!("http://{other}/metrics");
+        let redirecting = serve_on_loopback(Router::new().route(
+            "/metrics",
+            get(move || async move { axum::response::Redirect::temporary(&location) }),
+        ))
+        .await;
+        gone.box_url = Some(format!("http://{redirecting}"));
+        state.db.upsert_box(&gone).unwrap();
+        let down = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(
+            (down.status().as_u16(), reached.load(Ordering::SeqCst)),
+            (502, 0)
+        );
+        assert!(
+            !locked(&BOX_SCRAPES).contains_key(&deleted),
+            "stale entries go"
+        );
+        // A box that is not awake is not asked at all, though its row still holds an address.
+        gone.box_url = Some(format!("http://{other}"));
+        state.db.upsert_box(&gone).unwrap();
+        for st in [BoxState::Asleep, BoxState::Waking, BoxState::Error] {
+            state.set_box_state(&awake, st, None).await;
+            let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+            assert_eq!(
+                (res.status().as_u16(), reached.load(Ordering::SeqCst)),
+                (404, 0),
+                "{st:?}"
+            );
+        }
+        state.set_box_state(&awake, BoxState::Awake, None).await;
+        let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        assert_eq!(
+            (res.status().as_u16(), reached.load(Ordering::SeqCst)),
+            (200, 1)
+        );
+    }
+
+    /// The list is agentd's own: every family its module names is one the relay lets through,
+    /// so a family added there and forgotten here fails this test and not a dashboard.
+    #[test]
+    fn every_family_agentd_writes_is_on_the_list() {
+        let agentd = include_str!("../../arbos-agentd/src/metrics.rs");
+        let named: std::collections::BTreeSet<&str> = agentd
+            .split('"')
+            .filter(|s| s.starts_with("arbos_agentd_") && !s.contains([' ', '{']))
+            .collect();
+        assert!(named.len() >= 15, "{named:?}");
+        for family in named.into_iter().filter(|f| *f != BOX_BUILD_INFO) {
+            let listed = |n: &str| BOX_SAMPLES.iter().any(|(name, _)| *name == n);
+            assert!(
+                listed(family) || listed(&format!("{family}_bucket")),
+                "{family} is not in BOX_SAMPLES"
+            );
+        }
+    }
+
+    /// The allowlist is exact: no family, label or value a box invents gets through, so a box
+    /// cannot mint series or put its own words on a dashboard.
+    #[test]
+    fn a_box_cannot_add_a_family_a_label_or_a_value() {
+        let minted: String = (0..6000)
+            .map(|n| format!("arbos_agentd_x{n} 1\narbos_agentd_jobs{{state=\"s{n}\"}} 1\n"))
+            .collect();
+        let (kept, dropped) = box_exposition(&minted, None);
+        assert_eq!(
+            kept,
+            "# TYPE arbos_agentd_turn_duration_seconds histogram\n"
+        );
+        assert_eq!(dropped, 12_000);
+        // The version is the relay's word for the image, never the box's: a box that renames
+        // its build every scrape adds no series, and is not counted as sending anything foreign.
+        let renamed = "arbos_agentd_build_info{version=\"9.9.9\"} 1\n";
+        let (kept, dropped) = box_exposition(renamed, Some("arbos-agent-0.7.0-rc1"));
+        assert!(
+            kept.ends_with("arbos_agentd_build_info{version=\"0.7.0-rc1\"} 1\n"),
+            "{kept}"
+        );
+        assert_eq!((dropped, kept.contains("9.9.9")), (0, false));
+        let (kept, _) = box_exposition(renamed, Some("not a \"version\"\n"));
+        assert!(!kept.contains("build_info"), "{kept}");
+        // Everything agentd really writes is on the list, each label value included.
+        for (name, key) in BOX_SAMPLES {
+            let values: &[&str] = match *key {
+                "" => &[],
+                key => BOX_LABEL_VALUES.iter().find(|(k, _)| *k == key).unwrap().1,
+            };
+            let series: Vec<String> = match values {
+                [] => vec![name.to_string()],
+                values => values
+                    .iter()
+                    .map(|v| format!("{name}{{{key}=\"{v}\"}}"))
+                    .collect(),
+            };
+            for s in series {
+                assert_eq!(box_series_name(&s), Some(*name), "{s}");
+            }
+        }
+    }
+
+    /// What a box answers: agentd's lines, and what a user who owns the port could add.
+    const BOX_ANSWER: &str = "\
+# HELP arbos_agentd_turns_running any text a box likes
+# TYPE arbos_agentd_turns_running gauge
+arbos_agentd_build_info{version=\"0.6.422\"} 1
+arbos_agentd_turns_running 2
+arbos_agentd_turns_finished_total{result=\"done\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
+arbos_agentd_build_info{version=\"9.9.9\"} 1
+arbos_agentd_build_info{version=\"any words\"} 1
+arbos_agentd_turns_running 3
+arbos_agentd_made_up_0001 1
+arbos_agentd_jobs{state=\"fresh-value-1\"} 1
+arbos_agentd_jobs{result=\"done\"} 1
+arbos_agentd_jobs{state=\"queued\",box=\"000000000000\"} 1
+arbos_relay_kill_switch 1
+up 1
+arbos_agentd_turns_running{user=\"gh_1\"} 9
+arbos_agentd_turns_running not-a-number
+arbos_agentd_turns_running{result=\"done\" 1
+";
+    const BOX_KEPT: &str = "\
+# TYPE arbos_agentd_turn_duration_seconds histogram
+arbos_agentd_build_info{version=\"0.1.179\"} 1
+arbos_agentd_turns_running 2
+arbos_agentd_turns_finished_total{result=\"done\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
+arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
+";
+
+    /// `arbos_relay_box_scrapes` by result, as a scrape of the relay reads it.
+    fn last_scrapes(state: &AppState) -> BTreeMap<String, f64> {
+        let prefix = "arbos_relay_box_scrapes{result=\"";
+        parse(&render(state))
+            .into_iter()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.strip_prefix(prefix)?.trim_end_matches("\"}").to_owned(),
+                    v,
+                ))
+            })
+            .collect()
+    }
+
     /// Yesterday's automatic trip is over at 00:00 UTC, though the stored row still says `on`
     /// until something asks the gate. The gauge reads the rule and leaves the row alone.
     #[test]
@@ -1010,6 +1563,8 @@ mod tests {
         poison(&COUNTERS);
         poison(&HISTOGRAMS);
         poison(&SAMPLED);
+        poison(&BOX_SCRAPES);
+        poison(&BOX_TARGETS);
         let output = (TOKENS, label("kind", "output"));
         let tokens = || locked(&COUNTERS).get(&output).copied().unwrap_or(0.0);
         let answers = || locked(&HISTOGRAMS).get(MODEL_SECONDS).map_or(0, |h| h.0[2]);
@@ -1024,6 +1579,8 @@ mod tests {
         assert!(answers() > answered);
         let state = test_state(AuthMode::Github);
         assert!(render(&state).contains(TOKENS));
+        assert!(render(&state).contains("arbos_relay_box_scrapes{result=\"pending\"}"));
+        locked(&BOX_TARGETS).clear();
         assert!(render_boxes(&state).contains("arbos_relay_box_info"));
     }
 
