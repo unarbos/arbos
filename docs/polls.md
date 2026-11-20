@@ -472,8 +472,10 @@ written apart and merged later.
 
 Asked for again on 2026-11-19: "anon or public". Section 11's "Show who voted" off is **not**
 anonymous and must not be called that: every vote is a field named after its voter in the
-chat's document, which every member's device holds and the relay stores. The apps do not draw
-the names; a modified client, or anyone reading the device's store, has them. A vote written
+chat's document (`vote|<sender>`), which every member's device holds and the relay stores.
+The core's reader leaves the names out of what it hands the apps, so no build draws them; a
+modified client, or anyone reading the device's store, has them. "Names hidden" is a display
+rule, not secrecy. A vote written
 into the shared document cannot be anonymous towards the other members, whatever the apps
 show, so anonymous polls need votes that never enter it.
 
