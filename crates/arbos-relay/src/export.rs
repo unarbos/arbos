@@ -547,12 +547,28 @@ pub async fn send_message(
     // `notices::write_doc_deleting` does: the row leaves in the order it was stored, never
     // ahead of a push stored before it or between a push and its correction.
     let room = state.room(&room_name).await;
-    let admission = room.push_admission.lock().await;
+    let admission = match crate::notices::admission(&room).await {
+        Ok(admission) => admission,
+        Err(e) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "busy", e.to_string()),
+    };
+    // With the row, as a push does: whose message it is, and that the relay stored it. A row
+    // left unmarked would read as new when a device later heals it — gated, notified and
+    // waking agents for old history.
+    let (authors, stored) = (
+        [(message_id.clone(), format!("user:{user_id}"))],
+        [message_id.clone()],
+    );
+    let effects = crate::db::RowEffects {
+        chat_id: &id,
+        authors: &authors,
+        stored: &stored,
+        ..Default::default()
+    };
     let seq = match state
         .db
-        .append_row(&room_name, &device_id, &batch_id, &bytes)
+        .append_row_with(&room_name, &device_id, &batch_id, &bytes, &effects)
     {
-        Ok((seq, _)) => seq,
+        Ok((seq, ..)) => seq,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
     let frame = Frame::new(
@@ -1347,6 +1363,16 @@ mod tests {
             row.rest["mentions"],
             json!([format!("agent:{project}")]),
             "@hezbola resolves to the agent member"
+        );
+        // Recorded as a push records it: hers, and stored by the relay, so a device that
+        // later heals this row is restoring history, not posting a message.
+        assert_eq!(
+            state.db.message_author(&chat, &message_id).unwrap(),
+            Some(format!("user:{alice}"))
+        );
+        assert_eq!(
+            state.db.message_stored(&chat, &message_id).unwrap(),
+            Some(true)
         );
         // Announced (what drives unread, pushes and the mirror) and the mirror job is queued.
         assert!(state.db.chat_event_exists(&chat, &message_id).unwrap());
