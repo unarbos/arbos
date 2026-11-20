@@ -12173,7 +12173,7 @@ mod poll_rows_tests {
     #[test]
     fn a_poll_is_one_card_row_with_its_votes_and_no_text_bubble() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::older("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
         let from = |user: &str| UserMessageOpts {
             sender: Some(format!("user:{user}")),
             sender_name: Some("Ana".into()),
@@ -12244,7 +12244,7 @@ mod poll_rows_tests {
         let (_rt, state, transcript) = super::transcript_smoke_tests::mount_with(cx, Vec::new());
         let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::older("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
         let from = |sender: &str| UserMessageOpts {
             sender: Some(sender.into()),
             sender_name: Some("Ana".into()),
@@ -12349,7 +12349,7 @@ mod poll_rows_tests {
     #[test]
     fn a_build_without_polls_reads_the_row_as_its_plain_text() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::older("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
         doc.transact(|d| {
             d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
                 .unwrap();

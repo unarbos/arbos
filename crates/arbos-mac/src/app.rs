@@ -7468,7 +7468,7 @@ impl AppState {
         multiple: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(poll) = arbos_core::poll::Poll::new(question, options, multiple) else {
+        let Some(poll) = arbos_core::poll::Poll::older(question, options, multiple) else {
             return false;
         };
         self.command(ClientCommand::SendPoll {

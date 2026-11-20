@@ -253,6 +253,18 @@ impl Db {
         })
     }
 
+    /// Tests: make an author record look as one written before the stored mark existed.
+    #[cfg(test)]
+    pub fn forget_stored_mark_for_test(&self, chat_id: &str, message_id: &str) {
+        self.with(|c| {
+            c.execute(
+                "UPDATE message_authors SET stored = NULL WHERE chat_id = ?1 AND message_id = ?2",
+                params![chat_id, message_id],
+            )
+        })
+        .unwrap();
+    }
+
     /// Has the relay itself stored a row carrying this message — recorded from a push it
     /// accepted, not from an announce? An announce records an author for any id a member
     /// names, whether or not a row exists.
@@ -272,9 +284,6 @@ impl Db {
         })
     }
 
-    /// Did a push the relay stored take this message out? Read by tests only until the
-    /// push guard answers a row pushed back under a deleted id.
-    #[cfg(test)]
     pub fn message_deleted(&self, chat_id: &str, message_id: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row(

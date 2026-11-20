@@ -96,7 +96,8 @@ impl Composer {
             .iter()
             .map(|o| o.read(cx).text().to_owned())
             .collect();
-        Poll::new(&question, &options, draft.multiple).map(|_| (question, options, draft.multiple))
+        Poll::older(&question, &options, draft.multiple)
+            .map(|_| (question, options, draft.multiple))
     }
 
     fn send_poll(&mut self, cx: &mut Context<Self>) {
