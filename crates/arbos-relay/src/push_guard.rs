@@ -260,6 +260,18 @@ pub fn check_push(
                 detail: "every entry in a chat's messages is a message with an id".to_owned(),
             };
         }
+        // One push that takes a message out and puts a row in under the same id. The record
+        // is keyed on the id, so it would mark the id deleted and stored at once and keep
+        // the old row's author for whatever the new row says. No client writes this: an edit
+        // changes the row's fields, and a heal restores a row the list is missing.
+        if changes.removed.iter().any(|(x, _)| x == id) {
+            return PushCheck::Refuse {
+                code: "replaced_id",
+                detail: format!(
+                    "{id} is removed and inserted in one push; a new message needs an id of its own"
+                ),
+            };
+        }
         if changes.ids_after.iter().filter(|(x, _)| x == id).count() > 1 {
             return PushCheck::Refuse {
                 code: "duplicate_id",
@@ -1779,17 +1791,12 @@ mod tests {
             )),
             Some("not_yours")
         );
-        assert_eq!(
-            kind(&check_push(
-                &state,
-                &alice_dev,
-                PEOPLE_PROJECT,
-                &chat,
-                false,
-                &c
-            )),
-            Some(false),
-            "the author replacing her own row"
-        );
+        // Her own row is hers to remove, but not to replace under its id in the same push:
+        // the record of that id cannot be both deleted and stored. With or without a heal
+        // claim.
+        for heal in [false, true] {
+            let check = check_push(&state, &alice_dev, PEOPLE_PROJECT, &chat, heal, &c);
+            assert_eq!(code(&check), Some("replaced_id"), "heal={heal}");
+        }
     }
 }
