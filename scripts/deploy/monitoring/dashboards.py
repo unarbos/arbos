@@ -183,6 +183,8 @@ fleet = dashboard("arbos-fleet", "Arbos fleet", [
                         (f"container_memory_working_set_bytes{{{RELAY}}}", "service working set")], "bytes"),
     ts("Relay CPU and sockets", [(f"rate(container_cpu_usage_seconds_total{{{RELAY}}}[5m])", "CPU cores"), ("sum by (kind) (arbos_relay_sockets)", "{{kind}} websockets"),
                                  ("sum(arbos_relay_rooms_open)", "rooms open"), (f"container_sockets{{{RELAY}}}", "sockets (all)")]),
+    ts("Relay database", [("sum by (file) (arbos_relay_db_bytes)", "{{file}}")], "bytes",
+       desc="Size on disk of relay.db and its write-ahead log. The log sits near 4 MB; one that stays far above 64 MB means a read is held open across many commits, and writes get slower."),
     ts("Relay HTTP requests per second", [("sum by (class) (rate(arbos_relay_http_requests_total[5m]))", "{{class}}")], "reqps"),
     ts("Service restarts per hour", [(f"changes(container_start_time_seconds{{{SERVICE}}}[1h])", "{{id}}")],
        desc="How often each systemd service's cgroup was re-created."),
