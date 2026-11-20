@@ -106,6 +106,7 @@ final class ErrorUILintTests: XCTestCase {
         ("voices-error", "VoicePickerView.swift"),
         ("home-registry-error", "HomeView.swift"),
         ("wallet-error", "WalletViews.swift"),
+        ("wallet-backup-error", "WalletViews.swift"),
         ("wallet-restore-error", "WalletViews.swift"),
         ("send-cheque-error", "WalletViews.swift"),
         ("toast-", "ErrorNote.swift"),
