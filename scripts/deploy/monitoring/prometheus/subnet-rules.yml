@@ -81,14 +81,16 @@ groups:
         expr: round(arbos:boxes_waitlisted >= 5, 5) or arbos:boxes_waitlisted == 0 or arbos:boxes_waitlisted * 0 - 5
       - record: subnet:boxes_max
         expr: max(arbos_relay_boxes_max)
-      # Awake boxes whose agentd answers the scrape, and those that do not (an image from before
-      # agentd had /metrics, unreachable, or not scraped yet): turn numbers cover only the first group.
+      # Awake boxes whose agentd answers the scrape, and those whose last scrape failed (an image
+      # from before agentd had /metrics, unreachable, rejected): turn numbers cover only the first
+      # group. A box that has not been asked yet (`pending`) is in neither: while the per-box scrape
+      # job is off every awake box is pending, and that is not a fleet that fails to report.
       - record: arbos:boxes_reporting
         expr: sum(arbos_relay_box_scrapes{result="ok"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:boxes_reporting
         expr: round(arbos:boxes_reporting >= 5, 5) or arbos:boxes_reporting == 0 or arbos:boxes_reporting * 0 - 5
       - record: arbos:boxes_not_reporting
-        expr: sum(arbos_relay_box_scrapes{result!="ok"}) or 0 * max(arbos_relay_uptime_seconds)
+        expr: sum(arbos_relay_box_scrapes{result!~"ok|pending"}) or 0 * max(arbos_relay_uptime_seconds)
       - record: subnet:boxes_not_reporting
         expr: round(arbos:boxes_not_reporting >= 5, 5) or arbos:boxes_not_reporting == 0 or arbos:boxes_not_reporting * 0 - 5
       - record: subnet:box_starts:rate5m

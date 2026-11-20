@@ -53,9 +53,13 @@ A box is its user's machine, so the relay does not trust what one answers:
 - It follows no redirect: the request carries the box's token.
 - It reads at most 256 KB.
 - It passes on only the samples in the agentd table below, by exact name, with that family's one
-  label and one of that label's listed values (`version` must be three dotted numbers, one per
-  box), each series once, with a numeric value. Comment lines are not passed on. Anything else
-  is dropped and counted in `arbos_relay_box_scrape_dropped_lines_total`.
+  label and one of that label's listed values, each series once, with a numeric value. Comment
+  lines are not passed on. Anything else is dropped and counted in
+  `arbos_relay_box_scrape_dropped_lines_total`.
+- `arbos_agentd_build_info` is not taken from the box at all: the relay writes it, with the
+  version of the image it gave that box (the box row's snapshot, `arbos-agent-<version>`, so a
+  pre-release such as `0.7.0-rc1` reads as it is). A version a box reports about itself is a
+  string of its own choosing; this one is bounded by the images ever rolled.
 
 So a box cannot add a family, a label or a label value, and its answer is at most about forty
 series. Set `sample_limit` and `body_size_limit` on the Prometheus job as well.
@@ -90,7 +94,7 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_rooms_open` | gauge | | sync rooms held in memory |
 | `arbos_relay_sockets` | gauge | `kind` = `client` `box` | open room websockets |
 | `arbos_relay_boxes` | gauge | `state` = `awake` `waking` `asleep` `error` | boxes by the state the relay believes. A box the relay has not heard of since it started is in no state yet |
-| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake, not scraped yet |
+| `arbos_relay_box_scrapes` | gauge | `result` = `ok` `old_image` `unreachable` `rejected` `pending` | awake boxes by how their last agentd scrape through the relay ended. `old_image`: the box answered but has no `/metrics` yet, so it shows no agentd series until it is re-imaged. `rejected`: the answer was over 256 KB or not text. `pending`: awake and never asked, which is every awake box while the per-box scrape job is off; it is not a failure and no rule counts it as one |
 | `arbos_relay_box_scrape_dropped_lines_total` | counter | | lines in a box's answer that are not agentd's and were not passed on; above zero means a box is sending something it should not |
 | `arbos_relay_boxes_registered` | gauge | `provider` | box rows in the database |
 | `arbos_relay_boxes_max` | gauge | | resident box cap (`max_boxes`) |
@@ -163,7 +167,7 @@ One set of series per box (label `box`, see above).
 
 | name | type | labels | meaning |
 |---|---|---|---|
-| `arbos_agentd_build_info` | gauge | `version` | always 1 |
+| `arbos_agentd_build_info` | gauge | `version` | always 1. Through the relay, `version` is the image the relay gave the box, not what the box says it runs |
 | `arbos_agentd_uptime_seconds` | gauge | | seconds since agentd booted |
 | `arbos_agentd_workspaces` | gauge | `health` = `healthy` `unhealthy` | workspaces on the box; unhealthy = its main agent has no working child |
 | `arbos_agentd_turns_running` | gauge | | main-agent turns running now |

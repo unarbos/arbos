@@ -336,7 +336,6 @@ const BOX_BODY_MAX: usize = 256 * 1024;
 /// held to this list; a name or a label that is not here never reaches Prometheus.
 #[rustfmt::skip]
 const BOX_SAMPLES: &[(&str, &str)] = &[
-    ("arbos_agentd_build_info", "version"),
     ("arbos_agentd_uptime_seconds", ""),
     ("arbos_agentd_workspaces", "health"),
     ("arbos_agentd_turns_running", ""),
@@ -355,7 +354,12 @@ const BOX_SAMPLES: &[(&str, &str)] = &[
     ("arbos_agentd_relay_reconnects_total", ""),
 ];
 
-/// The values each of those labels may take. `version` has no list: it is three dotted numbers.
+/// The one family the relay does not take from the box. A version a box writes is a string of
+/// the box's choosing, a new series every time it changes; the version here is the image the
+/// relay itself gave the box, so the family is bounded by the images ever rolled.
+const BOX_BUILD_INFO: &str = "arbos_agentd_build_info";
+
+/// The values each of those labels may take.
 #[rustfmt::skip]
 const BOX_LABEL_VALUES: &[(&str, &[&str])] = &[
     ("health", &["healthy", "unhealthy"]),
@@ -377,12 +381,6 @@ fn box_series_name(series: &str) -> Option<&'static str> {
     let ok = match label {
         None => key.is_empty(),
         Some((k, _)) if k != *key => false,
-        Some((_, v)) if *key == "version" => {
-            let parts: Vec<&str> = v.split('.').collect();
-            let number =
-                |p: &&str| (1..=4).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit());
-            parts.len() == 3 && parts.iter().all(number)
-        }
         Some((k, v)) => BOX_LABEL_VALUES
             .iter()
             .any(|(key, values)| *key == k && values.contains(&v)),
@@ -391,34 +389,49 @@ fn box_series_name(series: &str) -> Option<&'static str> {
 }
 
 /// A box's exposition, cut down to agentd's own samples: a known name, its one known label with
-/// a known value, a numeric value, each series once and one `build_info`. Comment lines are not
-/// passed on at all (their text is free), so the relay writes the histogram's type itself.
+/// a known value, a numeric value, each series once. Comment lines are not passed on at all
+/// (their text is free), so the relay writes the histogram's type itself, and `build_info` is
+/// the relay's own line: `snapshot` is the image it gave the box (`arbos-agent-<version>`).
 /// Returns the text and how many lines were dropped.
-fn box_exposition(text: &str) -> (String, usize) {
+fn box_exposition(text: &str, snapshot: Option<&str>) -> (String, usize) {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = String::from("# TYPE arbos_agentd_turn_duration_seconds histogram\n");
+    let version = snapshot.map(|s| s.strip_prefix("arbos-agent-").unwrap_or(s));
+    let plain = |v: &&str| {
+        (1..=32).contains(&v.len())
+            && v.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if let Some(version) = version.filter(plain) {
+        let _ = writeln!(out, "{BOX_BUILD_INFO}{{{}}} 1", label("version", version));
+    }
     let mut dropped = 0;
     for l in text.lines() {
+        // agentd's own build_info and its comments are left out, not counted as foreign.
+        if l.starts_with('#') || l.starts_with(BOX_BUILD_INFO) {
+            continue;
+        }
         let kept = l.rsplit_once(' ').is_some_and(|(series, value)| {
-            let Some(name) = box_series_name(series) else {
-                return false;
-            };
-            // One version per box: a box cannot mint a series per scrape by renaming its build.
-            let once = if name == "arbos_agentd_build_info" {
-                name
-            } else {
-                series
-            };
-            value.parse::<f64>().is_ok() && seen.insert(once.to_owned())
+            box_series_name(series).is_some() && value.parse::<f64>().is_ok() && seen.insert(series)
         });
         if kept {
             out.push_str(l);
             out.push('\n');
-        } else if !l.starts_with('#') {
+        } else {
             dropped += 1;
         }
     }
     (out, dropped)
+}
+
+/// Box id → user id of the boxes that are awake now.
+async fn awake_boxes(state: &AppState) -> BTreeMap<String, String> {
+    let states = state.box_states.read().await;
+    states
+        .iter()
+        .filter(|(_, (st, _))| *st == BoxState::Awake)
+        .map(|(user_id, _)| (box_id(state, user_id), user_id.clone()))
+        .collect()
 }
 
 /// `GET /metrics/targets`: Prometheus HTTP service discovery for the boxes. One target per awake
@@ -436,14 +449,7 @@ async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderM
     let Some(host) = host else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    let awake: BTreeMap<String, String> = state
-        .box_states
-        .read()
-        .await
-        .iter()
-        .filter(|(_, (st, _))| *st == BoxState::Awake)
-        .map(|(user_id, _)| (box_id(&state, user_id), user_id.clone()))
-        .collect();
+    let awake = awake_boxes(&state).await;
     let targets: Vec<serde_json::Value> = awake
         .keys()
         .map(|id| {
@@ -462,7 +468,14 @@ async fn box_targets(State(state): State<AppState>, headers: axum::http::HeaderM
 async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     // Only a box that is awake now is asked. A sleeping box keeps its last `box_url`, and once
     // its port is another box's the token would be sent to the wrong machine.
-    let user_id = locked(&BOX_TARGETS).get(&id).cloned();
+    let mut user_id = locked(&BOX_TARGETS).get(&id).cloned();
+    if user_id.is_none() {
+        // Prometheus keeps its targets across a relay restart and this index does not: build it
+        // again on a miss, so a restart costs no scrape.
+        let awake = awake_boxes(&state).await;
+        user_id = awake.get(&id).cloned();
+        *locked(&BOX_TARGETS) = awake;
+    }
     let user_id = match user_id {
         Some(u) if state.box_state(&u).await.0 == BoxState::Awake => Some(u),
         _ => None,
@@ -472,14 +485,20 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
     let row = user_id.and_then(|u| {
         let read = state.db.read(|c| {
             c.query_row(
-                "SELECT box_url, mcp_token FROM boxes WHERE user_id = ?1",
+                "SELECT box_url, mcp_token, snapshot FROM boxes WHERE user_id = ?1",
                 [&u],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
         });
         read.ok()
     });
-    let Some((Some(url), token)) = row else {
+    let Some((Some(url), token, snapshot)) = row else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
     let sent = box_client()
@@ -505,7 +524,7 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
             };
             match (read, String::from_utf8(body)) {
                 ("ok", Ok(text)) => {
-                    let (kept, dropped) = box_exposition(&text);
+                    let (kept, dropped) = box_exposition(&text, snapshot.as_deref());
                     if dropped > 0 {
                         add(BOX_DROPPED, String::new(), dropped as f64);
                     }
@@ -519,7 +538,7 @@ async fn box_scrape(State(state): State<AppState>, Path(id): Path<String>) -> Re
         Ok(r) if r.status() == axum::http::StatusCode::NOT_FOUND => ("old_image", down()),
         _ => ("unreachable", down()),
     };
-    BOX_SCRAPES.lock().expect("metrics lock").insert(id, result);
+    locked(&BOX_SCRAPES).insert(id, result);
     res
 }
 
@@ -681,7 +700,7 @@ fn gauges(state: &AppState) -> Vec<Series> {
             .filter(|(_, (st, _))| *st == BoxState::Awake)
             .map(|(user_id, _)| box_id(state, user_id))
             .collect();
-        let last = BOX_SCRAPES.lock().expect("metrics lock");
+        let last = locked(&BOX_SCRAPES);
         for result in ["ok", "old_image", "unreachable", "rejected", "pending"] {
             let n = awake
                 .iter()
@@ -1083,7 +1102,7 @@ mod tests {
                 device_id: "box:test".into(),
                 box_token_hash: "hash".into(),
                 mcp_token: "mcp-of-the-box".into(),
-                snapshot: None,
+                snapshot: Some("arbos-agent-0.1.179".into()),
                 last_started_at: None,
                 last_stopped_at: None,
                 last_seen_at: None,
@@ -1112,6 +1131,9 @@ mod tests {
         assert!(!listed.contains(&awake), "a target must not name the user");
 
         assert_eq!(last_scrapes(&state)["pending"], 1.0);
+        // A relay that restarted has no index, and Prometheus still has its targets: the first
+        // scrape after a restart must find the box all the same.
+        locked(&BOX_TARGETS).clear();
         let dropped = || {
             let now = parse(&render(&state));
             now.get(BOX_DROPPED).copied().unwrap_or(0.0)
@@ -1127,7 +1149,7 @@ mod tests {
         // Only agentd's own samples come through: a made-up family, a fresh label value, a
         // second version, a repeat and anything foreign are dropped, and counted.
         assert_eq!(scraped.text().await.unwrap(), BOX_KEPT);
-        assert_eq!(dropped() - dropped_before, 12.0);
+        assert_eq!(dropped() - dropped_before, 10.0);
         // The id is keyed: the bare hash of a (public) user id does not find the box.
         let bare = {
             use sha2::Digest;
@@ -1229,7 +1251,7 @@ mod tests {
             .filter(|s| s.starts_with("arbos_agentd_") && !s.contains([' ', '{']))
             .collect();
         assert!(named.len() >= 15, "{named:?}");
-        for family in named {
+        for family in named.into_iter().filter(|f| *f != BOX_BUILD_INFO) {
             let listed = |n: &str| BOX_SAMPLES.iter().any(|(name, _)| *name == n);
             assert!(
                 listed(family) || listed(&format!("{family}_bucket")),
@@ -1245,17 +1267,27 @@ mod tests {
         let minted: String = (0..6000)
             .map(|n| format!("arbos_agentd_x{n} 1\narbos_agentd_jobs{{state=\"s{n}\"}} 1\n"))
             .collect();
-        let (kept, dropped) = box_exposition(&minted);
+        let (kept, dropped) = box_exposition(&minted, None);
         assert_eq!(
             kept,
             "# TYPE arbos_agentd_turn_duration_seconds histogram\n"
         );
         assert_eq!(dropped, 12_000);
+        // The version is the relay's word for the image, never the box's: a box that renames
+        // its build every scrape adds no series, and is not counted as sending anything foreign.
+        let renamed = "arbos_agentd_build_info{version=\"9.9.9\"} 1\n";
+        let (kept, dropped) = box_exposition(renamed, Some("arbos-agent-0.7.0-rc1"));
+        assert!(
+            kept.ends_with("arbos_agentd_build_info{version=\"0.7.0-rc1\"} 1\n"),
+            "{kept}"
+        );
+        assert_eq!((dropped, kept.contains("9.9.9")), (0, false));
+        let (kept, _) = box_exposition(renamed, Some("not a \"version\"\n"));
+        assert!(!kept.contains("build_info"), "{kept}");
         // Everything agentd really writes is on the list, each label value included.
         for (name, key) in BOX_SAMPLES {
             let values: &[&str] = match *key {
                 "" => &[],
-                "version" => &["0.6.422"],
                 key => BOX_LABEL_VALUES.iter().find(|(k, _)| *k == key).unwrap().1,
             };
             let series: Vec<String> = match values {
@@ -1295,7 +1327,7 @@ arbos_agentd_turns_running{result=\"done\" 1
 ";
     const BOX_KEPT: &str = "\
 # TYPE arbos_agentd_turn_duration_seconds histogram
-arbos_agentd_build_info{version=\"0.6.422\"} 1
+arbos_agentd_build_info{version=\"0.1.179\"} 1
 arbos_agentd_turns_running 2
 arbos_agentd_turns_finished_total{result=\"done\"} 5
 arbos_agentd_turn_duration_seconds_bucket{le=\"+Inf\"} 5
@@ -1510,6 +1542,8 @@ arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
         poison(&COUNTERS);
         poison(&HISTOGRAMS);
         poison(&SAMPLED);
+        poison(&BOX_SCRAPES);
+        poison(&BOX_TARGETS);
         let output = (TOKENS, label("kind", "output"));
         let tokens = || locked(&COUNTERS).get(&output).copied().unwrap_or(0.0);
         let answers = || locked(&HISTOGRAMS).get(MODEL_SECONDS).map_or(0, |h| h.0[2]);
@@ -1524,6 +1558,8 @@ arbos_agentd_turn_duration_seconds_bucket{le=\"2.5\"} 1
         assert!(answers() > answered);
         let state = test_state(AuthMode::Github);
         assert!(render(&state).contains(TOKENS));
+        assert!(render(&state).contains("arbos_relay_box_scrapes{result=\"pending\"}"));
+        locked(&BOX_TARGETS).clear();
         assert!(render_boxes(&state).contains("arbos_relay_box_info"));
     }
 
