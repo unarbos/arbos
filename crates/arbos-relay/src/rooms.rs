@@ -3053,6 +3053,7 @@ mod covered_push_tests {
     /// Runs a real client session against the room until the relay has nothing more to say,
     /// answering it as an app does. Returns what the session asked its host to do.
     async fn run_session(
+        state: &AppState,
         addr: SocketAddr,
         token: &str,
         session: &mut super::client_room::RoomSession,
@@ -3079,7 +3080,18 @@ mod covered_push_tests {
                         let vv = arbos_core::doc::decode_vv(relay_vv).unwrap();
                         session.on_heal(doc.updates_beyond(&vv));
                     }
-                    RoomAction::FetchCheckpoint { .. } => session.on_checkpoint_skipped(),
+                    RoomAction::FetchCheckpoint { frontier, .. } => {
+                        if doc.contains_frontier(frontier) {
+                            session.on_checkpoint_skipped();
+                        } else {
+                            let (seq, bytes) =
+                                state.db.checkpoint_bytes(session.room()).unwrap().unwrap();
+                            doc.import(&bytes).unwrap();
+                            session.on_checkpoint(seq);
+                        }
+                    }
+                    // The refused ops are in the old document: the app starts a new one.
+                    RoomAction::Rebuild { .. } => *doc = ChatDoc::new(None, false),
                     _ => {}
                 }
                 seen.push(action);
@@ -3114,7 +3126,7 @@ mod covered_push_tests {
                 .unwrap();
             session.on_local_commit(doc.export_updates_since(&mark));
         }
-        let seen = run_session(addr, &alice_token, &mut session, &mut doc).await;
+        let seen = run_session(&state, addr, &alice_token, &mut session, &mut doc).await;
         // The heal on connect carries all three; the batches behind it ack as already held.
         assert!(session.is_live() && session.pending().is_empty());
         assert!(!seen.iter().any(|a| matches!(
@@ -3132,6 +3144,99 @@ mod covered_push_tests {
                 Some(format!("user:{alice}"))
             );
         }
+    }
+
+    /// A device that wrote something the relay refuses for good used to send it again on every
+    /// connection, with everything behind it. Now the apps' session lets go of it: the device
+    /// reads the room back from the relay's checkpoint and rows, what it writes afterwards is
+    /// stored, and its document is the relay's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_refused_for_good_reads_the_room_back_and_delivers_again() {
+        use super::client_room::{RoomAction, RoomSession};
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, bob_token) = chat_with_bobs_message(&state);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let addr = serve(state.clone()).await;
+        // The relay holds a checkpoint of Bob's first message and a row for his second.
+        let frontier = arbos_core::doc::encode_vv(&bob_doc.oplog_vv());
+        assert!(state
+            .db
+            .put_checkpoint(&room, 1, &frontier, &bob_doc.snapshot())
+            .unwrap());
+        let mark = bob_doc.oplog_vv();
+        bob_doc
+            .append_user_message("m-bob-2", "again", "dev:bob", &as_user(&bob))
+            .unwrap();
+        let batch = [("bob-2".to_owned(), bob_doc.export_updates_since(&mark))];
+        let frames = push_after_catchup(addr, &room, &bob_token, "dev:bob", &batch).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        let head = state.db.room_state(&room).unwrap().head;
+        let relay_rows = || {
+            super::build_room_doc(&state, &room)
+                .unwrap()
+                .doc
+                .projected_rows()
+        };
+
+        // Alice's device holds the chat and, offline, rewrites Bob's message: not hers to do.
+        let mut doc = ChatDoc::new(Some(5), false);
+        doc.import(&bob_doc.snapshot()).unwrap();
+        let mut session = RoomSession::new("dev:alice", room.clone(), head, Vec::new());
+        let mark = doc.oplog_vv();
+        doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        session.on_local_commit(doc.export_updates_since(&mark));
+        let seen = run_session(&state, addr, &alice_token, &mut session, &mut doc).await;
+        let told: Vec<_> = seen
+            .iter()
+            .filter_map(|a| match a {
+                RoomAction::Rebuild { code, .. } => Some(code.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, ["not_yours"], "the app is told once");
+        assert!(session.is_closed() && session.pending().is_empty());
+        assert_eq!(session.cursor(), 0);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head,
+            "nothing stored"
+        );
+
+        // The next connection fills the new document from the checkpoint and the row after it,
+        // and has nothing to send: no resend, no heal, no refusal.
+        session.prepare_reconnect();
+        let seen = run_session(&state, addr, &alice_token, &mut session, &mut doc).await;
+        assert!(seen
+            .iter()
+            .any(|a| matches!(a, RoomAction::FetchCheckpoint { .. })));
+        assert!(!seen.iter().any(|a| matches!(
+            a,
+            RoomAction::Rebuild { .. }
+                | RoomAction::PushRefused { .. }
+                | RoomAction::SessionError { .. }
+                | RoomAction::Pending(_)
+        )));
+        assert!(session.is_live());
+        assert_eq!(doc.message_ids(), ["m-bob", "m-bob-2"]);
+        assert_eq!(doc.projected_rows(), relay_rows());
+
+        // What she writes now is stored under her name, and the two documents still agree.
+        session.on_close(0);
+        session.prepare_reconnect();
+        let mark = doc.oplog_vv();
+        doc.append_user_message("m-alice", "hi", "dev:alice", &as_user(&alice))
+            .unwrap();
+        session.on_local_commit(doc.export_updates_since(&mark));
+        run_session(&state, addr, &alice_token, &mut session, &mut doc).await;
+        assert!(session.is_live() && session.pending().is_empty());
+        let chat = room.strip_prefix("people/").unwrap();
+        assert_eq!(
+            state.db.message_author(chat, "m-alice").unwrap(),
+            Some(format!("user:{alice}"))
+        );
+        assert_eq!(doc.message_ids(), ["m-bob", "m-bob-2", "m-alice"]);
+        assert_eq!(doc.projected_rows(), relay_rows());
     }
 
     /// 250 pending batches whose ops the room already holds → 250 dup ACKs, no new rows, no
@@ -3202,7 +3307,7 @@ mod covered_push_tests {
     }
 
     /// Late poll writes through the socket, one connection per push: each
-    /// is acknowledged — a refusal would be re-sent on every reconnect and cut the device off
+    /// is acknowledged — a refusal would undo what the device had not yet delivered in
     /// the chat — and each is stored with the relay's correction right behind it, so the
     /// second push is judged against the corrected row and never against the first one's
     /// value (`push_guard::corrections`, `docs/polls.md` §11).
@@ -3838,8 +3943,8 @@ mod covered_push_tests {
     /// The app offers "Close poll" to the member whose name the row wears; the relay's record
     /// names whoever pushed the row. Where the two differ — a row one member pushed under
     /// another's name, with no record to check it against — the named maker's close is taken
-    /// and timed like any other. Refused, it would be re-sent on every reconnect with the rest
-    /// of that device's queue stuck behind it.
+    /// and timed like any other. Refused, it would take the rest of that device's undelivered
+    /// writes with it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_maker_named_on_a_poll_closes_it_whoever_the_record_names() {
         let state = test_state(AuthMode::Github);

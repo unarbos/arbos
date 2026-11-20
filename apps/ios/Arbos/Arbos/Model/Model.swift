@@ -751,7 +751,7 @@ struct Poll: Equatable {
 
 /// Remote flag `features.poll_options` from `GET /me`: the relay takes polls with "Show who
 /// voted", a duration and a close. Off on a relay from before them (it refuses such a poll,
-/// and a refused push is sent again for ever): the sheet then offers none of the three and
+/// and a refused push undoes what is unsent in the chat): the sheet then offers none of the three and
 /// the poll is posted in the older shape.
 ///
 /// Held in memory only, for the account and relay that answered: off at every launch until
