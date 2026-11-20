@@ -247,6 +247,8 @@ struct ChatSession: View {
     /// Rows added per step. Small on purpose: a step builds and lays out this many
     /// bubbles in one frame (≈4 ms each in a Debug simulator build).
     static let windowStep = 30
+    /// Rows a reveal's window keeps above its target (see `includeInWindow`).
+    static let revealRowsAbove = 5
     /// Most rows the view tree holds while reading history. Past this, each step
     /// that adds older rows at the top also drops the same number of newest rows
     /// below the viewport, and the first row on screen is re-pinned, so the cost
@@ -669,7 +671,12 @@ struct ChatSession: View {
         // rows the stack has just built.
         let below = Self.windowStep / 2
         let skip = max(0, all.count - ix - 1 - below)
-        let count = min(all.count - skip, Self.windowInitial)
+        // A short slice, not a full `windowInitial`: with 80 rows slid in under a scroll offset
+        // carried over from the stack it replaced, the lazy stack could re-place its rows
+        // forever inside one transaction once the reveal had arrived (main thread never
+        // returns; sampled in `LazySubviewPlacements.updateValue`). The reader grows it by
+        // scrolling, as from any window.
+        let count = min(all.count - skip, below + 1 + Self.revealRowsAbove)
         revealTrace("include-in-window",
                     "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
                     + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
@@ -2783,6 +2790,8 @@ struct ChatSession: View {
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
                 guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
+                // A reveal owns the window until it has landed.
+                guard revealingRow == nil else { return }
                 // One step per quarter second at most: the reporter now fires per scroll sample
                 // inside the top band (lazy rows), and a flick's deceleration there should bring
                 // a few slices in, not run away through the whole history.
@@ -3162,6 +3171,12 @@ struct ChatSession: View {
         // Before the scroll, so the corrections can tell this reveal from the next one.
         highlightedMessage = messageId
         lastRevealedMessage = messageId
+        // Claimed before the window moves, so the short slice `includeInWindow` slides in is
+        // not grown from the near-top reporter before the reveal has settled on it.
+        if !DebugHooks.revealPreFix {
+            revealFrame.clear()
+            revealingRow = RevealTarget(rowId: target.id, messageId: messageId)
+        }
         if includeInWindow(messageId: messageId) {
             // The window has just moved onto the target, so the rows on screen are not the
             // rows that were there a moment ago. A jump across a hundred rows of history has
