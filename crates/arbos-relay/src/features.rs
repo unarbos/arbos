@@ -7,6 +7,8 @@
 //! | `leaf_avatars`, `leaf_lottie` (retired: the leaf artwork is gone) | — | always off, see [`leaf_avatars`] |
 //! | `voice_mode` (spoken replies, voice picker, reply playback; 2026-10-22 Jacob: hidden until it works end to end) | `ARBOS_FEATURE_VOICE_MODE` | off; the relay also refuses `/proxy/v1/audio/speech` while off, so no client can spend on TTS |
 //!
+//! | `poll_options` (polls with "Show who voted", a duration and a close) | — | always on: it says what this relay's push guard accepts, so an app never posts a poll the relay would refuse |
+//!
 //! `GET /secrets` serves the same object from [`dto`].
 
 use arbos_core::api::MeFeaturesDto;
@@ -45,6 +47,8 @@ pub fn dto() -> MeFeaturesDto {
         leaf_avatars: Some(leaf_avatars()),
         leaf_lottie: Some(leaf_avatars()),
         voice_mode: Some(voice_mode()),
+        // Not a switch: this relay's push guard takes the poll fields, so it says so.
+        poll_options: Some(true),
     }
 }
 

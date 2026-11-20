@@ -215,3 +215,85 @@ final class ReactionPickerUITests: XCTestCase {
         XCTAssertFalse(heart.exists, "a tap on the bubble and one on the chip left the chip's own tap and no heart")
     }
 }
+
+/// The poll sheet in a people chat (tester report, 2026-11-14), on the fixture's Launch week
+/// group: the author's two choices under "Allow multiple answers". The card itself is not
+/// driven here: the fixture has no chat doc, so a vote or a close on screen would not go
+/// through the core. `PollTests` covers that path.
+final class PollUITests: XCTestCase {
+    private let appear: TimeInterval = 90
+    private let settle: TimeInterval = 20
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+    }
+
+    private func shot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "poll-\(name)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// The poll sheet carries the author's two new choices under "Allow multiple answers".
+    func testThePollSheetOffersVoterVisibilityAndADuration() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": "fx-group-launch"]
+        app.launch()
+        let any = app.descendants(matching: .any)
+        XCTAssertTrue(any["composer-plus"].firstMatch.waitForExistence(timeout: appear), "the composer is up")
+        any["composer-plus"].firstMatch.tap()
+        XCTAssertTrue(any["attach-poll"].firstMatch.waitForExistence(timeout: settle), "+ offers Poll in a group")
+        any["attach-poll"].firstMatch.tap()
+        let showVoters = app.switches["poll-show-voters"].firstMatch
+        XCTAssertTrue(showVoters.waitForExistence(timeout: settle), "the sheet has Show who voted")
+        XCTAssertEqual(showVoters.value as? String, "0", "off until the author turns it on")
+        let duration = any["poll-duration"].firstMatch
+        XCTAssertTrue(duration.exists, "the sheet has Closes after")
+        XCTAssertTrue(duration.label.contains("No time limit"), duration.label)
+        shot("sheet")
+    }
+
+    /// The card in each state (fixture polls): someone's closed poll takes no tap, mine sits
+    /// on my side with its time left, the count lists who voted (a voter who left is counted,
+    /// not named), and "Close poll" asks before it closes.
+    func testThePollCardClosedOpenVotersAndTheCloseConfirm() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_POLLS": "1"]
+        app.launch()
+        let closed = app.buttons["A, Lisbon, 2 votes"].firstMatch
+        XCTAssertTrue(closed.waitForExistence(timeout: appear), "the closed poll's option is drawn and spoken with its count")
+        XCTAssertFalse(closed.isEnabled, "a closed poll takes no tap")
+        let texts = app.staticTexts
+        XCTAssertTrue(texts.containing(NSPredicate(format: "label CONTAINS %@", "Mira Kaplan's poll · 3 voted · closed")).firstMatch.exists)
+        shot("cards")
+
+        // Mine, open, names shown, a little over two hours left.
+        let mine = app.buttons["A, Tuesday, 2 votes, chosen"].firstMatch
+        XCTAssertTrue(mine.exists && mine.isEnabled, "my open poll, with my pick spoken")
+        XCTAssertTrue(texts.containing(NSPredicate(format: "label CONTAINS %@", "Your poll · 4 voted · pick one · names shown · closes in 2 h")).firstMatch.exists)
+        // Names hidden: the count and my own pick, and no control that lists voters.
+        XCTAssertTrue(app.buttons["A, Yes, 3 votes, chosen"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["3 voted for Yes. Shows who."].exists)
+
+        // Who voted: Sam is named; the voter who is no longer in the chat is counted.
+        app.buttons["2 voted for Thursday. Shows who."].firstMatch.tap()
+        let voters = app.descendants(matching: .any)["poll-voters"].firstMatch
+        XCTAssertTrue(voters.waitForExistence(timeout: settle), "the voters line opens under the card")
+        XCTAssertEqual(voters.label, "Thursday: Sam Okafor and 1 other")
+        shot("voters")
+
+        // Close poll asks first; Cancel leaves the card as it was.
+        mine.press(forDuration: 0.8)
+        let close = app.buttons["Close poll"].firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: settle), "the hold menu offers Close poll on my open poll")
+        shot("menu")
+        close.tap()
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: settle), "closing asks first")
+        XCTAssertTrue(alert.buttons["Close poll"].exists)
+        shot("confirm")
+        alert.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(mine.waitForExistence(timeout: settle) && mine.isEnabled, "still open after Cancel")
+    }
+}

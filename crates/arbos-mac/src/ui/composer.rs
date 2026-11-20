@@ -7274,7 +7274,11 @@ mod overlay_tests {
             "no polls in an agent's own chat"
         );
 
-        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Group);
+        state.update(vcx, |s, _| {
+            s.projects[0].kind = SpaceKind::Group;
+            // A relay that takes the poll options (`features.poll_options`).
+            s.poll_options = true;
+        });
         settle(&state, &shell, vcx);
         let row = vcx
             .debug_bounds("composer-attach-poll")
@@ -7296,6 +7300,32 @@ mod overlay_tests {
             c.fill_poll_for_test("Where?", &["Lisbon", "Berlin"], cx)
         });
         settle(&state, &shell, vcx);
+        // The two switches under the options, offered because this relay takes them: who
+        // voted is hidden and there is no time limit until the author says otherwise.
+        let switches = |vcx: &mut gpui::VisualTestContext| {
+            composer.read_with(&*vcx, |c, _| {
+                let draft = c.poll.as_ref().expect("the form is open");
+                (draft.show_voters, draft.duration)
+            })
+        };
+        assert_eq!(switches(vcx), (false, 0));
+        // The duration row opens its choices; one of them is picked by name.
+        assert!(vcx.debug_bounds("composer-poll-duration-1").is_none());
+        for selector in [
+            "composer-poll-show-voters",
+            "composer-poll-duration",
+            "composer-poll-duration-1",
+        ] {
+            let row = vcx.debug_bounds(selector).expect(selector).center();
+            vcx.simulate_click(row, none);
+            settle(&state, &shell, vcx);
+        }
+        assert!(
+            vcx.debug_bounds("composer-poll-duration-1").is_none(),
+            "picking closes the list"
+        );
+        assert_eq!(switches(vcx), (true, 1), "shown, and closing in an hour");
+
         let send = vcx.debug_bounds("composer-poll-send").unwrap().center();
         vcx.simulate_click(send, none);
         settle(&state, &shell, vcx);
@@ -7303,6 +7333,18 @@ mod overlay_tests {
             composer.read_with(&*vcx, |c, _| c.poll.is_none()),
             "a valid poll is sent and the form closes"
         );
+
+        // A relay from before the poll options: the form offers neither switch.
+        state.update(vcx, |s, _| s.poll_options = false);
+        composer.update(vcx, |c, cx| c.toggle_attach_menu(cx));
+        settle(&state, &shell, vcx);
+        let row = vcx.debug_bounds("composer-attach-poll").unwrap().center();
+        vcx.simulate_click(row, none);
+        settle(&state, &shell, vcx);
+        assert!(vcx.debug_bounds("composer-poll-send").is_some());
+        for selector in ["composer-poll-show-voters", "composer-poll-duration"] {
+            assert!(vcx.debug_bounds(selector).is_none(), "{selector}");
+        }
     }
 
     #[gpui::test]

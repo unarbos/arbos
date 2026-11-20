@@ -112,7 +112,7 @@ final class CoreFixturesTests: XCTestCase {
     func testFfiReadsCoreChatDocFixture() throws {
         let snap = try fixtureData("chat_doc.bin")
         let doc = try ArbosFFI.ChatDoc.openFromSnapshot(snapshot: snap)
-        let raw = doc.readRowsJson()
+        let raw = doc.readRowsJson(viewer: nil)
         let json = try JSONSerialization.jsonObject(with: Data(raw.utf8))
         guard let rows = json as? [[String: Any]] else {
             return XCTFail("FFI rows not an array")
