@@ -14,13 +14,20 @@
 //! Two users who both proved the same address: the one who linked it first is paid.
 //!
 //! Only TAO counts. Stake (alpha) handed to the treasury is not a deposit, and neither is a
-//! transfer made inside a stake move (`chain.rs`). A sender that cannot sign a link proof is
-//! never credited from here: an exchange's wallet, a multisig, a pure proxy, a key that is not
-//! sr25519. Those are paid by hand, with the admin grant.
+//! transfer made inside a stake move or outside an extrinsic (`chain.rs`). A sender that cannot
+//! sign a link proof is never credited from here: an exchange's wallet, a multisig, a pure
+//! proxy, a key that is not sr25519. Those are paid by hand, with the admin grant.
 //!
-//! The chain node is somebody else's, and a lying one could invent a deposit. So a deposit above
-//! `ARBOS_DEPOSIT_MAX_TAO` is stored and shown but never credited from here: it is held for a
-//! person to check against the chain and grant by hand.
+//! The chain node is somebody else's, and a lying one could invent deposits. Nothing here
+//! checks what it says against a second node. Two limits bound what a lie can cost:
+//!
+//!   - a deposit above `ARBOS_DEPOSIT_MAX_TAO` when it is seen is held for good: stored and
+//!     shown, never credited from here, whatever the cap is later. A person checks it against
+//!     the chain and grants it by hand;
+//!   - no more than `ARBOS_DEPOSIT_DAILY_MAX_TAO` is credited from here in any 24 hours. A
+//!     deposit that would pass it waits, and is credited when the day has room.
+//!
+//! So a lying node can cost at most the daily limit a day, in deposits no larger than the cap.
 //!
 //! Unset `ARBOS_DEPOSIT_ADDRESS` and none of this runs; `GET /me/credits/deposit` is then 404.
 
@@ -43,7 +50,7 @@ use crate::state::AppState;
 pub const DEPOSITS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chain_deposits (
   block_hash TEXT NOT NULL, event_index INTEGER NOT NULL, block INTEGER NOT NULL,
-  from_address TEXT NOT NULL, rao INTEGER NOT NULL,
+  from_address TEXT NOT NULL, rao INTEGER NOT NULL, held INTEGER NOT NULL DEFAULT 0,
   seen_at INTEGER NOT NULL, user_id TEXT, usd REAL, tao_usd REAL, credited_at INTEGER,
   PRIMARY KEY (block_hash, event_index)
 );
@@ -78,17 +85,32 @@ impl crate::db::Db {
         })
     }
 
-    /// One finalized block, read: its deposits stored and the cursor moved, together.
-    fn record_block(&self, number: u64, hash: &str, deposits: &[Deposit]) -> anyhow::Result<()> {
+    /// One finalized block, read: its deposits stored and the cursor moved, together. A deposit
+    /// above `max_rao` is stored held, and stays held.
+    fn record_block(
+        &self,
+        number: u64,
+        hash: &str,
+        deposits: &[Deposit],
+        max_rao: i64,
+    ) -> anyhow::Result<()> {
         self.with(|c| {
             let tx =
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
             for d in deposits {
                 tx.execute(
                     "INSERT OR IGNORE INTO chain_deposits
-                       (block_hash, event_index, block, from_address, rao, seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![hash, d.index, number as i64, d.from, d.rao as i64, now_ms()],
+                       (block_hash, event_index, block, from_address, rao, held, seen_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5 > ?6, ?7)",
+                    params![
+                        hash,
+                        d.index,
+                        number as i64,
+                        d.from,
+                        d.rao as i64,
+                        max_rao,
+                        now_ms()
+                    ],
                 )?;
             }
             tx.execute(
@@ -100,34 +122,47 @@ impl crate::db::Db {
         })
     }
 
-    /// Is any stored deposit waiting only for a price?
-    fn deposits_to_credit(&self, max_rao: i64) -> anyhow::Result<bool> {
+    /// Is any stored deposit waiting only for a price, or for the day to have room?
+    fn deposits_to_credit(&self) -> anyhow::Result<bool> {
         self.with(|c| {
             c.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM chain_deposits d WHERE d.credited_at IS NULL AND d.rao <= ?1 AND {PAYEE} IS NOT NULL)"),
-                [max_rao],
+                &format!("SELECT EXISTS(SELECT 1 FROM chain_deposits d WHERE d.credited_at IS NULL AND NOT d.held AND {PAYEE} IS NOT NULL)"),
+                [],
                 |r| r.get(0),
             )
         })
     }
 
-    /// Credit every uncredited deposit of at most `max_rao` whose sender is linked, at
-    /// `tao_usd`. Each is marked and its ledger row written in one transaction; the mark is
-    /// what makes it once only.
-    fn credit_deposits(&self, tao_usd: f64, max_rao: i64) -> anyhow::Result<usize> {
+    /// Credit every uncredited deposit that is not held and whose sender is linked, at
+    /// `tao_usd`, oldest first. Each is marked and its ledger row written in one transaction;
+    /// the mark is what makes it once only. One that would take what was credited in the last
+    /// 24 hours above `daily_max_rao` is left waiting. Returns how many were credited and how
+    /// many left.
+    fn credit_deposits(&self, tao_usd: f64, daily_max_rao: i64) -> anyhow::Result<(usize, usize)> {
         self.with(|c| {
             let tx =
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
+            // A row settled by hand has no `usd` and is not counted.
+            let mut day: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(rao), 0) FROM chain_deposits
+                 WHERE credited_at > ?1 AND usd IS NOT NULL",
+                [now_ms() - 24 * 60 * 60 * 1000],
+                |r| r.get(0),
+            )?;
             let due: Vec<(String, i64, i64, String)> = tx
                 .prepare(&format!(
                     "SELECT d.block_hash, d.event_index, d.rao, {PAYEE}
-                     FROM chain_deposits d WHERE d.credited_at IS NULL AND d.rao <= ?1 AND {PAYEE} IS NOT NULL"
+                     FROM chain_deposits d
+                     WHERE d.credited_at IS NULL AND NOT d.held AND {PAYEE} IS NOT NULL
+                     ORDER BY d.block, d.event_index"
                 ))?
-                .query_map([max_rao], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<rusqlite::Result<_>>()?;
+            let mut credited = 0;
             for (hash, index, rao, user) in &due {
+                if day.saturating_add(*rao) > daily_max_rao {
+                    continue;
+                }
                 let tao = *rao as f64 / 1e9;
                 let usd = tao * tao_usd;
                 let marked = tx.execute(
@@ -142,29 +177,26 @@ impl crate::db::Db {
                          VALUES (?1, ?2, 'deposit', ?3, ?4, ?5, 'chain')",
                         params![user, now_ms(), usd, format!("{hash}:{index}"), note],
                     )?;
+                    day += rao;
+                    credited += 1;
                 }
             }
             tx.commit()?;
-            Ok(due.len())
+            Ok((credited, due.len() - credited))
         })
     }
 
     /// A user's deposits, newest first: those credited to them, and those still waiting from
-    /// the address they have linked now. `held` marks one above `max_rao`.
-    fn deposits_of(
-        &self,
-        user_id: &str,
-        linked: Option<&str>,
-        max_rao: i64,
-    ) -> anyhow::Result<Vec<Value>> {
+    /// the address they have linked now.
+    fn deposits_of(&self, user_id: &str, linked: Option<&str>) -> anyhow::Result<Vec<Value>> {
         self.with(|c| {
             c.prepare(
-                "SELECT block, rao, usd, credited_at, credited_at IS NULL AND rao > ?3
+                "SELECT block, rao, usd, credited_at, credited_at IS NULL AND held
                  FROM chain_deposits
                  WHERE user_id = ?1 OR (credited_at IS NULL AND from_address = ?2)
                  ORDER BY block DESC, event_index DESC LIMIT 50",
             )?
-            .query_map(params![user_id, linked, max_rao], |r| {
+            .query_map(params![user_id, linked], |r| {
                 Ok(json!({
                     "block": r.get::<_, i64>(0)?, "rao": r.get::<_, i64>(1)?,
                     "usd": r.get::<_, Option<f64>>(2)?, "credited_at": r.get::<_, Option<i64>>(3)?,
@@ -193,38 +225,42 @@ async fn tao_usd(http: &reqwest::Client) -> anyhow::Result<f64> {
     }
 }
 
-/// The most a deposit may be and still be credited without a person, in rao.
-fn max_rao(state: &AppState) -> i64 {
-    (state.cfg.deposit_max_tao * 1e9) as i64
+fn rao(tao: f64) -> i64 {
+    (tao * 1e9) as i64
 }
 
 /// Read the finalized blocks not read yet. Any failure leaves the cursor where it was; the
 /// next tick reads the block again.
 async fn read_blocks(state: &AppState, chain: &Chain, treasury: &str) -> anyhow::Result<()> {
-    let head = chain.finalized().await?;
+    // A load-balanced endpoint may answer the head and the block from different backends.
+    let head = chain.finalized().await?.saturating_sub(2);
+    let max_rao = rao(state.cfg.deposit_max_tao);
     // The first run starts at the head: money sent before the watcher existed is not looked for.
     let next = state.db.deposit_cursor()?.map_or(head, |c| c + 1);
     for number in next..=head.min(next.saturating_add(BLOCKS_PER_TICK)) {
         let (hash, deposits) = chain.deposits(number, treasury).await?;
         for d in &deposits {
             tracing::info!(block = number, from = %d.from, rao = d.rao, "deposit seen");
-            if d.rao as i64 > max_rao(state) {
+            if d.rao as i64 > max_rao {
                 tracing::warn!(block = number, from = %d.from, rao = d.rao, "deposit held for review");
             }
         }
-        state.db.record_block(number, &hash, &deposits)?;
+        state.db.record_block(number, &hash, &deposits, max_rao)?;
     }
     Ok(())
 }
 
 /// Credit what can be credited.
 async fn credit(state: &AppState) -> anyhow::Result<()> {
-    let max_rao = max_rao(state);
-    if state.db.deposits_to_credit(max_rao)? {
-        let credited = state
+    if state.db.deposits_to_credit()? {
+        let daily_max = rao(state.cfg.deposit_daily_max_tao);
+        let (credited, waiting) = state
             .db
-            .credit_deposits(tao_usd(&state.http).await?, max_rao)?;
+            .credit_deposits(tao_usd(&state.http).await?, daily_max)?;
         tracing::info!(credited, "deposits credited");
+        if waiting > 0 {
+            tracing::warn!(waiting, "deposits wait: the 24-hour limit is reached");
+        }
     }
     Ok(())
 }
@@ -279,9 +315,7 @@ pub async fn info(State(state): State<AppState>, principal: Principal) -> Respon
         );
     };
     let found = state.db.wallet(user_id).and_then(|linked| {
-        let deposits = state
-            .db
-            .deposits_of(user_id, linked.as_deref(), max_rao(&state))?;
+        let deposits = state.db.deposits_of(user_id, linked.as_deref())?;
         Ok((linked, deposits))
     });
     match found {
@@ -344,59 +378,63 @@ mod tests {
         assert!(SANE_TAO_USD.contains(&tao_usd(&state.http).await.unwrap()));
     }
 
+    const MAX: i64 = 25_000_000_000;
+    const DAY: i64 = 100_000_000_000;
+
     #[test]
     fn a_deposit_is_stored_once_and_credited_once_to_whoever_linked_its_sender_first() {
         let state = test_state(AuthMode::Github);
         let db = &state.db;
         assert_eq!(db.deposit_cursor().unwrap(), None);
-        const MAX: i64 = 25_000_000_000;
         let block = [deposit(3, 2_000_000_000), deposit(7, 500_000_000)];
-        db.record_block(10, "0xaa", &block).unwrap();
-        db.record_block(10, "0xaa", &block).unwrap();
+        db.record_block(10, "0xaa", &block, MAX).unwrap();
+        db.record_block(10, "0xaa", &block, MAX).unwrap();
         assert_eq!(db.deposit_cursor().unwrap(), Some(10));
 
         // Nobody has linked the sender: nothing to credit, nothing credited.
-        assert!(!db.deposits_to_credit(MAX).unwrap());
-        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 0);
-        assert_eq!(db.deposits_of("gh_1", Some(ALICE), MAX).unwrap().len(), 2);
+        assert!(!db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, DAY).unwrap(), (0, 0));
+        assert_eq!(db.deposits_of("gh_1", Some(ALICE)).unwrap().len(), 2);
 
         db.set_wallet("gh_1", Some(ALICE)).unwrap();
         std::thread::sleep(Duration::from_millis(2));
         db.set_wallet("gh_2", Some(ALICE)).unwrap();
-        assert!(db.deposits_to_credit(MAX).unwrap());
-        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 2);
+        assert!(db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, DAY).unwrap(), (2, 0));
         assert_eq!(balance(&state, "gh_1"), 2.5 * 200.0);
         assert_eq!(balance(&state, "gh_2"), 0.0);
 
         // Again, at another price, and after the block is read again: nothing moves.
-        db.record_block(10, "0xaa", &block).unwrap();
-        assert!(!db.deposits_to_credit(MAX).unwrap());
-        assert_eq!(db.credit_deposits(900.0, MAX).unwrap(), 0);
+        db.record_block(10, "0xaa", &block, MAX).unwrap();
+        assert!(!db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(900.0, DAY).unwrap(), (0, 0));
         assert_eq!(balance(&state, "gh_1"), 500.0);
-        let mine = db.deposits_of("gh_1", None, MAX).unwrap();
+        let mine = db.deposits_of("gh_1", None).unwrap();
         assert_eq!(mine.len(), 2);
         assert_eq!(mine[0]["usd"], 100.0);
         assert_eq!(mine[0]["held"], false);
-        assert!(db.deposits_of("gh_2", Some(ALICE), MAX).unwrap().is_empty());
+        assert!(db.deposits_of("gh_2", Some(ALICE)).unwrap().is_empty());
     }
 
     #[test]
-    fn a_deposit_above_the_cap_is_held_and_one_at_it_is_credited() {
+    fn a_deposit_above_the_cap_stays_held_and_one_at_it_is_credited() {
         let state = test_state(AuthMode::Github);
         let db = &state.db;
-        const MAX: i64 = 25_000_000_000;
         db.set_wallet("gh_1", Some(ALICE)).unwrap();
-        db.record_block(10, "0xaa", &[deposit(1, MAX as u64 + 1)])
+        db.record_block(10, "0xaa", &[deposit(1, MAX as u64 + 1)], MAX)
             .unwrap();
-        assert!(!db.deposits_to_credit(MAX).unwrap());
-        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 0);
+        assert!(!db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, DAY).unwrap(), (0, 0));
 
-        db.record_block(11, "0xbb", &[deposit(1, MAX as u64)])
+        // The cap is raised, and the block read again under it: the row is still held.
+        db.record_block(10, "0xaa", &[deposit(1, MAX as u64 + 1)], MAX * 2)
             .unwrap();
-        assert!(db.deposits_to_credit(MAX).unwrap());
-        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 1);
+        db.record_block(11, "0xbb", &[deposit(1, MAX as u64)], MAX * 2)
+            .unwrap();
+        assert!(db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, DAY).unwrap(), (1, 0));
         assert_eq!(balance(&state, "gh_1"), 25.0 * 200.0);
-        let mine = db.deposits_of("gh_1", Some(ALICE), MAX).unwrap();
+        let mine = db.deposits_of("gh_1", Some(ALICE)).unwrap();
         assert_eq!(
             (&mine[0]["held"], &mine[0]["usd"]),
             (&json!(false), &json!(5000.0))
@@ -405,5 +443,60 @@ mod tests {
             (&mine[1]["held"], &mine[1]["usd"]),
             (&json!(true), &Value::Null)
         );
+    }
+
+    #[test]
+    fn a_deposit_settled_by_hand_is_not_credited_when_its_sender_links() {
+        let state = test_state(AuthMode::Github);
+        let db = &state.db;
+        db.record_block(10, "0xaa", &[deposit(1, 1_000_000_000)], MAX)
+            .unwrap();
+        // The operator's step after a manual grant (docs/self-host.md).
+        db.with(|c| {
+            c.execute(
+                "UPDATE chain_deposits SET credited_at = 1, user_id = 'gh_1'
+                 WHERE block_hash = '0xaa' AND event_index = 1",
+                [],
+            )
+        })
+        .unwrap();
+        db.set_wallet("gh_1", Some(ALICE)).unwrap();
+        assert!(!db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, DAY).unwrap(), (0, 0));
+        assert_eq!(balance(&state, "gh_1"), 0.0);
+    }
+
+    #[test]
+    fn no_more_than_the_daily_limit_is_credited_in_24_hours() {
+        let state = test_state(AuthMode::Github);
+        let db = &state.db;
+        db.set_wallet("gh_1", Some(ALICE)).unwrap();
+        let tao = 1_000_000_000;
+        let block = [
+            deposit(1, 20 * tao),
+            deposit(2, 20 * tao),
+            deposit(3, 5 * tao),
+        ];
+        db.record_block(10, "0xaa", &block, MAX).unwrap();
+        // 20, then 20 would make 40 and waits, then 5 makes 25.
+        assert_eq!(db.credit_deposits(200.0, 30 * tao as i64).unwrap(), (2, 1));
+        assert_eq!(balance(&state, "gh_1"), 25.0 * 200.0);
+        // Still waiting, not held, and what was credited counts on the next pass.
+        assert!(db.deposits_to_credit().unwrap());
+        assert_eq!(db.credit_deposits(200.0, 30 * tao as i64).unwrap(), (0, 1));
+        assert_eq!(
+            db.deposits_of("gh_1", Some(ALICE)).unwrap()[1]["held"],
+            false
+        );
+        // A day later the earlier credits have aged out.
+        db.with(|c| {
+            c.execute(
+                "UPDATE chain_deposits SET credited_at = 1 WHERE credited_at IS NOT NULL",
+                [],
+            )
+        })
+        .unwrap();
+        assert_eq!(db.credit_deposits(200.0, 30 * tao as i64).unwrap(), (1, 0));
+        assert_eq!(balance(&state, "gh_1"), 45.0 * 200.0);
     }
 }

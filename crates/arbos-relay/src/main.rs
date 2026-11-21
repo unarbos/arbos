@@ -314,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
         auth_redirects: auth_redirects_from_env(),
         deposit_address,
         deposit_max_tao: env_f64("ARBOS_DEPOSIT_MAX_TAO", 25.0),
+        deposit_daily_max_tao: env_f64("ARBOS_DEPOSIT_DAILY_MAX_TAO", 100.0),
         // An archive node: catching up after downtime reads blocks a pruning node has dropped.
         chain_rpc: env_nonempty("ARBOS_CHAIN_RPC")
             .unwrap_or_else(|| "https://archive.sub.latent.to".to_owned()),

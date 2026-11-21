@@ -248,9 +248,10 @@ UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_AT
 # numbers, kept from the env file, never read from the vault. Unset = the relay's defaults ($100, no cap,
 # $500). They were not listed here, so a value set by hand was dropped by the next run of this script.
 # ARBOS_DEPOSIT_ADDRESS is the cold wallet that takes TAO for credits, ARBOS_CHAIN_RPC the node the
-# relay watches it through and ARBOS_DEPOSIT_MAX_TAO the largest deposit credited without a person
-# (crates/arbos-relay/src/deposits.rs); no address = no deposits.
-CREDIT_KEYS=(ARBOS_DEFAULT_GRANT_USD ARBOS_DEFAULT_DAILY_CAP_USD ARBOS_GLOBAL_DAILY_CAP_USD ARBOS_DEPOSIT_ADDRESS ARBOS_CHAIN_RPC ARBOS_DEPOSIT_MAX_TAO)
+# relay watches it through, ARBOS_DEPOSIT_MAX_TAO the largest deposit credited without a person and
+# ARBOS_DEPOSIT_DAILY_MAX_TAO the most credited in 24 hours (crates/arbos-relay/src/deposits.rs); no
+# address = no deposits.
+CREDIT_KEYS=(ARBOS_DEFAULT_GRANT_USD ARBOS_DEFAULT_DAILY_CAP_USD ARBOS_GLOBAL_DAILY_CAP_USD ARBOS_DEPOSIT_ADDRESS ARBOS_CHAIN_RPC ARBOS_DEPOSIT_MAX_TAO ARBOS_DEPOSIT_DAILY_MAX_TAO)
 # Prometheus (docs/metrics.md): the loopback address the relay serves GET /metrics on, e.g.
 # 127.0.0.1:9108. An operator switch kept from the env file; unset = no endpoint. Dropping it on a
 # deploy would blank every dashboard without an error anywhere.

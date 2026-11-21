@@ -87,6 +87,8 @@ pub struct Config {
     /// A deposit above this many TAO is held for a person, never credited by the watcher
     /// (`ARBOS_DEPOSIT_MAX_TAO`).
     pub deposit_max_tao: f64,
+    /// The most TAO the watcher credits in any 24 hours (`ARBOS_DEPOSIT_DAILY_MAX_TAO`).
+    pub deposit_daily_max_tao: f64,
     /// The Bittensor node the deposit watcher reads (`ARBOS_CHAIN_RPC`).
     pub chain_rpc: String,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
@@ -818,6 +820,7 @@ pub(crate) mod test_support {
             auth_redirects: Vec::new(),
             deposit_address: None,
             deposit_max_tao: 25.0,
+            deposit_daily_max_tao: 100.0,
             chain_rpc: String::new(),
             default_grant_usd: 100.0,
             default_account_limit: crate::credits::SpendLimit::Unlimited,

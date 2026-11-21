@@ -157,6 +157,9 @@ impl Chain {
         for i in transfers_that_count(&kinds) {
             let ev = &events[i];
             let (from, to, rao) = ev.decode_fields_unchecked_as::<([u8; 32], [u8; 32], u64)>()?;
+            // More than the database's integer holds is no real transfer: stop, like any event
+            // that does not decode.
+            anyhow::ensure!(rao <= i64::MAX as u64, "a transfer of {rao} rao");
             // A transfer of nothing is not a deposit.
             if rao > 0 {
                 let from = ss58(&from);
