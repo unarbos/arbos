@@ -1,6 +1,6 @@
-//! Paying for credits with TAO or subnet alpha: a deposit to the treasury becomes a ledger row.
+//! Paying for credits with TAO: a transfer to the treasury becomes a ledger row.
 //!
-//! The relay holds no key. It watches finalized blocks for money arriving at one address
+//! The relay holds no key. It watches finalized blocks for TAO arriving at one address
 //! (`ARBOS_DEPOSIT_ADDRESS`, a cold wallet) and credits whoever proved they hold the address it
 //! came from (`PUT /me/wallet`, `wallets.rs`):
 //!
@@ -12,6 +12,15 @@
 //!
 //! A deposit from an address nobody has linked waits, and is credited when its holder links it.
 //! Two users who both proved the same address: the one who linked it first is paid.
+//!
+//! Only TAO counts. Stake (alpha) handed to the treasury is not a deposit, and neither is a
+//! transfer made inside a stake move (`chain.rs`). A sender that cannot sign a link proof is
+//! never credited from here: an exchange's wallet, a multisig, a pure proxy, a key that is not
+//! sr25519. Those are paid by hand, with the admin grant.
+//!
+//! The chain node is somebody else's, and a lying one could invent a deposit. So a deposit above
+//! `ARBOS_DEPOSIT_MAX_TAO` is stored and shown but never credited from here: it is held for a
+//! person to check against the chain and grant by hand.
 //!
 //! Unset `ARBOS_DEPOSIT_ADDRESS` and none of this runs; `GET /me/credits/deposit` is then 404.
 
@@ -34,7 +43,7 @@ use crate::state::AppState;
 pub const DEPOSITS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chain_deposits (
   block_hash TEXT NOT NULL, event_index INTEGER NOT NULL, block INTEGER NOT NULL,
-  from_address TEXT NOT NULL, netuid INTEGER, rao INTEGER NOT NULL, valued_rao INTEGER NOT NULL,
+  from_address TEXT NOT NULL, rao INTEGER NOT NULL,
   seen_at INTEGER NOT NULL, user_id TEXT, usd REAL, tao_usd REAL, credited_at INTEGER,
   PRIMARY KEY (block_hash, event_index)
 );
@@ -77,9 +86,9 @@ impl crate::db::Db {
             for d in deposits {
                 tx.execute(
                     "INSERT OR IGNORE INTO chain_deposits
-                       (block_hash, event_index, block, from_address, netuid, rao, valued_rao, seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![hash, d.index, number as i64, d.from, d.netuid, d.rao as i64, d.valued_rao as i64, now_ms()],
+                       (block_hash, event_index, block, from_address, rao, seen_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![hash, d.index, number as i64, d.from, d.rao as i64, now_ms()],
                 )?;
             }
             tx.execute(
@@ -92,45 +101,42 @@ impl crate::db::Db {
     }
 
     /// Is any stored deposit waiting only for a price?
-    fn deposits_to_credit(&self) -> anyhow::Result<bool> {
+    fn deposits_to_credit(&self, max_rao: i64) -> anyhow::Result<bool> {
         self.with(|c| {
             c.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM chain_deposits d WHERE d.credited_at IS NULL AND {PAYEE} IS NOT NULL)"),
-                [],
+                &format!("SELECT EXISTS(SELECT 1 FROM chain_deposits d WHERE d.credited_at IS NULL AND d.rao <= ?1 AND {PAYEE} IS NOT NULL)"),
+                [max_rao],
                 |r| r.get(0),
             )
         })
     }
 
-    /// Credit every uncredited deposit whose sender is linked, at `tao_usd`. Each is marked and
-    /// its ledger row written in one transaction; the mark is what makes it once only.
-    fn credit_deposits(&self, tao_usd: f64) -> anyhow::Result<usize> {
+    /// Credit every uncredited deposit of at most `max_rao` whose sender is linked, at
+    /// `tao_usd`. Each is marked and its ledger row written in one transaction; the mark is
+    /// what makes it once only.
+    fn credit_deposits(&self, tao_usd: f64, max_rao: i64) -> anyhow::Result<usize> {
         self.with(|c| {
             let tx =
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
-            let due: Vec<(String, i64, i64, Option<i64>, String)> = tx
+            let due: Vec<(String, i64, i64, String)> = tx
                 .prepare(&format!(
-                    "SELECT d.block_hash, d.event_index, d.valued_rao, d.netuid, {PAYEE}
-                     FROM chain_deposits d WHERE d.credited_at IS NULL AND {PAYEE} IS NOT NULL"
+                    "SELECT d.block_hash, d.event_index, d.rao, {PAYEE}
+                     FROM chain_deposits d WHERE d.credited_at IS NULL AND d.rao <= ?1 AND {PAYEE} IS NOT NULL"
                 ))?
-                .query_map([], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                .query_map([max_rao], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            for (hash, index, valued_rao, netuid, user) in &due {
-                let tao = *valued_rao as f64 / 1e9;
+            for (hash, index, rao, user) in &due {
+                let tao = *rao as f64 / 1e9;
                 let usd = tao * tao_usd;
                 let marked = tx.execute(
                     "UPDATE chain_deposits SET user_id = ?3, usd = ?4, tao_usd = ?5, credited_at = ?6
                      WHERE block_hash = ?1 AND event_index = ?2 AND credited_at IS NULL",
                     params![hash, index, user, usd, tao_usd, now_ms()],
                 )?;
-                // A deposit valued at nothing is settled with no ledger row.
-                if marked == 1 && usd > 0.0 {
-                    let note = match netuid {
-                        None => format!("{tao} TAO at ${tao_usd}"),
-                        Some(n) => format!("subnet {n} alpha worth {tao} TAO at ${tao_usd}"),
-                    };
+                if marked == 1 {
+                    let note = format!("{tao} TAO at ${tao_usd}");
                     tx.execute(
                         "INSERT INTO credit_ledger(user_id, at, kind, usd, ref, note, actor)
                          VALUES (?1, ?2, 'deposit', ?3, ?4, ?5, 'chain')",
@@ -144,19 +150,25 @@ impl crate::db::Db {
     }
 
     /// A user's deposits, newest first: those credited to them, and those still waiting from
-    /// the address they have linked now.
-    fn deposits_of(&self, user_id: &str, linked: Option<&str>) -> anyhow::Result<Vec<Value>> {
+    /// the address they have linked now. `held` marks one above `max_rao`.
+    fn deposits_of(
+        &self,
+        user_id: &str,
+        linked: Option<&str>,
+        max_rao: i64,
+    ) -> anyhow::Result<Vec<Value>> {
         self.with(|c| {
             c.prepare(
-                "SELECT block, netuid, rao, valued_rao, usd, credited_at FROM chain_deposits
+                "SELECT block, rao, usd, credited_at, credited_at IS NULL AND rao > ?3
+                 FROM chain_deposits
                  WHERE user_id = ?1 OR (credited_at IS NULL AND from_address = ?2)
                  ORDER BY block DESC, event_index DESC LIMIT 50",
             )?
-            .query_map(params![user_id, linked], |r| {
+            .query_map(params![user_id, linked, max_rao], |r| {
                 Ok(json!({
-                    "block": r.get::<_, i64>(0)?, "netuid": r.get::<_, Option<i64>>(1)?,
-                    "rao": r.get::<_, i64>(2)?, "valued_rao": r.get::<_, i64>(3)?,
-                    "usd": r.get::<_, Option<f64>>(4)?, "credited_at": r.get::<_, Option<i64>>(5)?,
+                    "block": r.get::<_, i64>(0)?, "rao": r.get::<_, i64>(1)?,
+                    "usd": r.get::<_, Option<f64>>(2)?, "credited_at": r.get::<_, Option<i64>>(3)?,
+                    "held": r.get::<_, bool>(4)?,
                 }))
             })?
             .collect()
@@ -181,20 +193,37 @@ async fn tao_usd(http: &reqwest::Client) -> anyhow::Result<f64> {
     }
 }
 
-/// Read the finalized blocks not read yet, then credit what can be credited.
-async fn tick(state: &AppState, chain: &Chain, treasury: &str) -> anyhow::Result<()> {
+/// The most a deposit may be and still be credited without a person, in rao.
+fn max_rao(state: &AppState) -> i64 {
+    (state.cfg.deposit_max_tao * 1e9) as i64
+}
+
+/// Read the finalized blocks not read yet. Any failure leaves the cursor where it was; the
+/// next tick reads the block again.
+async fn read_blocks(state: &AppState, chain: &Chain, treasury: &str) -> anyhow::Result<()> {
     let head = chain.finalized().await?;
     // The first run starts at the head: money sent before the watcher existed is not looked for.
     let next = state.db.deposit_cursor()?.map_or(head, |c| c + 1);
     for number in next..=head.min(next.saturating_add(BLOCKS_PER_TICK)) {
         let (hash, deposits) = chain.deposits(number, treasury).await?;
         for d in &deposits {
-            tracing::info!(block = number, from = %d.from, netuid = ?d.netuid, rao = d.rao, valued_rao = d.valued_rao, "deposit seen");
+            tracing::info!(block = number, from = %d.from, rao = d.rao, "deposit seen");
+            if d.rao as i64 > max_rao(state) {
+                tracing::warn!(block = number, from = %d.from, rao = d.rao, "deposit held for review");
+            }
         }
         state.db.record_block(number, &hash, &deposits)?;
     }
-    if state.db.deposits_to_credit()? {
-        let credited = state.db.credit_deposits(tao_usd(&state.http).await?)?;
+    Ok(())
+}
+
+/// Credit what can be credited.
+async fn credit(state: &AppState) -> anyhow::Result<()> {
+    let max_rao = max_rao(state);
+    if state.db.deposits_to_credit(max_rao)? {
+        let credited = state
+            .db
+            .credit_deposits(tao_usd(&state.http).await?, max_rao)?;
         tracing::info!(credited, "deposits credited");
     }
     Ok(())
@@ -216,23 +245,23 @@ pub async fn spawn_watcher(state: AppState) {
             if chain.is_none() {
                 match Chain::connect(&state.cfg.chain_rpc, state.http.clone()).await {
                     Ok(c) => chain = Some(c),
-                    Err(error) => {
-                        tracing::warn!(%error, "deposits: chain node");
-                        continue;
-                    }
+                    Err(error) => tracing::warn!(%error, "deposits: chain node"),
                 }
             }
             if let Some(c) = &chain {
-                // Any failure leaves the cursor where it was; the next tick reads the block again.
-                if let Err(error) = tick(&state, c, &treasury).await {
-                    tracing::warn!(%error, "deposits");
+                if let Err(error) = read_blocks(&state, c, &treasury).await {
+                    tracing::warn!(%error, "deposits: reading blocks");
                 }
+            }
+            // Whatever the chain node did: a deposit already stored is credited all the same.
+            if let Err(error) = credit(&state).await {
+                tracing::warn!(%error, "deposits: crediting");
             }
         }
     });
 }
 
-/// `GET /me/credits/deposit` → `{address, linked, deposits}`: where to send TAO or alpha, the
+/// `GET /me/credits/deposit` → `{address, linked, deposits}`: where to send TAO, the
 /// address this user is credited from, and their deposits. 404 when the relay takes none.
 pub async fn info(State(state): State<AppState>, principal: Principal) -> Response {
     let Principal::Device { user_id, .. } = &principal else {
@@ -250,7 +279,9 @@ pub async fn info(State(state): State<AppState>, principal: Principal) -> Respon
         );
     };
     let found = state.db.wallet(user_id).and_then(|linked| {
-        let deposits = state.db.deposits_of(user_id, linked.as_deref())?;
+        let deposits = state
+            .db
+            .deposits_of(user_id, linked.as_deref(), max_rao(&state))?;
         Ok((linked, deposits))
     });
     match found {
@@ -276,13 +307,11 @@ mod tests {
 
     const ALICE: &str = "5DfhGyQdFobKM8NsWvEeAKk5EQQgYe9AydgJ7rMB6E1EqRzV";
 
-    fn deposit(index: u32, netuid: Option<u16>, rao: u64, valued_rao: u64) -> Deposit {
+    fn deposit(index: u32, rao: u64) -> Deposit {
         Deposit {
             index,
             from: ALICE.to_owned(),
-            netuid,
             rao,
-            valued_rao,
         }
     }
 
@@ -295,7 +324,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Live: one tick against Finney stores the head block and moves the cursor.
+    /// Live: one read of Finney stores the head block and moves the cursor.
     /// `ARBOS_CHAIN_RPC=https://archive.sub.latent.to cargo test -p arbos-relay live_ -- --ignored`
     #[tokio::test]
     #[ignore = "needs the network"]
@@ -307,10 +336,10 @@ mod tests {
         )
         .await
         .unwrap();
-        tick(&state, &chain, ALICE).await.unwrap();
+        read_blocks(&state, &chain, ALICE).await.unwrap();
         let first = state.db.deposit_cursor().unwrap().expect("a cursor");
         tokio::time::sleep(PERIOD * 2).await;
-        tick(&state, &chain, ALICE).await.unwrap();
+        read_blocks(&state, &chain, ALICE).await.unwrap();
         assert!(state.db.deposit_cursor().unwrap().unwrap() > first);
         assert!(SANE_TAO_USD.contains(&tao_usd(&state.http).await.unwrap()));
     }
@@ -320,36 +349,61 @@ mod tests {
         let state = test_state(AuthMode::Github);
         let db = &state.db;
         assert_eq!(db.deposit_cursor().unwrap(), None);
-        // 2 TAO, and alpha the chain called 1 TAO but an hour-old price halves.
-        let block = [
-            deposit(3, None, 2_000_000_000, 2_000_000_000),
-            deposit(7, Some(28), 1_000_000_000, 500_000_000),
-        ];
+        const MAX: i64 = 25_000_000_000;
+        let block = [deposit(3, 2_000_000_000), deposit(7, 500_000_000)];
         db.record_block(10, "0xaa", &block).unwrap();
         db.record_block(10, "0xaa", &block).unwrap();
         assert_eq!(db.deposit_cursor().unwrap(), Some(10));
 
         // Nobody has linked the sender: nothing to credit, nothing credited.
-        assert!(!db.deposits_to_credit().unwrap());
-        assert_eq!(db.credit_deposits(200.0).unwrap(), 0);
-        assert_eq!(db.deposits_of("gh_1", Some(ALICE)).unwrap().len(), 2);
+        assert!(!db.deposits_to_credit(MAX).unwrap());
+        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 0);
+        assert_eq!(db.deposits_of("gh_1", Some(ALICE), MAX).unwrap().len(), 2);
 
         db.set_wallet("gh_1", Some(ALICE)).unwrap();
         std::thread::sleep(Duration::from_millis(2));
         db.set_wallet("gh_2", Some(ALICE)).unwrap();
-        assert!(db.deposits_to_credit().unwrap());
-        assert_eq!(db.credit_deposits(200.0).unwrap(), 2);
+        assert!(db.deposits_to_credit(MAX).unwrap());
+        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 2);
         assert_eq!(balance(&state, "gh_1"), 2.5 * 200.0);
         assert_eq!(balance(&state, "gh_2"), 0.0);
 
         // Again, at another price, and after the block is read again: nothing moves.
         db.record_block(10, "0xaa", &block).unwrap();
-        assert!(!db.deposits_to_credit().unwrap());
-        assert_eq!(db.credit_deposits(900.0).unwrap(), 0);
+        assert!(!db.deposits_to_credit(MAX).unwrap());
+        assert_eq!(db.credit_deposits(900.0, MAX).unwrap(), 0);
         assert_eq!(balance(&state, "gh_1"), 500.0);
-        let mine = db.deposits_of("gh_1", None).unwrap();
+        let mine = db.deposits_of("gh_1", None, MAX).unwrap();
         assert_eq!(mine.len(), 2);
         assert_eq!(mine[0]["usd"], 100.0);
-        assert!(db.deposits_of("gh_2", Some(ALICE)).unwrap().is_empty());
+        assert_eq!(mine[0]["held"], false);
+        assert!(db.deposits_of("gh_2", Some(ALICE), MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_deposit_above_the_cap_is_held_and_one_at_it_is_credited() {
+        let state = test_state(AuthMode::Github);
+        let db = &state.db;
+        const MAX: i64 = 25_000_000_000;
+        db.set_wallet("gh_1", Some(ALICE)).unwrap();
+        db.record_block(10, "0xaa", &[deposit(1, MAX as u64 + 1)])
+            .unwrap();
+        assert!(!db.deposits_to_credit(MAX).unwrap());
+        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 0);
+
+        db.record_block(11, "0xbb", &[deposit(1, MAX as u64)])
+            .unwrap();
+        assert!(db.deposits_to_credit(MAX).unwrap());
+        assert_eq!(db.credit_deposits(200.0, MAX).unwrap(), 1);
+        assert_eq!(balance(&state, "gh_1"), 25.0 * 200.0);
+        let mine = db.deposits_of("gh_1", Some(ALICE), MAX).unwrap();
+        assert_eq!(
+            (&mine[0]["held"], &mine[0]["usd"]),
+            (&json!(false), &json!(5000.0))
+        );
+        assert_eq!(
+            (&mine[1]["held"], &mine[1]["usd"]),
+            (&json!(true), &Value::Null)
+        );
     }
 }

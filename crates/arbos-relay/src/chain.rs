@@ -3,6 +3,7 @@
 //! chain client of its own, but it is the apps' alone (CI checks its dependents), so the relay
 //! reads the chain itself.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use subxt::backend::LegacyBackend;
 use subxt::config::SubstrateConfig;
+use subxt::events::Phase;
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 
@@ -80,34 +82,38 @@ fn ss58(account: &[u8; 32]) -> String {
     AccountId32(*account).to_string()
 }
 
-/// Money that arrived at a treasury address in one finalized block, read from the block's
+/// TAO that arrived at a treasury address in one finalized block, read from the block's
 /// events, so a transfer made through a proxy, a batch or a multisig is seen like any other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deposit {
     /// The event's position in its block: with the block hash, the deposit's identity.
     pub index: u32,
-    /// Who paid: the account the TAO left, or the coldkey the stake left.
+    /// The account the TAO left.
     pub from: String,
-    /// `None` for TAO; the subnet whose alpha stake was handed over otherwise.
-    pub netuid: Option<u16>,
-    /// What the chain says moved, in rao of TAO (for alpha: its TAO value at the block's price).
+    /// What moved, in rao.
     pub rao: u64,
-    /// What it is worth to the treasury, in rao: `rao` for TAO, [`alpha_value`] for alpha.
-    pub valued_rao: u64,
 }
 
-/// Blocks in the hour an alpha deposit's price is checked against.
-const PRICE_LOOKBACK: u64 = 300;
-
-/// Alpha handed over inside one subnet is valued by the chain at that block's pool price, which
-/// whoever sends it can push up for a block with a trade of their own. So it is worth the lower
-/// of that price and the price an hour earlier: holding a pool up for an hour means selling to
-/// everyone who notices. Prices are rao of TAO per alpha.
-fn alpha_value(rao: u64, price_at: u64, price_before: u64) -> u64 {
-    if price_at == 0 {
-        return 0;
-    }
-    (rao as u128 * price_before.min(price_at) as u128 / price_at as u128) as u64
+/// The positions of the transfers that count, given each event's (extrinsic, pallet, name) in
+/// block order. A `Balances.Transfer` counts when it ran in an extrinsic that emitted no
+/// `SubtensorModule` event. Handing stake to another coldkey across subnets pays that coldkey
+/// TAO and stakes it away again in the same extrinsic (Subtensor `transition_stake_internal`),
+/// so the treasury is left holding alpha, not the TAO the transfer shows. Every stake call
+/// emits a `SubtensorModule` event; a plain transfer, alone or in a batch, a proxy or a
+/// multisig, emits none. A transfer outside any extrinsic is nobody's payment.
+fn transfers_that_count(events: &[(Option<u32>, &str, &str)]) -> Vec<usize> {
+    let staking: HashSet<u32> = events
+        .iter()
+        .filter(|e| e.1 == "SubtensorModule")
+        .filter_map(|e| e.0)
+        .collect();
+    (0..events.len())
+        .filter(|&i| {
+            let (extrinsic, pallet, name) = events[i];
+            (pallet, name) == ("Balances", "Transfer")
+                && extrinsic.is_some_and(|x| !staking.contains(&x))
+        })
+        .collect()
 }
 
 /// A chain node by URL.
@@ -129,54 +135,40 @@ impl Chain {
         Ok(self.0.at_current_block().await?.block_number())
     }
 
-    async fn alpha_price(&self, number: u64, netuid: u16) -> anyhow::Result<u64> {
-        let at = self.0.at_block(number).await?;
-        let raw = at
-            .runtime_apis()
-            .call_raw(
-                "SwapRuntimeApi_current_alpha_price",
-                Some(&netuid.to_le_bytes()),
-            )
-            .await?;
-        let raw: [u8; 8] = raw[..].try_into()?;
-        Ok(u64::from_le_bytes(raw))
-    }
-
-    /// Block `number`'s hash and every payment in it: `(to, same_subnet_alpha, deposit)`, with
-    /// alpha not yet valued. An event that does not decode is an error, never skipped: a
-    /// runtime that changed an event's shape must stop the watcher, not lose deposits.
-    async fn payments(
-        &self,
-        number: u64,
-    ) -> anyhow::Result<(String, Vec<([u8; 32], bool, Deposit)>)> {
+    /// Block `number`'s hash and every TAO payment in it, as `(to, deposit)`. An event that
+    /// does not decode is an error, never skipped: a runtime that changed an event's shape must
+    /// stop the watcher, not lose deposits.
+    async fn payments(&self, number: u64) -> anyhow::Result<(String, Vec<([u8; 32], Deposit)>)> {
         let at = self.0.at_block(number).await?;
         let hash = format!("0x{}", hex::encode(at.block_hash().0));
+        let events = at.events().fetch().await?;
+        let events = events.iter().collect::<Result<Vec<_>, _>>()?;
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|ev| {
+                let extrinsic = match ev.phase() {
+                    Phase::ApplyExtrinsic(i) => Some(i),
+                    _ => None,
+                };
+                (extrinsic, ev.pallet_name(), ev.event_name())
+            })
+            .collect();
         let mut out = Vec::new();
-        for ev in at.events().fetch().await?.iter() {
-            let ev = ev?;
-            let (to, from, netuid, same_subnet, rao) = match (ev.pallet_name(), ev.event_name()) {
-                ("Balances", "Transfer") => {
-                    let (from, to, rao) =
-                        ev.decode_fields_unchecked_as::<([u8; 32], [u8; 32], u64)>()?;
-                    (to, from, None, false, rao)
-                }
-                ("SubtensorModule", "StakeTransferred") => {
-                    let (from, to, _hotkey, origin, netuid, rao) = ev
-                        .decode_fields_unchecked_as::<([u8; 32], [u8; 32], [u8; 32], u16, u16, u64)>()
-                        ?;
-                    // Across subnets the amount is TAO a real swap paid out; root alpha is TAO.
-                    (to, from, Some(netuid), origin == netuid && netuid != 0, rao)
-                }
-                _ => continue,
-            };
-            let deposit = Deposit {
-                index: ev.index(),
-                from: ss58(&from),
-                netuid,
-                rao,
-                valued_rao: rao,
-            };
-            out.push((to, same_subnet, deposit));
+        for i in transfers_that_count(&kinds) {
+            let ev = &events[i];
+            let (from, to, rao) = ev.decode_fields_unchecked_as::<([u8; 32], [u8; 32], u64)>()?;
+            // A transfer of nothing is not a deposit.
+            if rao > 0 {
+                let from = ss58(&from);
+                out.push((
+                    to,
+                    Deposit {
+                        index: ev.index(),
+                        from,
+                        rao,
+                    },
+                ));
+            }
         }
         Ok((hash, out))
     }
@@ -191,22 +183,8 @@ impl Chain {
         let treasury = crate::wallets::public_key(treasury)
             .ok_or_else(|| anyhow::anyhow!("not a Bittensor address"))?;
         let (hash, payments) = self.payments(number).await?;
-        let mut out = Vec::new();
-        for (to, same_subnet, mut deposit) in payments {
-            if to != treasury {
-                continue;
-            }
-            if let (true, Some(netuid)) = (same_subnet, deposit.netuid) {
-                let before = number.saturating_sub(PRICE_LOOKBACK);
-                deposit.valued_rao = alpha_value(
-                    deposit.rao,
-                    self.alpha_price(number, netuid).await?,
-                    self.alpha_price(before, netuid).await?,
-                );
-            }
-            out.push(deposit);
-        }
-        Ok((hash, out))
+        let paid = payments.into_iter().filter(|(to, _)| *to == treasury);
+        Ok((hash, paid.map(|(_, deposit)| deposit).collect()))
     }
 }
 
@@ -215,16 +193,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alpha_is_worth_the_lower_of_two_prices() {
-        // Steady or fallen price: what the chain said. Pumped tenfold for the block: a tenth.
-        assert_eq!(alpha_value(1_000, 50, 50), 1_000);
-        assert_eq!(alpha_value(1_000, 50, 80), 1_000);
-        assert_eq!(alpha_value(1_000, 500, 50), 100);
-        assert_eq!(alpha_value(1_000, 0, 50), 0);
-        assert_eq!(alpha_value(u64::MAX, u64::MAX, u64::MAX), u64::MAX);
+    fn a_transfer_beside_a_stake_event_in_its_extrinsic_does_not_count() {
+        let transfer = |x| (x, "Balances", "Transfer");
+        let staked = |x| (x, "SubtensorModule", "StakeTransferred");
+        let fee = (Some(1), "TransactionPayment", "TransactionFeePaid");
+        assert_eq!(transfers_that_count(&[transfer(Some(1)), fee]), [0]);
+        assert!(transfers_that_count(&[transfer(Some(1)), staked(Some(1))]).is_empty());
+        assert!(transfers_that_count(&[staked(Some(1)), transfer(Some(1))]).is_empty());
+        // The same two in different extrinsics of one block.
+        assert_eq!(
+            transfers_that_count(&[transfer(Some(1)), staked(Some(2))]),
+            [0]
+        );
+        // Outside any extrinsic.
+        assert!(transfers_that_count(&[transfer(None)]).is_empty());
     }
 
-    /// Live: recent finalized Finney blocks decode, and hold both kinds of payment.
+    /// Live: recent finalized Finney blocks decode, and hold TAO transfers.
     /// `ARBOS_CHAIN_RPC=https://archive.sub.latent.to cargo test -p arbos-relay live_ -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "needs the network"]
@@ -232,30 +217,16 @@ mod tests {
         let url = std::env::var("ARBOS_CHAIN_RPC").expect("ARBOS_CHAIN_RPC");
         let chain = Chain::connect(&url, reqwest::Client::new()).await.unwrap();
         let head = chain.finalized().await.unwrap();
-        let (mut tao, mut alpha) = (0, 0);
+        let mut tao = 0;
         for n in (head - 40..=head).rev() {
-            for (to, same_subnet, d) in chain.payments(n).await.unwrap().1 {
-                match d.netuid {
-                    None => tao += 1,
-                    Some(netuid) => {
-                        alpha += 1;
-                        let price = chain.alpha_price(n, netuid).await.unwrap();
-                        println!(
-                            "{n}#{} sn{netuid} {} rao same={same_subnet} price={price} to {}",
-                            d.index,
-                            d.rao,
-                            ss58(&to)
-                        );
-                        // And through the public door, as that payee's treasury.
-                        let (_, mine) = chain.deposits(n, &ss58(&to)).await.unwrap();
-                        assert!(mine
-                            .iter()
-                            .any(|m| m.index == d.index && m.valued_rao <= d.rao));
-                    }
-                }
+            for (to, d) in chain.payments(n).await.unwrap().1 {
+                tao += 1;
+                // And through the public door, as that payee's treasury.
+                let (_, mine) = chain.deposits(n, &ss58(&to)).await.unwrap();
+                assert!(mine.contains(&d));
             }
         }
-        println!("{tao} TAO transfers, {alpha} stake transfers in 41 blocks");
+        println!("{tao} TAO transfers in 41 blocks");
         assert!(tao > 0, "no TAO transfer in 41 blocks");
     }
 }

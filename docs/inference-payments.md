@@ -105,7 +105,7 @@ Both are small because the payer is already resolved in one place.
 
 ## 7. TAO Top-Up (Optional, Later)
 
-**Implemented** (2026-11-19) in `crates/arbos-relay/src/deposits.rs`, for TAO and any subnet's alpha, ahead of the card path above. The points below are the design it followed.
+**Implemented** (2026-11-19) in `crates/arbos-relay/src/deposits.rs`, for TAO only, ahead of the card path above. Subnet alpha is not accepted. A deposit above `ARBOS_DEPOSIT_MAX_TAO` is held for a manual grant, and so is one whose sender cannot be linked: an exchange, a multisig, a pure proxy, a key that is not sr25519. The points below are the design it followed.
 
 For users who already hold TAO and linked an address (#2933):
 

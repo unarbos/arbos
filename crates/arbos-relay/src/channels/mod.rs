@@ -812,6 +812,7 @@ mod tests {
             github_client_secret: None,
             auth_redirects: Vec::new(),
             deposit_address: None,
+            deposit_max_tao: 25.0,
             chain_rpc: String::new(),
             default_grant_usd: 100.0,
             default_account_limit: crate::credits::SpendLimit::Unlimited,

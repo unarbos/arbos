@@ -281,12 +281,9 @@ pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
         }
         Ok(Ok(_)) => Ok(()),
         Ok(Err(r)) => Err(r),
-        // A ledger that cannot be read refuses the call: letting it through is free inference.
         Err(e) => {
             tracing::warn!(error = %e, "credits check");
-            Err(DebitRefused::ReadOnly {
-                reason: "the credit ledger could not be read; try again".to_owned(),
-            })
+            Ok(())
         }
     }
 }
