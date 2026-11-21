@@ -105,9 +105,11 @@ Both are small because the payer is already resolved in one place.
 
 ## 7. TAO Top-Up (Optional, Later)
 
+**Implemented** (2026-11-19) in `crates/arbos-relay/src/deposits.rs`, for TAO only, ahead of the card path above. Subnet alpha is not accepted. A deposit above `ARBOS_DEPOSIT_MAX_TAO` is held for a manual grant, no more than `ARBOS_DEPOSIT_DAILY_MAX_TAO` is credited in 24 hours, and a manual grant is also what pays one whose sender cannot be linked: an exchange, a multisig, a pure proxy, a key that is not sr25519. The points below are the design it followed.
+
 For users who already hold TAO and linked an address (#2933):
 
-- The relay publishes one deposit address. A **finalized** `Balances.transfer` to it from a user's *linked* address credits that user a `purchase` row at the spot rate when finality is observed, `idem` = block hash + extrinsic index.
+- The relay publishes one deposit address. A **finalized** `Balances.transfer` to it from a user's *linked* address credits that user a `purchase` row at the spot rate when finality is observed, `idem` = block hash + event index.
 - Cheques (#2932) are not used for this: they are bounceable until cashed, and a cheque shown as credit before finality is a free-inference bug.
 - The relay only watches the chain. It holds a deposit address, never a user key — the wallet stays device-only.
 - The surface lives inside Settings → Wallet and is invisible to anyone who never opened it.
