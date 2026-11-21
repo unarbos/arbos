@@ -283,6 +283,14 @@ async fn box_state(State(b): State<B>, headers: HeaderMap) -> Response {
     Json(crate::inspect::box_state(&b).await).into_response()
 }
 
+/// `GET /metrics` (same bearer): Prometheus text, scraped through the relay (`metrics.rs`).
+async fn box_metrics(State(b): State<B>, headers: HeaderMap) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::metrics::render(&b).await.into_response()
+}
+
 /// `POST /box/prepare-sleep` (same bearer): purge, compact, measure and report, so the box's
 /// supervisor can stop it clean or checkpoint it (`sleep.rs`). 409 with the reason while the box
 /// is not idle. It never stops the box itself.
@@ -373,6 +381,7 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
         .route("/w/{project}/inspect", get(workspace_inspect))
         .route("/w/{project}/jobs/{job_id}", get(workspace_job))
         .route("/box/state", get(box_state))
+        .route("/metrics", get(box_metrics))
         .route("/box/prepare-sleep", axum::routing::post(box_prepare_sleep))
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))
@@ -464,6 +473,7 @@ async fn stub_forward(
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            crate::metrics::model_request(Some(status.as_u16()));
             let mut out_headers = HeaderMap::new();
             for (k, v) in resp.headers() {
                 // `x-arbos-req-id` is the relay's id for this model call: passing it on is what
@@ -487,7 +497,10 @@ async fn stub_forward(
                 .map(|r| r.map_err(std::io::Error::other));
             (status, out_headers, Body::from_stream(stream)).into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("relay unreachable: {e}")).into_response(),
+        Err(e) => {
+            crate::metrics::model_request(None);
+            (StatusCode::BAD_GATEWAY, format!("relay unreachable: {e}")).into_response()
+        }
     }
 }
 

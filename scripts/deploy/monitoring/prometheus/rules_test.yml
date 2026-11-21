@@ -290,6 +290,45 @@ tests:
           - { labels: "subnet:box_starts:rate5m", value: 0 }
           - { labels: "subnet:box_start_failures:rate5m", value: 0 }
 
+  # A relay new enough to count box scrapes, with the per-box scrape job still off (it waits for the
+  # box image roll): no box has ever been asked, so every awake box is `pending`. That is a healthy
+  # fleet. Nobody, the partner least of all, may read "83 boxes not reporting" from it, and no box
+  # alert may fire.
+  - name: per-box scrape job off, relay new
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x40
+      - series: 'arbos_relay_boxes{state="awake"}'
+        values: 83x40
+      - series: 'arbos_relay_box_scrapes{result="ok"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="old_image"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="unreachable"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="rejected"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="pending"}'
+        values: 83x40
+      - series: 'arbos_relay_box_scrape_dropped_lines_total'
+        values: 0x40
+    promql_expr_test:
+      - expr: '{__name__=~"(arbos|subnet):boxes_(not_)?reporting"}'
+        eval_time: 15m
+        exp_samples:
+          - { labels: "arbos:boxes_reporting", value: 0 }
+          - { labels: "subnet:boxes_reporting", value: 0 }
+          - { labels: "arbos:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BoxesUnreachable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BoxMetricsRejected
+        exp_alerts: []
+
   # ...and with nothing reporting, there is no invented zero.
   - name: no relay metrics means no data
     interval: 30s
@@ -356,6 +395,25 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical }
             exp_annotations: { summary: "25% of model calls fail at the provider (5xx or no answer)." }
+
+  - name: a write-ahead log that stays large warns; a relay without the series is quiet
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_db_bytes{file="db", instance="new"}'
+        values: 9e9x30
+      - series: 'arbos_relay_db_bytes{file="wal", instance="new"}' # a checkpoint spike, then stuck high
+        values: 4e6x5 2e8x2 4e6x3 2e8x20
+      - series: 'arbos_relay_uptime_seconds{instance="old"}' # a relay from before the series existed
+        values: 100x30
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RelayWalLarge
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: RelayWalLarge
+        exp_alerts:
+          - exp_labels: { severity: warning, file: wal, instance: new }
+            exp_annotations: { summary: "The relay database's write-ahead log is 190.7MiB and not shrinking (Fleet dashboard → Relay database)." }
 
   - name: a waitlist warns, a growing waitlist pages
     interval: 1m
