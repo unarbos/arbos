@@ -519,14 +519,13 @@ async fn forward(
     let (url, key, key_header): (String, String, &str) = match api {
         _ if subnet_name.is_some() => {
             let (subnet, leaf) = subnet_of(&state.cfg, &model).expect("checked by the guard");
-            // The tail is joined to the provider's base and sent with the relay's key, so it
-            // names an endpoint and nothing else: no `..`, backslash, `%2e` or control byte
-            // that the URL parser would resolve to another path on that host.
-            if path_tail.contains("..")
-                || !path_tail
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
-            {
+            // The tail is joined to the provider's base and sent with the relay's key, so
+            // it is one of the endpoints the relay meters and nothing else on that host.
+            if !matches!(
+                (api, path_tail),
+                (Api::OpenAi, "chat/completions" | "responses")
+                    | (Api::Anthropic, "v1/messages" | "v1/messages/count_tokens")
+            ) {
                 return (StatusCode::BAD_REQUEST, "bad path").into_response();
             }
             // The provider gets its own bare id, and not who is asking: `user` and `metadata`
@@ -647,7 +646,12 @@ async fn forward(
         }
     };
 
-    let mut req = state.http.post(&url).body(body);
+    let http = if subnet_name.is_some() {
+        subnet_http()
+    } else {
+        &state.http
+    };
+    let mut req = http.post(&url).body(body);
     for h in PASS_HEADERS {
         // A subnet provider is not told which app is calling.
         if subnet_name.is_some() && matches!(*h, "x-title" | "http-referer") {
@@ -782,20 +786,26 @@ async fn forward(
             }
         }
         // A subnet's reported cost is a third party's word for what the user pays. Zero for
-        // tokens served is taken as not reported, and a cost over 20× the list price of the
-        // same tokens (and over a cent) is not believed: both are charged the list price.
-        if let Some((subnet, reported)) = subnet_name.zip(meter.cost) {
+        // tokens served is taken as not reported and charged the list price; a cost over 20×
+        // the list price of the same tokens (and over a cent) is charged that much and no more.
+        // Either way the row is `estimated` and `actual_usd` keeps what the provider said.
+        let reported = meter.cost;
+        let mut capped = false;
+        if let Some((subnet, reported)) = subnet_name.zip(reported) {
             meter.cost = None;
             let estimate = meter.usd();
+            let cap = (20.0 * estimate).max(0.01);
             let tokens = meter.input + meter.output + meter.cache_read + meter.cache_write;
-            if reported > 0.01 && reported > 20.0 * estimate {
+            capped = reported > cap;
+            if capped {
                 tracing::warn!(
                     req_id,
                     subnet,
                     reported,
                     estimate,
-                    "subnet cost out of bounds, charging the estimate"
+                    "subnet cost out of bounds, charging 20× the estimate"
                 );
+                meter.cost = Some(cap);
             } else if reported > 0.0 || tokens == 0 {
                 meter.cost = Some(reported);
             }
@@ -823,7 +833,9 @@ async fn forward(
         );
         // Record every upstream response, including failures without usage. A missing charge
         // remains unknown; omitting the row would hide it from coverage counts.
-        let cost_source = if meter.cost.is_some() {
+        let cost_source = if capped {
+            "estimated"
+        } else if meter.cost.is_some() {
             "reported"
         } else if meter.usage_seen {
             "estimated"
@@ -854,7 +866,7 @@ async fn forward(
             ttfb_ms: ttfb,
             context,
             request_id: Some(&req_id),
-            actual_usd: meter.cost,
+            actual_usd: reported,
             upstream_id: generation
                 .0
                 .as_deref()
@@ -1533,7 +1545,7 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
                 let mut list = serde_json::from_slice::<Value>(&b).unwrap_or_default();
                 if let Some(data) = list.get_mut("data").and_then(Value::as_array_mut) {
                     let subnets = state.cfg.subnets.iter();
-                    let lists = subnets.map(|s| subnet_models(&state.http, s));
+                    let lists = subnets.map(subnet_models);
                     data.extend(futures::future::join_all(lists).await.into_iter().flatten());
                     b = Bytes::from(list.to_string());
                 }
@@ -1544,13 +1556,27 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
     }
 }
 
+/// The client for every call to a subnet provider. It follows no redirect: reqwest keeps
+/// `x-api-key` across one to another host, and a provider has no need to send the relay's key
+/// anywhere. A 3xx goes back to the caller like any other status.
+fn subnet_http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_idle_timeout(Duration::from_secs(300))
+            .build()
+            .expect("subnet http client")
+    })
+}
+
 /// A subnet provider's chat models, each id prefixed with the provider's name so a pick routes
 /// back to it ([`subnet_of`]). A provider that does not answer in time lists nothing: the
 /// catalog is the main upstream's and must not wait on, or fail with, a subnet. The list is
 /// kept for 5 minutes, a failure for 30 seconds, so a slow provider is not asked on every call.
 /// The list is a third party's: bounded in bytes and entries, and only the fields the pickers
 /// read are passed on.
-async fn subnet_models(http: &reqwest::Client, subnet: &crate::state::Subnet) -> Vec<Value> {
+async fn subnet_models(subnet: &crate::state::Subnet) -> Vec<Value> {
     if let Some((until, models)) = &*subnet.models.lock().unwrap() {
         if Instant::now() < *until {
             return models.clone();
@@ -1558,7 +1584,8 @@ async fn subnet_models(http: &reqwest::Client, subnet: &crate::state::Subnet) ->
     }
     let url = format!("{}/v1/models", subnet.base.trim_end_matches('/'));
     let list = async {
-        let r = http.get(url).bearer_auth(&subnet.key).send().await.ok()?;
+        let r = subnet_http().get(url).bearer_auth(&subnet.key);
+        let r = r.send().await.ok()?;
         let mut r = r.error_for_status().ok()?;
         let mut body = Vec::new();
         while let Some(chunk) = r.chunk().await.ok()? {
@@ -2068,8 +2095,10 @@ mod usage_tests {
     /// A model named for a subnet provider goes to that provider under its bare id, with the
     /// provider's key in the header its API reads; any other id takes the main upstream. The
     /// catalog offers the provider's chat models under the prefixed id. The provider learns
-    /// nothing of the caller: no caller key, app name, `user` or `metadata`; and from its model
-    /// list only well-formed ids and the known fields are passed on, fetched once per window.
+    /// is not sent the caller's key, `x-title`, `http-referer`, `user` or `metadata`, is sent
+    /// no path but the endpoints the relay meters, and is followed through no redirect; from
+    /// its model list only well-formed ids and the known fields are passed on, fetched once
+    /// per window.
     #[tokio::test]
     async fn a_subnet_model_goes_to_its_provider_and_is_listed_under_its_name() {
         use crate::state::{test_support::test_state, AuthMode, Subnet};
@@ -2106,6 +2135,10 @@ mod usage_tests {
         let app = axum::Router::new()
             .route("/engy/v1/chat/completions", axum::routing::post(chat))
             .route("/engy/v1/messages", axum::routing::post(messages))
+            .route(
+                "/engy/v1/responses",
+                axum::routing::post(|| async { axum::response::Redirect::temporary("/main/chat/completions") }),
+            )
             .route(
                 "/engy/v1/models",
                 axum::routing::get(|| async {
@@ -2196,10 +2229,19 @@ mod usage_tests {
         };
         let call = |body| call_at("chat/completions", body);
         // The relay's key goes to the endpoint named and to no other path on the provider.
-        for tail in ["../../admin", "a/..", "a\\b", "%2e%2e/x", ".\t./x", "a?b"] {
+        for tail in [
+            "../../admin",
+            "%2e%2e/x",
+            "embeddings",
+            "v1/messages",
+            "models",
+        ] {
             let r = call_at(tail, r#"{"model":"engy/glm-5.3","messages":[]}"#).await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{tail}");
         }
+        let r = call_at("responses", r#"{"model":"engy/glm-5.3","input":""}"#).await;
+        assert_eq!(r.status(), StatusCode::TEMPORARY_REDIRECT, "not followed");
+        axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         let r = call(
             r#"{"model":"engy/glm-5.3","stream":true,"messages":[],"user":"u1","metadata":{"a":1}}"#,
         )
@@ -2253,13 +2295,13 @@ mod usage_tests {
 
         // The provider's reported cost is what was metered, and the row names the subnet.
         for _ in 0..50 {
-            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 3 {
+            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 4 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
-        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows.len(), 4, "{rows:?}");
         let seen: Vec<_> = rows
             .iter()
             .map(|r| {
@@ -2279,11 +2321,11 @@ mod usage_tests {
         }
     }
 
-    /// A subnet's reported cost is charged only when it is believable: zero for tokens served,
-    /// or far above the list price of the same tokens, is charged at the list price instead,
-    /// on a streamed reply as on a whole one.
+    /// A subnet's reported cost is charged only as far as it is believable: zero for tokens
+    /// served is charged the list price, and one far above the list price of the same tokens
+    /// is charged 20× that price (at least a cent), on a streamed reply as on a whole one.
     #[tokio::test]
-    async fn a_subnet_cost_of_zero_or_out_of_bounds_is_charged_at_the_list_price() {
+    async fn a_subnet_cost_of_zero_is_charged_the_list_price_and_one_out_of_bounds_is_capped() {
         use crate::state::{test_support::test_state, AuthMode, Subnet};
         async fn chat(axum::Json(body): axum::Json<Value>) -> Response {
             let model = body["model"].as_str().unwrap().to_owned();
@@ -2292,7 +2334,16 @@ mod usage_tests {
                 "absurd" | "absurd-stream" => 5.0,
                 _ => 0.002,
             };
-            let reply = json!({"model":model,"usage":{"prompt_tokens":100,"completion_tokens":20,"cost":cost}});
+            let reply = match model.as_str() {
+                "no-tokens" => json!({"model":model,"usage":{"cost":0.04}}),
+                // 1M output tokens: $5 at the default list price, so the cap is $100.
+                "big" => {
+                    json!({"model":model,"usage":{"prompt_tokens":0,"completion_tokens":1_000_000,"cost":500.0}})
+                }
+                _ => {
+                    json!({"model":model,"usage":{"prompt_tokens":100,"completion_tokens":20,"cost":cost}})
+                }
+            };
             if body["stream"] == true {
                 format!("data: {reply}\n\ndata: [DONE]\n\n").into_response()
             } else {
@@ -2317,6 +2368,8 @@ mod usage_tests {
             r#"{"model":"engy/absurd","messages":[]}"#,
             r#"{"model":"engy/absurd-stream","stream":true,"messages":[]}"#,
             r#"{"model":"engy/fair","messages":[]}"#,
+            r#"{"model":"engy/no-tokens","messages":[]}"#,
+            r#"{"model":"engy/big","messages":[]}"#,
         ] {
             let mut h = HeaderMap::new();
             h.insert("x-arbos-project", HeaderValue::from_static("p"));
@@ -2332,22 +2385,26 @@ mod usage_tests {
             axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         }
         for _ in 0..50 {
-            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 4 {
+            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 6 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
-        assert_eq!(rows.len(), 4, "{rows:?}");
-        // 100 input and 20 output tokens at the default list price of $1 / $5 per million.
-        for (model, usd) in [
-            ("free", 0.0002),
-            ("absurd", 0.0002),
-            ("absurd-stream", 0.0002),
-            ("fair", 0.002),
+        assert_eq!(rows.len(), 6, "{rows:?}");
+        // 100 input and 20 output tokens at the default list price of $1 / $5 per million are
+        // $0.0002, so their cap is the one-cent floor.
+        for (model, usd, source) in [
+            ("free", 0.0002, "estimated"),
+            ("absurd", 0.01, "estimated"),
+            ("absurd-stream", 0.01, "estimated"),
+            ("fair", 0.002, "reported"),
+            ("no-tokens", 0.01, "estimated"),
+            ("big", 100.0, "estimated"),
         ] {
             let row = rows.iter().find(|r| r["model"] == model).unwrap();
             assert!((row["usd"].as_f64().unwrap() - usd).abs() < 1e-9, "{row}");
+            assert_eq!(row["cost_source"], source, "{row}");
         }
     }
 

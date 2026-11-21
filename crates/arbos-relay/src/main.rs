@@ -273,12 +273,18 @@ async fn main() -> anyhow::Result<()> {
         ]
         .into_iter()
         .filter_map(|(name, key, base, default)| {
-            Some(state::Subnet {
+            let subnet = state::Subnet {
                 name,
                 key: env_nonempty(key)?,
                 base: env_nonempty(base).unwrap_or_else(|| default.to_owned()),
                 models: Default::default(),
-            })
+            };
+            // A bad base turns that provider off; it does not stop the relay.
+            if !subnet.base_ok() {
+                tracing::warn!("{base} must be https:// (http:// only to loopback): {name} is off");
+                return None;
+            }
+            Some(subnet)
         })
         .collect(),
         openai_base: args.openai_base.clone(),
@@ -347,14 +353,6 @@ async fn main() -> anyhow::Result<()> {
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
-    for s in &cfg.subnets {
-        anyhow::ensure!(
-            s.base_ok(),
-            "the {} base must be https:// (http:// only to loopback), not {}",
-            s.name,
-            s.base
-        );
-    }
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let jwt_key: [u8; 32] = match env_nonempty("ARBOS_JWT_KEY") {
         Some(k) => connectors::crypto::RelayKey::derive(&k).subkey("jwt"),
