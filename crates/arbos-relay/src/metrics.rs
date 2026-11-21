@@ -221,7 +221,7 @@ pub fn room_push_refused(code: &str) {
 /// One upstream model call: the provider's status, or `None` when it could not be reached.
 /// The provider is read from the upstream URL the relay chose, never from the request.
 pub fn model_request(url: &str, status: Option<u16>, took: Duration) {
-    let provider = ["openrouter", "anthropic", "openai"]
+    let provider = ["openrouter", "anthropic", "openai", "saygm", "engy"]
         .into_iter()
         .find(|p| url.contains(p))
         .unwrap_or("other");
