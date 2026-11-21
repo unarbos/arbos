@@ -124,6 +124,8 @@ struct PendingRoomPush<'a> {
     room_name: &'a str,
     cached: crate::state::RoomDocCache,
     changes: arbos_core::doc::MessageChanges,
+    /// The payload imported; `changes` is then the room's own reading of it.
+    imported: bool,
     _admission: tokio::sync::MutexGuard<'a, ()>,
 }
 
@@ -181,12 +183,13 @@ async fn push_message_changes<'a>(
                 .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??
         }
     };
-    let changes = diff_pushed_row(&mut cached, payload);
+    let (changes, imported) = diff_pushed_row(&mut cached, payload);
     Ok(PendingRoomPush {
         room,
         room_name,
         cached,
         changes,
+        imported,
         _admission: admission,
     })
 }
@@ -195,16 +198,19 @@ async fn push_message_changes<'a>(
 fn diff_pushed_row(
     cached: &mut crate::state::RoomDocCache,
     payload: &[u8],
-) -> arbos_core::doc::MessageChanges {
+) -> (arbos_core::doc::MessageChanges, bool) {
     let before = cached.doc.frontiers();
     if cached.doc.import(payload).is_err() {
         // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
         // before, so this is not a rejection of malformed input — it is "nothing is known
         // about what this does", which the caller fails closed on.
-        return arbos_core::doc::MessageChanges {
-            unreadable: true,
-            ..Default::default()
-        };
+        return (
+            arbos_core::doc::MessageChanges {
+                unreadable: true,
+                ..Default::default()
+            },
+            false,
+        );
     }
     let changes =
         cached
@@ -213,7 +219,7 @@ fn diff_pushed_row(
     if !changes.unreadable {
         cached.message_ids = changes.ids_after.clone();
     }
-    changes
+    (changes, true)
 }
 
 /// Read the room's stored doc (checkpoint ∪ rows) from the cache the room keeps: head moves
@@ -845,14 +851,26 @@ async fn handle_frame(
                 .unwrap_or(room_name);
             let pending =
                 push_message_changes(state, room, room_name, &f.payload, admission).await?;
-            let (carries_new_message, attributed) = match crate::push_guard::check_push(
-                state,
-                principal,
-                project_id,
-                chat_of_room,
-                p.heal,
-                &pending.changes,
-            ) {
+            // A payload that imported and whose diff still cannot be read is refused: nothing
+            // is known about what it does. The room's doc left the cache for this admission
+            // and is dropped with it, so the next push reads against a rebuilt one. The code is
+            // the one every client stays connected on.
+            let check = if pending.imported && pending.changes.unreadable {
+                crate::push_guard::PushCheck::Refuse {
+                    code: "not_available",
+                    detail: "this push cannot be applied as it stands".to_owned(),
+                }
+            } else {
+                crate::push_guard::check_push(
+                    state,
+                    principal,
+                    project_id,
+                    chat_of_room,
+                    p.heal,
+                    &pending.changes,
+                )
+            };
+            let (carries_new_message, attributed) = match check {
                 crate::push_guard::PushCheck::Allow {
                     carries_new_message,
                     attributed,
@@ -863,8 +881,15 @@ async fn handle_frame(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
                     );
-                    sink.send(room_push_refused_frame(code, &detail, &p.batch_id))
-                        .await?;
+                    // In a people chat the gates answer first. A sender they refuse gets
+                    // their answer, the one a device stays connected on, whatever else is
+                    // wrong with the push.
+                    let refusal = room_name
+                        .strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+                        .and_then(|chat_id| people::room_push_refusal(state, principal, chat_id))
+                        .map(|r| push_refused_frame(&r, &p.batch_id))
+                        .unwrap_or_else(|| room_push_refused_frame(code, &detail, &p.batch_id));
+                    sink.send(refusal).await?;
                     return Ok(());
                 }
             };
@@ -2624,6 +2649,14 @@ mod history_tests {
     }
 }
 
+/// The apps' room session, compiled from its own source so a test can drive the real one
+/// against this relay. `arbos-client` is app-only and the relay may not depend on it; the
+/// module needs nothing beyond `arbos-core` and serde, which the relay already has.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../arbos-client/src/room.rs"]
+mod client_room;
+
 #[cfg(test)]
 mod covered_push_tests {
     //! Reconnect storm (#1570): pending batches whose ops the room already holds must ACK as
@@ -2768,6 +2801,270 @@ mod covered_push_tests {
             }
         }
         out
+    }
+
+    fn chat_with_bobs_message(state: &AppState) -> (String, ChatDoc, String, String) {
+        let (alice, _) = person(state, 1);
+        let (bob, _) = person(state, 2);
+        let chat = dm(state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let bob_doc = ChatDoc::new(Some(7), false);
+        let base = bob_doc.oplog_vv();
+        bob_doc.init_meta(&chat, "people", 1);
+        bob_doc
+            .append_user_message("m-bob", "hello", "dev:bob", &as_user(&bob))
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:bob",
+                "seed",
+                &bob_doc.export_updates_since(&base),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "m-bob", &format!("user:{bob}"))
+            .unwrap();
+        let (alice_token, bob_token) = (device_token(state, &alice), device_token(state, &bob));
+        (room, bob_doc, alice_token, bob_token)
+    }
+
+    fn as_user(user: &str) -> UserMessageOpts {
+        UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        }
+    }
+
+    /// A push that imports and whose diff the relay still cannot read is refused with the code
+    /// a device stays connected on, and nothing is stored. The room's doc is rebuilt for the
+    /// next push, so the same change sent again is taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_diff_that_cannot_be_read_is_refused_and_the_next_push_reads_a_rebuilt_doc() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        // The room's mirror of ids out of step with its list: no row can be named.
+        let mut cached = super::build_room_doc(&state, &room).unwrap();
+        cached.message_ids.clear();
+        *state.room(&room).await.doc_cache.lock().unwrap() = Some(cached);
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("preview", json!("x"))]);
+        let edit = bob_doc.export_updates_since(&mark);
+        let addr = serve(state.clone()).await;
+
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("edit".into(), edit.clone())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error, "{}", frames[0].header);
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["batchId"], "edit");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+
+        let frames =
+            push_after_catchup(addr, &room, &bob_token, "dev:bob", &[("edit".into(), edit)]).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "{}", frames[0].header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 1);
+    }
+
+    /// A whole snapshot is a payload like any other: applied in full, judged, stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_pushed_as_a_row_is_judged_and_stored() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "header={}", frames[0].header);
+        assert_eq!(frames[0].header["dup"], false);
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m-alice"]);
+
+        // And refused like any other when what it does is not the pusher's to do.
+        alice_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("snap-2".into(), alice_doc.snapshot())],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_yours");
+    }
+
+    /// The record of who wrote what failing to read is not an empty record: the push is
+    /// refused and nothing is stored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_is_refused_while_the_author_record_cannot_be_read() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        state
+            .db
+            .with(|c| c.execute_batch("ALTER TABLE message_authors RENAME TO message_authors_gone"))
+            .unwrap();
+        let mut alice_doc = ChatDoc::new(Some(5), false);
+        alice_doc.import(&bob_doc.snapshot()).unwrap();
+        let mark = alice_doc.oplog_vv();
+        alice_doc
+            .append_user_message("m-alice", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &alice_token,
+            "dev:alice",
+            &[("a1".into(), alice_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "unavailable");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+    }
+
+    /// In a people chat a sender the gates refuse gets the gates' answer for a push the guard
+    /// refuses too, so the device stays connected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sender_the_gates_refuse_gets_their_answer_for_a_push_the_guard_refuses() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let (bob, _) = person(&state, 2);
+        let chat = room.strip_prefix("people/").unwrap();
+        let me = format!("user:{bob}");
+        assert!(state.db.set_member_silenced(chat, &me, true, None).unwrap());
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("id", json!("m-other"))]);
+        let frames = push_after_catchup(
+            serve(state.clone()).await,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("b1".into(), bob_doc.export_updates_since(&mark))],
+        )
+        .await;
+        assert_eq!(
+            frames[0].ty,
+            FrameType::Error,
+            "header={}",
+            frames[0].header
+        );
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["reason"], "silenced");
+        assert_eq!(frames[0].header["batchId"], "b1");
+    }
+
+    /// Runs a real client session against the room until the relay has nothing more to say,
+    /// answering it as an app does. Returns what the session asked its host to do.
+    async fn run_session(
+        addr: SocketAddr,
+        token: &str,
+        session: &mut super::client_room::RoomSession,
+        doc: &mut ChatDoc,
+    ) -> Vec<super::client_room::RoomAction> {
+        use super::client_room::RoomAction;
+        let url = format!("ws://{addr}/room/{}?token={token}", session.room());
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        session.on_open(0);
+        let mut seen = Vec::new();
+        loop {
+            // Answering one action can queue more, so drain until the session is quiet.
+            let mut actions = std::collections::VecDeque::from(session.drain_actions());
+            while let Some(action) = actions.pop_front() {
+                match &action {
+                    RoomAction::SendFrame(bytes) => {
+                        sink.send(TMsg::Binary(bytes.clone().into())).await.unwrap()
+                    }
+                    RoomAction::ApplyBytes(bytes) => {
+                        doc.import(bytes).unwrap();
+                    }
+                    RoomAction::HealCheck { relay_vv } => {
+                        let vv = arbos_core::doc::decode_vv(relay_vv).unwrap();
+                        session.on_heal(doc.updates_beyond(&vv));
+                    }
+                    RoomAction::FetchCheckpoint { .. } => session.on_checkpoint_skipped(),
+                    _ => {}
+                }
+                seen.push(action);
+                actions.extend(session.drain_actions());
+            }
+            match tokio::time::timeout(Duration::from_millis(400), stream.next()).await {
+                Ok(Some(Ok(TMsg::Binary(bytes)))) => session.on_frame(&bytes),
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+        }
+        seen
+    }
+
+    /// What an app does today passes every rule: a device that comes back with several
+    /// messages written offline has each of them stored under its author, and its session
+    /// stays live with nothing refused and no redial asked for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_real_client_session_sends_what_it_wrote_offline_and_stays_connected() {
+        use super::client_room::{RoomAction, RoomSession};
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, alice_token, _) = chat_with_bobs_message(&state);
+        let (alice, _) = person(&state, 1);
+        let addr = serve(state.clone()).await;
+
+        let mut doc = ChatDoc::new(Some(5), false);
+        doc.import(&bob_doc.snapshot()).unwrap();
+        let mut session = RoomSession::new("dev:alice", room.clone(), 0, Vec::new());
+        for id in ["m1", "m2", "m3"] {
+            let mark = doc.oplog_vv();
+            doc.append_user_message(id, "hi", "dev:alice", &as_user(&alice))
+                .unwrap();
+            session.on_local_commit(doc.export_updates_since(&mark));
+        }
+        let seen = run_session(addr, &alice_token, &mut session, &mut doc).await;
+        // The heal on connect carries all three; the batches behind it ack as already held.
+        assert!(session.is_live() && session.pending().is_empty());
+        assert!(!seen.iter().any(|a| matches!(
+            a,
+            RoomAction::ScheduleReconnect { .. }
+                | RoomAction::SessionError { .. }
+                | RoomAction::PushRefused { .. }
+        )));
+        let stored = super::build_room_doc(&state, &room).unwrap();
+        assert_eq!(stored.doc.message_ids(), ["m-bob", "m1", "m2", "m3"]);
+        for id in ["m1", "m2", "m3"] {
+            let chat = room.strip_prefix("people/").unwrap();
+            assert_eq!(
+                state.db.message_author(chat, id).unwrap(),
+                Some(format!("user:{alice}"))
+            );
+        }
     }
 
     /// 250 pending batches whose ops the room already holds → 250 dup ACKs, no new rows, no

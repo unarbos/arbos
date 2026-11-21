@@ -1,0 +1,30 @@
+# The per-box agentd scrape job. NOT ACTIVE: Prometheus loads only what is in enabled/.
+#
+# It stays off until the box image is rolled. Boxes on the current image have no /metrics, so with
+# the job on every awake box would be a target that reads down (the relay answers 502 for it). The
+# relay's own numbers about boxes (the `relay` and `relay-boxes` jobs) do not need this job.
+#
+# To switch it on, once boxes run an image whose agentd serves /metrics (on the host, in the
+# directory the stack runs from):
+#
+#   cp prometheus/available/agentd.yml prometheus/enabled/ && docker kill -s HUP arbos-mon-prometheus
+#
+# and off again: rm prometheus/enabled/agentd.yml, then the same HUP.
+#
+# What to expect with it on:
+#   - one target per awake box, listed by the relay, which proxies each scrape to that box's agentd.
+#     A box that has gone to sleep since the last listing answers 404: a brief up=0 around sleep is
+#     not an incident, and no alert reads this job's `up` (BoxesUnreachable uses the relay's count).
+#   - the `box` label is the same opaque id as on the relay-boxes job. It is not a user id, but that
+#     job's info series maps it to a container name, so it is internal: nothing with `box` on it
+#     reaches the Subnet Prometheus.
+#   - a box is its user's machine, so its answer is untrusted. The relay passes on only agentd's own
+#     samples (about 40 series, ~3 KB) and cuts off at 256 KB; the limits below fail the scrape of
+#     anything larger.
+scrape_configs:
+  - job_name: arbos-agentd
+    scrape_interval: 30s
+    sample_limit: 500
+    body_size_limit: 512KB
+    http_sd_configs:
+      - url: http://127.0.0.1:9108/metrics/targets
