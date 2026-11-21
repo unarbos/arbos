@@ -277,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 key: env_nonempty(key)?,
                 base: env_nonempty(base).unwrap_or_else(|| default.to_owned()),
+                models: Default::default(),
             })
         })
         .collect(),
@@ -346,6 +347,14 @@ async fn main() -> anyhow::Result<()> {
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
+    for s in &cfg.subnets {
+        anyhow::ensure!(
+            s.base_ok(),
+            "the {} base must be https:// (http:// only to loopback), not {}",
+            s.name,
+            s.base
+        );
+    }
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let jwt_key: [u8; 32] = match env_nonempty("ARBOS_JWT_KEY") {
         Some(k) => connectors::crypto::RelayKey::derive(&k).subkey("jwt"),

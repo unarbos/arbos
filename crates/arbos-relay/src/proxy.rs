@@ -519,9 +519,24 @@ async fn forward(
     let (url, key, key_header): (String, String, &str) = match api {
         _ if subnet_name.is_some() => {
             let (subnet, leaf) = subnet_of(&state.cfg, &model).expect("checked by the guard");
-            // The provider gets its own bare id.
+            // The tail is joined to the provider's base and sent with the relay's key, so it
+            // names an endpoint and nothing else: no `..`, backslash, `%2e` or control byte
+            // that the URL parser would resolve to another path on that host.
+            if path_tail.contains("..")
+                || !path_tail
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+            {
+                return (StatusCode::BAD_REQUEST, "bad path").into_response();
+            }
+            // The provider gets its own bare id, and not who is asking: `user` and `metadata`
+            // identify the caller to a third party and are dropped.
             if let Some(v) = req_json.as_mut() {
                 v["model"] = json!(leaf);
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("user");
+                    o.remove("metadata");
+                }
                 if matches!(api, Api::OpenAi) {
                     normalize_openai_reasoning_body(leaf, v);
                     if is_stream && path_tail.ends_with("chat/completions") {
@@ -634,6 +649,10 @@ async fn forward(
 
     let mut req = state.http.post(&url).body(body);
     for h in PASS_HEADERS {
+        // A subnet provider is not told which app is calling.
+        if subnet_name.is_some() && matches!(*h, "x-title" | "http-referer") {
+            continue;
+        }
         if let Some(v) = headers.get(*h) {
             req = req.header(*h, v);
         }
@@ -760,6 +779,25 @@ async fn forward(
                 let (id, provider) = generation_marks(&carry);
                 generation.0 = generation.0.take().or(id);
                 generation.1 = generation.1.take().or(provider);
+            }
+        }
+        // A subnet's reported cost is a third party's word for what the user pays. Zero for
+        // tokens served is taken as not reported, and a cost over 20× the list price of the
+        // same tokens (and over a cent) is not believed: both are charged the list price.
+        if let Some((subnet, reported)) = subnet_name.zip(meter.cost) {
+            meter.cost = None;
+            let estimate = meter.usd();
+            let tokens = meter.input + meter.output + meter.cache_read + meter.cache_write;
+            if reported > 0.01 && reported > 20.0 * estimate {
+                tracing::warn!(
+                    req_id,
+                    subnet,
+                    reported,
+                    estimate,
+                    "subnet cost out of bounds, charging the estimate"
+                );
+            } else if reported > 0.0 || tokens == 0 {
+                meter.cost = Some(reported);
             }
         }
         // The other half of the record: who answered, how fast, and what the upstream counted.
@@ -1490,14 +1528,13 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
             let status =
                 StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let mut b = r.bytes().await.unwrap_or_default();
-            if let (true, Ok(mut list)) = (
-                status.is_success() && !state.cfg.subnets.is_empty(),
-                serde_json::from_slice::<Value>(&b),
-            ) {
+            // No subnet key: the upstream's bytes go out untouched and unparsed.
+            if status.is_success() && !state.cfg.subnets.is_empty() {
+                let mut list = serde_json::from_slice::<Value>(&b).unwrap_or_default();
                 if let Some(data) = list.get_mut("data").and_then(Value::as_array_mut) {
-                    for subnet in &state.cfg.subnets {
-                        data.extend(subnet_models(&state.http, subnet).await);
-                    }
+                    let subnets = state.cfg.subnets.iter();
+                    let lists = subnets.map(|s| subnet_models(&state.http, s));
+                    data.extend(futures::future::join_all(lists).await.into_iter().flatten());
                     b = Bytes::from(list.to_string());
                 }
             }
@@ -1509,21 +1546,41 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
 
 /// A subnet provider's chat models, each id prefixed with the provider's name so a pick routes
 /// back to it ([`subnet_of`]). A provider that does not answer in time lists nothing: the
-/// catalog is the main upstream's and must not wait on, or fail with, a subnet.
+/// catalog is the main upstream's and must not wait on, or fail with, a subnet. The list is
+/// kept for 5 minutes, a failure for 30 seconds, so a slow provider is not asked on every call.
+/// The list is a third party's: bounded in bytes and entries, and only the fields the pickers
+/// read are passed on.
 async fn subnet_models(http: &reqwest::Client, subnet: &crate::state::Subnet) -> Vec<Value> {
+    if let Some((until, models)) = &*subnet.models.lock().unwrap() {
+        if Instant::now() < *until {
+            return models.clone();
+        }
+    }
     let url = format!("{}/v1/models", subnet.base.trim_end_matches('/'));
     let list = async {
         let r = http.get(url).bearer_auth(&subnet.key).send().await.ok()?;
-        r.error_for_status().ok()?.json::<Value>().await.ok()
+        let mut r = r.error_for_status().ok()?;
+        let mut body = Vec::new();
+        while let Some(chunk) = r.chunk().await.ok()? {
+            if body.len() + chunk.len() > 2 << 20 {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<Value>(&body).ok()
     };
     let Ok(Some(list)) = tokio::time::timeout(Duration::from_secs(5), list).await else {
         tracing::warn!(subnet = subnet.name, "subnet model list unavailable");
+        *subnet.models.lock().unwrap() =
+            Some((Instant::now() + Duration::from_secs(30), Vec::new()));
         return Vec::new();
     };
+    let mut seen = std::collections::HashSet::new();
     let models = list.get("data").and_then(Value::as_array);
-    models
+    let models: Vec<Value> = models
         .into_iter()
         .flatten()
+        .take(500)
         // The agents speak chat completions. A provider that names what each model speaks
         // (SayGM's `api_shapes`: its Claude models are messages-only) lists only those that do.
         .filter(|m| {
@@ -1532,12 +1589,32 @@ async fn subnet_models(http: &reqwest::Client, subnet: &crate::state::Subnet) ->
                 .is_none_or(|shapes| shapes.iter().any(|s| s == "chat.completions"))
         })
         .filter_map(|m| {
-            let mut m = m.clone();
-            let id = format!("{}/{}", subnet.name, m.get("id")?.as_str()?);
-            m["id"] = json!(id);
-            Some(m)
+            let id = m.get("id")?.as_str()?;
+            let ok = (1..=128).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b));
+            if !ok || !seen.insert(id) {
+                return None;
+            }
+            let mut out = json!({ "id": format!("{}/{id}", subnet.name) });
+            for field in ["name", "context_length", "pricing", "api_shapes"] {
+                let right_type = |v: &&Value| match field {
+                    "name" => v.as_str().is_some_and(|s| s.len() <= 200),
+                    "context_length" => v.is_number(),
+                    "pricing" => v.is_object(),
+                    _ => v.is_array(),
+                };
+                if let Some(v) = m.get(field).filter(right_type) {
+                    out[field] = v.clone();
+                }
+            }
+            Some(out)
         })
-        .collect()
+        .collect();
+    *subnet.models.lock().unwrap() =
+        Some((Instant::now() + Duration::from_secs(300), models.clone()));
+    models
 }
 
 #[cfg(test)]
@@ -1990,7 +2067,9 @@ mod usage_tests {
 
     /// A model named for a subnet provider goes to that provider under its bare id, with the
     /// provider's key in the header its API reads; any other id takes the main upstream. The
-    /// catalog offers the provider's chat models under the prefixed id.
+    /// catalog offers the provider's chat models under the prefixed id. The provider learns
+    /// nothing of the caller: no caller key, app name, `user` or `metadata`; and from its model
+    /// list only well-formed ids and the known fields are passed on, fetched once per window.
     #[tokio::test]
     async fn a_subnet_model_goes_to_its_provider_and_is_listed_under_its_name() {
         use crate::state::{test_support::test_state, AuthMode, Subnet};
@@ -1999,6 +2078,10 @@ mod usage_tests {
             axum::Json(body): axum::Json<Value>,
         ) -> impl IntoResponse {
             assert_eq!(headers["authorization"], "Bearer engy-key");
+            for h in ["x-api-key", "x-title", "http-referer"] {
+                assert!(headers.get(h).is_none(), "{h}");
+            }
+            assert!(body.get("user").is_none() && body.get("metadata").is_none());
             assert_eq!(body["model"], "glm-5.3", "the provider's own id");
             assert_eq!(body["stream_options"]["include_usage"], true);
             axum::Json(
@@ -2010,22 +2093,32 @@ mod usage_tests {
             axum::Json(body): axum::Json<Value>,
         ) -> impl IntoResponse {
             assert_eq!(headers["x-api-key"], "engy-key");
-            assert!(headers.get("authorization").is_none());
+            for h in ["authorization", "x-title", "http-referer"] {
+                assert!(headers.get(h).is_none(), "{h}");
+            }
+            assert!(body.get("user").is_none() && body.get("metadata").is_none());
             assert_eq!(body["model"], "kimi-k3");
             axum::Json(
                 json!({"model":"kimi-k3","usage":{"input_tokens":10,"output_tokens":2,"cost":0.001}}),
             )
         }
+        static LISTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let app = axum::Router::new()
             .route("/engy/v1/chat/completions", axum::routing::post(chat))
             .route("/engy/v1/messages", axum::routing::post(messages))
             .route(
                 "/engy/v1/models",
                 axum::routing::get(|| async {
+                    LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     axum::Json(json!({"data":[
-                        {"id":"glm-5.3"},
-                        {"id":"gpt-6-sol","api_shapes":["chat.completions","responses"]},
+                        {"id":"glm-5.3","name":"GLM","context_length":1000,"pricing":{"prompt":"1"},
+                         "owned_by":"x","description":"y"},
+                        {"id":"gpt-6-sol","api_shapes":["chat.completions","responses"],"name":7},
                         {"id":"claude-opus-5-5","api_shapes":["messages"]},
+                        {"id":"glm-5.3"},
+                        {"id":"bad id"},
+                        {"id":"x\n\"<script>"},
+                        {"id":""},
                     ]}))
                 }),
             )
@@ -2051,7 +2144,21 @@ mod usage_tests {
             name: "engy",
             base: format!("{base}/engy/"),
             key: "engy-key".into(),
+            models: Default::default(),
         }];
+        assert!(!format!("{:?}", cfg.subnets).contains("engy-key"));
+        assert!(cfg.subnets[0].base_ok(), "http to loopback");
+        for (base, ok) in [
+            ("https://api.engy.ai", true),
+            ("http://[::1]:9", true),
+            ("http://api.engy.ai", false),
+            ("http://localhost.example.com", false),
+            ("api.engy.ai", false),
+        ] {
+            let mut s = cfg.subnets[0].clone();
+            s.base = base.into();
+            assert_eq!(s.base_ok(), ok, "{base}");
+        }
         assert_eq!(
             subnet_of(&cfg, "engy/glm-5.3").map(|(s, m)| (s.name, m)),
             Some(("engy", "glm-5.3"))
@@ -2069,18 +2176,34 @@ mod usage_tests {
         let project = || {
             let mut h = HeaderMap::new();
             h.insert("x-arbos-project", HeaderValue::from_static("p"));
+            h.insert("authorization", HeaderValue::from_static("Bearer caller"));
+            h.insert("x-api-key", HeaderValue::from_static("caller"));
+            h.insert("x-title", HeaderValue::from_static("Arbos"));
+            h.insert(
+                "http-referer",
+                HeaderValue::from_static("https://a.example"),
+            );
             h
         };
-        let call = |body: &'static str| {
+        let call_at = |tail: &'static str, body: &'static str| {
             openai(
                 State(state.clone()),
                 Principal::Admin,
-                Path("chat/completions".into()),
+                Path(tail.into()),
                 project(),
                 Bytes::from_static(body.as_bytes()),
             )
         };
-        let r = call(r#"{"model":"engy/glm-5.3","stream":true,"messages":[]}"#).await;
+        let call = |body| call_at("chat/completions", body);
+        // The relay's key goes to the endpoint named and to no other path on the provider.
+        for tail in ["../../admin", "a/..", "a\\b", "%2e%2e/x", ".\t./x", "a?b"] {
+            let r = call_at(tail, r#"{"model":"engy/glm-5.3","messages":[]}"#).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{tail}");
+        }
+        let r = call(
+            r#"{"model":"engy/glm-5.3","stream":true,"messages":[],"user":"u1","metadata":{"a":1}}"#,
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         let r = call(r#"{"model":"saygm/unkeyed","messages":[]}"#).await;
@@ -2091,7 +2214,9 @@ mod usage_tests {
             Principal::Admin,
             Path("v1/messages".into()),
             project(),
-            Bytes::from_static(br#"{"model":"engy/kimi-k3","max_tokens":5,"messages":[]}"#),
+            Bytes::from_static(
+                br#"{"model":"engy/kimi-k3","max_tokens":5,"messages":[],"metadata":{"user_id":"u1"}}"#,
+            ),
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
@@ -2101,6 +2226,16 @@ mod usage_tests {
         let list: Value =
             serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap())
                 .unwrap();
+        assert_eq!(
+            list["data"][1],
+            json!({"id":"engy/glm-5.3","name":"GLM","context_length":1000,"pricing":{"prompt":"1"}})
+        );
+        assert_eq!(
+            list["data"][2],
+            json!({"id":"engy/gpt-6-sol","api_shapes":["chat.completions","responses"]})
+        );
+        openai_models(State(state.clone()), Principal::Admin).await;
+        assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
         let ids: Vec<&str> = list["data"]
             .as_array()
             .unwrap()
@@ -2141,6 +2276,78 @@ mod usage_tests {
             ("m", None, 0.0001),
         ] {
             assert!(seen.contains(&want), "{want:?} in {seen:?}");
+        }
+    }
+
+    /// A subnet's reported cost is charged only when it is believable: zero for tokens served,
+    /// or far above the list price of the same tokens, is charged at the list price instead,
+    /// on a streamed reply as on a whole one.
+    #[tokio::test]
+    async fn a_subnet_cost_of_zero_or_out_of_bounds_is_charged_at_the_list_price() {
+        use crate::state::{test_support::test_state, AuthMode, Subnet};
+        async fn chat(axum::Json(body): axum::Json<Value>) -> Response {
+            let model = body["model"].as_str().unwrap().to_owned();
+            let cost = match model.as_str() {
+                "free" => 0.0,
+                "absurd" | "absurd-stream" => 5.0,
+                _ => 0.002,
+            };
+            let reply = json!({"model":model,"usage":{"prompt_tokens":100,"completion_tokens":20,"cost":cost}});
+            if body["stream"] == true {
+                format!("data: {reply}\n\ndata: [DONE]\n\n").into_response()
+            } else {
+                axum::Json(reply).into_response()
+            }
+        }
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(chat));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let mut state = test_state(AuthMode::Paircode);
+        let mut cfg = (*state.cfg).clone();
+        cfg.subnets = vec![Subnet {
+            name: "engy",
+            base,
+            key: "engy-key".into(),
+            models: Default::default(),
+        }];
+        state.cfg = std::sync::Arc::new(cfg);
+        for body in [
+            r#"{"model":"engy/free","messages":[]}"#,
+            r#"{"model":"engy/absurd","messages":[]}"#,
+            r#"{"model":"engy/absurd-stream","stream":true,"messages":[]}"#,
+            r#"{"model":"engy/fair","messages":[]}"#,
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert("x-arbos-project", HeaderValue::from_static("p"));
+            let r = openai(
+                State(state.clone()),
+                Principal::Admin,
+                Path("chat/completions".into()),
+                h,
+                Bytes::from_static(body.as_bytes()),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        }
+        for _ in 0..50 {
+            if state.db.usage_rows_after("p", 0, 10).unwrap().len() == 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let rows = state.db.usage_rows_after("p", 0, 10).unwrap();
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        // 100 input and 20 output tokens at the default list price of $1 / $5 per million.
+        for (model, usd) in [
+            ("free", 0.0002),
+            ("absurd", 0.0002),
+            ("absurd-stream", 0.0002),
+            ("fair", 0.002),
+        ] {
+            let row = rows.iter().find(|r| r["model"] == model).unwrap();
+            assert!((row["usd"].as_f64().unwrap() - usd).abs() < 1e-9, "{row}");
         }
     }
 
