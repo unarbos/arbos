@@ -100,6 +100,10 @@ impl Shell {
             }
             crate::update::UpdatePhase::Idle
             | crate::update::UpdatePhase::UpToDate
+            | crate::update::UpdatePhase::CheckFailed { .. }
+            // A version an earlier run found is not something to install: "Check now" asks the
+            // feed for the build itself, which is the only thing that can be installed.
+            | crate::update::UpdatePhase::FoundEarlier { .. }
             | crate::update::UpdatePhase::Failed {
                 available: None, ..
             } => Some(("update-check", "Check now", false)),
