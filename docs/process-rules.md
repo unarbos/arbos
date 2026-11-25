@@ -150,6 +150,60 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
   simulator keeps a dozen daemons runnable.
 
+## A free heavy slot is not permission to use the Mac (2026-11-02, found by the lane that hit it)
+
+The slot count answers "has anyone claimed a slot", not "is this box usable". Those come apart in practice: a
+lane was observed running `xcodebuild test-without-building` at one-minute load **77** while
+`arbos-heavy-slot.sh` reported a slot free. **Treat a free slot as a false signal, not a weak one** — it can
+say yes while the machine is saturated by work that never took a slot at all.
+
+**Before starting heavy work, check the machine rather than the bookkeeping.** Both of these, every time:
+
+- no `xcodebuild` and no `fastlane` running, of any kind, anyone's;
+- one-minute load average **at or under 12**.
+
+If either fails, wait. A free slot does not override them, and the slot rules above still apply on top of
+them — this check is additional, not alternative.
+
+**`nice` is not isolation.** Rig builds still run `nice -n 12` as the section above requires, but understand
+what that does and does not buy: it redistributes CPU share between runnable processes without reducing how
+many there are, so the load average climbs just the same, and it gives a timing-sensitive CoreSimulator
+device lookup no protection whatsoever. A niced build on a loaded box is still a build on a loaded box.
+
+**Recognising the failure in CI.** A gate red that reads
+
+```
+Unable to find a device matching the provided destination specifier
+```
+
+with **no test output and that single error line** is contention, not the branch. The destination lookup
+timed out against a machine too busy to answer it. Re-run it. Do **not** waive it with `accept-red` — the
+branch was never tested, so there is no red result to accept, and a waived contention failure buries the
+capacity problem that caused it.
+
+**Pin heavy simulator work to the rig device.** Use the dedicated `Arbos Nav1906`, which the gate's own
+name lookup cannot match, so your run and the gate cannot collide over one device. **Pin it by UDID, not by
+name** (`-destination "id=<udid>"`): a name lookup is exactly the call that fails under load.
+
+## A new Swift test file cannot be added from a Linux box (2026-11-02)
+
+Separate from the simulator, and a harder limit: **`Arbos.xcodeproj` does not use file-system-synchronised
+groups.** A file that exists on disk is not in the build until `project.pbxproj` says so, which for one new
+test helper means **four hand-written entries** — the file reference, the build file, the group membership
+and the target's sources phase.
+
+Nothing on a Linux box can verify those four. There is no `xcodebuild` to resolve the project, so a wrong or
+missing entry is not a compile error you see; it is a file that silently is not in any target, which is the
+same shape as the zero-test-run hazard the gate already guards against.
+
+So: **adding or moving a Swift test file is Mac work, not "edit the pbxproj carefully" work.** A Linux lane
+may write the test's contents and hand them over, but it must not claim the change is complete, and it must
+say in its PR that the project file edit is unverified. Renaming and deleting Swift test files carry the same
+limit for the same reason.
+
+This is why work that is otherwise small — consolidating two private `waitUntil` helpers into one shared
+file, for instance — is not small from here.
+
 ## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
 
 Port 22 on the EC2 Mac (13.217.52.163) is not open to the internet: its security group (`arbos-mobile`) allows ssh
