@@ -4,9 +4,17 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
 
 ## Outside feedback never merges without Jacob's per-item approval (2026-10-24 13:55 UTC, permanent)
 
-- **Who is "outside":** every reporter that is not Jacob's own account (`unarbos`, `arbos`, `const`) and not
-  a coordinator-worker-owned item. Testers (TestFlight, in-app sheet), Doug, agent-filed reports on
-  behalf of other users, group members, relayed chat reports — all outside.
+- **Who is "outside":** an item is outside when **both** hold — the reporter is not Jacob's own account
+  (`unarbos`, `arbos`, `const`), **and** the item is not coordinator-owned in the narrow sense below.
+  Testers (TestFlight, in-app sheet), Doug, agent-filed reports on behalf of other users, group members
+  and relayed chat reports are outside **reporters**: each of their items is outside *unless* it is
+  coordinator-owned. The reporter alone does not settle it, and neither does ownership alone.
+- **What "coordinator-owned" means, narrowly.** A coordinator **owns** an item when it has taken
+  responsibility for that specific item — it assigned the work and it answers for the result. Being
+  aware of an item, having routed or relayed it, or listing it on a board is **not** ownership: a
+  coordinator sees every item, so reading "tracks it" as ownership would empty this rule. Ownership is
+  per item and is recorded on the item, not inferred from a batch. **Where it is unclear, the item is
+  outside and holds** — an agent does not resolve the question in favour of merging its own work.
 - **What still happens automatically:** intake → malicious-intent screen → fix agent → tests → CI gate
   (Linux + Mac release build + iOS build on the integration tree). The work is done and verified.
 - **What does not happen:** the merge. A green outside fix holds as **`awaiting-jacob`** (loop state
@@ -23,12 +31,41 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
   is refused. If an operator ever must lift it, `approval-gate lift --i-am-jacob --reason "<why>"` is
   required, is written to the loop log and shown in `status`, and `approval-gate restore` re-arms it —
   and even a lift does not release already-held items; they still need `approve`.
-- **Jacob's own asks** (reporter `unarbos` / `arbos` / `const`, items labelled "Jacob (owner)", items
-  owned by a coordinator worker, items the coordinator tracks) merge and ship as before.
+- **Jacob's own asks** (reporter `unarbos` / `arbos` / `const`, items labelled "Jacob (owner)", and items
+  a coordinator owns in the narrow sense above) merge and ship as before. "The coordinator tracks it" is
+  not one of these.
 - **Jacob's design rules are not overridden by tester preference.** `docs/mac-design-rules.md` (centred
   header pill, hover-only timestamps, the three-control sidebar strip, three panes, right-pane layout, …)
   stands even when a tester report asks for something else; a fix that would move one of those rules
   holds for his approval like any other outside change, and the agent says so in its summary.
+
+**Why the first two bullets were rewritten (2026-11-05).** The old text defined "outside" by reporter
+*and* ownership, then listed "relayed chat reports — all outside" without the ownership half, and
+exempted "items the coordinator tracks" — three statements that cannot all hold. On
+[#2806](https://github.com/unarbos/arbos/pull/2806) a worker read the list and held; a coordinator read
+the exemption and ruled the item inside. Both readings were in the text. The wording above settles it so
+the gate still means something: ownership is claimed per item, not implied by routing. **This is an
+editorial clarification of Jacob's rule, not a change to what he decided.**
+
+### What a lane decides for itself, and what it does not (2026-11-05)
+
+- **A lane judges its own work, never its own authorisation.** Whether the change is right, tested and
+  green is the lane's call. Whether it may merge is not, and an ambiguity is not resolved in favour of
+  merging one's own work — it holds, and the coordinator rules.
+- **A lane's own gate is never more authoritative than `scripts/merge/merge.sh`'s GO.** Pre-checks exist
+  to avoid wasting a call, not to decide. When a lane's conditions say "not yet" but nothing is pending,
+  call the tool and let it answer: a wrong attempt refuses in seconds and names its reason, while a
+  silent modelling error in a lane's own gate can hold a ready change for hours and looks identical to
+  correctly waiting.
+- **A setup gap is not a refusal.** `merge.sh` exit **5** means the kit or its tools are missing and
+  *nothing was judged*; only exit **2** is a policy answer. Never read a 5 as "I am not cleared", and
+  never fall back to `gh pr merge` or any other direct merge — fix the setup or ask the coordinator.
+- **Anything armed re-reads its authorisation.** A detached loop that can merge, publish, delete or
+  spend must re-read `$MERGE_KIT/merge-allow` immediately before the irreversible call and abort when
+  its number is absent. Stand a lane down by **removing its number from the list, not by deleting the
+  file** — deletion yields exit 5, which means "nothing was judged" and must not be read as a stop. The
+  stop has to work while the lane's agent is asleep, mid-tool-call or ended, because a detached loop
+  reads no messages: a stand-down cannot reach a process that does not listen for one.
 
 ## The loop merges the live branch head, never an older one (2026-10-25)
 
