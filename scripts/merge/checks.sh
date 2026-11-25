@@ -251,16 +251,37 @@ gate_state() {
   # A job skipped by an `if:` condition did no work, so it proves nothing about this commit.
   red=$(printf '%s\n' "$list" | awk '$4!="success" && $4!="skipped" && $4!="neutral"')
   [ -n "$red" ] && { echo "RED $got run(s) on this head, none successful: $all"; return; }
-  # A canary, not a live path — and kept deliberately. Under #2448 every run reaches the always()
-  # verdict job, so a wholly skipped or neutral run should be unreachable for a fresh head. It stays
-  # because it is still live for historical heads, whose all-skipped runs sit on main's history
-  # permanently and are read by the audit paths, and because the red= filter above deliberately
-  # excludes skipped and neutral, so this case arrives here by falling through everything else.
-  # Delete the branch and the case has to be reclassified; the convenient reclassification is "pass",
-  # which restores the original bug inside the one function written to prevent it. If this line ever
-  # fires for a fresh head, the verdict job's fail-closed guarantee has been broken — read it as that
-  # alarm, not as a routine skip.
-  echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it: $all"
+  # A reachable state with two causes, and the branch names which one rather than asserting either.
+  #
+  # The two are repaired in different files, so naming the wrong one is its own harm: it sends a
+  # reader to audit a workflow that is working while the head simply has no run that tested it.
+  # Which one applies is already in $list, because every run there carries its event — so it is read
+  # off the data and not inferred from what anyone believed about the workflow.
+  #   no push event   the workflow's path filter matched nothing this head changed, so no push run
+  #                   was ever minted and nothing was asked to test it. An empty commit on a PR the
+  #                   gate applies to produces exactly this: the pull_request trigger still fires on
+  #                   the three-dot diff and its job skips. A missing run.
+  #   a push event    a run was minted, so the filter did match, and it still tested nothing. Read
+  #                   the workflow's jobs for this run: something that should have run did not.
+  # This is said rather than guessed, and it stays true however the workflow is built — it is a
+  # statement about the runs GitHub recorded, not about which jobs the workflow is expected to have.
+  # A previous comment here asserted the second cause outright, on the strength of a pull request
+  # that would make the first impossible. That pull request had not landed, so every reader of this
+  # branch was told the wrong thing; an assertion about another file's future is a claim nothing can
+  # test, which is why there is none here now.
+  #
+  # The branch itself stays. It is live for historical heads, whose all-skipped runs sit on main's
+  # history permanently and are read by the audit paths, and it arrives here by falling through the
+  # red= filter above, which deliberately excludes skipped and neutral. Delete it and the case has
+  # to be reclassified; the convenient reclassification is "pass", which restores the original bug
+  # inside the one function written to prevent it.
+  local why
+  if printf '%s\n' "$list" | awk '$2=="push"{found=1} END{exit !found}'; then
+    why="a push run was minted for this head, so ${wf##*/}'s path filter did match it, and it still tested nothing — read that run's jobs: something that should have run did not"
+  else
+    why="no push run exists for this head, so nothing was ever asked to test it — a change set matching none of ${wf##*/}'s paths, an empty commit for one, mints no push run. A missing run, not a broken workflow"
+  fi
+  echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it ($why): $all"
 }
 
 # gate_applies <workflow> <sha> <files>: 0 when the diff touches the workflow's path filter, 1 when it
