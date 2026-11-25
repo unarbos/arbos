@@ -82,6 +82,11 @@ pub struct ChatView {
     pub kind: String,
     pub title: String,
     pub created_at: i64,
+    /// Somebody other than the owner may write here: a people chat, or an agent whose project
+    /// has been shared. The one server-side answer to a question both apps were answering from
+    /// their own copy of the project, and disagreeing about (Mac drew a group, the guest's
+    /// phone drew a 1:1).
+    pub shared: bool,
 }
 
 impl ChatView {
@@ -100,6 +105,7 @@ impl ChatView {
             "title": self.title,
             "created_at": self.created_at,
             "agent": self.project,
+            "shared": self.shared,
         })
     }
 }
@@ -122,6 +128,11 @@ impl ChatView {
 pub fn visible_chats(state: &AppState, link: &AgentLink) -> Vec<ChatView> {
     let mut out: Vec<ChatView> = Vec::new();
     for project in state.db.projects_of_user(&link.user_id).unwrap_or_default() {
+        let shared = !state
+            .db
+            .project_members(&project.id)
+            .unwrap_or_default()
+            .is_empty();
         for chat in state.db.list_chats(&project.id).unwrap_or_default() {
             out.push(ChatView {
                 id: chat.id,
@@ -137,6 +148,7 @@ pub fn visible_chats(state: &AppState, link: &AgentLink) -> Vec<ChatView> {
                     chat.title.clone()
                 },
                 created_at: chat.created_at,
+                shared,
             });
         }
     }
@@ -151,6 +163,7 @@ pub fn visible_chats(state: &AppState, link: &AgentLink) -> Vec<ChatView> {
             project: None,
             kind: cm.chat.kind,
             created_at: cm.chat.created_at,
+            shared: true,
         });
     }
     if let Some(only) = &link.chats {
@@ -350,6 +363,19 @@ fn members_json(state: &AppState, view: &ChatView) -> Vec<Value> {
                         "name": card.name, "role": "owner",
                     }));
                 }
+                // Sharing an agent adds people to the project, and those people write in its
+                // chats. A roster that listed only the owner and the agent said two people were
+                // in a conversation that had three, and the reader had no way to tell who the
+                // third was (Jacob, 2026-11-04).
+                for (uid, _, _) in state.db.project_members(&p.id).unwrap_or_default() {
+                    let card = state.db.user_card(&uid).ok().flatten();
+                    out.push(json!({
+                        "kind": "user", "id": uid,
+                        "handle": card.as_ref().map(|c| c.handle.clone()).unwrap_or_default(),
+                        "name": card.and_then(|c| c.name).unwrap_or_default(),
+                        "role": "member",
+                    }));
+                }
                 out.push(json!({
                     "kind": "agent", "id": p.id, "handle": people::agent_slug(&p.name),
                     "name": p.name, "role": "agent",
@@ -546,7 +572,7 @@ fn lines(state: &AppState, view: &ChatView, rows: &[Value]) -> Vec<Line> {
             Some(Line {
                 id,
                 at: r["createdAt"].as_i64().unwrap_or(0),
-                sender: crate::export::sender_json(state, r),
+                sender: sender_of(state, view, r),
                 text,
                 attachments,
                 reply_to: r["replyTo"].as_str().map(str::to_owned),
@@ -557,12 +583,130 @@ fn lines(state: &AppState, view: &ChatView, rows: &[Value]) -> Vec<Line> {
     out
 }
 
+/// Who wrote one row, named from the chat when the row cannot name itself.
+///
+/// A 1:1 conversation with one of the owner's own agents stores no identity on its rows: the
+/// owner's messages carry the bare marker `sender: "user"` and the agent's carry `sender:
+/// "agent"`, because inside that chat there is exactly one of each and the apps draw both from
+/// the chat itself. [`crate::export::sender_json`] is handed one row and nothing else, so it can
+/// resolve neither and answers `system` for both — over this API that is a lie about who said
+/// what: the owner's own messages came back as `system`, and the agent's reply came back with no
+/// name at all. The chat supplies here what the row left out.
+///
+/// Only the two bare markers are filled in. A row written by a routine, a channel or another
+/// project names its own sender, and a `system` row really is the system: attributing any of
+/// those to the owner would be the same lie in the other direction.
+fn sender_of(state: &AppState, view: &ChatView, row: &Value) -> Value {
+    let who = crate::export::sender_json(state, row);
+    let Some(pid) = view.project.as_deref() else {
+        return who;
+    };
+    let raw = row["sender"].as_str().unwrap_or("");
+    let role = row["role"].as_str().unwrap_or("");
+    if raw == "user" && role == "user" {
+        let Some(project) = state.db.project(pid).ok().flatten() else {
+            return who;
+        };
+        let writer = writer_of(state, &project, row);
+        let card = writer
+            .as_deref()
+            .and_then(|uid| state.db.user_card(uid).ok().flatten());
+        let handle = row["senderHandle"]
+            .as_str()
+            .filter(|h| !h.is_empty())
+            .map(str::to_owned)
+            .or_else(|| card.as_ref().map(|c| c.handle.clone()))
+            .unwrap_or_default();
+        let name = row["senderName"]
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .or_else(|| card.and_then(|c| c.name))
+            .unwrap_or_default();
+        return json!({
+            "kind": "user", "id": writer, "handle": handle, "name": name,
+        });
+    }
+    if who["kind"] == "agent" {
+        // `agent:{id}` says which agent; a 1:1 reply says only `assistant`, and then the agent is
+        // the chat's own. The handle is the one the members list gives, so the two agree.
+        let id = who["id"].as_str().unwrap_or(pid);
+        let Some(agent) = state.db.project(id).ok().flatten() else {
+            return who;
+        };
+        let name = if agent.name.trim().is_empty() {
+            who["name"].as_str().unwrap_or_default().to_owned()
+        } else {
+            agent.name
+        };
+        return json!({
+            "kind": "agent", "id": agent.id, "name": name,
+            "handle": people::agent_slug(&name),
+        });
+    }
+    who
+}
+
+/// Which human wrote a row that carries only the bare `user` marker, or `None` when the relay
+/// cannot say.
+///
+/// The marker is written by a client that believes it is the only human in the chat, and after
+/// an agent is shared that belief is simply out of date — the guest's phone and the owner's Mac
+/// each decide it from their own copy of the project. So the row's own device decides instead:
+/// the relay knows which account a device belongs to, and the answer is kept only when that
+/// account may write here at all (the owner, or a live guest of the project). A device the
+/// relay cannot place names nobody, rather than naming the owner for somebody else's words.
+fn writer_of(state: &AppState, project: &crate::db::Project, row: &Value) -> Option<String> {
+    let may_write = |uid: &str| {
+        uid == project.user_id
+            || state
+                .db
+                .is_project_member(&project.id, uid)
+                .unwrap_or(false)
+    };
+    let by_device = row["deviceId"]
+        .as_str()
+        .and_then(|d| state.db.device_user(d).ok().flatten())
+        .filter(|uid| may_write(uid));
+    if by_device.is_some() {
+        return by_device;
+    }
+    let by_handle = row["senderHandle"]
+        .as_str()
+        .filter(|h| !h.is_empty())
+        .and_then(|h| state.db.user_by_handle(h).ok().flatten())
+        .map(|c| c.id)
+        .filter(|uid| may_write(uid));
+    if by_handle.is_some() {
+        return by_handle;
+    }
+    // Nobody was ever added to this project, so its one human is its owner.
+    state
+        .db
+        .project_members(&project.id)
+        .map(|guests| guests.is_empty())
+        .unwrap_or(false)
+        .then(|| project.user_id.clone())
+}
+
+/// `**@unarbos** · …` for a person, `**Agent (@agent)** · …` for an agent: a bare handle is a
+/// human, a name carrying a handle is one of the owner's agents, so the reader can tell the two
+/// sides apart at a glance without the `kind` the JSON format carries.
 fn render_md(title: &str, lines: &[Line]) -> String {
     let mut out = format!("# {title}\n\n");
     for l in lines {
+        let name = l.sender["name"].as_str().unwrap_or_default().trim();
+        let handle = l.sender["handle"].as_str().unwrap_or_default().trim();
         let who = match l.sender["kind"].as_str() {
-            Some("user") => format!("@{}", l.sender["handle"].as_str().unwrap_or("?")),
-            Some("agent") => format!("{} (agent)", l.sender["name"].as_str().unwrap_or("agent")),
+            Some("user") if !handle.is_empty() => format!("@{handle}"),
+            Some("user") if !name.is_empty() => name.to_owned(),
+            Some("user") => "a person".to_owned(),
+            Some("agent") => match (name.is_empty(), handle.is_empty()) {
+                (false, false) => format!("{name} (@{handle})"),
+                (false, true) => format!("{name} (agent)"),
+                (true, false) => format!("@{handle} (agent)"),
+                (true, true) => "an agent".to_owned(),
+            },
             _ => "system".to_owned(),
         };
         let when = chrono::DateTime::from_timestamp_millis(l.at)
@@ -815,6 +959,7 @@ mod tests {
 
     use super::*;
     use crate::agent_link::Scope;
+    use crate::auth::Principal;
     use crate::db::Chat;
     use crate::people::tests_support::{dm, person, project_of};
     use crate::state::test_support::test_state;
@@ -908,6 +1053,32 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    /// One message from one device, written the way a client writes it when it believes it is
+    /// the only human in the chat: the bare `user` marker, with the handle but no id.
+    fn say_from(
+        state: &AppState,
+        chat_id: &str,
+        project: Option<&str>,
+        device_id: &str,
+        msg_id: &str,
+        text: &str,
+    ) {
+        let room = wire::room_name(project.unwrap_or(crate::people::PEOPLE_PROJECT), chat_id);
+        let doc = ChatDoc::new(Some(5), false);
+        let before = doc.oplog_vv();
+        doc.append_user_message(msg_id, text, device_id, &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                device_id,
+                &format!("b-{msg_id}"),
+                &doc.export_updates_since(&before),
+            )
+            .unwrap();
     }
 
     /// The spec's own warning, as a test: Jacob asked about `codingarbos`, which is a **native
@@ -1320,6 +1491,289 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(md.contains("# Long") && md.contains("three"), "{md}");
+    }
+
+    /// Jacob's own read of chat `01M6J6J79BHXBF78XBJ9DMN27R`, 2026-11-04: three messages he sent
+    /// from his Mac came back as **system**, and every reply from his agent came back as
+    /// `** (agent)**` — no name, no handle. A 1:1 agent chat writes the bare markers `user` and
+    /// `agent` on its rows, and nothing downstream turned them back into the two people in the
+    /// conversation.
+    #[tokio::test]
+    async fn a_one_to_one_chat_names_the_owner_and_the_agent_rather_than_system() {
+        let state = test_state(AuthMode::Github);
+        let (jacob, _) = person(&state, 7001);
+        let project = project_of(&state, &jacob, "Agent");
+        let chat_id = agent_chat(&state, &project, "Launch week");
+        // Exactly what the Mac writes in a solo project chat: no `user:{id}`, because the chat
+        // holds one human.
+        say(
+            &state,
+            &chat_id,
+            Some(&project),
+            &["what model are you running?"],
+        );
+        let room = wire::room_name(&project, &chat_id);
+        // Its own peer id: `say` already wrote as peer 5, and two docs sharing one would be two
+        // writers claiming the same identity.
+        let doc = ChatDoc::new(Some(6), false);
+        let before = doc.oplog_vv();
+        doc.start_assistant_message("reply-1", "m0", "box:test");
+        let part = doc.add_text_part("reply-1", "text").expect("text part");
+        doc.append_text("reply-1", &part, "haiku-5.5.");
+        doc.finish_message("reply-1", arbos_core::doc::MessageStatus::Done);
+        state
+            .db
+            .append_row(
+                &room,
+                "box:test",
+                "b-reply",
+                &doc.export_updates_since(&before),
+            )
+            .unwrap();
+
+        let link = link_for(&state, &jacob, Scope::Read, None);
+        let (status, body) = json_of(
+            messages(
+                State(state.clone()),
+                who(&link),
+                Path(chat_id.clone()),
+                Query(MessagesQuery::default()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let his = &body["messages"][0]["sender"];
+        assert_eq!(
+            his["kind"], "user",
+            "the owner wrote it, not the system: {body}"
+        );
+        assert_eq!(his["handle"], "user7001", "{body}");
+        assert_eq!(his["id"], jacob, "{body}");
+        let hers = &body["messages"][1]["sender"];
+        assert_eq!(hers["kind"], "agent", "{body}");
+        assert_eq!(hers["name"], "Agent", "the agent is named: {body}");
+        assert_eq!(hers["handle"], "agent", "and addressable: {body}");
+        assert_eq!(hers["id"], project, "{body}");
+
+        // And the Markdown the outside agent actually reads says the same two things.
+        let (status, md) = text_of(
+            messages(
+                State(state.clone()),
+                who(&link),
+                Path(chat_id.clone()),
+                Query(MessagesQuery {
+                    format: Some("md".into()),
+                    ..Default::default()
+                }),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(md.contains("**@user7001**"), "{md}");
+        assert!(md.contains("**Agent (@agent)**"), "{md}");
+        assert!(
+            !md.contains("**system**"),
+            "nothing here is the system: {md}"
+        );
+        assert!(!md.contains("** (agent)**"), "{md}");
+    }
+
+    /// The share bug (Jacob, 2026-11-04). He pressed Share on his agent and added his phone
+    /// account; the relay still showed the chat with two members, and everything the phone said
+    /// came back as **system** with no id and no handle. Nothing was written down anywhere
+    /// about who the third person in that conversation was: the guest is a member of the
+    /// *project*, the chat's roster was assembled from the owner and the agent alone, and the
+    /// phone — believing it was in a 1:1 — wrote the bare `user` marker the serializer cannot
+    /// read. Both halves are answered from what the relay already knows.
+    #[tokio::test]
+    async fn a_shared_agent_chat_lists_the_guest_and_names_what_the_guest_said() {
+        let state = test_state(AuthMode::Github);
+        let (jacob, _) = person(&state, 7101);
+        let (friend, friend_dev) = person(&state, 7102);
+        let (stranger, stranger_dev) = person(&state, 7103);
+        let project = project_of(&state, &jacob, "Agent");
+        let chat_id = agent_chat(&state, &project, "Launch week");
+        state
+            .db
+            .add_project_member(&project, &friend, &jacob)
+            .unwrap();
+        let device_of = |p: &Principal| match p {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() hands back a device"),
+        };
+        // The phone's own row: the bare marker, because its copy of the project still says 1:1.
+        say_from(
+            &state,
+            &chat_id,
+            Some(&project),
+            &device_of(&friend_dev),
+            "m-friend",
+            "This is Jacob",
+        );
+
+        let link = link_for(&state, &jacob, Scope::Read, None);
+        let (status, body) =
+            json_of(chat(State(state.clone()), who(&link), Path(chat_id.clone())).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["shared"], true, "the chat has guests: {body}");
+        let roster: Vec<(&str, &str)> = body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["id"].as_str().unwrap_or_default(),
+                    m["role"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            roster.contains(&(friend.as_str(), "member")),
+            "the shared friend is in the chat: {body}"
+        );
+        assert!(roster.contains(&(jacob.as_str(), "owner")), "{body}");
+        assert!(
+            roster
+                .iter()
+                .any(|(id, role)| *id == project && *role == "agent"),
+            "{body}"
+        );
+
+        let (_, page) = json_of(
+            messages(
+                State(state.clone()),
+                who(&link),
+                Path(chat_id.clone()),
+                Query(MessagesQuery::default()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        let sender = &page["messages"][0]["sender"];
+        assert_eq!(sender["kind"], "user", "a person said it: {page}");
+        assert_eq!(sender["id"], friend, "and it was the friend: {page}");
+        assert_eq!(sender["handle"], "user7102", "{page}");
+
+        // A device of somebody who was never added names nobody: the owner must not be made to
+        // say words that are not his.
+        say_from(
+            &state,
+            &chat_id,
+            Some(&project),
+            &device_of(&stranger_dev),
+            "m-stranger",
+            "let me in",
+        );
+        let (_, page) = json_of(
+            messages(
+                State(state.clone()),
+                who(&link),
+                Path(chat_id.clone()),
+                Query(MessagesQuery::default()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        let sender = &page["messages"][1]["sender"];
+        assert_ne!(sender["id"], jacob, "not the owner: {page}");
+        assert_ne!(sender["id"], stranger, "and not a guess: {page}");
+        assert!(sender["id"].is_null(), "{page}");
+    }
+
+    /// Jacob's second session with the same agent, made on purpose while the friend was in the
+    /// main chat: a shared project does not pool its chats. Each chat is read on its own, and
+    /// the roster of the shared one does not pull the other one's messages in behind it.
+    #[tokio::test]
+    async fn a_second_session_with_the_same_agent_stays_its_own_conversation() {
+        let state = test_state(AuthMode::Github);
+        let (jacob, _) = person(&state, 7201);
+        let (friend, _) = person(&state, 7202);
+        let project = project_of(&state, &jacob, "Agent");
+        let main = agent_chat(&state, &project, "Launch week");
+        let second = agent_chat(&state, &project, "Multi");
+        state
+            .db
+            .add_project_member(&project, &friend, &jacob)
+            .unwrap();
+        say(&state, &main, Some(&project), &["shared chat only"]);
+        say(&state, &second, Some(&project), &["second session only"]);
+
+        let link = link_for(&state, &jacob, Scope::Read, None);
+        for (id, mine, theirs) in [
+            (&main, "shared chat only", "second session only"),
+            (&second, "second session only", "shared chat only"),
+        ] {
+            let (_, body) = json_of(
+                messages(
+                    State(state.clone()),
+                    who(&link),
+                    Path(id.clone()),
+                    Query(MessagesQuery::default()),
+                    HeaderMap::new(),
+                )
+                .await,
+            )
+            .await;
+            let texts: Vec<&str> = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["text"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(texts, vec![mine], "{body}");
+            assert!(!texts.contains(&theirs), "no leak between sessions: {body}");
+        }
+    }
+
+    /// The other half of the rule: a row that names its own sender is left alone. A routine or a
+    /// channel writes a `user`-role row under its own sender, and filling the owner in over it
+    /// would be the same misattribution in the other direction.
+    #[tokio::test]
+    async fn a_row_that_names_its_own_sender_is_not_relabelled_as_the_owner() {
+        let state = test_state(AuthMode::Github);
+        let (jacob, _) = person(&state, 7002);
+        let project = project_of(&state, &jacob, "Agent");
+        let chat_id = agent_chat(&state, &project, "Routines");
+        let room = wire::room_name(&project, &chat_id);
+        let doc = ChatDoc::new(Some(5), false);
+        let before = doc.oplog_vv();
+        doc.append_user_message(
+            "from-routine",
+            "the nightly build finished",
+            "box:test",
+            &UserMessageOpts {
+                sender: Some("routine:01ROUTINE".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        state
+            .db
+            .append_row(&room, "box:test", "b-r", &doc.export_updates_since(&before))
+            .unwrap();
+
+        let link = link_for(&state, &jacob, Scope::Read, None);
+        let (_, body) = json_of(
+            messages(
+                State(state.clone()),
+                who(&link),
+                Path(chat_id.clone()),
+                Query(MessagesQuery::default()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            body["messages"][0]["sender"]["kind"], "system",
+            "a routine is not the owner: {body}"
+        );
     }
 
     /// The debugging window: the same one the owner reads, minus the sandbox facts that help
