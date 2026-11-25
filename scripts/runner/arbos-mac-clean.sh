@@ -31,7 +31,11 @@ LOG=/var/log/arbos-mac-clean.log
 LOW_FREE_GB=${LOW_FREE_GB:-40}
 ts() { date -u +%FT%TZ; }
 say() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
-free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
+# Every build target dir lives under /Users on the 1 TB data volume (2026-10-30: the release lane via
+# ARBOS_SCRATCH=/Users in the runner's .env, the gate via ARBOS_GATE_TARGET_DIR in ec2-user's ~/.zshenv), so
+# free space is read where the builds write. The old trees on /Volumes/ArbosScratch are not swept.
+BUILD_ROOT=/Users
+free_gb() { df -g "$BUILD_ROOT" | awk 'NR==2 {print $4}'; }
 
 # CoreSimulator moves a deleted/erased device's data to $TMPDIR/Deleting-<uuid> and removes it later; on this
 # saturated box "later" never comes (20 of them = 69 GB on 2026-10-23 20:5x, re-created at ~4/10 min by the
@@ -103,10 +107,7 @@ if [ "${1:-}" = "--if-low" ]; then
 fi
 JOURNAL=/Users/Shared/arbos-run/loop-journal.log
 MIN_FREE_GB=${MIN_FREE_GB:-20}
-# Target dirs live on the internal SSD (/Volumes/ArbosScratch/<user>/…, #1846) when it is mounted; the home
-# paths are the fallback — both locations are checked.
-SCRATCH=${ARBOS_SCRATCH:-/Volumes/ArbosScratch}
-pick() { if [ -d "$SCRATCH/$1/$2" ]; then echo "$SCRATCH/$1/$2"; else echo "/Users/$1/$2"; fi; }
+pick() { echo "$BUILD_ROOT/$1/$2"; }
 TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}
 PROTECT='(/Users/Shared/arbos-store-pending|/Users/Shared/arbos-tools|/Users/ec2-user/arbos-parity|/Users/ec2-user/arbos-ios|/Users/ec2-user/arbos-refresh|/Users/arbosgui/actions-runner)'
 
@@ -118,7 +119,7 @@ say "start free=$(free_gb)G"
 # for 30 min is removed whole — the worker's branch is on GitHub, the checkout is scratch. (Before: 24 h
 # whole / 2 h artifacts; the volume hit 8 GB free at 23:33 with ~50 GB of live worker builds.) The gate's own
 # trees and the protected list above are never touched.
-WORKER_KEEP='^(arbos-gate|arbos-rust-gate|arbos-rust-gate-target|arbos-rust-gate-runs|arbos-gate-dd-Release|arbos-gate-dd-Debug|arbos-parity|arbos-ios|arbos-refresh)$'
+WORKER_KEEP='^(arbos-gate|arbos-rust-gate|arbos-rust-gate-target|arbos-rust-gate-target-smoke|arbos-rust-gate-runs|arbos-gate-dd-Release|arbos-gate-dd-Debug|arbos-parity|arbos-ios|arbos-refresh)$'
 WORKER_IDLE_MIN=${WORKER_IDLE_MIN:-30}
 for d in /Users/ec2-user/arbos-*; do
   [ -d "$d" ] || continue
@@ -152,14 +153,14 @@ sudo -u ec2-user xcrun simctl delete unavailable >/dev/null 2>&1 && say "simctl 
 #    */release/deps/ (77 of them = 13 GB); only the newest per directory can still be linked;
 #  - rustc's deps/rustcXXXXXX scratch dirs survive a killed compile (0.7 GB each).
 # Runs in every pass (nightly and --if-low); skips files younger than 30 min so a build in flight is untouched.
-find /Users/ec2-user /Users/arbosgui "$SCRATCH" -maxdepth 6 -type d -path "*/release/deps" -not -path "*/node_modules/*" 2>/dev/null | while read -r deps; do
+find /Users/ec2-user /Users/arbosgui -maxdepth 6 -type d -path "*/release/deps" -not -path "*/node_modules/*" 2>/dev/null | while read -r deps; do
   newest=$(ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | head -n 1)
   find "$deps" -maxdepth 1 -name "libarbos_ffi-*.a" -mmin +30 2>/dev/null | while read -r f; do
     [ "$f" = "$newest" ] && continue
     mib=$(du -sm "$f" 2>/dev/null | cut -f1); rm -f "$f" && say "removed stale $f (${mib} MiB)"
   done
 done
-find /Users/ec2-user /Users/arbosgui "$SCRATCH" -maxdepth 7 -type d -path "*/deps/rustc*" -mmin +30 2>/dev/null | while read -r d; do
+find /Users/ec2-user /Users/arbosgui -maxdepth 7 -type d -path "*/deps/rustc*" -mmin +30 2>/dev/null | while read -r d; do
   mib=$(du -sm "$d" 2>/dev/null | cut -f1); rm -rf "$d" && say "removed rustc leftover $d (${mib} MiB)"
 done
 
