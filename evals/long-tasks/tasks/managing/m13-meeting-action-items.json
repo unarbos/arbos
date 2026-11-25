@@ -1,0 +1,21 @@
+{
+ "id": "m13-meeting-action-items",
+ "lane": "c",
+ "category": "managing",
+ "title": "Turn meeting notes into an action-item table with owners and due dates; decisions are not actions",
+ "turns": [
+  {
+   "prompt": "Turn my meeting notes in {D}/standup-2026-10-28.md into an action-item list: one row per action with owner, task and due date (YYYY-MM-DD, or 'none' if no date was set), saved as a Markdown table in {D}/actions.md. A decision with no owner is not an action item. Then tell me which actions have no due date.",
+   "seed": "mkdir -p {D} && cat > {D}/standup-2026-10-28.md <<'EOF'\n# Platform sync - 28 Oct 2026\nAttendees: Lena, Omar, Priya, Tomas\n\n- Lena: the billing export still drops rows with a comma in the customer name. She'll fix the CSV quoting by Monday 2 Nov.\n- Omar said the deploy pipeline was flaky twice this week; he'll look into it (no date set).\n- Priya will send the Q4 vendor shortlist to finance by Friday 30 Oct.\n- We agreed to move the retro to Thursdays.\n- Tomas owns the on-call handbook update, due 6 Nov.\n- Lena and Priya pair on the SSO migration plan, draft by 9 Nov, Priya leads.\nEOF",
+   "verify": "f={D}/actions.md; test -f $f || { echo FAIL: no actions.md; exit 0; }\npython3 - \"$f\" <<'EOF'\nimport re, sys\nrows = [l for l in open(sys.argv[1]) if l.strip().startswith('|')]\nrows = [r for r in rows if not re.fullmatch(r'[\\s|:\\-]+', r.strip())]\nbody = rows[1:] if rows else []\nlow = [r.lower() for r in body]\nprint(f\"SHOW rows={len(body)}\")\nfor r in body: print(\"SHOW \" + r.strip()[:160])\nneed = [\"2026-11-02\", \"2026-10-30\", \"2026-11-06\", \"2026-11-09\"]\nmiss = [d for d in need if not any(d in r for r in body)]\nomar = [r for r in low if \"omar\" in r]\nomar_ok = bool(omar) and any(re.search(r\"\\bnone\\b|n/a|\\u2014|no date\", r) for r in omar)\nretro = any(\"retro\" in r for r in low)\nif len(body) == 5 and not miss and omar_ok and not retro:\n    print(\"PASS\")\nelse:\n    print(f\"FAIL: rows={len(body)} missing_dates={miss} omar_undated={omar_ok} retro_listed={retro}\")\nEOF",
+   "reply_regex": "(?i)omar",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if actions.md holds exactly five actions (Lena CSV quoting 2026-11-02, Omar flaky deploy with no date, Priya vendor shortlist 2026-10-30, Tomas handbook 2026-11-06, Priya SSO plan 2026-11-09), the retro decision is left out, and the reply names Omar's item as the one without a date. Fail if dates are wrong, an action is invented or dropped, or the reply claims dates the notes do not give.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 15 (2026-10-30): a realistic ask a user gives an Arbos agent, graded by a programmatic check plus the rubric. Checks date resolution from weekday+day phrases and that a decision is not turned into a task."
+}

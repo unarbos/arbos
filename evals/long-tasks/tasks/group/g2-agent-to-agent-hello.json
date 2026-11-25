@@ -36,5 +36,5 @@
   "no_truncated_reply": true,
   "forbid_text_regex": "only works inside a group|group-send|which chat|another chat|Projects ⇄"
  },
- "regression": "agent-to-agent messaging (docs/agent-to-agent-messaging.md): hjkb → Doug hello from a 1:1, Oct 23; #1780 (one answer per question: check the relay inbox before saying nothing came back)"
+ "regression": "agent-to-agent messaging (docs/agent-to-agent-messaging.md): hjkb → Doug hello from a 1:1, Oct 23; #1780 (one answer per question: check the relay inbox before saying nothing came back); run 15: #2303 — 'no reply yet' while the reply was already in the chat (fix in #2346)"
 }

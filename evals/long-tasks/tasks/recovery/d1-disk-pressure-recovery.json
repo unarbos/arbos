@@ -11,9 +11,10 @@
       "reply_regex": "disk|space|full|clean up|free",
       "reply_regex_not": "os error 28|ENOSPC|No space left on device \\(os error",
       "rubric": {
-        "criteria": "The workspace disk is nearly full (≈ 60 MiB free, below the recovery floor). Pass if the user is told in plain words that the disk is full / nearly full and how to free space (say 'clean up' or delete files) — a raw errno like 'os error 28' fails. Also acceptable: the agent frees space itself and completes the haiku, saying what it did.",
+        "criteria": "The seed fills the shared workspace disk to about 60 MiB free, but other lanes share that disk, so the free space at reply time can differ: judge the agent's figure against free_mib_at_reply in the produced output, never against 60 MiB. Pass if the user is told in plain words how full the disk is (a figure that matches free_mib_at_reply is right) and how to free space (say 'clean up' or delete files) — a raw errno like 'os error 28' fails. Also acceptable: the agent frees space itself and completes the haiku, saying what it did. If free_mib_at_reply is above 100, the pressure had passed by the time the agent answered: a written, read-back haiku with a true disk figure passes, and clean-up advice is not required.",
         "min": 3
-      }
+      },
+      "show": "df -m /work | tail -1 | awk '{print \"free_mib_at_reply=\"$4\" use=\"$5}'"
     },
     {
       "prompt": "clean up",
@@ -27,5 +28,5 @@
     }
   ],
   "cleanup": "rm -f {D}/ballast-fill.bin; true",
-  "regression": "#1641 verified on 0.1.118: ballast released at ~7 MiB free, haiku written, plain disk line, no os error 28; 'clean up' asks before touching an unknown large file"
+  "regression": "#1641 verified on 0.1.118: ballast released at ~7 MiB free, haiku written, plain disk line, no os error 28; 'clean up' asks before touching an unknown large file; run 15: the judge failed a true '188 MB free' because the rubric hard-coded the 60 MiB premise while other lanes freed space — the rubric now reads the measured figure; run 15 part 2: at 187 MiB free (other lanes freed space after the fill) the judge failed a correct haiku for giving no clean-up advice — above 100 MiB the advice is not required"
 }

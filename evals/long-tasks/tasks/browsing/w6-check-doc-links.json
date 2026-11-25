@@ -1,0 +1,21 @@
+{
+ "id": "w6-check-doc-links",
+ "lane": "d",
+ "category": "browsing",
+ "title": "Check every link in a README and list the broken ones (404/500 broken, a redirect to a live page is fine)",
+ "turns": [
+  {
+   "prompt": "Check every link in {D}/README.md and tell me which ones are broken (anything that does not end in a 2xx after following redirects). Write the broken URLs to {D}/broken.txt, one per line, exactly as they appear in the README.",
+   "seed": "mkdir -p {D} && cat > {D}/README.md <<'EOF'\n# tally docs\n\n- [JSON module](https://docs.python.org/3/library/json.html)\n- [Old tutorial](https://docs.python.org/3/library/no-such-module-xyz.html)\n- [Status page](https://httpbin.org/status/500)\n- [Example site](https://example.com/)\n- [Health check](https://httpbin.org/status/200)\n- [Moved page](https://httpbin.org/redirect-to?url=https%3A%2F%2Fexample.com%2F)\nEOF",
+   "verify": "f={D}/broken.txt; up=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://httpbin.org/status/200); echo \"SHOW httpbin_status=$up\"; test -f $f || { echo FAIL: no broken.txt; exit 0; }\npython3 - \"$f\" \"$up\" <<'EOF'\nimport sys\ngot = {l.strip().strip('<>') for l in open(sys.argv[1]) if l.strip()}\nwant = {\"https://docs.python.org/3/library/no-such-module-xyz.html\", \"https://httpbin.org/status/500\"}\nprint(\"SHOW broken=\" + \", \".join(sorted(got)))\nif got == want:\n    print(\"PASS\")\nelif sys.argv[2] != \"200\":\n    print(f\"FAIL: harness: httpbin.org answered {sys.argv[2]} from the box, so the working links could not be told apart\")\nelse:\n    print(f\"FAIL: extra={sorted(got - want)} missing={sorted(want - got)}\")\nEOF",
+   "reply_regex": "(?i)no-such-module[\\s\\S]*500|500[\\s\\S]*no-such-module",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if the reply names exactly two broken links (the docs.python.org no-such-module page, 404, and httpbin status/500) with their status codes, treats the redirect as working, and broken.txt holds those two URLs. Fail if a working link is reported broken, a broken one is missed, or statuses are invented without fetching. The produced output's httpbin_status line is the harness's own probe of https://httpbin.org/status/200 (it shows httpbin was reachable), not the status of the status/500 link.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 15 (2026-10-30): a realistic ask a user gives an Arbos agent, graded by a programmatic check plus the rubric. The verify reports httpbin's own status so an httpbin outage reads as a harness problem, not an agent failure."
+}
