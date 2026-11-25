@@ -37,6 +37,7 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 | `harness/arbos-pi-ext` | The pi extension (TypeScript): `route`, `ask_user`, deny+audit hook, act-call limits, output offload, working set. |
 | `image/` | The `arbos-agent` machine image (pi + Prime + Claude Code + agent-browser/Chrome), hook scripts, Prime skills; `register-snapshot.sh`. |
 | `assets/avatars/trees` | Retired tree characters (replaced by coloured-initial avatars, D79); the brand mark is the acacia tree in `site/assets/logo` (D84). |
+| `crates/arbos-core/assets` | The [Inter](https://rsms.me/inter/) subsets the Mac app and agentd draw text with, and the SIL Open Font License 1.1 they come under — [provenance and attribution](crates/arbos-core/assets/README.md). |
 | `site/` | arbos.life. |
 | `scripts/` | `bundle-mac.sh` (DMG, signing, notarization), `release/`, `deploy/` (relay server, site sync), `runner/` (self-hosted Mac runner), `relay-start.sh`, `site/` (social preview), `readme-hero/` (this page's hero image). |
 | `docs/` | [Self-hosting guide](docs/self-host.md) and the README assets. |

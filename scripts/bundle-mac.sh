@@ -85,6 +85,10 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [[ -f crates/arbos-mac/macos/Arbos.icns ]]; then
   cp crates/arbos-mac/macos/Arbos.icns "$APP/Contents/Resources/"
 fi
+# The binary embeds the Inter subsets (notification avatars, chart PNGs). OFL 1.1 clause 2
+# asks every distributed copy to carry the licence, so the app bundle gets its own copy
+# (crates/arbos-core/assets/README.md).
+cp crates/arbos-core/assets/Inter-LICENSE.txt "$APP/Contents/Resources/"
 echo "==> $APP"
 
 SIGNING="ad-hoc"
