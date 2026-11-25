@@ -128,12 +128,26 @@ fn settings_path() -> std::path::PathBuf {
     crate::sync::credentials::config_dir().join("settings.json")
 }
 
-fn read_settings() -> serde_json::Map<String, serde_json::Value> {
+/// Everything in `<config>/settings.json`, the app's own settings file.
+pub(crate) fn read_settings() -> serde_json::Map<String, serde_json::Value> {
     std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
+}
+
+/// Write one key of `<config>/settings.json`, leaving the rest as it was.
+pub(crate) fn save_setting(key: &str, value: serde_json::Value) {
+    let mut settings = read_settings();
+    settings.insert(key.to_owned(), value);
+    let path = settings_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&serde_json::Value::Object(settings)) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 /// The Settings → Updates toggle (`auto_update` in `<config>/settings.json`, default off);
@@ -149,15 +163,7 @@ pub fn auto_update_enabled() -> bool {
 }
 
 pub fn save_auto_update(enabled: bool) {
-    let mut settings = read_settings();
-    settings.insert("auto_update".into(), serde_json::Value::Bool(enabled));
-    let path = settings_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&serde_json::Value::Object(settings)) {
-        let _ = std::fs::write(path, json);
-    }
+    save_setting("auto_update", serde_json::Value::Bool(enabled));
 }
 
 #[derive(Clone, Debug, PartialEq)]

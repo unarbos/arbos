@@ -494,6 +494,7 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
+ "chrono-tz",
  "core-graphics 0.24.0",
  "cosmic-text",
  "cpal",

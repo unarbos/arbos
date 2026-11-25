@@ -118,6 +118,11 @@ struct SettingsView: View {
     @State private var showAgentLinksPage: Bool
     @State private var showRelayPage: Bool
     @State private var showSecretsPage: Bool
+    /// Settings → Bot → Timezone: the zone list (`TimezonePickerView`). `timezoneSaved` is
+    /// bumped when it closes so the row's value follows the pick — the setting lives in
+    /// `UserDefaults`, which publishes nothing.
+    @State private var showTimezonePicker = false
+    @State private var timezoneSaved = 0
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
     /// the structure test checks the shared index finds each of them.
@@ -337,6 +342,19 @@ struct SettingsView: View {
                 SettingsRow(icon: "textformat.size", title: "Text Size", value: TextScale.label(model.textScale))
             }),
         ], separatorInset: inset))
+        // Bot: how the agents answer. Timezone is the zone every agent is told you are in, so
+        // "what time is it" is answered on your clock and not on the box's UTC.
+        out.append(.title("Bot"))
+        out.append(.card([
+            AnyView(Button { showTimezonePicker = true } label: {
+                SettingsRow(icon: "globe", title: "Timezone", value: timezoneSummary)
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showTimezonePicker, onDismiss: { timezoneSaved += 1 }) {
+                TimezonePickerView().environmentObject(model).environment(\.theme, theme)
+            }),
+        ], separatorInset: inset))
+        out.append(.footnote(timezoneFootnote))
         var about: [AnyView] = [
             AnyView(Button {
                 guard origin.accepts(model, allowUnpaired: true) else { return }
@@ -471,6 +489,18 @@ struct SettingsView: View {
 
     private var privacySummary: String {
         (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
+    }
+
+    /// The zone the agents are told about, pinned or detected.
+    private var timezoneSummary: String {
+        _ = timezoneSaved
+        return TimeZoneSetting.rowValue(account: model.user?.id ?? "")
+    }
+
+    /// Whether that zone follows this iPhone or was pinned by hand.
+    private var timezoneFootnote: String {
+        _ = timezoneSaved
+        return TimeZoneSetting.footnote(account: model.user?.id ?? "")
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
