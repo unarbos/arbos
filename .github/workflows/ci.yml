@@ -8,6 +8,11 @@ on:
   # The feedback loop dispatches CI on a gate/** branch when GitHub ran nothing for
   # it (a branch created through the API without a new commit raises no push event).
   workflow_dispatch:
+  # feedback-ci.yml runs these jobs on feedback/** pushes under its own name, so the loop,
+  # Release and the deploy scripts, which all look for runs named `CI`, never read a branch
+  # verdict. Every job here then also runs for outside contributors: keep them on Linux.
+  # A macOS job must carry `if: github.workflow == 'CI'` (a called workflow sees the caller's name).
+  workflow_call:
   push:
     # gate/** = the feedback loop's integration branches (current main + the ready
     # fix branches); this run is the Linux half of its pre-merge gate.

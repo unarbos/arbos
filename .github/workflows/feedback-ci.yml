@@ -1,0 +1,21 @@
+name: Feedback CI
+
+# ci.yml's Linux jobs (fmt, clippy, test) for a feedback/** push, so a contributor sees a
+# compile result in minutes instead of at the loop's gate. Linux only: hosted macOS runners
+# are scarce, and the gate already builds the Mac and iPhone halves on its own Mac.
+
+on:
+  push:
+    branches: ["feedback/**"]
+    paths-ignore: ["apps/ios/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feedback-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
