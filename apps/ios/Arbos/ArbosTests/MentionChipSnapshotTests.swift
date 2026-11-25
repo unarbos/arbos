@@ -75,7 +75,7 @@ final class MentionChipSnapshotTests: XCTestCase {
         model.loadFixture()
         let table = MentionTable(model: model, theme: Theme.dark)
         let attr = Markdown.inline(table.display(message), color: .white, link: .white, codeChip: .gray)
-        let text = table.text(attr, link: .white, pill: Color(red: 0, green: 1, blue: 0), lineHeight: Theme.body * 1.2)
+        let text = table.text(attr, link: .white, pill: Color(red: 0, green: 1, blue: 0), lineHeight: Theme.body * 1.2, dark: true)
         let view = text
             .font(.system(size: Theme.body))
             .lineSpacing(Theme.bodyLineSpacing)

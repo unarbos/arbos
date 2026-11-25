@@ -2528,7 +2528,7 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: color)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
+                Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions, dark: theme.isDark)
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
@@ -2536,7 +2536,7 @@ struct BlockView: View {
             }
         case .heading(let level, let text):
             // Bolder, larger text; never an anchor (Mac: 20 / 17 / 15 pt on a 13 pt body).
-            Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
+            Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions, dark: theme.isDark)
                 .font(theme.font(Self.headingSize(level), weight: .bold))
                 .tint(theme.accent)
                 .mentionPills()
@@ -2573,7 +2573,7 @@ struct BlockView: View {
                             StreamingText(text: item, font: .system(size: Theme.body), color: color)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Markdown.inlineText(item, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
+                            Markdown.inlineText(item, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions, dark: theme.isDark)
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
                                 .mentionPills()
@@ -2788,7 +2788,7 @@ struct TableBlock: View {
     private func tableRow(_ cells: [String], widths: [CGFloat], head: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { ci, cell in
-                Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
+                Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions, dark: theme.isDark)
                     .font(theme.font(14, weight: head ? .semibold : .regular))
                     .tint(theme.accent)
                     .mentionPills()
@@ -3487,7 +3487,7 @@ struct ImageBubble: View {
                         // The same text as a text bubble: body size, body line spacing, links
                         // and mention chips (Jacob: "normal font size").
                         Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
-                                            codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                                            codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions, dark: theme.isDark)
                             .font(theme.font(Theme.body))
                             .lineSpacing(Theme.bodyLineSpacing)
                             .tint(theme.accent)

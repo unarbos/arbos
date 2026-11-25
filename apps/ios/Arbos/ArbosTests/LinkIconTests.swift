@@ -43,13 +43,13 @@ final class LinkIconTests: XCTestCase {
             XCTAssertEqual(links.count, 1, item)
             XCTAssertEqual(links.first?.host, "nypost.com")
             // Building the Text asks for the icon: the placeholder while loading.
-            _ = LinkIcons.shared.text(attr, lineHeight: 20)
-            XCTAssertEqual(LinkIcons.shared.image(for: "nypost.com").size, LinkIcons.placeholder.size)
+            _ = LinkIcons.shared.text(attr, lineHeight: 20, dark: true)
+            XCTAssertEqual(LinkIcons.shared.image(for: "nypost.com", dark: true).size, LinkIcons.placeholder.size)
         }
         // One ask per host, however many links point at it.
         try await Self.waitUntilAnswered("nypost.com")
         XCTAssertEqual(fetched, ["nypost.com"])
-        let icon = LinkIcons.shared.image(for: "nypost.com")
+        let icon = LinkIcons.shared.image(for: "nypost.com", dark: true)
         XCTAssertEqual(icon.size, CGSize(width: LinkIcons.side + LinkIcons.gap, height: LinkIcons.side))
         XCTAssertFalse(icon === LinkIcons.placeholder, "the fetched picture replaced the placeholder")
     }
@@ -57,10 +57,10 @@ final class LinkIconTests: XCTestCase {
     func testASiteWithoutAnIconKeepsThePlaceholderAndIsNotAskedAgain() async throws {
         var asks = 0
         LinkIcons.shared.fetch = { _ in asks += 1; return nil }
-        _ = LinkIcons.shared.image(for: "none.example")
+        _ = LinkIcons.shared.image(for: "none.example", dark: true)
         try await Self.waitUntilAnswered("none.example")
-        XCTAssertTrue(LinkIcons.shared.image(for: "none.example") === LinkIcons.placeholder)
-        _ = LinkIcons.shared.image(for: "none.example")
+        XCTAssertTrue(LinkIcons.shared.image(for: "none.example", dark: true) === LinkIcons.placeholder)
+        _ = LinkIcons.shared.image(for: "none.example", dark: true)
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(asks, 1)
         XCTAssertNil(LinkIcons.rounded(Data("not a picture".utf8)))

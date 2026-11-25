@@ -25,6 +25,9 @@ final class LinkIcons: ObservableObject {
     /// draw ([feedback link-icons-ios-tile-2026-10-27]); `nil` when the site has none.
     private(set) var pictures: [String: (image: UIImage, tone: LinkIconTone)?] = [:]
     private var inFlight: Set<String> = []
+    /// `host|dark` / `host|light` → the inline icon with the fill its tone needs behind it,
+    /// rendered once per host and appearance. Only hosts whose tone asks for a flip are keys.
+    private var flipped: [String: UIImage] = [:]
     /// Decoded answers waiting for the next publish (`flush`).
     private var landed: [String: Decoded] = [:]
     private var flushQueued = false
@@ -34,12 +37,22 @@ final class LinkIcons: ObservableObject {
 
     /// The picture to draw before a link to `host`: its icon when known, else the placeholder — and
     /// the first ask for a host schedules its fetch.
-    func image(for host: String) -> UIImage {
-        if let known = images[host] {
-            return known ?? Self.placeholder
+    ///
+    /// `dark` is the appearance the icon will sit on. A transparent mark that would vanish there
+    /// gets the fill its `LinkIconTone` asks for behind it, the same flip the tiles give it
+    /// ([feedback link-icons-ios-tile-2026-10-27]); every other icon is drawn as it came.
+    func image(for host: String, dark: Bool) -> UIImage {
+        guard let known = images[host] else {
+            request(host)
+            return Self.placeholder
         }
-        request(host)
-        return Self.placeholder
+        guard let icon = known else { return Self.placeholder }
+        guard let picture = pictures[host] ?? nil, let fill = picture.tone.flipFill(dark: dark) else { return icon }
+        let key = host + (dark ? "|dark" : "|light")
+        if let made = flipped[key] { return made }
+        let made = Self.roundedIcon(picture.image, scale: UIScreen.main.scale, fill: UIColor(fill)) ?? icon
+        flipped[key] = made
+        return made
     }
 
     /// The full-size picture for a tile on `host`, with its tone — or `nil` while it loads or
@@ -87,6 +100,8 @@ final class LinkIcons: ObservableObject {
         for (host, decoded) in landed {
             pictures[host] = decoded.picture
             images[host] = decoded.icon
+            flipped[host + "|dark"] = nil
+            flipped[host + "|light"] = nil
             inFlight.remove(host)
         }
         landed = [:]
@@ -116,6 +131,7 @@ final class LinkIcons: ObservableObject {
         objectWillChange.send()
         images = [:]
         pictures = [:]
+        flipped = [:]
         inFlight = []
         landed = [:]
     }
@@ -172,15 +188,16 @@ final class LinkIcons: ObservableObject {
     }
 
     /// `attr` as a `Text`, with each named link's site icon before its text (the Mac's icon cell).
-    /// Plain `Text(attr)` when there is no named link.
-    func text(_ attr: AttributedString, lineHeight: CGFloat) -> Text {
+    /// Plain `Text(attr)` when there is no named link. `dark` is the appearance the icons sit on
+    /// (see `image(for:dark:)`).
+    func text(_ attr: AttributedString, lineHeight: CGFloat, dark: Bool) -> Text {
         let links = Self.namedLinks(in: attr)
         guard !links.isEmpty else { return Text(attr) }
         var out = Text("")
         var cursor = attr.startIndex
         for (range, host) in links {
             out = out + Text(AttributedString(attr[cursor..<range.lowerBound]))
-            let icon = image(for: host)
+            let icon = image(for: host, dark: dark)
             // The picture rides the baseline a little low so its centre sits on the x-height.
             out = out + Text(Image(uiImage: icon)).baselineOffset(-(Self.side - lineHeight * 0.62) / 2)
             out = out + Text(AttributedString(attr[range]))
@@ -209,13 +226,20 @@ final class LinkIcons: ObservableObject {
     /// The decoded picture as the inline icon (see `rounded(_ data:)`).
     /// `scale` is the screen's, passed in when this runs off the main thread (where the
     /// renderer's default format cannot be trusted to match the screen).
-    nonisolated static func roundedIcon(_ src: UIImage, scale: CGFloat? = nil) -> UIImage? {
+    /// `fill` is painted inside the rounded corner under the picture, for a transparent mark that
+    /// would otherwise vanish on the bubble.
+    nonisolated static func roundedIcon(_ src: UIImage, scale: CGFloat? = nil, fill: UIColor? = nil) -> UIImage? {
         let format = UIGraphicsImageRendererFormat.default()
         if let scale { format.scale = scale }
         let r = UIGraphicsImageRenderer(size: CGSize(width: side + gap, height: side), format: format)
         return r.image { _ in
             let rect = CGRect(x: 0, y: 0, width: side, height: side)
-            UIBezierPath(roundedRect: rect, cornerRadius: side / 4).addClip()
+            let corner = UIBezierPath(roundedRect: rect, cornerRadius: side / 4)
+            if let fill {
+                fill.setFill()
+                corner.fill()
+            }
+            corner.addClip()
             src.draw(in: rect)
         }.withRenderingMode(.alwaysOriginal)
     }
