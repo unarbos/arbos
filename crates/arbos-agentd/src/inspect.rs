@@ -591,8 +591,8 @@ fn disk_json(path: &std::path::Path) -> Value {
 }
 
 /// `GET /box/state`: image, agentd build, uptime, load, memory and disk headroom, every
-/// workspace with its turn-lock state, jobs and resource share; `resources` is the sampler's
-/// cgroup-aware view (`resources.rs`) for Settings → Machine.
+/// workspace with its turn-lock state, jobs, outstanding work and resource share; `resources`
+/// is the sampler's cgroup-aware view (`resources.rs`) for Settings → Machine.
 pub async fn box_state(sup: &Supervisor) -> Value {
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
@@ -614,6 +614,13 @@ pub async fn box_state(sup: &Supervisor) -> Value {
             "run_as": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "turn": turn_json(&w.agent).await,
             "jobs_running": w.agent.jobs_running.load(std::sync::atomic::Ordering::SeqCst),
+            // What the owner still has outstanding here, which `jobs_running` above never said:
+            // that counter counts asks beside a turn, so a workspace running three jobs reports
+            // zero. `null` when the store could not be read, so a client draws nothing rather
+            // than "none".
+            "work_outstanding": w.agent.work_outstanding().map(|(jobs, approvals)| {
+                json!({ "jobs": jobs, "approvals": approvals })
+            }),
             "usage": resources.workspace(&w.project_id),
             "links": w.sync.link_summary().await,
         }));
