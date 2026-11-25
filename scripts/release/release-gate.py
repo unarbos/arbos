@@ -91,6 +91,8 @@ ROOT = HERE.parent.parent
 IOS_WORKFLOW = ".github/workflows/ios.yml"
 GATE_WORKFLOW = ".github/workflows/release-gate.yml"
 SCREEN = "gate-can-decide.sh"
+SELF = "release-gate.py"
+REQUIRE_MAIN_BASE = "GATE_REQUIRE_MAIN_BASE"
 PROBE = "__release_gate_coverage_probe__"
 
 # Exit 1 is deliberately absent: see "what this stopped doing" in the module docstring. Nothing
@@ -329,6 +331,52 @@ def assert_every_job_refuses_an_undecidable_event() -> None:
         raise Undetermined(
             f"{GATE_WORKFLOW} has job(s) that could report success without deciding: "
             f"{'; '.join(faults)}."
+        )
+
+
+def assert_the_deciding_job_requires_a_base_it_can_measure() -> None:
+    """The job that runs this script must refuse a base branch other than main.
+
+    Only main publishes, so a pull request into any other branch has nothing for the gate to
+    measure. Saying so and exiting 0 is the same defect as the dispatch path above: a run that
+    concluded `success` having judged nothing, which checks.sh cannot tell from a verdict. It
+    reached every stacked pull request in the repository, and it turned into a real verdict at
+    the moment the base was retargeted at main — the one moment nobody looks again.
+
+    The refusal lives in the screen, switched on by GATE_REQUIRE_MAIN_BASE, and this is what
+    keeps it switched on: delete the env line and the gate goes quietly permissive again for
+    exactly the pull requests that are hardest to notice it on. Deliberately not applied to the
+    self-test job, whose cases are offline and pinned: a stacked pull request that edits the
+    predicate is the one whose self-test must still run.
+    """
+    try:
+        doc = yaml.safe_load((ROOT / GATE_WORKFLOW).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        raise Undetermined(f"{GATE_WORKFLOW} is not readable: {err}") from err
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict) or not jobs:
+        raise Undetermined(f"{GATE_WORKFLOW} has no `jobs:` map to check")
+
+    # Found by what it does, not by its name: the job that runs this script is the one whose
+    # answer checks.sh reads, whatever the key over it says.
+    deciding = [
+        name
+        for name, job in jobs.items()
+        if isinstance(job, dict)
+        and any(SELF in str(s.get("run", "")) for s in job.get("steps") or [] if isinstance(s, dict))
+    ]
+    if len(deciding) != 1:
+        raise Undetermined(
+            f"{GATE_WORKFLOW} has {len(deciding)} job(s) running {SELF}, expected exactly one: "
+            f"{', '.join(deciding) or 'none'}."
+        )
+    steps = jobs[deciding[0]]["steps"]
+    screens = [s for s in steps if isinstance(s, dict) and SCREEN in str(s.get("run", ""))]
+    if not any((s.get("env") or {}).get(REQUIRE_MAIN_BASE) for s in screens):
+        raise Undetermined(
+            f"{GATE_WORKFLOW}'s {deciding[0]} job does not set {REQUIRE_MAIN_BASE} on {SCREEN}, "
+            "so a pull request based on anything but main would report a pass having measured "
+            "nothing."
         )
 
 
@@ -640,6 +688,7 @@ def main(argv: list[str]) -> int:
         assert_mac_paths_is_the_binary_closure()
         assert_trigger_covers_both_predicates()
         assert_every_job_refuses_an_undecidable_event()
+        assert_the_deciding_job_requires_a_base_it_can_measure()
         pr_base, pr_head, main_sha = (
             commit(args.pr_base),
             commit(args.pr_head),
