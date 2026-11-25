@@ -140,6 +140,122 @@ def is_fetch(call):
     return bool(re.search(r"https?://|^[\w.-]+\.[a-z]{2,}/", str(target), re.I))
 
 
+#: `web_fetch` says this when a page reduced to almost no readable text (`THIN_PAGE_CHARS` in
+#: `web.rs`). A bot wall or a JavaScript-only shell is not literally empty, but it is the empty
+#: result the investigation item is about — it is what the agent has to escalate from.
+THIN_PAGE_RX = re.compile(r"almost no readable text|bot wall or javascript", re.I)
+
+
+def _session_text(message):
+    """The assistant's words in one pi session message: its `text` blocks, in order."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+    )
+
+
+def _tool_result_text(message):
+    """The body of a pi `toolResult`, whose content is a string or a list of typed blocks."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("text")
+        )
+    return ""
+
+
+def _result_is_empty(body):
+    """Whether a tool result came back with nothing to read.
+
+    `web_fetch` answers with a header block (`URL:`, then `Status:`/`Source:`), a blank line and
+    the page. A page that reduced to nothing still carries that header, so judging the whole
+    string would read the empty fetch at the heart of the BEFORE run as a full one. Strip the
+    header before deciding, and only when it is there — a `bash` result has no header and its
+    first blank line is just a blank line.
+    """
+    if not body.strip():
+        return True
+    if THIN_PAGE_RX.search(body):
+        return True
+    if body.startswith("URL: "):
+        _, _, page = body.partition("\n\n")
+        return not page.strip()
+    return False
+
+
+def bundle_from_session(entries, task, agent, image, target_keys=None, **kw):
+    """Bundle from a raw pi session file — `box.session_entries()` output, unreduced.
+
+    Use this and not `bundle_from_run` for any transcript-derived run. `bundle_from_run` reads
+    `driver.session_metrics`, which hardcodes `error: None` and never sets `output_empty`, so two
+    items lose the ability to register their failing value: `retry` can only come back `n/a`
+    however many transient errors the transcript holds, and `investigation` can never reach the
+    `0` for stopping at the first empty page. An instrument that cannot score a failure is not
+    measuring it.
+
+    Fills only what is mechanical — the ordered messages and tool calls, each call's error text and
+    whether its result came back empty. The judgement fields (`slots_filled`, `committed`,
+    `contradictions`, `stated_count`, `produced_count`, `nudge_labels`) stay hand-scored and are
+    passed through as keyword arguments, exactly as the BEFORE bundles were built.
+    """
+    keys = target_keys or ("url", "path", "file_path", "handle", "command", "query", "to", "pattern")
+    user_messages, assistant_messages, calls = [], [], []
+    by_call_id = {}
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        role = message.get("role")
+        if role == "user":
+            user_messages.append(_session_text(message))
+        elif role == "assistant":
+            text = _session_text(message)
+            if text.strip():
+                assistant_messages.append(text)
+            content = message.get("content")
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "toolCall":
+                    continue
+                args = block.get("input") or block.get("arguments") or block.get("args") or {}
+                target = None
+                for k in keys:
+                    v = args.get(k) if isinstance(args, dict) else None
+                    if isinstance(v, str) and v.strip():
+                        target = v.strip()
+                        break
+                calls.append({"name": block.get("name"), "target": target,
+                              "error": None, "output_empty": None})
+                call_id = block.get("id") or block.get("toolCallId")
+                if call_id is not None:
+                    by_call_id[call_id] = len(calls) - 1
+        elif role == "toolResult":
+            call_id = message.get("toolCallId") or message.get("id")
+            i = by_call_id.get(call_id)
+            if i is None:
+                # an unmatched result answers the newest call still waiting for one
+                i = next((j for j in range(len(calls) - 1, -1, -1)
+                          if calls[j]["output_empty"] is None), None)
+            if i is None:
+                continue
+            body = _tool_result_text(message)
+            if message.get("isError"):
+                calls[i]["error"] = (body or "error")[:300]
+            calls[i]["output_empty"] = _result_is_empty(body)
+    return bundle(
+        task=task, agent=agent, image=image,
+        user_messages=user_messages, assistant_messages=assistant_messages,
+        tool_calls=calls, **kw,
+    )
+
+
 def bundle_from_run(turn_records, parity_messages, task, agent, image, **kw):
     """Bundle from this suite's own run records: `results[].turns[]` plus the parity message rows.
 
