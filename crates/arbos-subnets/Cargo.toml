@@ -1,0 +1,19 @@
+[package]
+name = "arbos-subnets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Keeps one how-to-mine skill per Bittensor subnet on the relay, written from each subnet's public repository"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Substrate storage keys are twox128 of the pallet and item names. Already built for subxt.
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
