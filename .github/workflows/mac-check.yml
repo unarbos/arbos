@@ -1,0 +1,79 @@
+name: Mac check
+
+# `cargo check -p arbos-mac` on macOS, for pull requests that change the Mac app's crates.
+#
+# ── the hole this fills ─────────────────────────────────────────────────────
+# Every job in ci.yml runs on ubuntu-24.04, and swift-core-check.yml's paths do not list
+# crates/arbos-mac, so before this workflow a pull request touching only that crate was green on
+# every check without one of them compiling its code. Rust parses a `#[cfg(target_os = "macos")]`
+# module but does not type-check it, so the Linux build caught a syntax error there and nothing
+# else — not a wrong AppKit selector, not a missing cargo feature on a macOS-only dependency, not a
+# type error. Measured on #2706 (crates/arbos-mac only, all 8 check runs on ubuntu-24.04, the whole
+# diff inside `#[cfg(target_os = "macos")] mod mac` plus one objc2-app-kit feature). The first
+# macOS compile of such a change was release.yml's `macos` job: after the merge, on main, and only
+# when a channel is being cut.
+#
+# ── what it does NOT cover ──────────────────────────────────────────────────
+# This is a compile gate, not a test gate. It type-checks; it runs nothing. A change that compiles
+# and behaves wrong passes here. It does not build, does not link, does not bundle, and does not
+# run the composer tests that release.yml and scripts/feedback/rust-gate.sh run — a green run here
+# says the Mac crates type-check on macOS, and no more than that.
+# Also outside it: pushes with no pull request (the feedback loop's `feedback/**` and `gate/**`
+# branches, which scripts/feedback/rust-gate.sh already builds on the EC2 Mac); main itself, whose
+# macOS compile is still release.yml's; a macOS-only break introduced from a path not listed below,
+# notably crates/arbos-core, Cargo.lock and the gpui pin; and anything specific to x86_64, since
+# the hosted runner is arm64 and this checks one target.
+#
+# ── cost ───────────────────────────────────────────────────────────────────
+# GitHub's hosted macOS pool lets this repository run about five jobs at once and is the scarcest
+# thing the project has: over 208 completed macos-15 jobs from 2026-11-01 to 2026-11-04 the wait for
+# a machine was 0.7 min at the median, 23.5 at p75 and 130.9 at p90. So the trigger is as narrow as
+# the hole allows — pull_request only, path-filtered — which is 8 of the last 95 merged pull
+# requests (8.4%). No push trigger: a same-repo branch would otherwise run this twice per head on
+# that pool, and a run on main would buy nothing release.yml does not already compile.
+# `cargo check` and not `cargo build`: a type-check is what closes the hole.
+
+on:
+  pull_request:
+    paths:
+      # The Mac app's UI crate, and the updater, whose eight `cfg(target_os = "macos")` sites
+      # `cargo check -p arbos-mac` compiles as a dependency (1 of the last 95 merged PRs).
+      - "crates/arbos-mac/**"
+      - "crates/arbos-update/**"
+      - ".github/workflows/mac-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: cargo check (macOS)
+    runs-on: macos-15
+    # The check itself is minutes; the number is for a cold cache, where webrtc-sys downloads a
+    # prebuilt libwebrtc and every dependency is compiled to metadata for the first time.
+    timeout-minutes: 60
+    # CONSTRAINT — this workflow has exactly one job and that job has no `if:`, so a run of it
+    # concludes `success` only when the check really ran and passed. scripts/merge/checks.sh judges
+    # a gate by its RUN conclusion; add a job here that can succeed without compiling anything, or
+    # put `continue-on-error` on this one, and a run would conclude success having tested nothing.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mac-check
+          cache-on-failure: true
+      # --all-targets so the tests and benches type-check too: crates/arbos-mac's test code is
+      # macOS-only as well, and #2089 broke release.yml's composer test step that way.
+      # RUSTFLAGS is deliberately not `-D warnings`: no macOS build in this repository treats a
+      # warning as an error (release.yml and scripts/feedback/rust-gate.sh do not), so this gate
+      # must not refuse a change that would compile and ship.
+      - run: cargo check -p arbos-mac --locked --all-targets
