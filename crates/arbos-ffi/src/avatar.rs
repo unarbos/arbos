@@ -76,7 +76,7 @@ pub fn disc_neutral_index() -> u8 {
     disc::NEUTRAL
 }
 
-/// Bump of the index rule; clients refresh cached defaults when it moves.
+/// Revision of the published disc rule; clients refresh cached defaults when it moves.
 #[uniffi::export]
 pub fn disc_rule_version() -> u32 {
     disc::DISC_RULE_VERSION
