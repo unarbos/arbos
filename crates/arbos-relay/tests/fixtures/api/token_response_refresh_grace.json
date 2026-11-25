@@ -11,6 +11,7 @@
     "id": "gh_301",
     "last_login_at": 1700000000000,
     "login": "user301",
-    "name": "Fixture User"
+    "name": "Fixture User",
+    "name_source": "github"
   }
 }
