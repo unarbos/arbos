@@ -264,6 +264,21 @@ pub struct MemoryRow {
     pub supersedes: Value,
     pub confidence: f64,
     pub importance: i64,
+    /// [`PROVENANCE_OWNER`] or [`PROVENANCE_OUTSIDE`].
+    pub provenance: String,
+}
+
+/// The owner stated the record, in words the write pass proved are theirs. Also what agentd's
+/// own code-written notes (a rename) carry, and every row from before the column existed.
+pub const PROVENANCE_OWNER: &str = "owner";
+/// The record was derived from anything else: a tool result, a page, a file, another person's
+/// or agent's message, the agent's own text. Stored, but unverified: never offered as a fact.
+pub const PROVENANCE_OUTSIDE: &str = "outside";
+
+impl MemoryRow {
+    pub fn unverified(&self) -> bool {
+        self.provenance != PROVENANCE_OWNER
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +381,18 @@ impl Store {
             .any(|n| n == "steers");
         if !has_steers {
             c.execute_batch("ALTER TABLE jobs ADD COLUMN steers TEXT NOT NULL DEFAULT '[]'")?;
+        }
+        // Additive migration: where a memory record came from. Rows written before the column
+        // existed read as the owner's, so nothing a box already remembers is demoted.
+        let has_provenance: bool = c
+            .prepare("PRAGMA table_info(memory)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "provenance");
+        if !has_provenance {
+            c.execute_batch(
+                "ALTER TABLE memory ADD COLUMN provenance TEXT NOT NULL DEFAULT 'owner'",
+            )?;
         }
         // Additive migration: when a late approval's re-run was let through without a second
         // card. This is the whole of the grant — it used to be a ten-minute entry in memory,
@@ -1547,13 +1574,14 @@ impl Store {
         confidence: f64,
         importance: i64,
         supersedes: &[String],
+        provenance: &str,
     ) -> Result<String> {
         let id = ulid();
         let text = redact(text);
         self.with(|c| {
             c.execute(
-                "INSERT INTO memory(id, tier, thread_id, kind, scope, text, source, valid_at, created_at, supersedes, confidence, importance) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![id, tier, thread_id, kind, scope, text, source.map(|s| s.to_string()), valid_at, now_ms(), serde_json::to_string(supersedes).unwrap_or_default(), confidence, importance],
+                "INSERT INTO memory(id, tier, thread_id, kind, scope, text, source, valid_at, created_at, supersedes, confidence, importance, provenance) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                params![id, tier, thread_id, kind, scope, text, source.map(|s| s.to_string()), valid_at, now_ms(), serde_json::to_string(supersedes).unwrap_or_default(), confidence, importance, provenance],
             )?;
             c.execute("INSERT INTO memory_fts(text, id, tier) VALUES (?1,?2,?3)", params![text, id, tier])?;
             Ok(())
@@ -1610,10 +1638,11 @@ impl Store {
             supersedes: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or(json!([])),
             confidence: r.get(11)?,
             importance: r.get(12)?,
+            provenance: r.get(13)?,
         })
     }
 
-    const MEMORY_COLS: &'static str = "m.id, m.tier, m.thread_id, m.kind, m.scope, m.text, m.valid_at, m.invalid_at, m.created_at, m.expired_at, m.supersedes, m.confidence, m.importance";
+    const MEMORY_COLS: &'static str = "m.id, m.tier, m.thread_id, m.kind, m.scope, m.text, m.valid_at, m.invalid_at, m.created_at, m.expired_at, m.supersedes, m.confidence, m.importance, m.provenance";
 
     pub fn memory_search(
         &self,
@@ -1635,7 +1664,7 @@ impl Store {
                  ORDER BY bm25(memory_fts) LIMIT ?4",
                 Self::MEMORY_COLS
             ))?;
-            let rows = st.query_map(params![q, include_expired, tiers_csv, limit], |r| Ok((Self::row_to_memory(r)?, r.get::<_, f64>(13)?)))?;
+            let rows = st.query_map(params![q, include_expired, tiers_csv, limit], |r| Ok((Self::row_to_memory(r)?, r.get::<_, f64>(14)?)))?;
             rows.collect()
         })
     }
@@ -1648,7 +1677,7 @@ impl Store {
     ) -> Result<Vec<MemoryRow>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM memory m WHERE m.tier = ?1 AND m.expired_at IS NULL AND (?2 IS NULL OR m.thread_id = ?2) ORDER BY m.importance DESC, m.created_at DESC LIMIT ?3",
+                "SELECT {} FROM memory m WHERE m.tier = ?1 AND m.expired_at IS NULL AND (?2 IS NULL OR m.thread_id = ?2) ORDER BY m.provenance != 'owner', m.importance DESC, m.created_at DESC LIMIT ?3",
                 Self::MEMORY_COLS
             ))?;
             let rows = st.query_map(params![tier, thread_id, limit], Self::row_to_memory)?;

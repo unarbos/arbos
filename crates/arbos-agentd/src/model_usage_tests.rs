@@ -192,6 +192,7 @@ async fn model_usage_context_is_sent_by_internal_llm_calls() {
             original_context,
             "subagent",
             "The old task finished in chat A and is being indexed later.",
+            None,
             &[],
         )
         .await
