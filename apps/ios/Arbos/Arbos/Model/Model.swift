@@ -668,8 +668,18 @@ struct Question: Equatable {
     /// Secret hand-off: the request card (`payload.kind = secret_offer`) — Name + masked
     /// Value + Save, no answer rows. The payload carries names only.
     var secretOffer: SecretOffer? = nil
+    /// A subnet registration card (`payload.kind = subnet_register`): Register is answered by
+    /// this phone signing with the wallet, not by a plain approve.
+    var registration: SubnetRegistration? = nil
 
     var hasChoices: Bool { !options.isEmpty }
+}
+
+/// What this phone signs for a subnet registration card: the two fields the card names. The
+/// transaction is built here from them; nothing else in the payload is signed.
+struct SubnetRegistration: Equatable {
+    var netuid: UInt16
+    var hotkey: String
 }
 
 /// What the secret request card needs from its payload (secret hand-off, 2026-10-26).
@@ -1844,6 +1854,11 @@ enum DocJSON {
             options = []
             if state == "approved" { picked = ["saved"] }
         }
+        var registration: SubnetRegistration?
+        if str(payload?["kind"]) == "subnet_register", let n = payload?["netuid"] as? Int,
+           let netuid = UInt16(exactly: n), let hotkey = str(payload?["hotkey"]), !hotkey.isEmpty {
+            registration = SubnetRegistration(netuid: netuid, hotkey: hotkey)
+        }
         var title = (str(pm["title"]) ?? "Approve this?").trimmingCharacters(in: .whitespaces)
         if offer == nil, !title.hasSuffix("?") {
             while title.hasSuffix(".") { title.removeLast() }
@@ -1860,7 +1875,8 @@ enum DocJSON {
             approvalId: approvalId,
             secretRequestId: str(payload?["secretRequestId"]),
             shellCard: shellCard,
-            secretOffer: offer
+            secretOffer: offer,
+            registration: registration
         )
     }
 

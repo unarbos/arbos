@@ -24,6 +24,28 @@ final class SecretHandoffTests: XCTestCase {
                 pending: false, parts: parts, hiddenCount: 0, senderHandle: handle, senderName: name)
     }
 
+    /// A subnet registration card carries the two fields this phone signs and keeps its own
+    /// rows; a payload whose subnet number is not one, or that names no hotkey, signs nothing.
+    func testRegistrationCardCarriesOnlyTheSubnetAndTheHotkey() throws {
+        func card(_ netuid: Any, _ hotkey: String) -> Question? {
+            let pm: [String: Any] = [
+                "id": "p1", "kind": "approval", "approvalId": "ap-reg", "state": "pending",
+                "title": "Register a miner on subnet 51", "risk": "money", "summary": "mine with the home GPUs",
+                "payload": ["kind": "subnet_register", "netuid": netuid, "hotkey": hotkey,
+                            "answers": [["id": "approve", "label": "Register"], ["id": "deny", "label": "Not now"]]] as [String: Any],
+            ]
+            if case .question(_, let q) = DocJSON.part(pm) { return q }
+            return nil
+        }
+        let hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        let q = try XCTUnwrap(card(51, hotkey))
+        XCTAssertEqual(q.registration, SubnetRegistration(netuid: 51, hotkey: hotkey))
+        XCTAssertEqual(q.options.map(\.id), ["approve", "deny"])
+        XCTAssertNil(card(70_000, hotkey)?.registration)
+        XCTAssertNil(card("51", hotkey)?.registration)
+        XCTAssertNil(card(51, "")?.registration)
+    }
+
     func testRequestCardDecodesWithoutRowsOrAValueField() throws {
         guard case .question(_, let q) = DocJSON.part(offerPart(state: "pending")) else {
             return XCTFail("approval parts render as question cards")

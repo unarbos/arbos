@@ -78,7 +78,7 @@ struct QuestionCard: View {
                     list
                 }
                 if open && !options.isEmpty {
-                    Text(foot ?? (shellCard
+                    Text(registrationNote ?? foot ?? (shellCard
                          ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
                          : "Or answer in the chat below"))
                         .font(theme.font(Theme.small))
@@ -93,6 +93,65 @@ struct QuestionCard: View {
             .padding(.horizontal, Self.pad)
             .padding(.bottom, Self.pad + 1)
             .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(palette.outer))
+            .alert(registrationAlertTitle, isPresented: registrationAlert) {
+                if case .quoted(let chat, let reg, _, let limit) = registration, let id = approvalId {
+                    Button("Pay up to \(walletFormatTao(rao: String(limit)))") {
+                        model.payRegistration(chatId: chat, approvalId: id, reg, limit: limit)
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } else {
+                    Button("OK", role: .cancel) {}
+                }
+            } message: {
+                Text(registrationAlertMessage)
+            }
+        }
+    }
+
+    // MARK: Subnet registration card
+
+    private var approvalId: String? { questionId?.stripping(prefix: "approval:") }
+
+    private var registration: AppModel.RegistrationState? { approvalId.flatMap { model.registrations[$0] } }
+
+    private var registrationNote: String? {
+        switch registration {
+        case .quoting: return "Reading the fee…"
+        case .paying: return "Registering from your wallet. This takes about half a minute."
+        default: return nil
+        }
+    }
+
+    /// Up while a price waits for a yes or a failure waits to be read. Closing it forgets
+    /// either; a payment already started is left alone.
+    private var registrationAlert: Binding<Bool> {
+        Binding(get: {
+            switch registration {
+            case .quoted, .failed: return true
+            default: return false
+            }
+        }, set: { shown in
+            guard !shown, let id = approvalId else { return }
+            switch model.registrations[id] {
+            case .quoted, .failed: model.registrations[id] = nil
+            default: break
+            }
+        })
+    }
+
+    private var registrationAlertTitle: String {
+        if case .quoted(_, let reg, _, _) = registration { return "Register on subnet \(reg.netuid)?" }
+        return "Couldn't register"
+    }
+
+    private var registrationAlertMessage: String {
+        switch registration {
+        case .quoted(_, _, let fee, let limit):
+            return "It costs \(walletFormatTao(rao: String(fee))) right now and the price moves. At most \(walletFormatTao(rao: String(limit))) leaves your wallet. It is not refunded."
+        case .failed(let words):
+            return "\(words) Nothing was spent."
+        default:
+            return ""
         }
     }
 
