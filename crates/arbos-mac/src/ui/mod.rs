@@ -46,6 +46,7 @@ pub mod message_menu;
 pub mod mock_backdrop;
 pub mod modal;
 pub mod motion;
+pub mod needs_you;
 pub mod notify;
 pub mod onboarding;
 pub mod palette;
