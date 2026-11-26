@@ -167,3 +167,34 @@ pub enum LocalServerFrame {
     Exec(LocalExecRequest),
     Ping,
 }
+
+/// Box → relay, `POST /projects/{id}/local/{device}/requests`: the op a card is about to ask the
+/// user to approve. The relay keeps it; what later runs is the relay's copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRequestCreate {
+    pub op: LocalOp,
+    pub chat_id: String,
+}
+
+/// Relay → box: the id that goes on the card and back in the exec body as `request_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalRequestCreated {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDecision {
+    Approve,
+    Deny,
+}
+
+/// App → relay, `POST /local/requests/{id}/decide`: the user's answer, with the op the card
+/// showed. The relay accepts it only when that is the op it stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalDecide {
+    pub decision: LocalDecision,
+    pub op: LocalOp,
+}

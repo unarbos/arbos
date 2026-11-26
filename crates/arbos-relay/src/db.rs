@@ -221,6 +221,15 @@ CREATE TABLE IF NOT EXISTS local_devices (
   home TEXT NOT NULL DEFAULT '', connected INTEGER NOT NULL DEFAULT 0, last_seen INTEGER, first_seen INTEGER NOT NULL,
   allow_reads INTEGER NOT NULL DEFAULT 0
 );
+-- An approval the relay holds, so a box cannot vouch for itself. `kind` is 'local' today; connector
+-- write actions have the same shape and are meant to land here too. `payload` is the exact thing
+-- approved (canonical JSON), `target` what it acts on (a local device id).
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  target TEXT NOT NULL, chat_id TEXT NOT NULL, payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS approval_requests_project ON approval_requests(project_id, status, created_at);
 CREATE TABLE IF NOT EXISTS vault_items (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
   fields TEXT NOT NULL, allowed_hosts TEXT NOT NULL DEFAULT '[]',
@@ -624,6 +633,28 @@ pub struct UsageTotals {
     pub cache_write: i64,
     pub usd: f64,
     pub calls: i64,
+}
+
+/// Pending approval requests one project may hold; see [`Db::approval_create`].
+pub const APPROVALS_PENDING_MAX: i64 = 20;
+/// How long a decided approval request is kept.
+const APPROVALS_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How long after the user's yes an approval can be spent.
+pub const APPROVAL_USABLE_MS: i64 = 5 * 60 * 1000;
+
+/// One row of `approval_requests`.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub kind: String,
+    pub user_id: String,
+    pub project_id: String,
+    pub target: String,
+    pub chat_id: String,
+    pub payload: String,
+    /// `pending | approved | denied | used`.
+    pub status: String,
+    pub created_at: i64,
 }
 
 /// One `arbos-local` helper that connected at least once (`local_devices`, F9).
@@ -3041,6 +3072,100 @@ impl Db {
                 params![device_id],
             )
             .map(|n| n > 0)
+        })
+    }
+
+    // ---- approval requests --------------------------------------------------------------------
+
+    /// Store a pending request. A project keeps its newest [`APPROVALS_PENDING_MAX`] pending
+    /// requests; older ones are denied, so a box cannot grow the table by asking. Decided rows
+    /// older than [`APPROVALS_KEEP_MS`] go at the same time.
+    pub fn approval_create(&self, r: &ApprovalRequest) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO approval_requests(id, kind, user_id, project_id, target, chat_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![r.id, r.kind, r.user_id, r.project_id, r.target, r.chat_id, r.payload, r.created_at],
+            )?;
+            c.execute(
+                "UPDATE approval_requests SET status = 'denied', decided_at = ?2
+                 WHERE project_id = ?1 AND status = 'pending' AND id NOT IN (
+                   SELECT id FROM approval_requests WHERE project_id = ?1 AND status = 'pending'
+                   ORDER BY created_at DESC, id DESC LIMIT ?3)",
+                params![r.project_id, r.created_at, APPROVALS_PENDING_MAX],
+            )?;
+            c.execute(
+                "DELETE FROM approval_requests WHERE project_id = ?1 AND status != 'pending' AND created_at < ?2",
+                params![r.project_id, r.created_at - APPROVALS_KEEP_MS],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn approval(&self, id: &str) -> Result<Option<ApprovalRequest>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id, kind, user_id, project_id, target, chat_id, payload, status, created_at
+                 FROM approval_requests WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(ApprovalRequest {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        user_id: r.get(2)?,
+                        project_id: r.get(3)?,
+                        target: r.get(4)?,
+                        chat_id: r.get(5)?,
+                        payload: r.get(6)?,
+                        status: r.get(7)?,
+                        created_at: r.get(8)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Decide a pending request. `false` when it was not pending: the first answer stands.
+    pub fn approval_decide(&self, id: &str, status: &str, decided_by: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE approval_requests SET status = ?2, decided_by = ?3, decided_at = ?4
+                 WHERE id = ?1 AND status = 'pending'",
+                params![id, status, decided_by, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Spend an approval: `approved → used` in one statement, and only for the user, project and
+    /// target it was made for, within [`APPROVAL_USABLE_MS`] of the decision. Returns the stored
+    /// payload, which is what the caller must act on. `None` is every kind of "no".
+    pub fn approval_claim(
+        &self,
+        id: &str,
+        kind: &str,
+        user_id: &str,
+        project_id: &str,
+        target: &str,
+    ) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "UPDATE approval_requests SET status = 'used'
+                 WHERE id = ?1 AND kind = ?2 AND user_id = ?3 AND project_id = ?4 AND target = ?5
+                   AND status = 'approved' AND decided_at > ?6
+                 RETURNING payload",
+                params![
+                    id,
+                    kind,
+                    user_id,
+                    project_id,
+                    target,
+                    now_ms() - APPROVAL_USABLE_MS
+                ],
+                |r| r.get(0),
+            )
+            .optional()
         })
     }
 }

@@ -72,6 +72,9 @@ pub struct Config {
     pub openai_audio_base: String,
     /// `ARBOS_VAULT_MOCK=1`: two demo vault items and a local echo target (F8).
     pub vault_mock: bool,
+    /// `ARBOS_LOCAL_APPROVAL=enforce`: a local op runs only against an approval the relay holds.
+    /// Otherwise (observe) one without is logged and still runs, until apps and boxes send them.
+    pub local_approval_enforce: bool,
     /// How devices sign in: GitHub OAuth (self-serve) or one-time pairing codes (self-hosters).
     pub auth_mode: AuthMode,
     pub github_client_id: Option<String>,
@@ -804,6 +807,7 @@ pub(crate) mod test_support {
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
+            local_approval_enforce: false,
             auth_mode,
             github_client_id: Some("id".into()),
             github_client_secret: Some("secret".into()),
