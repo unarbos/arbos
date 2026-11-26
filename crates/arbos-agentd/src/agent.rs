@@ -7504,7 +7504,20 @@ impl Agent {
             tracing::info!(chat_id, "escalation note: act turn ended with no text");
         }
 
-        self.spawn_memory_pass(chat_id, &assistant_msg_id, &user_text, &turn.streamed_text);
+        let ask_by_owner = message_view.as_ref().is_some_and(|m| {
+            crate::people::written_by_owner(
+                self.people.info(chat_id).as_ref(),
+                &self.people.project_owner(),
+                m,
+            )
+        });
+        self.spawn_memory_pass(
+            chat_id,
+            &assistant_msg_id,
+            &user_text,
+            ask_by_owner,
+            &turn.streamed_text,
+        );
 
         // Hand-offs after the main turn: new / wake / escalation. Never on the chat's critical path.
         if turn.stopped {
@@ -7913,7 +7926,17 @@ impl Agent {
     }
 
     /// Memory write pass + compaction, off the reply path (design §6.9).
-    fn spawn_memory_pass(self: &Arc<Self>, chat_id: &str, msg_id: &str, ask: &str, reply: &str) {
+    /// `ask_by_owner`: `ask` is the owner's own message, the only text a memory record can be
+    /// proved against as stated by the owner; a notice, a guest's or another agent's is not.
+    fn spawn_memory_pass(
+        self: &Arc<Self>,
+        chat_id: &str,
+        msg_id: &str,
+        ask: &str,
+        ask_by_owner: bool,
+        reply: &str,
+    ) {
+        let owner_said = ask_by_owner.then(|| ask.to_owned());
         let me = self.clone();
         let chat = chat_id.to_owned();
         let text = format!("User: {ask}\nAgent: {reply}");
@@ -7926,7 +7949,15 @@ impl Agent {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             if let Err(e) = me
                 .memory
-                .write_pass(&msg, &chat, usage_context, "assistant", &text, &[])
+                .write_pass(
+                    &msg,
+                    &chat,
+                    usage_context,
+                    "assistant",
+                    &text,
+                    owner_said.as_deref(),
+                    &[],
+                )
                 .await
             {
                 tracing::debug!(error = %e, "memory write pass");
@@ -9441,6 +9472,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             &format!("[subagent {name} finished: {status}]"),
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -9516,6 +9548,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             &format!("[job {} failed; answered inline]", job.title),
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -9557,6 +9590,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             "[approval outcome]",
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -14137,6 +14171,7 @@ impl Agent {
                         usage_context,
                         "subagent",
                         &body,
+                        None,
                         &proposals,
                     )
                     .await;
@@ -15364,7 +15399,7 @@ pub(crate) fn reply_to_wanted(shared: bool, from_agent: bool) -> bool {
     shared || from_agent
 }
 
-fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
+pub(crate) fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
     m.rest
         .get("sender")
         .and_then(Value::as_str)

@@ -217,6 +217,30 @@ impl PeopleChatInfo {
     }
 }
 
+/// Whether a user row is the owner's own words, for memory provenance. Fails closed: a
+/// routine's or another agent's row, a channel sender, a guest and an author the row does not
+/// identify are all not the owner. `info` is the people chat the row is in, if it is in one.
+pub(crate) fn written_by_owner(
+    info: Option<&PeopleChatInfo>,
+    project_owner: &str,
+    msg: &MessageView,
+) -> bool {
+    if crate::agent::message_from_routine(msg) {
+        return false;
+    }
+    match info {
+        Some(info) => info.author_of(msg).as_deref() == Some(info.owner_user.as_str()),
+        // This Project's own chats: the owner's devices write `user` or `user:<owner>`.
+        None => match msg.rest.get("sender").and_then(Value::as_str) {
+            Some("user") => true,
+            Some(s) => s
+                .strip_prefix("user:")
+                .is_some_and(|u| !u.is_empty() && u == project_owner),
+            None => false,
+        },
+    }
+}
+
 /// `user_id` of an asker the agent could not identify (see `arbos_core::UNKNOWN_ASKER`).
 pub const UNKNOWN_ASKER: &str = arbos_core::UNKNOWN_ASKER;
 
@@ -1959,6 +1983,68 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(no_devices.author_of(&unknown), None);
+    }
+
+    /// Memory provenance: only the owner's own row counts as the owner's words. Everyone and
+    /// everything else that can write a user row does not, and an unknown author never does.
+    #[test]
+    fn only_the_owners_own_row_is_written_by_the_owner() {
+        let row = |rest: Value| {
+            let mut m = msg("invoices go to billing@acme.test", json!({}));
+            m.rest = rest;
+            m
+        };
+        // This Project's own chats.
+        for (rest, owner, want) in [
+            (json!({ "sender": "user" }), "gh_1", true),
+            (json!({}), "gh_1", false),
+            (json!({ "sender": "user:gh_1" }), "gh_1", true),
+            (json!({ "sender": "user:gh_2" }), "gh_1", false),
+            (json!({ "sender": "user:gh_1" }), "", false),
+            (json!({ "sender": "user:" }), "", false),
+            (json!({ "sender": "channel:slack:U123" }), "gh_1", false),
+            (json!({ "sender": "routine:01R" }), "gh_1", false),
+            (
+                json!({ "sender": "user", "routineRunId": "01RUN" }),
+                "gh_1",
+                false,
+            ),
+            (
+                json!({ "sender": "user:gh_1", "agentMessage": {} }),
+                "gh_1",
+                false,
+            ),
+            (json!({ "sender": "agent:01HOTHER" }), "gh_1", false),
+        ] {
+            assert_eq!(
+                written_by_owner(None, owner, &row(rest.clone())),
+                want,
+                "{rest}"
+            );
+        }
+        // A people chat: the roster decides, and an author it cannot name is not the owner.
+        let group = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_1", "handle": "jacob", "devices": ["DEVJ1"] }),
+                json!({ "member": "user:gh_2", "handle": "sam", "devices": ["DEVSAM"] }),
+            ],
+            owner_user: "gh_1".into(),
+            ..Default::default()
+        };
+        for (rest, want) in [
+            (json!({ "sender": "user:gh_1" }), true),
+            (json!({ "sender": "user", "deviceId": "DEVJ1" }), true),
+            (json!({ "sender": "user:gh_2" }), false),
+            (json!({ "sender": "user", "deviceId": "DEVSAM" }), false),
+            (json!({ "sender": "user" }), false),
+            (json!({ "sender": "user:gh_1", "agentMessage": {} }), false),
+        ] {
+            assert_eq!(
+                written_by_owner(Some(&group), "gh_1", &row(rest.clone())),
+                want,
+                "{rest}"
+            );
+        }
     }
 
     /// #1538: Jacob (@unarbos) named an agent "unarbos", and the composer resolved `@unarbos`

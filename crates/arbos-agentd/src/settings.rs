@@ -605,6 +605,7 @@ impl Agent {
             1.0,
             9,
             &[],
+            crate::store::PROVENANCE_OWNER,
         ) {
             tracing::warn!(error = %e, "rename note into memory");
         }
