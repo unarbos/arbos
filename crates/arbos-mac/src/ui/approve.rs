@@ -369,8 +369,20 @@ pub fn approval_card(
         list = list.child(approve_row).child(reject_row);
     } else {
         let picked = view.picked_answer();
+        // A subnet registration is signed by the wallet, and only the iPhone has one: here the
+        // Register row says so and does nothing. Mac wallet: build it, then drop this.
+        let phone_signs =
+            view.payload.get("kind").and_then(|k| k.as_str()) == Some("subnet_register");
         for (ix, (id, label)) in answers.iter().enumerate() {
-            let state = if pending {
+            let phone_only = phone_signs && id == "approve";
+            let label = if phone_only {
+                "Register: approve on your iPhone".to_string()
+            } else {
+                label.clone()
+            };
+            let state = if pending && phone_only {
+                RowState::Faded
+            } else if pending {
                 RowState::Open
             } else if picked == Some(id.as_str()) {
                 RowState::Chosen
@@ -384,13 +396,13 @@ pub fn approval_card(
                 option_row(
                     format!("{row_id}-{id}"),
                     Some(letter),
-                    label,
+                    &label,
                     state,
                     ix > 0,
                     &look,
                 )
                 .when(ix + 1 == answers.len(), last_row)
-                .when(pending, |el| {
+                .when(pending && !phone_only, |el| {
                     el.on_click(move |_, _, cx| on_answer(&choice, cx))
                 }),
             );

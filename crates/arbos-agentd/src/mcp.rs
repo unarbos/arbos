@@ -334,6 +334,7 @@ async fn call_tool(
             | "vault_request"
             | "secrets_request"
             | "request_secret"
+            | "subnet_register"
             | "secrets_save_from_message"
             | "browser_fill"
             // Destructive cmds are gated inside `app::call_tool` (approval card per command).
@@ -997,6 +998,7 @@ async fn call_tool(
         }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
         "request_secret" => crate::handoff::request_secret(a, args, &chat_for_scratch).await,
+        "subnet_register" => crate::register::subnet_register(a, args, &chat_for_scratch).await,
         "secrets_save_from_message" => {
             crate::handoff::secrets_save_from_message(a, args, &chat_for_scratch).await
         }
