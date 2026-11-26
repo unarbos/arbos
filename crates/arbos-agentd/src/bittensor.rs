@@ -1,6 +1,7 @@
 //! `bittensor_subnet`: what the relay knows about Bittensor's subnets (`arbos-relay/src/
 //! subnets.rs`, kept current by `arbos-subnets`), handed to the agent with the same short guide
-//! every time, so the rules about keys and spending arrive with the facts they govern.
+//! every time, so the rules about keys and spending arrive with the facts they govern. The
+//! steps of mining are a skill (`skills/bittensor-mining.md`), read once through `skills_read`.
 //!
 //! A tool rather than a skill per subnet: skills are picked by shared words, and a hundred
 //! skills that all say "bittensor", "subnet" and "mine" crowd out the one that was asked for.
