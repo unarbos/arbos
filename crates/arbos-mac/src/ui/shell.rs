@@ -47,6 +47,7 @@ use crate::ui::message_menu;
 use crate::ui::mock_backdrop;
 use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, shake_offset, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::needs_you::NeedsYou;
 use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
@@ -528,6 +529,8 @@ pub struct Shell {
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
     /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
     pub(crate) feedback: Entity<FeedbackSheet>,
+    /// The "Needs you" sheet (self-contained in `ui::needs_you`).
+    pub(crate) needs_you: Entity<NeedsYou>,
 }
 
 impl Shell {
@@ -1150,6 +1153,8 @@ impl Shell {
         cx.observe(&skills, |_, _, cx| cx.notify()).detach();
         let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
         cx.observe(&feedback, |_, _, cx| cx.notify()).detach();
+        let needs_you = cx.new(|cx| NeedsYou::new(state.clone(), cx));
+        cx.observe(&needs_you, |_, _, cx| cx.notify()).detach();
 
         // Drop the stale All · Agents · People · Servers pref so old segment
         // choices do not linger ([feedback chat-list-no-filter-mac-2026-11-10]).
@@ -1307,6 +1312,7 @@ impl Shell {
             handle_input,
             members_open: false,
             feedback,
+            needs_you,
         };
         if open_settings.is_some() {
             shell.state.update(cx, |s, cx| {
@@ -1495,6 +1501,13 @@ impl Shell {
         self.menu_open = false;
         self.close_settings(cx);
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+    }
+
+    pub(crate) fn open_needs_you(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.close_settings(cx);
+        self.needs_you
+            .update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
     // ----- settings navigation (#1086) -------------------------------------------
@@ -2692,6 +2705,7 @@ impl Shell {
         !(self.palette.open
             || self.avatar_picker.is_some()
             || self.feedback.read(cx).is_open()
+            || self.needs_you.read(cx).is_open()
             || s.pairing.is_some()
             || s.media_viewer.is_some()
             || s.chart_viewer.is_some()
@@ -3301,6 +3315,7 @@ impl Shell {
                 self.secrets.update(cx, |p, cx| p.show_connect(cx));
             }
             SettingTarget::Feedback => self.open_feedback(window, cx),
+            SettingTarget::NeedsYou => self.open_needs_you(window, cx),
             SettingTarget::Profile => {
                 self.hide_settings_page(cx);
                 self.settings_page = SettingsPage::Root;
@@ -3440,6 +3455,12 @@ impl Shell {
         }
         if self.feedback.read(cx).is_open() {
             self.feedback.update(cx, |sheet, cx| sheet.close(cx));
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
+            return;
+        }
+        if self.needs_you.read(cx).is_open() {
+            self.needs_you.update(cx, |sheet, cx| sheet.close(cx));
             Composer::focus(&self.composer, window, cx);
             cx.notify();
             return;
@@ -5889,6 +5910,9 @@ impl Render for Shell {
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
+        }
+        if self.needs_you.read(cx).is_open() {
+            root = root.child(self.needs_you.clone());
         }
         if viewer_open {
             // Focus moves into the viewer once per opening (← → page, Esc
