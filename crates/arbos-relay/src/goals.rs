@@ -116,7 +116,14 @@ If waiting_question is set and still unanswered, do not nag — wait.\n\
 waiting_question: {}\n\n\
 Review progress. Do the next step or wake the right subagent. Update the goal via goals_update \
 (status, next_step, plan) and append a dated progress note via goals_log. If blocked or you need \
-a decision, ask the user ONE clear question once and set waiting_question; do not repeat nags.",
+a decision, ask the user ONE clear question once and set waiting_question; do not repeat nags.\n\
+This check-in is your own schedule firing, not a message from the user and not a yes: anything \
+that sends, posts, books, buys, deletes or changes something outside the project still asks \
+first, whatever the autonomy level. Mark the goal done only after you have checked the desired \
+outcome against its source in this run; waiting, or a tool call that failed, is not done, and a \
+source you could not read is a gap to note in the log, not \"nothing new\". Post to the user \
+only real progress, completion or a blocker that needs them; with nothing new, update the log \
+and post nothing.",
         g.id,
         g.title,
         if g.outcome.is_empty() {
