@@ -20,6 +20,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
     /// The message shows a link preview card and the user may delete the message: drop the
     /// card for everyone ([feedback link-embeds-ios-2026-10-27]).
     case removePreview
+    /// The maker's own open poll: close it for good (asks first).
+    case closePoll
     case delete
 
     var label: String {
@@ -32,6 +34,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .replyInDM: return "Reply in DM"
         case .edit: return "Edit"
         case .removePreview: return "Remove preview"
+        case .closePoll: return "Close poll"
         case .delete: return "Delete"
         }
     }
@@ -46,6 +49,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .replyInDM: return "bubble.left"
         case .edit: return "pencil"
         case .removePreview: return "link"
+        case .closePoll: return "lock"
         case .delete: return "trash"
         }
     }
@@ -77,7 +81,8 @@ enum MessageMenu {
     /// sits under Copy when the text shares a link (`hasLink`).
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
                       hasReplies: Bool = false, hasPreview: Bool = false,
-                      inPrivateChat: Bool = false, hasLink: Bool = false) -> [MessageMenuItem] {
+                      inPrivateChat: Bool = false, hasLink: Bool = false,
+                      canClosePoll: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
         var out: [MessageMenuItem] = hasLink ? [.copy, .copyLink, .reply] : [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
@@ -85,6 +90,7 @@ enum MessageMenu {
         if !inPrivateChat { out.append(.replyInDM) }
         if canEdit { out.append(.edit) }
         if canDelete && hasPreview { out.append(.removePreview) }
+        if canClosePoll { out.append(.closePoll) }
         if canDelete { out.append(.delete) }
         return out
     }

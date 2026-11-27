@@ -279,6 +279,8 @@ Shared **app** client protocol lives in `RoomSession` (sans-IO: no tokio/tungste
 | `Cursor` / `Pending` | Persist room cursor and unacked PUSHes |
 | `BoxState` / `LinkLive` / `Presence` / `Ack` | UI / registry events |
 | `ScheduleReconnect { after }` | Sleep, then dial again |
+| `PushRefused { code, reason, … }` | Show the chat's "not being delivered" note until the next `Ack` (§11.1) |
+| `Rebuild { code, verb, why, … }` | Start the room again on an empty document and show one error (§11.1) |
 
 Room naming for the app session: `people/{chatId}` for people chats, else `{projectId}/{chatId}` (`arbos_client::room_path`, which calls `wire::room_name`). Mac `relay.rs` keeps only WebSocket + HTTP glue and performs actions. Backoff: min 250 ms, doubling, max 16 s, reset after a connection that stayed live ≥ 30 s (§8.6). Wake and presence issued while not Live are held (latest only) across close / reconnect and flushed from `finish_handshake` after `RowsReq` and pending PUSH resend.
 
@@ -289,7 +291,7 @@ After `STATE`, if `checkpointSeq > 0`:
 1. If the local doc **contains** the frontier (`ChatDoc::contains_frontier` / `contains_vv` / Swift `contains(frontier:)`), advance `cursor = max(cursor, checkpointSeq)` — compacted rows are already in the replica.
 2. Else **`GET /room/{project}/{chat}/checkpoint`** — body = snapshot bytes; response header `x-arbos-checkpoint-seq`. Import into Loro, then set cursor.
 
-Box (or admin) writes checkpoints: **`POST /room/{project}/{chat}/checkpoint?seqCovered=`** with body = snapshot and header `x-arbos-frontier` = hex-encoded VV. Conflict if `seqCovered` is below the floor.
+Box (or admin) asks for a checkpoint: **`POST /room/{project}/{chat}/checkpoint?seqCovered=`** with body = its snapshot. The body must hold every row it covers (409 `checkpoint_incomplete` otherwise); what the relay stores is its own doc for the room, so a checkpoint holds only ops that arrived as pushes. Conflict if `seqCovered` is below the floor. Attempts are spaced by 30 s per caller, and for everyone after a stored checkpoint; inside it the answer is 429. A chat that does not exist answers 404.
 
 Also: **`GET /room/{project}/{chat}/stats`** returns the same counters as STATE (no frontier).
 
@@ -460,6 +462,25 @@ Clients:
 3. On reconnect, resend all pending batches after catch-up. Duplicate `batchId` → `dup: true`, still safe to drop locally.
 
 This is how a message typed offline or across a crash still lands once.
+
+### 11.1 A refused push
+
+The relay answers a push it will not store with `ERROR { code, message, batchId }`. What the session does depends on whether the same bytes could ever be accepted (`arbos_client::refusal_is_final`):
+
+| Code | Why it may lift | Session |
+| --- | --- | --- |
+| `rate_limited` | time | keeps the batch, stays connected, resends after `retryS` |
+| `not_available` | a person: a block, a mute, the chat coming back | keeps the batch, stays connected, resends on a timer and on a nudge; `PushRefused` |
+| `unavailable` | the relay could not read its own record of who wrote what | keeps the batch, reconnects and resends; `PushRefused` |
+| anything else with a `batchId` it holds (`not_yours`, `bad_message`, `duplicate_id`, `replaced_id`, `bad_vote`, `bad_poll`, `poll_fixed`, `too_large`, a code this build does not know) | it cannot: the answer is about the bytes | lets go and reads the room back; `Rebuild` |
+
+A final refusal cannot be answered by dropping the one batch: every later local update depends on its ops, so the relay would hold what follows as rows that never apply. So the session empties its pending queue, sets its cursor to 0, emits `Pending([])` and `Rebuild`, and closes for an immediate reconnect. The host replaces the room's document with an empty one (a new Loro peer), deletes its saved copy and its "not sent yet" marks, and shows "Couldn't `verb`. `why`" once. The next connection reads the checkpoint and the rows as a first open does; the heal check then finds nothing the relay lacks, and what the user writes from there is delivered. The Mac reopens the room (`RoomAction::Rebuild` in `relay.rs`); the iPhone's `SessionRoom` stops and `AppModel` opens a new one (`onRebuild`).
+
+A history heal is the exception. A `heal-…` batch can carry other people's history that the relay lost and only this device still holds, so a final refusal of one never empties the document: the session drops that batch (the next connection computes a new one), reports a `SessionError` for the log and stays connected. When the heal was refused for a write of this device's own, that write is also in an ordinary batch right behind it, and its refusal is the one that rebuilds.
+
+What it costs: every write in that room the relay had not acknowledged goes with the refused one, and the error says so when there was more than one. A code unknown to the build is read as final because the other reading leaves the device unable to deliver anything in the room for good. A relay that adds a refusal which may lift must therefore reuse one of the three codes above.
+
+Not covered: a refused write that is in the document but in no pending batch (the saved queue was lost) is only ever offered as a heal, so it stays. And a batch already sent behind the refused one, on the same connection, reaches the relay with its dependencies missing. The relay stores it as a row that cannot apply (it reads as no change), which this change does not alter.
 
 ---
 

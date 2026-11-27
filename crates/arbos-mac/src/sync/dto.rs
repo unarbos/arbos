@@ -515,6 +515,13 @@ pub fn routine_from_dto(d: &RoutineDto) -> Option<Routine> {
         last_run_at: d.last_run_at,
         next_run_at: d.next_run_at,
         fire_url: d.fire_url.clone(),
+        recent_runs: d
+            .recent_runs
+            .iter()
+            .map(|s| {
+                serde_json::from_value(Value::String(s.clone())).unwrap_or(RoutineRunStatus::Other)
+            })
+            .collect(),
     })
 }
 
@@ -1589,6 +1596,9 @@ mod tests {
         let rt = routine_from_dto(&schedule).expect("schedule routine");
         assert_eq!(rt.id, "routine_schedule_fixture");
         assert_eq!(rt.name, "Weekday check-in");
+        assert_eq!(rt.recent_runs.len(), 7);
+        assert_eq!(rt.recent_runs[0], RoutineRunStatus::Running);
+        assert_eq!(rt.recent_runs[5], RoutineRunStatus::Failed);
         assert!(matches!(
             rt.trigger,
             RoutineTrigger::Cron { ref expr, ref tz }
@@ -1909,7 +1919,7 @@ mod tests {
     fn channels_from_fixtures() {
         let view = ChannelsView::from(&load_json::<ChannelsOverviewDto>("channels_overview.json"));
         assert!(view.loaded && view.mock);
-        assert_eq!(view.platforms.len(), 4);
+        assert_eq!(view.platforms.len(), 5);
         assert!(view
             .platforms
             .iter()

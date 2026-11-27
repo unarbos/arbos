@@ -39,7 +39,8 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 9)
+        // Ten with Close poll, which only a poll's maker sees (`canClosePoll`).
+        XCTAssertEqual(MessageMenuItem.allCases.count, 10)
     }
 
     func testCopyLinkSitsUnderCopyOnlyWhenTheTextSharesALink() {

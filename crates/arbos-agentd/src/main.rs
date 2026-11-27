@@ -6,6 +6,7 @@ mod agent_messages;
 mod app;
 mod approval;
 mod attachments;
+mod bittensor;
 mod budget;
 #[cfg(test)]
 mod cancel_handles_tests;
@@ -110,6 +111,7 @@ mod pi_slot;
 mod refusal_line_and_window_notice_tests;
 #[cfg(test)]
 mod refused_turn_window_tests;
+mod register;
 mod relay_error;
 mod reply;
 mod resources;

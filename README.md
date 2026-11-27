@@ -90,7 +90,7 @@ The quickest full stack with no cloud account is the **process box**: the relay 
 - **Connectors** — Gmail/Calendar, Slack, GitHub and Harness Comms, brokered by the relay so tokens never enter a machine. Writes and sends go through an approval card first. Settings → Connectors.
 - **Routines** — prompts that run while you are away: on a cron schedule, when a webhook is called, or on an event. `arbosctl routines create <project> --name "Stand-up" --prompt "…" --cron "0 9 * * 1-5"`; Settings → Routines.
 - **Skills** — Markdown how-tos shared across projects; the agent picks up to three relevant ones per turn and can save new ones. `arbosctl skills list|show|add`; Settings → Skills.
-- **Channels** — talk to an agent from Slack, Telegram, WhatsApp or Beeper: mint a code in Settings → Channels and send `/pair <code>` from that chat. Unpaired senders get one hint and never reach a machine.
+- **Channels** — talk to an agent from Slack, Telegram, WhatsApp, Discord or Beeper: mint a code in Settings → Channels and send `/pair <code>` from that chat. Unpaired senders get one hint and never reach a machine.
 - **People** — direct messages and shared projects with other Arbos users; invite someone to a project and their devices join its chats, or add a project's agent to a DM.
 - **Voice and video calls between people (self-hosted LiveKit)** — start a call from the header of a DM or a shared project; the relay decides who may join and mints the tokens, media goes through [your own LiveKit server](docs/self-host.md#9-calls-livekit) and never through the relay.
 - **Profile pages** — tap a person, an agent or a group to open its page: who it is, what it works on, members, and the groups you have in common.

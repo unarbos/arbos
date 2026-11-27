@@ -530,6 +530,14 @@ pub fn first_words(line: &str, max_chars: usize) -> String {
 /// The message flattened to one line ([`one_line`]) and cut to `max_chars`;
 /// an attachment-only message names its file, an empty one says "Message".
 pub fn message_line(message: &Message, max_chars: usize) -> String {
+    // A poll is quoted by its question, not by the list of options its text part spells out
+    // (tester report, 2026-11-14).
+    if let Some(question) = message.parts.iter().find_map(|p| match p {
+        Part::Poll { question, .. } => Some(question),
+        _ => None,
+    }) {
+        return first_words(&format!("Poll: {question}"), max_chars);
+    }
     let line = one_line(&message.plain_text());
     let line = if line.is_empty() {
         match message.parts.iter().find_map(|p| match p {
@@ -743,12 +751,22 @@ pub enum RowKind {
     /// casts, changes or retracts my vote.
     Poll {
         question: String,
-        /// `(option id, label, the doc senders who hold it)`, in the poll's order.
-        options: Vec<(String, String, Vec<String>)>,
+        /// `(option id, label, how many hold it, the senders this Mac may name)`, in the
+        /// poll's order. The senders are everyone where the poll shows who voted, otherwise
+        /// at most me: the core hands over no other name.
+        options: Vec<(String, String, usize, Vec<String>)>,
         /// "Allow multiple answers".
         multiple: bool,
         /// Whose poll, when it is not mine.
         by: Option<String>,
+        /// "Show who voted": the author's choice, fixed with the poll. `Some(false)` shows
+        /// counts only; `None` is a poll from before the choice, which names its voters as
+        /// it always has.
+        show_voters: Option<bool>,
+        /// How many people voted.
+        voted: usize,
+        /// When it closes or closed (ms): `arbos_core::poll::closed` reads it.
+        deadline: Option<i64>,
         /// Its sender when it is not mine: their disc and name, as on their bubble.
         sender: Option<Person>,
         named: bool,
@@ -967,6 +985,11 @@ pub struct Transcript {
     people: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
+    /// The poll deadline a redraw is scheduled for ([`Self::watch_poll_deadlines`]).
+    poll_redraw_at: Option<i64>,
+    /// The poll (message id) whose maker picked "Close poll": its card asks before closing,
+    /// because a close is for everyone and cannot be taken back.
+    poll_close_asked: Option<Id>,
     /// The code card Copy pill reading "Copied" right now (its id, when).
     code_copied: Option<(SharedString, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
@@ -1063,6 +1086,8 @@ impl Transcript {
             multi_party: false,
             people: false,
             copied_feedback: None,
+            poll_redraw_at: None,
+            poll_close_asked: None,
             code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
@@ -1756,6 +1781,7 @@ impl Transcript {
 
         if chat_changed {
             self.rows = new_rows;
+            self.watch_poll_deadlines(cx);
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.revealed = None;
@@ -1797,6 +1823,7 @@ impl Transcript {
         }
         let old_len = self.rows.len();
         self.rows = new_rows;
+        self.watch_poll_deadlines(cx);
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
         if crate::model::trace_rows() {
             eprintln!(
@@ -1943,6 +1970,55 @@ impl Transcript {
                         cx.notify();
                     }
                 });
+        })
+        .detach();
+    }
+
+    /// "Close poll" was picked on `message_id`: its card asks to confirm.
+    pub fn ask_close_poll(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        self.poll_close_asked = Some(message_id);
+        cx.notify();
+    }
+
+    /// A poll voter's name for an option's tip: `None` for someone this reader is not shown
+    /// by name — no longer in the chat, or blocked. They are counted, not named.
+    fn poll_voter_name(&self, sender: &str, me: &str, cx: &App) -> Option<String> {
+        if sender == me {
+            return Some("You".into());
+        }
+        let member = self.mentions.by_id(sender)?;
+        let blocked = sender.strip_prefix("user:").is_some_and(|id| {
+            let state = self.state.read(cx);
+            state.blocked.iter().any(|p| p.id == id)
+        });
+        (!blocked).then(|| member.name.clone())
+    }
+
+    /// Redraw while an open poll with a closing time is on screen: once a minute, so "closes
+    /// in 5 min" does not stand still on an idle window, and when the nearest one's time
+    /// runs out, so its card closes by itself. One timer.
+    fn watch_poll_deadlines(&mut self, cx: &mut Context<Self>) {
+        let now = arbos_core::poll::now();
+        let next = next_poll_deadline(&self.rows, now);
+        if next == self.poll_redraw_at {
+            return;
+        }
+        self.poll_redraw_at = next;
+        let Some(at) = next else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(poll_redraw_wait(at, now)))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Still the deadline being waited for: a newer timer owns any other.
+                if this.poll_redraw_at == Some(at) {
+                    this.poll_redraw_at = None;
+                    cx.notify();
+                    this.watch_poll_deadlines(cx);
+                }
+            });
         })
         .detach();
     }
@@ -3594,62 +3670,120 @@ impl Transcript {
                 options,
                 multiple,
                 by,
+                show_voters,
+                voted,
+                deadline,
                 sender,
                 named,
                 disc,
             } => {
+                // The core's one rule, by the relay's clock as this Mac knows it. The counts
+                // are the reducer's, which goes by each vote's own time.
+                let now = arbos_core::poll::now();
+                let closed = arbos_core::poll::closed(deadline, now);
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let look = CardLook::of(&theme);
                 let mine: Vec<String> = options
                     .iter()
-                    .filter(|(_, _, voters)| voters.contains(&me))
+                    .filter(|(.., voters)| voters.contains(&me))
                     .map(|(id, ..)| id.clone())
                     .collect();
-                let voted = options
-                    .iter()
-                    .flat_map(|(_, _, voters)| voters)
-                    .collect::<HashSet<_>>()
-                    .len();
                 let mut list = option_list(&look.palette);
-                for (ix, (id, label, voters)) in options.iter().enumerate() {
+                for (ix, (id, label, count, voters)) in options.iter().enumerate() {
                     let on = mine.contains(id);
                     let next = poll_pick(&mine, id, multiple);
-                    let names: SharedString = voters
+                    let names: Vec<Option<String>> = voters
                         .iter()
-                        .map(|s| self.reaction_sender_label(s, &me, cx))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                        .into();
+                        .map(|s| self.poll_voter_name(s, &me, cx))
+                        .collect();
+                    let names: SharedString = poll_voters_tip(&names).into();
+                    let spoken: SharedString =
+                        poll_option_spoken(ix, label, *count, on, closed).into();
                     let (state, chat, message_id) =
                         (self.state.clone(), chat_id.clone(), row.message_id.clone());
                     let selector: SharedString = format!("poll-option#{id}").into();
+                    let state_of_row = match (on, closed) {
+                        (true, _) => RowState::Chosen,
+                        (false, false) => RowState::Open,
+                        (false, true) => RowState::Faded,
+                    };
                     list = list.child(
-                        poll_option_row(&row.id, ix, options.len(), id, label, on, &look)
+                        poll_option_row(&row.id, ix, options.len(), id, label, state_of_row, &look)
                             .debug_selector(move || selector.to_string())
-                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .aria_label(spoken)
+                            .when(!closed, |el| el.cursor_pointer())
                             .child(
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(TEXT_SMALL))
                                     .text_color(theme.text_muted)
-                                    .child(voters.len().to_string()),
+                                    .child(count.to_string()),
                             )
-                            // Who voted for it, behind a hover — the reaction chip's tip.
-                            .when(!voters.is_empty(), |el| {
+                            // Who voted for it, behind a hover — the reaction chip's tip —
+                            // unless the author turned "Show who voted" off.
+                            .when(show_voters != Some(false) && !voters.is_empty(), |el| {
                                 el.tooltip(move |_, cx| {
                                     cx.new(|_| ReactionSendersTip(names.clone())).into()
                                 })
                             })
-                            .on_click(move |_, _, cx| {
-                                let (chat, message_id, next) =
-                                    (chat.clone(), message_id.clone(), next.clone());
-                                state.update(cx, |s, cx| s.vote_poll(chat, message_id, next, cx));
+                            .when(!closed, |el| {
+                                el.on_click(move |_, _, cx| {
+                                    let (chat, message_id, next) =
+                                        (chat.clone(), message_id.clone(), next.clone());
+                                    state.update(cx, |s, cx| {
+                                        s.vote_poll(chat, message_id, next, cx)
+                                    });
+                                })
                             }),
                     );
                 }
-                let whose = by.map_or("Your poll".to_owned(), |name| format!("{name}'s poll"));
-                let rule = if multiple { "pick any" } else { "pick one" };
+                let foot = arbos_core::poll::foot(
+                    by.as_deref(),
+                    voted as u32,
+                    multiple,
+                    show_voters == Some(true),
+                    closed,
+                    deadline.map(|t| t - now),
+                );
+                // "Close poll" was picked: the foot asks first. Closing is for everyone and
+                // cannot be undone, and the iPhone asks too.
+                let asking = !closed && self.poll_close_asked.as_ref() == Some(&row.message_id);
+                let foot_line =
+                    if asking {
+                        let (state, chat, message_id) =
+                            (self.state.clone(), chat_id.clone(), row.message_id.clone());
+                        // The kit's confirm pills, as the Unblock confirm uses them.
+                        let button = |id: &'static str, label: &'static str, go: bool| {
+                            crate::ui::profiles::kit::confirm_button(id, label, go, &theme)
+                                .debug_selector(move || id.to_string())
+                                .role(gpui::Role::Button)
+                                .aria_label(label)
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child("Close this poll for everyone?")
+                            .child(button("poll-close-confirm", "Close poll", true).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.poll_close_asked = None;
+                                    let (chat, message_id) = (chat.clone(), message_id.clone());
+                                    state.update(cx, |s, cx| s.close_poll(chat, message_id, cx));
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(button("poll-close-cancel", "Cancel", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.poll_close_asked = None;
+                                    cx.notify();
+                                }),
+                            ))
+                            .into_any_element()
+                    } else {
+                        foot.into_any_element()
+                    };
                 let card = card_frame(format!("{}-card", row.id), &look.palette)
                     .debug_selector(|| "poll-card".into())
                     .child(card_header("", &question, None, &look.palette, &theme))
@@ -3659,9 +3793,10 @@ impl Transcript {
                             .px(px(1.0))
                             .text_size(px(TEXT_SMALL))
                             .text_color(look.palette.badge_ink)
-                            .child(format!("{whose} · {voted} voted · {rule}")),
+                            .child(foot_line),
                     );
-                // Right-click is the message menu, as on a bubble: its author deletes it there.
+                // Right-click is the message menu, as on a bubble: its maker closes or deletes
+                // it there.
                 let card = self.menu_target(card, &row.message_id, cx);
                 // Mine sits right at my bubble's width; someone else's after their disc.
                 if let Some(person) = sender {
@@ -3976,6 +4111,72 @@ fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
     }
 }
 
+/// The nearest deadline still ahead among the polls in `rows`: when the transcript next has
+/// a card to close.
+fn next_poll_deadline(rows: &[Row], now: i64) -> Option<i64> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::Poll {
+                deadline: Some(at), ..
+            } if *at > now => Some(*at),
+            _ => None,
+        })
+        .min()
+}
+
+/// How many voters an option's tip names before it counts the rest, as on the iPhone.
+const POLL_VOTERS_NAMED: usize = 12;
+
+/// An option's tip: who holds it. One entry per voter, `None` for someone the reader is not
+/// shown by name. At most [`POLL_VOTERS_NAMED`] names, then "and 3 others"; the same words
+/// as the iPhone's line under the card.
+fn poll_voters_tip(names: &[Option<String>]) -> String {
+    let named: Vec<&str> = names
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .take(POLL_VOTERS_NAMED)
+        .collect();
+    let others = names.len() - named.len();
+    let rest = match (others, named.is_empty()) {
+        (0, _) => None,
+        (1, true) => Some("1 person".to_owned()),
+        (n, true) => Some(format!("{n} people")),
+        (1, false) => Some("1 other".to_owned()),
+        (n, false) => Some(format!("{n} others")),
+    };
+    let list = (!named.is_empty()).then(|| named.join(", "));
+    [list, rest]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// What VoiceOver reads for an option: its letter, label, count and state. The count and
+/// "chosen" are otherwise only drawn.
+fn poll_option_spoken(ix: usize, label: &str, count: usize, on: bool, closed: bool) -> String {
+    let votes = if count == 1 {
+        "1 vote".to_owned()
+    } else {
+        format!("{count} votes")
+    };
+    let mut spoken = format!("{}, {label}, {votes}", letter(ix));
+    if on {
+        spoken.push_str(", chosen");
+    }
+    if closed {
+        spoken.push_str(", closed");
+    }
+    spoken
+}
+
+/// How long to wait before redrawing for a poll that closes at `at`: until it closes, and at
+/// most a minute, which is how often its "closes in" line can change.
+fn poll_redraw_wait(at: i64, now: i64) -> u64 {
+    ((at - now).max(0) as u64 + 50).min(60_000)
+}
+
 /// My vote after a click on `id`: a single-choice poll swaps to it, or retracts when it is
 /// the one already held; a multiple-answer poll toggles it.
 fn poll_pick(mine: &[String], id: &str, multiple: bool) -> Vec<String> {
@@ -3996,14 +4197,14 @@ fn poll_option_row(
     count: usize,
     id: &str,
     label: &str,
-    on: bool,
+    state: RowState,
     look: &CardLook,
 ) -> gpui::Stateful<Div> {
     option_row(
         format!("{row_id}#{id}"),
         Some(letter(ix)),
         label,
-        if on { RowState::Chosen } else { RowState::Open },
+        state,
         ix > 0,
         look,
     )
@@ -4941,14 +5142,22 @@ pub fn build_rows_with_cache(
                         options,
                         max,
                         votes,
+                        counts,
+                        voters,
+                        show_voters,
+                        deadline,
                         ..
                     } => Some(RowKind::Poll {
+                        show_voters: *show_voters,
+                        voted: *voters,
+                        deadline: *deadline,
                         question: question.clone(),
                         options: options
                             .iter()
                             .map(|o| {
-                                let voters = votes.get(&o.id).cloned().unwrap_or_default();
-                                (o.id.clone(), o.label.clone(), voters)
+                                let count = counts.get(&o.id).copied().unwrap_or(0);
+                                let senders = votes.get(&o.id).cloned().unwrap_or_default();
+                                (o.id.clone(), o.label.clone(), count, senders)
                             })
                             .collect(),
                         multiple: *max > 1,
@@ -12134,10 +12343,14 @@ mod time_divider_tests {
     }
 
     /// 23:52 → 00:03 is four minutes short of the hour and still a new day:
-    /// neither client drew a stamp there before this.
+    /// neither client drew a stamp there before this. The midnight is the
+    /// reader's own, in the zone the rows are built with, so this holds off UTC.
     #[test]
     fn a_new_day_draws_one_on_a_gap_too_short_for_the_hour() {
-        let before_midnight = NOON + 11 * 60 * MINUTE + 52 * MINUTE;
+        let local_midnight = (NOON + 12 * 60 * MINUTE)
+            .checked_add_signed(-i64::from(utc_offset_seconds()) * 1000)
+            .expect("in range");
+        let before_midnight = local_midnight - 8 * MINUTE;
         let messages = [
             person("m1", "last of the night", before_midnight),
             person("m2", "one more thought", before_midnight + 11 * MINUTE),
@@ -12173,7 +12386,14 @@ mod poll_rows_tests {
     #[test]
     fn a_poll_is_one_card_row_with_its_votes_and_no_text_bubble() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
         let from = |user: &str| UserMessageOpts {
             sender: Some(format!("user:{user}")),
             sender_name: Some("Ana".into()),
@@ -12215,21 +12435,37 @@ mod poll_rows_tests {
             options,
             multiple,
             by,
+            show_voters,
+            voted,
+            deadline,
             ..
         } = &rows[1].kind
         else {
             panic!("the poll row is a poll card");
         };
+        assert_eq!(
+            *show_voters,
+            Some(true),
+            "the author's choice rides on the row"
+        );
+        assert_eq!(
+            (*voted, *deadline),
+            (2, None),
+            "two voted; open, no time limit"
+        );
+        // A reply quotes the poll by its question, not by its list of options.
+        assert_eq!(quote_text(&messages[0]), "Poll: Where?");
         assert_eq!(question, "Where?");
         assert_eq!(by.as_deref(), Some("Ana"));
         assert!(!multiple);
         assert_eq!(
             options,
             &[
-                ("1".to_owned(), "Lisbon".to_owned(), vec![]),
+                ("1".to_owned(), "Lisbon".to_owned(), 0, vec![]),
                 (
                     "2".to_owned(),
                     "Berlin".to_owned(),
+                    2,
                     vec!["user:ana".to_owned(), "user:me".to_owned()]
                 ),
             ]
@@ -12244,7 +12480,14 @@ mod poll_rows_tests {
         let (_rt, state, transcript) = super::transcript_smoke_tests::mount_with(cx, Vec::new());
         let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
         let from = |sender: &str| UserMessageOpts {
             sender: Some(sender.into()),
             sender_name: Some("Ana".into()),
@@ -12333,7 +12576,8 @@ mod poll_rows_tests {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
         let look = CardLook::of(&theme);
         let corners = |ix: usize, count: usize| {
-            let mut row = poll_option_row("p1#poll", ix, count, "1", "Lisbon", false, &look);
+            let mut row =
+                poll_option_row("p1#poll", ix, count, "1", "Lisbon", RowState::Open, &look);
             let c = &row.style().corner_radii;
             (c.top_left.is_some(), c.bottom_left.is_some())
         };
@@ -12349,7 +12593,14 @@ mod poll_rows_tests {
     #[test]
     fn a_build_without_polls_reads_the_row_as_its_plain_text() {
         let doc = ChatDoc::new(Some(1), false);
-        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         doc.transact(|d| {
             d.append_poll_message("p1", &poll, "dev", &UserMessageOpts::default())
                 .unwrap();
@@ -12361,6 +12612,122 @@ mod poll_rows_tests {
         let message: Message = serde_json::from_value(row).expect("the row still reads");
         assert!(matches!(message.parts.as_slice(), [Part::Text { .. }]));
         assert_eq!(message.plain_text(), "Poll: Where?\n1. Lisbon\n2. Berlin");
+    }
+
+    /// The transcript redraws at the nearest poll deadline still ahead; closed polls and
+    /// polls with no time limit ask for nothing.
+    #[test]
+    fn the_next_redraw_is_the_nearest_deadline_still_ahead() {
+        let poll = |deadline: Option<i64>| Row {
+            id: "r".into(),
+            message_id: "m".into(),
+            version: 0,
+            kind: RowKind::Poll {
+                question: "Q".into(),
+                options: vec![],
+                multiple: false,
+                by: None,
+                show_voters: Some(false),
+                voted: 0,
+                deadline,
+                sender: None,
+                named: false,
+                disc: false,
+            },
+        };
+        let rows = [poll(None), poll(Some(50)), poll(Some(300)), poll(Some(200))];
+        assert_eq!(next_poll_deadline(&rows, 100), Some(200));
+        assert_eq!(next_poll_deadline(&rows, 300), None, "all closed");
+        assert_eq!(next_poll_deadline(&[], 0), None);
+        // The countdown moves by the minute: an hour away is redrawn in a minute, ten
+        // seconds away when it closes.
+        assert_eq!(poll_redraw_wait(3_600_000, 0), 60_000);
+        assert_eq!(poll_redraw_wait(10_000, 0), 10_050);
+        assert_eq!(poll_redraw_wait(5, 100), 50);
+    }
+
+    /// An option's tip names at most twelve voters and counts the rest, including the ones
+    /// the reader is not shown by name; VoiceOver hears the count and the state that are
+    /// otherwise only drawn.
+    #[test]
+    fn a_polls_voters_are_bounded_and_its_options_are_spoken() {
+        let named =
+            |n: usize| -> Vec<Option<String>> { (0..n).map(|i| Some(format!("P{i}"))).collect() };
+        assert_eq!(poll_voters_tip(&named(2)), "P0, P1");
+        let many = poll_voters_tip(&named(15));
+        assert!(
+            many.starts_with("P0, P1, ") && many.ends_with("P11 and 3 others"),
+            "{many}"
+        );
+        let mixed = [Some("Ana".to_owned()), None, None];
+        assert_eq!(poll_voters_tip(&mixed), "Ana and 2 others");
+        assert_eq!(poll_voters_tip(&[None]), "1 person");
+        assert_eq!(poll_voters_tip(&[None, None]), "2 people");
+        assert_eq!(
+            poll_voters_tip(&[Some("Ana".into()), None]),
+            "Ana and 1 other"
+        );
+
+        assert_eq!(
+            poll_option_spoken(0, "Lisbon", 0, false, false),
+            "A, Lisbon, 0 votes"
+        );
+        assert_eq!(
+            poll_option_spoken(1, "Berlin", 1, true, false),
+            "B, Berlin, 1 vote, chosen"
+        );
+        assert_eq!(
+            poll_option_spoken(1, "Berlin", 3, true, true),
+            "B, Berlin, 3 votes, chosen, closed"
+        );
+    }
+
+    /// A poll that hides its voters reaches this Mac with counts and the reader's own vote:
+    /// no other member's id is in the message the transcript is built from, so no surface
+    /// above it can name them.
+    #[test]
+    fn a_poll_that_hides_its_voters_gives_the_mac_no_other_names() {
+        let poll = Poll::new(
+            "Where?",
+            &["Lisbon".into(), "Berlin".into()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let mut row = serde_json::json!({ "id": "p1", "role": "user", "sender": "user:zoe",
+            "status": "done", "createdAt": 1, "poll": poll,
+            "vote|user:ana": ["2"], "voteAt|user:ana": 5,
+            "vote|user:me": ["2"], "voteAt|user:me": 6,
+            "parts": [{ "id": "t", "kind": "text", "text": "Poll: Where?" }] });
+        arbos_core::doc::project_poll(&mut row, Some("user:me"));
+        // The row the Mac is handed, before it is even read into a message.
+        assert!(!row.to_string().contains("user:ana"), "{row}");
+        let message: Message = serde_json::from_value(row).expect("a core row reads as a Message");
+        let Some(Part::Poll {
+            votes,
+            counts,
+            voters,
+            ..
+        }) = message
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Poll { .. }))
+        else {
+            panic!("the poll part");
+        };
+        assert_eq!(
+            (counts.get("2"), *voters),
+            (Some(&2), 2),
+            "both votes are counted"
+        );
+        assert_eq!(
+            votes.get("2"),
+            Some(&vec!["user:me".to_owned()]),
+            "my own vote"
+        );
+        let whole = serde_json::to_string(&message).unwrap();
+        assert!(!whole.contains("user:ana"), "{whole}");
     }
 
     #[test]

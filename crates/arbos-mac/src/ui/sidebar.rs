@@ -1061,6 +1061,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // hit, ordered by activity.
     let hidden_mode = shell.hidden_open;
     let hidden_count = state.archived_space_count();
+    let waiting_count = crate::ui::needs_you::waiting(&state.messages).len();
     // One linear list of every chat kind — agents, people, servers together
     // ([feedback chat-list-no-filter-mac-2026-11-10]).
     let empty = state.projects.is_empty() && state.servers.is_empty();
@@ -1300,6 +1301,38 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // The Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): a muted label, the
     // pinned rows in the user's order, a hairline, then the rest. Zero pins → nothing of
     // this is drawn and the list is exactly as before.
+    if !hidden_mode && !empty {
+        // "Needs you · N": the sheet of every card waiting on me (`ui::needs_you`), in
+        // the voice of the "Archived chats · N ›" footer. No count when nothing waits.
+        list = list.child(
+            div()
+                .id("sidebar-needs-you")
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_between()
+                .mb(px(4.0))
+                .h(px(32.0))
+                .px(px(12.0))
+                .rounded(px(PANEL_RADIUS - 4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(if waiting_count > 0 {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .cursor_pointer()
+                .map(|el| highlight::row(el, false, Shape::Own, &theme))
+                .child(if waiting_count > 0 {
+                    format!("Needs you · {waiting_count}")
+                } else {
+                    "Needs you".to_string()
+                })
+                .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| this.open_needs_you(window, cx))),
+        );
+    }
     if pinned_count > 0 {
         list = list.child(pinned_header(&theme));
     }
@@ -3864,6 +3897,9 @@ mod status_cell_tests {
                 }
             }
             s.selected_project = Some("quiet".into());
+            // The default column, not whatever `<config>/sidebar_width` holds on
+            // the machine running the tests: under `HANDLE_MIN` a DM row has no `@handle`.
+            s.sidebar_width = crate::ui::theme::SIDEBAR_WIDTH;
             cx.notify();
         });
         let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));

@@ -11,6 +11,42 @@ use arbos_core::wire::BoxState;
 
 use crate::db::Db;
 
+/// One subnet inference provider: OpenAI chat completions under `{base}/v1`, Anthropic messages
+/// at `{base}/v1/messages`, cost reported in `usage.cost`.
+#[derive(Clone)]
+pub struct Subnet {
+    pub name: &'static str,
+    pub base: String,
+    pub key: String,
+    pub models: Arc<std::sync::Mutex<SubnetModels>>,
+}
+
+/// A provider's model list as last fetched for the catalog, and until when it is served
+/// (`proxy::subnet_models`).
+pub type SubnetModels = Option<(std::time::Instant, Vec<serde_json::Value>)>;
+
+impl Subnet {
+    /// The key leaves only over TLS: an `https://` base, or `http://` to this machine.
+    pub fn base_ok(&self) -> bool {
+        url::Url::parse(&self.base).is_ok_and(|u| {
+            u.scheme() == "https"
+                || u.scheme() == "http"
+                    && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+        })
+    }
+}
+
+/// The key is never printed.
+impl std::fmt::Debug for Subnet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subnet")
+            .field("name", &self.name)
+            .field("base", &self.base)
+            .field("key", &"…")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub public_url: String,
@@ -19,6 +55,9 @@ pub struct Config {
     pub openrouter_key: Option<String>,
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
+    /// Bittensor subnet inference providers the relay holds a key for (`SAYGM_API_KEY`,
+    /// `ENGY_API_KEY`). A model id that starts with a provider's name and a slash goes there.
+    pub subnets: Vec<Subnet>,
     pub openai_base: String,
     /// Upstream for `/proxy/v1/images/generations` (OpenAI's own API; OpenRouter has no images endpoint).
     pub openai_images_base: String,
@@ -72,6 +111,9 @@ pub struct Config {
     pub openai_audio_base: String,
     /// `ARBOS_VAULT_MOCK=1`: two demo vault items and a local echo target (F8).
     pub vault_mock: bool,
+    /// `ARBOS_LOCAL_APPROVAL=enforce`: a local op runs only against an approval the relay holds.
+    /// Otherwise (observe) one without is logged and still runs, until apps and boxes send them.
+    pub local_approval_enforce: bool,
     /// How devices sign in: GitHub OAuth (self-serve) or one-time pairing codes (self-hosters).
     pub auth_mode: AuthMode,
     pub github_client_id: Option<String>,
@@ -81,6 +123,16 @@ pub struct Config {
     /// whole: scheme, host and port. A path on an entry is ignored, and no entry is ever
     /// matched against the start of a redirect (`signin::redirect_allowed`).
     pub auth_redirects: Vec<String>,
+    /// The cold wallet that takes TAO for credits (`ARBOS_DEPOSIT_ADDRESS`); unset, the relay
+    /// takes no deposits (`deposits.rs`).
+    pub deposit_address: Option<String>,
+    /// A deposit above this many TAO is held for a person, never credited by the watcher
+    /// (`ARBOS_DEPOSIT_MAX_TAO`).
+    pub deposit_max_tao: f64,
+    /// The most TAO the watcher credits in any 24 hours (`ARBOS_DEPOSIT_DAILY_MAX_TAO`).
+    pub deposit_daily_max_tao: f64,
+    /// The Bittensor node the deposit watcher reads (`ARBOS_CHAIN_RPC`).
+    pub chain_rpc: String,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
@@ -177,6 +229,15 @@ pub struct RoomDocCache {
     pub message_ids: Vec<arbos_core::doc::MessageIdentity>,
 }
 
+/// When a room's checkpoint was last stored, and when each caller last asked for one. The
+/// callers are the boxes that may reach the room, and entries older than the interval go at
+/// the next request.
+#[derive(Default)]
+pub(crate) struct CheckpointTried {
+    pub stored: Option<std::time::Instant>,
+    pub callers: HashMap<String, std::time::Instant>,
+}
+
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
     /// What each replica last told this relay about the room (room_health, #1470).
@@ -191,6 +252,8 @@ pub struct Room {
     pub(crate) doc_build: tokio::sync::Mutex<()>,
     /// One speculative push owns the message preimage through durable admission.
     pub(crate) push_admission: tokio::sync::Mutex<()>,
+    /// When a checkpoint was last asked for (`rooms::post_checkpoint` spaces the attempts).
+    pub(crate) checkpoint_tried: std::sync::Mutex<CheckpointTried>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
     /// agent live only through such a socket; without one the box is told to open the room
     /// (`boxes::after_person_row`, #2120).
@@ -580,6 +643,7 @@ impl AppState {
                     doc_cache: std::sync::Mutex::new(None),
                     doc_build: tokio::sync::Mutex::new(()),
                     push_admission: tokio::sync::Mutex::new(()),
+                    checkpoint_tried: Default::default(),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
@@ -782,6 +846,7 @@ pub(crate) mod test_support {
             openrouter_key: None,
             anthropic_key: None,
             openai_key: None,
+            subnets: Vec::new(),
             openai_base: String::new(),
             anthropic_base: String::new(),
             default_snapshot: String::new(),
@@ -804,10 +869,15 @@ pub(crate) mod test_support {
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
+            local_approval_enforce: false,
             auth_mode,
             github_client_id: Some("id".into()),
             github_client_secret: Some("secret".into()),
             auth_redirects: Vec::new(),
+            deposit_address: None,
+            deposit_max_tao: 25.0,
+            deposit_daily_max_tao: 100.0,
+            chain_rpc: String::new(),
             default_grant_usd: 100.0,
             default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,

@@ -221,6 +221,15 @@ CREATE TABLE IF NOT EXISTS local_devices (
   home TEXT NOT NULL DEFAULT '', connected INTEGER NOT NULL DEFAULT 0, last_seen INTEGER, first_seen INTEGER NOT NULL,
   allow_reads INTEGER NOT NULL DEFAULT 0
 );
+-- An approval the relay holds, so a box cannot vouch for itself. `kind` is 'local' today; connector
+-- write actions have the same shape and are meant to land here too. `payload` is the exact thing
+-- approved (canonical JSON), `target` what it acts on (a local device id).
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  target TEXT NOT NULL, chat_id TEXT NOT NULL, payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS approval_requests_project ON approval_requests(project_id, status, created_at);
 CREATE TABLE IF NOT EXISTS vault_items (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
   fields TEXT NOT NULL, allowed_hosts TEXT NOT NULL DEFAULT '[]',
@@ -626,6 +635,28 @@ pub struct UsageTotals {
     pub calls: i64,
 }
 
+/// Pending approval requests one project may hold; see [`Db::approval_create`].
+pub const APPROVALS_PENDING_MAX: i64 = 20;
+/// How long a decided approval request is kept.
+const APPROVALS_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How long after the user's yes an approval can be spent.
+pub const APPROVAL_USABLE_MS: i64 = 5 * 60 * 1000;
+
+/// One row of `approval_requests`.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub kind: String,
+    pub user_id: String,
+    pub project_id: String,
+    pub target: String,
+    pub chat_id: String,
+    pub payload: String,
+    /// `pending | approved | denied | used`.
+    pub status: String,
+    pub created_at: i64,
+}
+
 /// One `arbos-local` helper that connected at least once (`local_devices`, F9).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalDevice {
@@ -676,6 +707,7 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE routines ADD COLUMN check_hash TEXT", []);
         let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
         // Agent sites: an explicit prefix move keeps the old name answering 301 for 30 days.
         let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_from TEXT", []);
@@ -753,6 +785,11 @@ impl Db {
         Self::migrate_mono_avatar_defaults(&c)?;
         Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        // `stored`: NULL on rows from before the column — the relay cannot tell which of those
+        // it stored and which were only announced. An announce writes 0, a stored push 1.
+        // `deleted_at`: when the message was deleted for everyone.
+        add_column(&c, "message_authors", "stored INTEGER")?;
+        add_column(&c, "message_authors", "deleted_at INTEGER")?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
@@ -764,6 +801,8 @@ impl Db {
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         c.execute_batch(crate::pins::PINS_SCHEMA)?;
         c.execute_batch(crate::wallets::WALLETS_SCHEMA)?;
+        c.execute_batch(crate::deposits::DEPOSITS_SCHEMA)?;
+        c.execute_batch(crate::subnets::SUBNETS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);
@@ -1921,8 +1960,43 @@ impl Db {
         )
         .optional()
     }
+}
 
+/// Add a column to a table, tolerating only that it is already there. Any other failure of
+/// the migration stops the relay from starting on a schema it did not expect.
+fn add_column(c: &Connection, table: &str, column: &str) -> Result<()> {
+    match c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column}"), []) {
+        Err(e) if !e.to_string().contains("duplicate column name") => {
+            Err(e).with_context(|| format!("adding {column} to {table}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// What a stored room push changes besides its own row, written in that row's transaction.
+#[derive(Default)]
+pub struct RowEffects<'a> {
+    /// `(device, batch id, bytes)` of the row the relay writes right behind the push: its
+    /// correction (`push_guard::corrections`).
+    pub answer: Option<(&'a str, &'a str, &'a [u8])>,
+    /// The chat the message ids below belong to.
+    pub chat_id: &'a str,
+    /// `(message id, author)` the push guard attributed to the pusher.
+    pub authors: &'a [(String, String)],
+    /// Message ids the push put in the chat: from here on the relay has stored them itself,
+    /// which an announce can never claim.
+    pub stored: &'a [String],
+    /// Message ids the row took out of the chat. Recorded on each one's author record, so
+    /// the record of deletions has no rows of its own and grows with nothing but the
+    /// messages the relay already keeps an author for. A message with no author record (a
+    /// system line, one older than the record) leaves none: pushed back, it is a message
+    /// the relay has never seen, with every rule of a new one.
+    pub deleted: &'a [String],
+}
+
+impl Db {
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
+    #[cfg(test)]
     pub fn append_row(
         &self,
         room: &str,
@@ -1930,6 +2004,23 @@ impl Db {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(i64, bool)> {
+        self.append_row_with(room, device, batch_id, bytes, &RowEffects::default())
+            .map(|(seq, dup, _)| (seq, dup))
+    }
+
+    /// [`Self::append_row`] with everything else a stored push changes, in the same
+    /// transaction ([`RowEffects`]): all of it is stored or none of it is, and no reader sees
+    /// the row without the relay's answer to it. Returns the answer row's seq too; a
+    /// duplicate first row stores nothing.
+    pub fn append_row_with(
+        &self,
+        room: &str,
+        device: &str,
+        batch_id: &str,
+        bytes: &[u8],
+        effects: &RowEffects<'_>,
+    ) -> Result<(i64, bool, Option<i64>)> {
+        let answer = effects.answer;
         let now = now_ms();
         self.with(|c| {
             // The room position and its row commit together: an insert failure must not leave
@@ -1938,17 +2029,41 @@ impl Db {
             let tx = crate::db::write_tx(c)?;
             if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
                 tx.commit()?;
-                return Ok((seq, true));
+                return Ok((seq, true, None));
             }
             tx.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
-            tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
-            let seq: i64 = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
-            tx.execute(
-                "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![room, seq, device, batch_id, bytes, now],
-            )?;
+            let mut seqs = [0i64; 2];
+            let rows = [Some((device, batch_id, bytes)), answer];
+            for (seq, (device, batch_id, bytes)) in seqs.iter_mut().zip(rows.into_iter().flatten()) {
+                tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
+                *seq = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
+                tx.execute(
+                    "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![room, *seq, device, batch_id, bytes, now],
+                )?;
+            }
+            for (message_id, sender) in effects.authors {
+                tx.execute(
+                    "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at, stored)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![effects.chat_id, message_id, sender, now],
+                )?;
+            }
+            for message_id in effects.stored {
+                tx.execute(
+                    "UPDATE message_authors SET stored = 1 WHERE chat_id = ?1 AND message_id = ?2",
+                    params![effects.chat_id, message_id],
+                )?;
+            }
+            for message_id in effects.deleted {
+                tx.execute(
+                    "UPDATE message_authors SET deleted_at = ?3
+                      WHERE chat_id = ?1 AND message_id = ?2 AND deleted_at IS NULL",
+                    params![effects.chat_id, message_id, now],
+                )?;
+            }
             tx.commit()?;
-            Ok((seq, false))
+            Ok((seqs[0], false, answer.map(|_| seqs[1])))
         })
     }
 
@@ -3043,6 +3158,100 @@ impl Db {
             .map(|n| n > 0)
         })
     }
+
+    // ---- approval requests --------------------------------------------------------------------
+
+    /// Store a pending request. A project keeps its newest [`APPROVALS_PENDING_MAX`] pending
+    /// requests; older ones are denied, so a box cannot grow the table by asking. Decided rows
+    /// older than [`APPROVALS_KEEP_MS`] go at the same time.
+    pub fn approval_create(&self, r: &ApprovalRequest) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO approval_requests(id, kind, user_id, project_id, target, chat_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![r.id, r.kind, r.user_id, r.project_id, r.target, r.chat_id, r.payload, r.created_at],
+            )?;
+            c.execute(
+                "UPDATE approval_requests SET status = 'denied', decided_at = ?2
+                 WHERE project_id = ?1 AND status = 'pending' AND id NOT IN (
+                   SELECT id FROM approval_requests WHERE project_id = ?1 AND status = 'pending'
+                   ORDER BY created_at DESC, id DESC LIMIT ?3)",
+                params![r.project_id, r.created_at, APPROVALS_PENDING_MAX],
+            )?;
+            c.execute(
+                "DELETE FROM approval_requests WHERE project_id = ?1 AND status != 'pending' AND created_at < ?2",
+                params![r.project_id, r.created_at - APPROVALS_KEEP_MS],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn approval(&self, id: &str) -> Result<Option<ApprovalRequest>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id, kind, user_id, project_id, target, chat_id, payload, status, created_at
+                 FROM approval_requests WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(ApprovalRequest {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        user_id: r.get(2)?,
+                        project_id: r.get(3)?,
+                        target: r.get(4)?,
+                        chat_id: r.get(5)?,
+                        payload: r.get(6)?,
+                        status: r.get(7)?,
+                        created_at: r.get(8)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Decide a pending request. `false` when it was not pending: the first answer stands.
+    pub fn approval_decide(&self, id: &str, status: &str, decided_by: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE approval_requests SET status = ?2, decided_by = ?3, decided_at = ?4
+                 WHERE id = ?1 AND status = 'pending'",
+                params![id, status, decided_by, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Spend an approval: `approved → used` in one statement, and only for the user, project and
+    /// target it was made for, within [`APPROVAL_USABLE_MS`] of the decision. Returns the stored
+    /// payload, which is what the caller must act on. `None` is every kind of "no".
+    pub fn approval_claim(
+        &self,
+        id: &str,
+        kind: &str,
+        user_id: &str,
+        project_id: &str,
+        target: &str,
+    ) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "UPDATE approval_requests SET status = 'used'
+                 WHERE id = ?1 AND kind = ?2 AND user_id = ?3 AND project_id = ?4 AND target = ?5
+                   AND status = 'approved' AND decided_at > ?6
+                 RETURNING payload",
+                params![
+                    id,
+                    kind,
+                    user_id,
+                    project_id,
+                    target,
+                    now_ms() - APPROVAL_USABLE_MS
+                ],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
 }
 
 impl Db {
@@ -3171,6 +3380,17 @@ impl Db {
         })
     }
 
+    /// Remember what a routine's check last saw; true when `hash` differs from it.
+    pub fn routine_check_changed(&self, id: &str, hash: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE routines SET check_hash = ?2 WHERE id = ?1 AND check_hash IS NOT ?2",
+                params![id, hash],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn delete_routine(&self, id: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
@@ -3225,6 +3445,15 @@ impl Db {
     ) -> Result<bool> {
         let finished = matches!(status, "done" | "failed" | "skipped").then(now_ms);
         self.with(|c| {
+            if status == "failed" {
+                // A failed run told the owner nothing: forget what its check saw so the next
+                // tick runs again instead of skipping as "nothing new".
+                c.execute(
+                    "UPDATE routines SET check_hash = NULL
+                     WHERE id = (SELECT routine_id FROM routine_runs WHERE id = ?1)",
+                    params![id],
+                )?;
+            }
             c.execute(
                 "UPDATE routine_runs SET status = ?2, message_id = COALESCE(?3, message_id), note = COALESCE(?4, note),
                         finished_at = COALESCE(?5, finished_at) WHERE id = ?1",
@@ -4451,6 +4680,59 @@ mod account_cap_migration_tests {
             .unwrap();
         assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod message_authors_migration_tests {
+    use super::*;
+
+    /// A database from before the stored mark and the deletion record gains both columns on
+    /// open, keeps its rows (their marks unknown, not false), and opens again unchanged.
+    #[test]
+    fn the_stored_and_deleted_columns_are_added_once_to_an_older_table() {
+        let dir =
+            std::env::temp_dir().join(format!("arbos-authors-mig-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE message_authors (
+                   chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY (chat_id, message_id));
+                 INSERT INTO message_authors VALUES ('c1', 'm1', 'user:ana', 5);",
+            )
+            .unwrap();
+        }
+        for round in 0..2 {
+            let db = Db::open(&path).unwrap_or_else(|e| panic!("open {round}: {e:#}"));
+            let columns: Vec<String> = db
+                .with(|c| {
+                    let mut q =
+                        c.prepare("SELECT name FROM pragma_table_info('message_authors')")?;
+                    let names = q
+                        .query_map([], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    Ok(names)
+                })
+                .unwrap();
+            for column in ["stored", "deleted_at"] {
+                assert_eq!(
+                    columns.iter().filter(|c| *c == column).count(),
+                    1,
+                    "round {round}: {columns:?}"
+                );
+            }
+            assert_eq!(
+                db.message_author("c1", "m1").unwrap().as_deref(),
+                Some("user:ana")
+            );
+            assert_eq!(db.message_stored("c1", "m1").unwrap(), None, "unknown");
+            assert!(!db.message_deleted("c1", "m1").unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

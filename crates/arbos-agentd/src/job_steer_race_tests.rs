@@ -324,11 +324,13 @@ async fn a_routing_mark_that_never_clears_delays_the_file_by_the_cap_and_no_more
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT2, JOB2, WORKER2, ASK2, ROW2).await;
 
+    // The gate counts the hold from when the mark went up, not from when the delivery asks, so
+    // the clock starts before the mark: whatever happens between the two is part of the hold.
+    let t0 = std::time::Instant::now();
     // Held for the whole test: nothing clears this one.
     let _stuck = agent.steer_gate.routing(CHAT2, &ulid());
 
     let path = a_file(&agent, "cap.csv", "a,b\n1,2\n");
-    let t0 = std::time::Instant::now();
     // Bounded here as well as in the gate. A cap that stops working makes this delivery wait for
     // ever, and a test that hangs says nothing; this one says the cap is gone.
     let posted = tokio::time::timeout(

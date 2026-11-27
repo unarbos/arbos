@@ -21,10 +21,12 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use arbos_core::api::{LocalDeviceDto, LocalDevicesDto};
 use arbos_core::ids::ulid;
 use arbos_core::local::{
-    LocalClientFrame, LocalExecRequest, LocalOp, LocalResult, LocalServerFrame,
+    LocalClientFrame, LocalDecide, LocalDecision, LocalExecRequest, LocalOp, LocalRequestCreate,
+    LocalRequestCreated, LocalResult, LocalServerFrame, LOCAL_RUN_TIMEOUT_MAX_S,
 };
 
 use crate::auth::Principal;
+use crate::db::{ApprovalRequest, LocalDevice};
 use crate::state::AppState;
 
 const PING_EVERY: Duration = Duration::from_secs(20);
@@ -211,38 +213,209 @@ pub(crate) async fn disconnect(state: &AppState, device_id: &str, why: &str) {
     conn.closed.notify_one();
 }
 
-/// `POST /projects/{id}/local/{device}/exec` (box token): body = one `LocalOp`.
-pub async fn exec(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path((project_id, device_id)): Path<(String, String)>,
-    Json(op): Json<LocalOp>,
-) -> ApiResult {
-    if !state.allows(&principal, &project_id) {
+/// `approval_requests.kind` for a local op.
+const KIND: &str = "local";
+const CMD_MAX: usize = 16 * 1024;
+const PATH_MAX: usize = 4 * 1024;
+const CHAT_ID_MAX: usize = 128;
+
+fn bad(why: &str) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, why.to_owned())
+}
+
+/// The one answer for an op the relay holds no usable approval for, whatever the reason:
+/// unknown id, still pending, denied, already used, too old, or made for another device.
+fn not_approved() -> (StatusCode, String) {
+    (StatusCode::FORBIDDEN, "not_approved".to_owned())
+}
+
+/// What a box must hold to ask anything of a computer: its own project, and a helper that is its
+/// own user's and still signed in.
+fn reachable(
+    state: &AppState,
+    principal: &Principal,
+    project_id: &str,
+    device_id: &str,
+) -> Result<LocalDevice, (StatusCode, String)> {
+    if !state.allows(principal, project_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if !matches!(principal, Principal::Box { .. } | Principal::Admin) {
         return Err((StatusCode::FORBIDDEN, "box token required".into()));
     }
-    if state.db.project(&project_id).map_err(internal)?.is_none() {
+    if state.db.project(project_id).map_err(internal)?.is_none() {
         return Err((StatusCode::NOT_FOUND, "no such project".into()));
     }
     // The project is the caller's (`allows` above); the computer has to be the caller's too.
     // Without this a box could run ops against any helper whose device id it had seen.
-    if !owns_device(&state, &principal, &device_id)? {
+    if !owns_device(state, principal, device_id)? {
         return Err(no_such_device());
     }
     // And it has to still be signed in. `disconnect` takes a revoked device out of
     // `local_conns`, but that is a teardown racing a request rather than a check: the
     // re-review's probe C ran file operations against a signed-out computer for the whole of a
     // hung Matrix logout. The map is a cache of who is reachable; `devices` is the authority.
-    if !state.device_is_live(&device_id) {
+    if !state.device_is_live(device_id) {
         return Err(no_such_device());
     }
-    let known = state.db.local_device(&device_id).map_err(internal)?;
-    if known.is_none() {
-        return Err(no_such_device());
+    state
+        .db
+        .local_device(device_id)
+        .map_err(internal)?
+        .ok_or_else(no_such_device)
+}
+
+/// Parse a body that carries an op under `"op"`, refusing any field the op's own shape does not
+/// have. `LocalOp` cannot say `deny_unknown_fields` itself (it is flattened into the helper's
+/// frame), so the check is that the op serializes back to exactly what was sent. An explicit
+/// `null` for an optional field is refused with the rest.
+fn parse_exact<T: serde::de::DeserializeOwned>(
+    raw: serde_json::Value,
+    op_of: impl Fn(&T) -> &LocalOp,
+) -> Result<T, (StatusCode, String)> {
+    let sent = raw.get("op").cloned();
+    let body: T = serde_json::from_value(raw).map_err(|e| bad(&e.to_string()))?;
+    if serde_json::to_value(op_of(&body)).ok() != sent {
+        return Err(bad("unknown field in op"));
     }
+    Ok(body)
+}
+
+fn check_bounds(op: &LocalOp) -> Result<(), (StatusCode, String)> {
+    let ok = match op {
+        LocalOp::Run {
+            cmd,
+            cwd,
+            timeout_s,
+        } => {
+            !cmd.is_empty()
+                && cmd.len() <= CMD_MAX
+                && cwd.as_ref().is_none_or(|d| d.len() <= PATH_MAX)
+                && timeout_s.is_none_or(|t| (1..=LOCAL_RUN_TIMEOUT_MAX_S).contains(&t))
+        }
+        LocalOp::ReadFile { path, .. } | LocalOp::ListDir { path } => {
+            !path.is_empty() && path.len() <= PATH_MAX
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(bad("op is empty or out of bounds"))
+    }
+}
+
+/// `POST /projects/{id}/local/{device}/requests` (box token): register the op a card is about to
+/// ask for. The answer is the id the card carries; nothing runs.
+pub async fn request(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((project_id, device_id)): Path<(String, String)>,
+    Json(raw): Json<serde_json::Value>,
+) -> ApiResult {
+    reachable(&state, &principal, &project_id, &device_id)?;
+    // A request belongs to a user, so the admin token, which acts for none, cannot make one.
+    let Principal::Box { user_id } = &principal else {
+        return Err((StatusCode::FORBIDDEN, "box token required".into()));
+    };
+    let body: LocalRequestCreate = parse_exact(raw, |b: &LocalRequestCreate| &b.op)?;
+    check_bounds(&body.op)?;
+    if body.chat_id.len() > CHAT_ID_MAX {
+        return Err(bad("chat_id is too long"));
+    }
+    let id = ulid();
+    state
+        .db
+        .approval_create(&ApprovalRequest {
+            id: id.clone(),
+            kind: KIND.to_owned(),
+            user_id: user_id.clone(),
+            project_id,
+            target: device_id,
+            chat_id: body.chat_id,
+            payload: serde_json::to_string(&body.op).map_err(internal)?,
+            status: "pending".to_owned(),
+            created_at: arbos_core::ids::now_ms(),
+        })
+        .map_err(internal)?;
+    Ok(Json(LocalRequestCreated { id }).into_response())
+}
+
+/// `POST /local/requests/{id}/decide` (device token): the user's answer to one request.
+///
+/// Two things make it the user's answer to this command and not something a box arranged. The
+/// caller is a signed-in device of the user the request belongs to: a box token is refused, and
+/// in a shared chat nobody else's device can answer for the owner's computer. And the body
+/// echoes the op the card showed, which has to be the op stored when the box asked. The card's
+/// payload lives in the chat document, which the box writes, so a card that shows one command
+/// for a request made for another is refused here.
+pub async fn decide(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(raw): Json<serde_json::Value>,
+) -> ApiResult {
+    let Principal::Device {
+        id: device,
+        user_id,
+        ..
+    } = &principal
+    else {
+        return Err((StatusCode::FORBIDDEN, "device token required".into()));
+    };
+    let body: LocalDecide = parse_exact(raw, |b: &LocalDecide| &b.op)?;
+    // Another user's request answers like one that does not exist.
+    let request = state
+        .db
+        .approval(&id)
+        .map_err(internal)?
+        .filter(|r| r.kind == KIND && r.user_id == *user_id)
+        .ok_or((StatusCode::NOT_FOUND, "no such request".to_owned()))?;
+    if serde_json::to_string(&body.op).map_err(internal)? != request.payload {
+        return Err((
+            StatusCode::CONFLICT,
+            "that is not the op this request is for".into(),
+        ));
+    }
+    let wanted = match body.decision {
+        LocalDecision::Approve => "approved",
+        LocalDecision::Deny => "denied",
+    };
+    // Only a pending request is decided; a second answer gets the first one back.
+    let status = if state
+        .db
+        .approval_decide(&id, wanted, device)
+        .map_err(internal)?
+    {
+        wanted.to_owned()
+    } else {
+        let now = state.db.approval(&id).map_err(internal)?;
+        now.map_or(request.status, |r| r.status)
+    };
+    Ok(Json(json!({ "status": status })).into_response())
+}
+
+/// The body of an exec: one `LocalOp`, and the approval it runs under.
+#[derive(Deserialize)]
+pub struct ExecBody {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(flatten)]
+    pub op: LocalOp,
+}
+
+/// `POST /projects/{id}/local/{device}/exec` (box token).
+///
+/// With a `request_id` the relay holds as approved, that approval is spent and the op that runs
+/// is the one stored with it, not the one in this body. Without one, a read runs when the device
+/// allows reads without asking, and anything else is refused under `ARBOS_LOCAL_APPROVAL=enforce`
+/// and logged otherwise.
+pub async fn exec(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((project_id, device_id)): Path<(String, String)>,
+    Json(body): Json<ExecBody>,
+) -> ApiResult {
+    let device = reachable(&state, &principal, &project_id, &device_id)?;
     let conn = state.local_conns.lock().await.get(&device_id).cloned();
     let Some(conn) = conn else {
         return Ok((
@@ -250,6 +423,31 @@ pub async fn exec(
             Json(json!({ "kind": "error", "message": "device is offline" })),
         )
             .into_response());
+    };
+    // Spent only now, with a helper to send it to: an offline computer costs the user no approval.
+    let claimed = match (&body.request_id, principal.user_id()) {
+        (Some(request_id), Some(user)) => state
+            .db
+            .approval_claim(request_id, KIND, user, &project_id, &device_id)
+            .map_err(internal)?,
+        (Some(_), None) | (None, _) => None,
+    };
+    let op = match claimed {
+        Some(stored) => serde_json::from_str::<LocalOp>(&stored).map_err(internal)?,
+        // The admin token is the operator's and belongs to no user, so there is nobody to ask.
+        None if matches!(principal, Principal::Admin) => body.op,
+        None if body.op.is_read() && device.allow_reads => body.op,
+        None if state.cfg.local_approval_enforce => return Err(not_approved()),
+        None => {
+            tracing::warn!(
+                %project_id,
+                %device_id,
+                op = body.op.name(),
+                presented = body.request_id.is_some(),
+                "local: op ran without an approved request (ARBOS_LOCAL_APPROVAL is not enforce)"
+            );
+            body.op
+        }
     };
     let id = ulid();
     let (tx, rx) = oneshot::channel();
@@ -407,11 +605,18 @@ mod owner_tests {
 
     use super::*;
 
-    fn helper(state: &AppState, owner_device: &str) {
+    pub(super) fn helper(state: &AppState, owner_device: &str) {
         state
             .db
             .local_device_hello(owner_device, "mac.local", "macos", "/Users/t")
             .expect("hello");
+    }
+
+    pub(super) fn bare(op: LocalOp) -> ExecBody {
+        ExecBody {
+            request_id: None,
+            op,
+        }
     }
 
     fn live(state: &AppState, device_id: &str) -> bool {
@@ -430,20 +635,20 @@ mod owner_tests {
     /// These handlers report "no such device" as an error and success as a response, and the
     /// older ones reported a missing row as an `Ok(404)`. The tests care about the status either
     /// way, so that a refusal that never happened fails on what it let through, not on shape.
-    fn status_of(r: ApiResult) -> StatusCode {
+    pub(super) fn status_of(r: ApiResult) -> StatusCode {
         match r {
             Ok(res) => res.status(),
             Err((code, _)) => code,
         }
     }
 
-    fn box_of(user: &str) -> Principal {
+    pub(super) fn box_of(user: &str) -> Principal {
         Principal::Box {
             user_id: user.to_owned(),
         }
     }
 
-    fn project_of(state: &AppState, id: &str, user: &str) {
+    pub(super) fn project_of(state: &AppState, id: &str, user: &str) {
         state
             .db
             .insert_project(&Project {
@@ -608,7 +813,7 @@ mod owner_tests {
             State(state.clone()),
             box_of(&alice),
             Path(("p_alice".to_owned(), bob_id.clone())),
-            Json(LocalOp::ListDir { path: "/".into() }),
+            Json(bare(LocalOp::ListDir { path: "/".into() })),
         )
         .await;
         assert_eq!(
@@ -640,7 +845,7 @@ mod owner_tests {
             State(state.clone()),
             box_of(&alice),
             Path(("p_alice".to_owned(), id.clone())),
-            Json(LocalOp::ListDir { path: "/".into() }),
+            Json(bare(LocalOp::ListDir { path: "/".into() })),
         )
         .await;
         assert_eq!(status_of(before), StatusCode::SERVICE_UNAVAILABLE);
@@ -650,7 +855,7 @@ mod owner_tests {
             State(state.clone()),
             box_of(&alice),
             Path(("p_alice".to_owned(), id.clone())),
-            Json(LocalOp::ListDir { path: "/".into() }),
+            Json(bare(LocalOp::ListDir { path: "/".into() })),
         )
         .await;
         assert_eq!(
@@ -746,6 +951,352 @@ mod owner_tests {
                 .revoked_at
                 .is_some(),
             "a removed helper cannot mint a new access token from a refresh token it kept"
+        );
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    //! Whether a local op was approved used to be decided inside the box, from a row in a chat
+    //! document the box itself writes. These are the relay deciding it instead.
+
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::owner_tests::{bare, box_of, helper, project_of, status_of};
+    use super::*;
+
+    const P: &str = "p_alice";
+
+    struct World {
+        state: AppState,
+        alice: String,
+        phone: Principal,
+        /// Alice's computer, with a helper connected.
+        mac: String,
+        conn: Arc<LocalConn>,
+        sent: mpsc::Receiver<String>,
+    }
+
+    async fn world(enforce: bool) -> World {
+        let mut state = test_state(AuthMode::Github);
+        Arc::get_mut(&mut state.cfg)
+            .expect("cfg")
+            .local_approval_enforce = enforce;
+        let (alice, phone) = person(&state, 41);
+        let mac = ulid();
+        state
+            .db
+            .insert_device(&mac, "d", &ulid(), &alice, "github")
+            .expect("device");
+        helper(&state, &mac);
+        project_of(&state, P, &alice);
+        let (conn, sent) = connect(&state, &mac).await;
+        World {
+            state,
+            alice,
+            phone,
+            mac,
+            conn,
+            sent,
+        }
+    }
+
+    async fn connect(state: &AppState, device: &str) -> (Arc<LocalConn>, mpsc::Receiver<String>) {
+        let (tx, sent) = mpsc::channel::<String>(4);
+        let conn = Arc::new(LocalConn {
+            tx,
+            pending: Mutex::new(HashMap::new()),
+            closed: Notify::new(),
+        });
+        state
+            .local_conns
+            .lock()
+            .await
+            .insert(device.to_owned(), conn.clone());
+        (conn, sent)
+    }
+
+    fn run(cmd: &str) -> LocalOp {
+        LocalOp::Run {
+            cmd: cmd.to_owned(),
+            cwd: None,
+            timeout_s: None,
+        }
+    }
+
+    impl World {
+        /// The box asks; the id of the stored request.
+        async fn ask(&self, device: &str, op: &LocalOp) -> String {
+            let r = request(
+                State(self.state.clone()),
+                box_of(&self.alice),
+                Path((P.to_owned(), device.to_owned())),
+                Json(json!({ "op": op, "chat_id": "c1" })),
+            )
+            .await
+            .expect("request");
+            let bytes = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["id"].as_str().expect("id").to_owned()
+        }
+
+        async fn answer(
+            &self,
+            who: Principal,
+            id: &str,
+            decision: &str,
+            op: &LocalOp,
+        ) -> ApiResult {
+            decide(
+                State(self.state.clone()),
+                who,
+                Path(id.to_owned()),
+                Json(json!({ "decision": decision, "op": op })),
+            )
+            .await
+        }
+
+        async fn approve(&self, id: &str, op: &LocalOp) {
+            let r = self.answer(self.phone.clone(), id, "approve", op).await;
+            assert_eq!(status_of(r), StatusCode::OK);
+        }
+
+        fn status(&self, id: &str) -> String {
+            self.state.db.approval(id).unwrap().expect("row").status
+        }
+
+        /// The box execs. The status it got, and the op the helper was sent, if any.
+        async fn exec(&mut self, device: &str, body: ExecBody) -> (StatusCode, Option<LocalOp>) {
+            let mut call = tokio::spawn(exec(
+                State(self.state.clone()),
+                box_of(&self.alice),
+                Path((P.to_owned(), device.to_owned())),
+                Json(body),
+            ));
+            tokio::select! {
+                r = &mut call => (status_of(r.unwrap()), None),
+                Some(text) = self.sent.recv() => {
+                    let LocalServerFrame::Exec(sent) = serde_json::from_str(&text).unwrap() else {
+                        panic!("exec frame")
+                    };
+                    let waiter = self.conn.pending.lock().await.remove(&sent.id).expect("pending");
+                    let _ = waiter.send(LocalResult::Error { message: "test".into() });
+                    (status_of(call.await.unwrap()), Some(sent.op))
+                }
+            }
+        }
+    }
+
+    fn with(id: &str, op: LocalOp) -> ExecBody {
+        ExecBody {
+            request_id: Some(id.to_owned()),
+            op,
+        }
+    }
+
+    /// The hole itself: a box token and nothing else.
+    #[tokio::test]
+    async fn a_box_token_alone_runs_nothing() {
+        let mut w = world(true).await;
+        let mac = w.mac.clone();
+        assert_eq!(
+            w.exec(&mac, bare(run("id"))).await,
+            (StatusCode::FORBIDDEN, None)
+        );
+        assert_eq!(
+            w.exec(&mac, with("made-up", run("id"))).await,
+            (StatusCode::FORBIDDEN, None)
+        );
+    }
+
+    /// Until apps and boxes send approvals the relay only watches: today's exec still runs.
+    #[tokio::test]
+    async fn observe_mode_refuses_nothing() {
+        let mut w = world(false).await;
+        let mac = w.mac.clone();
+        assert_eq!(
+            w.exec(&mac, bare(run("id"))).await,
+            (StatusCode::OK, Some(run("id")))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approval_runs_its_own_op_once() {
+        let mut w = world(true).await;
+        let mac = w.mac.clone();
+        let id = w.ask(&mac, &run("ls")).await;
+        assert_eq!(
+            w.exec(&mac, with(&id, run("ls"))).await.0,
+            StatusCode::FORBIDDEN,
+            "asked, not yet answered"
+        );
+        w.approve(&id, &run("ls")).await;
+
+        // The box says one thing in the exec body; what was approved is what is sent.
+        assert_eq!(
+            w.exec(&mac, with(&id, run("rm -rf ~"))).await,
+            (StatusCode::OK, Some(run("ls")))
+        );
+        assert_eq!(w.status(&id), "used");
+        assert_eq!(
+            w.exec(&mac, with(&id, run("ls"))).await,
+            (StatusCode::FORBIDDEN, None),
+            "an approval is spent by its first use"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_or_stale_approval_runs_nothing() {
+        let mut w = world(true).await;
+        let mac = w.mac.clone();
+        let denied = w.ask(&mac, &run("ls")).await;
+        let r = w.answer(w.phone.clone(), &denied, "deny", &run("ls")).await;
+        assert_eq!(status_of(r), StatusCode::OK);
+        assert_eq!(
+            w.exec(&mac, with(&denied, run("ls"))).await.0,
+            StatusCode::FORBIDDEN
+        );
+
+        let stale = w.ask(&mac, &run("ls")).await;
+        w.approve(&stale, &run("ls")).await;
+        w.state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE approval_requests SET decided_at = decided_at - ?2 WHERE id = ?1",
+                    rusqlite::params![stale, crate::db::APPROVAL_USABLE_MS],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            w.exec(&mac, with(&stale, run("ls"))).await,
+            (StatusCode::FORBIDDEN, None),
+            "a yes is good for five minutes"
+        );
+    }
+
+    /// A request is for one computer. Alice's second machine is hers too, and still not it.
+    #[tokio::test]
+    async fn an_approval_for_one_computer_does_not_run_on_another() {
+        let mut w = world(true).await;
+        let mac = w.mac.clone();
+        let other = ulid();
+        w.state
+            .db
+            .insert_device(&other, "d", &ulid(), &w.alice, "github")
+            .expect("device");
+        helper(&w.state, &other);
+        let (_conn, _sent) = connect(&w.state, &other).await;
+
+        let id = w.ask(&mac, &run("ls")).await;
+        w.approve(&id, &run("ls")).await;
+        assert_eq!(
+            w.exec(&other, with(&id, run("ls"))).await,
+            (StatusCode::FORBIDDEN, None)
+        );
+        assert_eq!(w.status(&id), "approved", "and it is not spent by the try");
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_decides_and_only_for_the_op_that_was_asked() {
+        let w = world(true).await;
+        let id = w.ask(&w.mac, &run("ls -la")).await;
+
+        let (_bob, bob_phone) = person(&w.state, 42);
+        let r = w.answer(bob_phone, &id, "approve", &run("ls -la")).await;
+        assert_eq!(status_of(r), StatusCode::NOT_FOUND, "another user's device");
+        let r = w
+            .answer(box_of(&w.alice), &id, "approve", &run("ls -la"))
+            .await;
+        assert_eq!(status_of(r), StatusCode::FORBIDDEN, "the box itself");
+        // One byte off what the box registered: the card showed something else.
+        let r = w
+            .answer(w.phone.clone(), &id, "approve", &run("ls -lb"))
+            .await;
+        assert_eq!(status_of(r), StatusCode::CONFLICT);
+        assert_eq!(w.status(&id), "pending", "none of those decided anything");
+
+        w.approve(&id, &run("ls -la")).await;
+        let r = w
+            .answer(w.phone.clone(), &id, "deny", &run("ls -la"))
+            .await
+            .expect("second answer");
+        let bytes = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["status"], "approved", "the first answer stands");
+    }
+
+    /// "Allow reads without asking" is the relay's own setting, and it covers reads only.
+    #[tokio::test]
+    async fn reads_run_unasked_only_where_the_device_allows_them() {
+        let mut w = world(true).await;
+        let mac = w.mac.clone();
+        let read = LocalOp::ListDir { path: "/".into() };
+        assert_eq!(
+            w.exec(&mac, bare(read.clone())).await,
+            (StatusCode::FORBIDDEN, None)
+        );
+        w.state.db.local_device_set_allow_reads(&mac, true).unwrap();
+        assert_eq!(
+            w.exec(&mac, bare(read.clone())).await,
+            (StatusCode::OK, Some(read))
+        );
+        assert_eq!(
+            w.exec(&mac, bare(run("id"))).await,
+            (StatusCode::FORBIDDEN, None),
+            "the switch never covers a command"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_is_validated_and_a_project_holds_a_bounded_number() {
+        let w = world(true).await;
+        let ask = |body: Value| {
+            request(
+                State(w.state.clone()),
+                box_of(&w.alice),
+                Path((P.to_owned(), w.mac.clone())),
+                Json(body),
+            )
+        };
+        for body in [
+            json!({ "op": { "op": "run", "cmd": "ls", "sudo": true }, "chat_id": "c" }),
+            json!({ "op": { "op": "run", "cmd": "ls" }, "chat_id": "c", "extra": 1 }),
+            json!({ "op": { "op": "run", "cmd": "" }, "chat_id": "c" }),
+            json!({ "op": { "op": "run", "cmd": "x".repeat(CMD_MAX + 1) }, "chat_id": "c" }),
+            json!({ "op": { "op": "run", "cmd": "ls", "timeout_s": 601 }, "chat_id": "c" }),
+            json!({ "op": { "op": "list_dir", "path": "/".repeat(PATH_MAX + 1) }, "chat_id": "c" }),
+        ] {
+            let shown = body.to_string().chars().take(60).collect::<String>();
+            assert_eq!(
+                status_of(ask(body).await),
+                StatusCode::BAD_REQUEST,
+                "{shown}"
+            );
+        }
+        // A device token cannot register a request; only the box that will raise the card.
+        let r = request(
+            State(w.state.clone()),
+            w.phone.clone(),
+            Path((P.to_owned(), w.mac.clone())),
+            Json(json!({ "op": run("ls"), "chat_id": "c" })),
+        )
+        .await;
+        assert_eq!(status_of(r), StatusCode::FORBIDDEN);
+
+        let first = w.ask(&w.mac, &run("ls")).await;
+        for _ in 0..crate::db::APPROVALS_PENDING_MAX {
+            w.ask(&w.mac, &run("ls")).await;
+        }
+        assert_eq!(
+            w.status(&first),
+            "denied",
+            "the oldest pending one gives way"
         );
     }
 }

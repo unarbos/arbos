@@ -998,6 +998,32 @@ fn utf8_len(b: u8) -> usize {
 /// Subagents running at once per box; further spawns wait in FIFO order (demo review item 2).
 pub const SUBAGENT_MAX_CONCURRENT: usize = 4;
 
+/// The answers an offer card carries, by id; the labels are in [`offer_widget`].
+const OFFER_ANSWERS: [&str; 3] = ["do", "later", "never"];
+
+fn offer_widget() -> Widget {
+    let option = |id: &str, label: &str| arbos_core::widget::ChoiceOption {
+        id: id.into(),
+        label: label.into(),
+    };
+    Widget::Choice {
+        options: vec![
+            option("do", "Do it"),
+            option("later", "Not now"),
+            option("never", "Don't suggest this"),
+        ],
+    }
+}
+
+/// A topic is the key "never" closes, so it is a slug, not prose. Exact match only: a model
+/// that renames a closed topic gets past it, and then only the rest between offers holds.
+fn valid_offer_topic(topic: &str) -> bool {
+    (1..=48).contains(&topic.len())
+        && topic
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Pack section for every subagent: an unknown service, API or tool is researched, not guessed
 /// at and not handed back to the user. Mirrors the main agent's rule in `prompts/router.md`.
 const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the task involves a service, API, CLI or library you do not know, or a call fails (not found, unknown endpoint, auth error, unexpected shape), find the answer yourself; guessing more than one or two URLs is not research. Until one path works: `web_search` for the service's API reference or developer docs and `web_fetch` them (the docs site, its OpenAPI/Swagger spec at `/openapi.json`, `/swagger.json`, `/docs`, `/redoc`, `/llms.txt`, the README); find the official SDK or CLI, install it (`uv tool install`, `pip install`, `npm i -g`, a release binary) and read its `--help` and, when needed, its source for the real base URL, routes and auth header; read the service's GitHub repositories and examples; read the error body. Read what you fetched before the next call. Authenticated calls go through `egress` with the secret's placeholder in a header or the body.\n\nReport `blocked` or `needs_input` only for a real blocker: a credential or account that does not exist, a choice only the user can make between real options you found, a spend decision, or a service that is down after you checked it against its docs. Never ask for docs, an API reference, an endpoint, or for the user to install something. Money: anything that charges the user beyond what the brief states (renting, buying, subscribing, paying) needs their go-ahead first: show the chosen option with its price (and a cheaper alternative when one exists) and ask with `ask_user`; listing options and quoting prices is free.\n\nSecret notes: each secret the owner stored comes with their note (`use_notes` in `secrets_list`, comments in your shell's secrets.env); the note is the policy for that key — for `egress` and for any CLI, SDK or script that reads the real `$NAME`. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. A note without spending guidance leaves the money rule above in force. Never pass a confirmation-skipping flag (`--yes`, `-y`, `--force`, `--no-confirm` and the like) to a command that charges unless the note allows that spend.\n\n";
@@ -7146,6 +7172,10 @@ impl Agent {
             }
         };
         let _ = self.store.answer_ask(question_id);
+        // A tap on one of the three answers; a typed reply is recorded where it is read.
+        if let Some(a) = value.as_str().filter(|a| OFFER_ANSWERS.contains(a)) {
+            let _ = self.store.answer_offer(question_id, a, now_ms());
+        }
         {
             let h = host.lock().await;
             h.doc.answer_question_part(question_id, &value);
@@ -7298,6 +7328,9 @@ impl Agent {
             prompt_text = format!("Answer to your question \"{question}\":\n{rendered}");
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
+            // Typed instead of tapped: the person answered, so the short rest; what they meant
+            // reaches the model as words.
+            let _ = self.store.answer_offer(&ask_id, "typed", now_ms());
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
             answers_my_question = true;
         }
@@ -7504,7 +7537,20 @@ impl Agent {
             tracing::info!(chat_id, "escalation note: act turn ended with no text");
         }
 
-        self.spawn_memory_pass(chat_id, &assistant_msg_id, &user_text, &turn.streamed_text);
+        let ask_by_owner = message_view.as_ref().is_some_and(|m| {
+            crate::people::written_by_owner(
+                self.people.info(chat_id).as_ref(),
+                &self.people.project_owner(),
+                m,
+            )
+        });
+        self.spawn_memory_pass(
+            chat_id,
+            &assistant_msg_id,
+            &user_text,
+            ask_by_owner,
+            &turn.streamed_text,
+        );
 
         // Hand-offs after the main turn: new / wake / escalation. Never on the chat's critical path.
         if turn.stopped {
@@ -7913,7 +7959,17 @@ impl Agent {
     }
 
     /// Memory write pass + compaction, off the reply path (design §6.9).
-    fn spawn_memory_pass(self: &Arc<Self>, chat_id: &str, msg_id: &str, ask: &str, reply: &str) {
+    /// `ask_by_owner`: `ask` is the owner's own message, the only text a memory record can be
+    /// proved against as stated by the owner; a notice, a guest's or another agent's is not.
+    fn spawn_memory_pass(
+        self: &Arc<Self>,
+        chat_id: &str,
+        msg_id: &str,
+        ask: &str,
+        ask_by_owner: bool,
+        reply: &str,
+    ) {
+        let owner_said = ask_by_owner.then(|| ask.to_owned());
         let me = self.clone();
         let chat = chat_id.to_owned();
         let text = format!("User: {ask}\nAgent: {reply}");
@@ -7926,7 +7982,15 @@ impl Agent {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             if let Err(e) = me
                 .memory
-                .write_pass(&msg, &chat, usage_context, "assistant", &text, &[])
+                .write_pass(
+                    &msg,
+                    &chat,
+                    usage_context,
+                    "assistant",
+                    &text,
+                    owner_said.as_deref(),
+                    &[],
+                )
                 .await
             {
                 tracing::debug!(error = %e, "memory write pass");
@@ -9441,6 +9505,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             &format!("[subagent {name} finished: {status}]"),
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -9516,6 +9581,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             &format!("[job {} failed; answered inline]", job.title),
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -9557,6 +9623,7 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             "[approval outcome]",
+            false,
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -12088,19 +12155,32 @@ impl Agent {
     ///
     /// When the turn is in a side thread but the prompt came from another agent (group /
     /// Projects ⇄), the card is posted on the pinned main chat so the owner can find it.
+    ///
+    /// `offer` marks an unasked suggestion and names its topic. The card then carries the three
+    /// fixed answers, and the ask is refused in a room, with no turn to show the card, and while
+    /// [`Store::offer_refusal`] says so: how often the user is offered something is decided here,
+    /// not by the model.
     pub async fn hook_ask_user(
         &self,
         question: &str,
         widget: Option<&Value>,
+        offer: Option<&Value>,
         session_id: &str,
     ) -> Result<String> {
-        let widget = match Widget::parse(widget) {
-            Ok(w) => w,
-            Err(e) => {
+        // Anything but a slug is refused, never asked as an ordinary question instead.
+        let offer = match offer.filter(|o| !o.is_null()) {
+            None => None,
+            Some(o) => Some(o.as_str().filter(|t| valid_offer_topic(t)).ok_or_else(|| {
+                anyhow!("offer must be a short topic slug: a-z, 0-9 and '-', at most 48")
+            })?),
+        };
+        let widget = match offer {
+            Some(_) => Some(offer_widget()),
+            None => Widget::parse(widget).unwrap_or_else(|e| {
                 // An invalid widget degrades to a plain question rather than losing the turn.
                 tracing::warn!(error = %e, "ask_user widget rejected; asking as plain text");
                 None
-            }
+            }),
         };
         let widget_json = widget.as_ref().and_then(|w| serde_json::to_value(w).ok());
         let mut tl = self.turn.lock().await;
@@ -12143,6 +12223,23 @@ impl Agent {
             turn_chat.clone()
         };
         let id = ulid();
+        if let Some(topic) = offer {
+            let why = if from_other_agent {
+                Some("offers are not made in a room or to another agent")
+            } else if tl.is_none() || self.sync.host(&chat_id).await.is_none() {
+                // The card is drawn on a running turn's reply. Without one nothing would be
+                // shown, and an offer nobody saw must not rest the others for a week.
+                Some("no turn is running to show the card")
+            } else {
+                self.store.offer_refusal(topic, now_ms())?
+            };
+            if let Some(why) = why {
+                return Err(anyhow!(
+                    "Not offered: {why}. Do not make this offer another way; carry on without it."
+                ));
+            }
+            self.store.insert_offer(&id, topic, now_ms())?;
+        }
         self.store.insert_ask(
             &id,
             Some(&chat_id),
@@ -12834,7 +12931,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nYou work in your own Linux sandbox: `bash`, and `read`, `write`, `edit` for files, with `curl`, `python3`, `jq`, `git` and `rg` installed. A page that comes back empty or as placeholders is usually JavaScript-rendered — `curl` the raw HTML, read the script and data URLs in it and fetch those. A large result comes back as a handle: page through it with `peek`, never by fetching the same thing twice.\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), post_chart (a line / area / bar / scatter / pie chart from structured series, drawn natively in the chat), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never print, encode or copy a value (its length or a hash, when asked, is fine); a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nYou work in your own Linux sandbox: `bash`, and `read`, `write`, `edit` for files, with `curl`, `python3`, `jq`, `git` and `rg` installed. A page that comes back empty or as placeholders is usually JavaScript-rendered — `curl` the raw HTML, read the script and data URLs in it and fetch those. A large result comes back as a handle: page through it with `peek`, never by fetching the same thing twice.\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), post_chart (a line / area / bar / scatter / pie chart from structured series, drawn natively in the chat), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never print, encode or copy a value (its length or a hash, when asked, is fine); a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), bittensor_subnet (call it first for anything about Bittensor, TAO, subnets or mining: a subnet by number or name, with the rules on keys and spending), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(WORK_RULES_SECTION);
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -14137,6 +14234,7 @@ impl Agent {
                         usage_context,
                         "subagent",
                         &body,
+                        None,
                         &proposals,
                     )
                     .await;
@@ -15364,7 +15462,7 @@ pub(crate) fn reply_to_wanted(shared: bool, from_agent: bool) -> bool {
     shared || from_agent
 }
 
-fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
+pub(crate) fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
     m.rest
         .get("sender")
         .and_then(Value::as_str)
@@ -17051,6 +17149,78 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hook path of an offer: no card without a turn to show it, none in a room, the three
+    /// fixed answers whatever widget was passed, one offer at a time, and a tap is what records
+    /// the answer.
+    #[tokio::test]
+    async fn an_offer_is_a_fixed_card_refused_in_a_room_and_recorded_on_a_tap() {
+        const CHAT: &str = "01TESTCHATOFFERHOOK0000001";
+        const DAY: i64 = 86_400_000;
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message_from("u-own", "hello", "dev-mac", "user", &[]);
+            let from_room = [("groupChatId", json!("g1"))];
+            h.doc
+                .append_user_message_from("u-room", "hi", "dev-mac", "agent", &from_room);
+            h.doc.start_assistant_message("a1", "u-own", "dev-box");
+        }
+        let turn_on = |user_msg: &'static str| async {
+            let mut t = TurnState::claim(CHAT, user_msg, false);
+            t.assistant_msg_id = "a1".into();
+            *agent.turn.lock().await = Some(t);
+        };
+        let brief = json!("brief");
+        let offer = || agent.hook_ask_user("Brief?", None, Some(&brief), CHAT);
+        let resting = |after: i64| {
+            let rest = agent.store.offer_refusal("other", now_ms() + after);
+            rest.unwrap().is_some()
+        };
+
+        // Not a slug, or not a string: refused, never asked as an ordinary question.
+        turn_on("u-own").await;
+        for bad in [json!("Morning brief"), json!(""), json!(7), json!(true)] {
+            let refused = agent.hook_ask_user("Brief?", None, Some(&bad), CHAT).await;
+            assert!(refused.is_err(), "{bad}");
+        }
+        // No turn to show the card, then a turn another agent's message started.
+        *agent.turn.lock().await = None;
+        assert!(offer().await.is_err());
+        turn_on("u-room").await;
+        let refused = offer().await.unwrap_err().to_string();
+        assert!(refused.contains("room"), "{refused}");
+        assert!(!resting(0), "a refused offer rested the others");
+        assert!(host.lock().await.doc.open_question().is_none());
+
+        // Made: the card is the three answers, not the widget the model passed.
+        turn_on("u-own").await;
+        let passed = json!({ "type": "text" });
+        let id = agent
+            .hook_ask_user("Brief?", Some(&passed), Some(&brief), CHAT)
+            .await
+            .unwrap();
+        let (open_id, _, widget) = host.lock().await.doc.open_question().expect("a card");
+        assert_eq!(open_id, id);
+        assert_eq!(widget, serde_json::to_value(offer_widget()).ok());
+        let refused = offer().await.unwrap_err().to_string();
+        assert!(refused.contains("resting"), "{refused}");
+
+        // Unanswered it would rest seven days; the tap on "Not now" makes it three.
+        let tap = CommandView {
+            id: ulid(),
+            kind: "answer".into(),
+            payload: json!({ "questionId": id, "value": "later" }),
+            issued_by: "dev-mac".into(),
+            issued_at: now_ms(),
+            status: "pending".into(),
+        };
+        let (_, said) = agent.resolve_structured_answer(&host, &tap).await.unwrap();
+        assert_eq!(said, "Answer: Not now");
+        assert!(resting(2 * DAY) && !resting(3 * DAY + 60_000));
+    }
 
     /// #2073: how a prompt is handed to a pi that may still be running — never "reject".
     #[test]

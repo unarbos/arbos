@@ -681,19 +681,24 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     name: "ask_user",
     label: "Ask user",
     description:
-      "Ask the user one question and stop; the answer arrives as the next message. Pass `widget` when a typed answer is better than free text: choice (one of options), multi_select (several), text (placeholder, multiline), date (min/max yyyy-mm-dd), form (<= 8 fields of type text|number|choice|date|bool).",
+      "Ask the user one question and stop; the answer arrives as the next message. Pass `widget` when a typed answer is better than free text: choice (one of options), multi_select (several), text (placeholder, multiline), date (min/max yyyy-mm-dd), form (<= 8 fields of type text|number|choice|date|bool). Pass `offer` (a short topic slug such as `morning-brief`) when the question is your own suggestion the user did not ask for: the card then offers Do it, Not now and Don't suggest this, and the call is refused while an earlier offer is resting or the topic was closed.",
     promptSnippet: "ask_user: ask the user one question and wait; optional widget = choice | multi_select | text | date | form",
     parameters: Type.Object({
       question: Type.String({ description: "The question, one or two sentences" }),
       widget: Type.Optional(WIDGET_PARAM),
+      offer: Type.Optional(Type.String({ pattern: "^[a-z0-9-]{1,48}$", description: "Topic slug of an unasked suggestion" })),
     }),
     exposure: "model-only",
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const widget = params.widget ?? null;
-      const res = await hook("/hook/ask_user", { session_id: sessionId, question: params.question, widget });
+      const res = await hook("/hook/ask_user", { session_id: sessionId, question: params.question, widget, offer: params.offer });
       if (res?.ok) {
         return { content: [{ type: "text", text: "Question posted. Stop here; the user's answer arrives as the next message." }], details: { question: params.question, widget }, terminate: true };
+      }
+      // A refused offer is an answer, not an unreachable user: never fall through to asking another way.
+      if (params.offer) {
+        return { content: [{ type: "text", text: res?.error ?? "Not offered: no user is reachable." }], details: { question: params.question, offer: params.offer } };
       }
       if (ctx.hasUI) {
         const answer = await ctx.ui.input("Agent question", describeWidget(params.question, widget));

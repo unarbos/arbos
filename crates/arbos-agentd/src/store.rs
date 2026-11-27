@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS asks (
   id TEXT PRIMARY KEY, chat_id TEXT, session_id TEXT, question TEXT NOT NULL, answered INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
 );
 
+-- Unasked offers (`ask_user` with `offer`): one row per offer card. `answer` is the tapped choice
+-- (do | later | never), NULL while unanswered; `at` is when it was made or answered.
+CREATE TABLE IF NOT EXISTS offers (
+  ask_id TEXT PRIMARY KEY, topic TEXT NOT NULL, answer TEXT, at INTEGER NOT NULL
+);
+
 -- Approval cards (feature approve): the doc part is the source of truth for clients; this row
 -- survives a restart so a late decision still dispatches.
 CREATE TABLE IF NOT EXISTS approvals (
@@ -264,6 +270,21 @@ pub struct MemoryRow {
     pub supersedes: Value,
     pub confidence: f64,
     pub importance: i64,
+    /// [`PROVENANCE_OWNER`] or [`PROVENANCE_OUTSIDE`].
+    pub provenance: String,
+}
+
+/// The owner stated the record, in words the write pass proved are theirs. Also what agentd's
+/// own code-written notes (a rename) carry, and every row from before the column existed.
+pub const PROVENANCE_OWNER: &str = "owner";
+/// The record was derived from anything else: a tool result, a page, a file, another person's
+/// or agent's message, the agent's own text. Stored, but unverified: never offered as a fact.
+pub const PROVENANCE_OUTSIDE: &str = "outside";
+
+impl MemoryRow {
+    pub fn unverified(&self) -> bool {
+        self.provenance != PROVENANCE_OWNER
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +387,18 @@ impl Store {
             .any(|n| n == "steers");
         if !has_steers {
             c.execute_batch("ALTER TABLE jobs ADD COLUMN steers TEXT NOT NULL DEFAULT '[]'")?;
+        }
+        // Additive migration: where a memory record came from. Rows written before the column
+        // existed read as the owner's, so nothing a box already remembers is demoted.
+        let has_provenance: bool = c
+            .prepare("PRAGMA table_info(memory)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "provenance");
+        if !has_provenance {
+            c.execute_batch(
+                "ALTER TABLE memory ADD COLUMN provenance TEXT NOT NULL DEFAULT 'owner'",
+            )?;
         }
         // Additive migration: when a late approval's re-run was let through without a second
         // card. This is the whole of the grant — it used to be a ten-minute entry in memory,
@@ -1547,13 +1580,14 @@ impl Store {
         confidence: f64,
         importance: i64,
         supersedes: &[String],
+        provenance: &str,
     ) -> Result<String> {
         let id = ulid();
         let text = redact(text);
         self.with(|c| {
             c.execute(
-                "INSERT INTO memory(id, tier, thread_id, kind, scope, text, source, valid_at, created_at, supersedes, confidence, importance) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![id, tier, thread_id, kind, scope, text, source.map(|s| s.to_string()), valid_at, now_ms(), serde_json::to_string(supersedes).unwrap_or_default(), confidence, importance],
+                "INSERT INTO memory(id, tier, thread_id, kind, scope, text, source, valid_at, created_at, supersedes, confidence, importance, provenance) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                params![id, tier, thread_id, kind, scope, text, source.map(|s| s.to_string()), valid_at, now_ms(), serde_json::to_string(supersedes).unwrap_or_default(), confidence, importance, provenance],
             )?;
             c.execute("INSERT INTO memory_fts(text, id, tier) VALUES (?1,?2,?3)", params![text, id, tier])?;
             Ok(())
@@ -1610,10 +1644,11 @@ impl Store {
             supersedes: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or(json!([])),
             confidence: r.get(11)?,
             importance: r.get(12)?,
+            provenance: r.get(13)?,
         })
     }
 
-    const MEMORY_COLS: &'static str = "m.id, m.tier, m.thread_id, m.kind, m.scope, m.text, m.valid_at, m.invalid_at, m.created_at, m.expired_at, m.supersedes, m.confidence, m.importance";
+    const MEMORY_COLS: &'static str = "m.id, m.tier, m.thread_id, m.kind, m.scope, m.text, m.valid_at, m.invalid_at, m.created_at, m.expired_at, m.supersedes, m.confidence, m.importance, m.provenance";
 
     pub fn memory_search(
         &self,
@@ -1635,7 +1670,7 @@ impl Store {
                  ORDER BY bm25(memory_fts) LIMIT ?4",
                 Self::MEMORY_COLS
             ))?;
-            let rows = st.query_map(params![q, include_expired, tiers_csv, limit], |r| Ok((Self::row_to_memory(r)?, r.get::<_, f64>(13)?)))?;
+            let rows = st.query_map(params![q, include_expired, tiers_csv, limit], |r| Ok((Self::row_to_memory(r)?, r.get::<_, f64>(14)?)))?;
             rows.collect()
         })
     }
@@ -1648,7 +1683,7 @@ impl Store {
     ) -> Result<Vec<MemoryRow>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM memory m WHERE m.tier = ?1 AND m.expired_at IS NULL AND (?2 IS NULL OR m.thread_id = ?2) ORDER BY m.importance DESC, m.created_at DESC LIMIT ?3",
+                "SELECT {} FROM memory m WHERE m.tier = ?1 AND m.expired_at IS NULL AND (?2 IS NULL OR m.thread_id = ?2) ORDER BY m.provenance != 'owner', m.importance DESC, m.created_at DESC LIMIT ?3",
                 Self::MEMORY_COLS
             ))?;
             let rows = st.query_map(params![tier, thread_id, limit], Self::row_to_memory)?;
@@ -1930,6 +1965,52 @@ impl Store {
         self.with(|c| {
             c.execute("UPDATE asks SET answered = 1 WHERE id = ?1", params![id])
                 .map(|_| ())
+        })
+    }
+
+    /// Why no unasked offer on `topic` may be made at `now`, or `None` when one may. A topic
+    /// answered "never" is closed for good. Otherwise every offer rests all offers: seven days
+    /// while unanswered, three after "not now", one day after any other answer.
+    pub fn offer_refusal(&self, topic: &str, now: i64) -> Result<Option<&'static str>> {
+        const DAY: i64 = 86_400_000;
+        self.with(|c| {
+            let closed: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM offers WHERE topic = ?1 AND answer = 'never')",
+                params![topic],
+                |r| r.get(0),
+            )?;
+            if closed {
+                return Ok(Some("the user said never to suggest this"));
+            }
+            let rest_until: Option<i64> = c.query_row(
+                "SELECT MAX(at + CASE WHEN answer IS NULL THEN 7 WHEN answer = 'later' THEN 3 ELSE 1 END * ?1) FROM offers",
+                params![DAY],
+                |r| r.get(0),
+            )?;
+            Ok(rest_until
+                .filter(|until| now < *until)
+                .map(|_| "an earlier offer is still resting"))
+        })
+    }
+
+    pub fn insert_offer(&self, ask_id: &str, topic: &str, now: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO offers(ask_id, topic, at) VALUES (?1,?2,?3)",
+                params![ask_id, topic, now],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Record the tapped answer to an offer, once. Not an offer, or already answered: nothing.
+    pub fn answer_offer(&self, ask_id: &str, answer: &str, now: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE offers SET answer = ?2, at = ?3 WHERE ask_id = ?1 AND answer IS NULL",
+                params![ask_id, answer, now],
+            )
+            .map(|_| ())
         })
     }
 
@@ -2358,6 +2439,46 @@ mod tests {
     fn job_store() -> Store {
         let dir = std::env::temp_dir().join(format!("arbos-store-{}", ulid()));
         Store::open(&dir.join("state.sqlite")).unwrap()
+    }
+
+    #[test]
+    fn an_offer_rests_by_its_answer_and_never_closes_the_topic() {
+        const DAY: i64 = 86_400_000;
+        let s = job_store();
+        let may = |topic: &str, day: i64| s.offer_refusal(topic, day * DAY).unwrap().is_none();
+        assert!(may("brief", 0), "nothing offered yet");
+
+        s.insert_offer("a", "brief", 0).unwrap();
+        assert!(
+            !may("other", 6),
+            "unanswered rests every topic for seven days"
+        );
+        assert!(may("other", 7));
+
+        s.answer_offer("a", "later", 7 * DAY).unwrap();
+        assert!(!may("brief", 9), "not now rests three days from the answer");
+        assert!(may("brief", 10));
+
+        s.insert_offer("b", "brief", 10 * DAY).unwrap();
+        s.answer_offer("b", "do", 10 * DAY).unwrap();
+        assert!(!may("brief", 10), "at most one a day, even after a yes");
+        assert!(may("brief", 11));
+
+        s.insert_offer("c", "watch", 11 * DAY).unwrap();
+        s.answer_offer("c", "never", 11 * DAY).unwrap();
+        s.answer_offer("c", "do", 11 * DAY).unwrap();
+        assert!(
+            !may("watch", 400),
+            "never closes the topic, and an answer is taken once"
+        );
+        assert!(may("brief", 12), "other topics open again after a day");
+
+        s.insert_offer("d", "brief", 12 * DAY).unwrap();
+        s.answer_offer("d", "typed", 12 * DAY).unwrap();
+        assert!(
+            !may("brief", 12) && may("brief", 13),
+            "a typed reply is an answer"
+        );
     }
 
     /// A job running since a moment ago, on the step its worker last reported.

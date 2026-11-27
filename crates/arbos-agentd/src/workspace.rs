@@ -542,7 +542,7 @@ impl Supervisor {
                                 .unwrap_or("")
                                 .to_owned();
                             let widget = v.get("widget").cloned();
-                            let _ = agent2.hook_ask_user(&q, widget.as_ref(), &sid).await;
+                            let _ = agent2.hook_ask_user(&q, widget.as_ref(), None, &sid).await;
                         }
                         let _ = std::fs::rename(&p, p.with_extension("done"));
                     }

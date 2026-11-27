@@ -1,8 +1,8 @@
-// The wallet every user has (crates/arbos-wallet): one 12-word phrase, kept in the iCloud
-// Keychain, is their TAO account and the key to their encrypted chat history. It is made on
-// the account's first encrypting device and shown once; every later device of theirs gets it
-// from iCloud Keychain (or the person types it) and opens the history with it. The relay never
-// sees it.
+// The wallet every user has (crates/arbos-wallet): one 12-word phrase is their TAO account and
+// the key to their encrypted chat history. It is made on the account's first encrypting device
+// and shown once, where the person chooses whether it also goes into their iCloud Keychain;
+// every later device of theirs gets it from there, or the person types it, and opens the
+// history with it. The relay never sees it.
 
 import Foundation
 import Security
@@ -78,37 +78,65 @@ enum ChequeCashing: Equatable {
     case refused(String)
 }
 
-/// Keychain items for the wallet. The phrase syncs through iCloud Keychain; the Matrix store
-/// key never leaves this device.
+/// Keychain items for the wallet. The phrase is kept on this device only, or in the iCloud
+/// Keychain when the person chose that; the Matrix store key never leaves this device.
 enum WalletVault {
     private static let service = "sh.arbos.ios.wallet"
 
-    private static func query(user: String) -> [String: Any] {
+    /// The keychain calls the phrase goes through. Replaced in the unit tests, whose unsigned
+    /// host has no keychain (every call there is errSecMissingEntitlement).
+    static var add: ([String: Any]) -> OSStatus = { SecItemAdd($0 as CFDictionary, nil) }
+    static var delete: ([String: Any]) -> OSStatus = { SecItemDelete($0 as CFDictionary) }
+    static var copy: ([String: Any]) -> Data? = { query in
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess ? item as? Data : nil
+    }
+
+    /// `synced`: the iCloud Keychain item, the device-only one, or (nil) whichever is there.
+    private static func query(user: String, synced: Bool?) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: "phrase:\(user)",
-            kSecAttrSynchronizable as String: true,
+            kSecAttrSynchronizable as String: synced.map { $0 as Any } ?? kSecAttrSynchronizableAny,
         ]
     }
 
-    static func phrase(user: String) -> String? {
-        var q = query(user: user)
+    private static func phrase(user: String, synced: Bool?) -> String? {
+        var q = query(user: user, synced: synced)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        return copy(q).flatMap { String(data: $0, encoding: .utf8) }
     }
 
-    /// Add only: an existing phrase is never overwritten (it may be holding money).
-    static func save(_ phrase: String, user: String) throws {
-        var add = query(user: user)
+    static func phrase(user: String) -> String? { phrase(user: user, synced: nil) }
+
+    /// Whether the phrase is in the iCloud Keychain (an account from before the choice
+    /// existed has it there).
+    static func isSynced(user: String) -> Bool { phrase(user: user, synced: true) != nil }
+
+    /// Add only: an existing phrase, synced or not, is never overwritten (it may be holding
+    /// money). Device-only unless the person chose iCloud Keychain.
+    static func save(_ phrase: String, user: String, synced: Bool = false) throws {
+        if let kept = Self.phrase(user: user), kept != phrase { throw Keychain.KeychainError.status(errSecDuplicateItem) }
+        var add = query(user: user, synced: synced)
         add[kSecValueData as String] = Data(phrase.utf8)
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(add as CFDictionary, nil)
-        if status == errSecDuplicateItem, Self.phrase(user: user) == phrase { return }
+        // A device-only phrase does not ride an encrypted backup onto another phone either.
+        add[kSecAttrAccessible as String] = synced ? kSecAttrAccessibleAfterFirstUnlock : kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = Self.add(add)
+        if status == errSecDuplicateItem, Self.phrase(user: user, synced: synced) == phrase { return }
         guard status == errSecSuccess else { throw Keychain.KeychainError.status(status) }
+    }
+
+    /// Move the phrase into the iCloud Keychain, or out of it onto this device only. The copy
+    /// is written and read back before the other is deleted: a failure leaves the phrase
+    /// where it was. Taking it out of iCloud takes it off the person's other devices too.
+    static func move(user: String, synced: Bool) throws {
+        guard let phrase = Self.phrase(user: user) else { throw Keychain.KeychainError.status(errSecItemNotFound) }
+        try save(phrase, user: user, synced: synced)
+        guard Self.phrase(user: user, synced: synced) == phrase else { throw Keychain.KeychainError.status(errSecItemNotFound) }
+        let status = delete(query(user: user, synced: !synced))
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw Keychain.KeychainError.status(status) }
     }
 
     /// Forget a phrase this device made a moment ago and never showed, when another device's
@@ -116,7 +144,7 @@ enum WalletVault {
     /// may be holding money and is left alone.
     static func discard(unshown phrase: String, user: String) {
         guard Self.phrase(user: user) == phrase else { return }
-        SecItemDelete(query(user: user) as CFDictionary)
+        _ = delete(query(user: user, synced: nil))
     }
 
     /// The random key that encrypts this device's Matrix store, made once.
@@ -196,7 +224,8 @@ extension AppModel {
 
     /// Right after the Matrix client starts. The phrase on this device opens (or, on the
     /// account's first device, sets up) the key backup. With no phrase: the first device makes
-    /// one and shows it once; a later device asks for it — it never makes a second one.
+    /// one, keeps it on this device and shows it once, where the person may put it in iCloud
+    /// Keychain; a later device asks for it — it never makes a second one.
     func ensureKeys(_ client: ArbosFFI.MatrixClient) async {
         guard let me = user else { return }
         let backup = await client.backup()
@@ -252,6 +281,16 @@ extension AppModel {
         walletPrompt = nil
         // The keys are here now: read the people chats whose rows were locked again.
         for chat in nativeRooms.keys { openChannel(chat) }
+        return nil
+    }
+
+    /// Put the phrase in the iCloud Keychain, or take it out and keep it on this device only.
+    /// Returns what went wrong, in words.
+    func setWalletSynced(_ synced: Bool) -> String? {
+        guard let me = user, (try? WalletVault.move(user: me.id, synced: synced)) != nil else {
+            return synced ? "Couldn't save your recovery phrase to iCloud Keychain. It is still on this iPhone."
+                          : "Couldn't take your recovery phrase out of iCloud Keychain. It is still there."
+        }
         return nil
     }
 
@@ -411,5 +450,75 @@ extension AppModel {
     /// Submitted earlier and not yet seen finalized.
     func isChequePending(_ bytes: String) -> Bool {
         (UserDefaults.standard.dictionary(forKey: "pendingCheques") as? [String: String])?[bytes] != nil
+    }
+}
+
+// MARK: Subnet registration card
+
+extension AppModel {
+    /// Where this phone stands with a registration card.
+    enum RegistrationState: Equatable {
+        case quoting
+        /// The fee read from the chain and the most this phone will sign for (fee + 10%).
+        case quoted(chatId: Id, SubnetRegistration, fee: UInt64, limit: UInt64)
+        case paying
+        case failed(String)
+    }
+
+    /// Register tapped: read the fee so the person approves a number, not a blank.
+    func quoteRegistration(chatId: Id, approvalId: String, _ registration: SubnetRegistration) {
+        guard registrations[approvalId] == nil else { return }
+        guard walletPhrase != nil else {
+            registrations[approvalId] = .failed("Set up your wallet first.")
+            return
+        }
+        registrations[approvalId] = .quoting
+        guard let work = accountWork() else { return }
+        Task { @MainActor in
+            do {
+                guard let fee = UInt64(try await walletRegistrationFee(netuid: registration.netuid)) else {
+                    throw WalletError.Chain("The chain gave no fee for that subnet.")
+                }
+                guard accountLifetime.accepts(work.owner) else { return }
+                // 10% headroom: the fee moves every block, and the chain takes only the fee.
+                let (limit, overflow) = fee.addingReportingOverflow(fee / 10)
+                registrations[approvalId] = overflow ? .failed("That fee is not a real amount.")
+                    : .quoted(chatId: chatId, registration, fee: fee, limit: limit)
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
+                registrations[approvalId] = .failed(walletWords(error))
+            }
+        }
+    }
+
+    /// The price was confirmed: sign exactly this subnet, hotkey and limit, send it, and answer
+    /// the card only when the chain has finalized it.
+    func payRegistration(chatId: Id, approvalId: String, _ registration: SubnetRegistration, limit: UInt64) {
+        guard case .quoted = registrations[approvalId], let phrase = walletPhrase, let work = accountWork() else { return }
+        registrations[approvalId] = .paying
+        Task { @MainActor in
+            do {
+                let bytes = try await walletSignRegistration(phrase: phrase, netuid: registration.netuid,
+                                                             hotkey: registration.hotkey, limitRao: String(limit))
+                var since: UInt64?
+                // The signature is good for 64 blocks (~13 min); 150 looks at 6 s cover it.
+                for _ in 0..<150 {
+                    guard accountLifetime.accepts(work.owner) else { return }
+                    switch try await walletCashCheque(bytes: bytes, since: since) {
+                    case .paid(let block):
+                        answerRegistrationCard(chatId: chatId, approvalId: approvalId, registration, limit: limit, block: block)
+                        registrations[approvalId] = nil
+                        return
+                    case .pending(let s):
+                        since = s
+                        try await Task.sleep(nanoseconds: 6_000_000_000)
+                    }
+                }
+                registrations[approvalId] = .failed("The chain hasn't confirmed it yet. Check your wallet before trying again.")
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
+                registrations[approvalId] = .failed(walletWords(error))
+            }
+        }
     }
 }

@@ -129,7 +129,10 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    match a.hook_ask_user(&q, b.get("widget"), &sid).await {
+    match a
+        .hook_ask_user(&q, b.get("widget"), b.get("offer"), &sid)
+        .await
+    {
         Ok(id) => Json(json!({ "ok": true, "question_id": id })).into_response(),
         Err(e) => err(e),
     }

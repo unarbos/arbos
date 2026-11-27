@@ -209,7 +209,23 @@ final class AppModel: ObservableObject {
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
-    @Published private(set) var user: AuthUser?
+    @Published private(set) var user: AuthUser? {
+        // Rows are read as the signed-in person (a poll that hides its voters hands over the
+        // reader's own vote only), so a change of who that is reads the open chats again.
+        // Through `emitSnapshot`, which reads a long chat off the main thread. Not the project
+        // documents (they hold no transcript), and not on sign-out: there is no reader then,
+        // and the documents are on their way out.
+        didSet {
+            guard oldValue?.id != user?.id else { return }
+            // What the last account's relay takes says nothing about this one's: off until
+            // its `/me` answers (and off for good at sign-out).
+            PollOptionsFlag.shared.set(false)
+            guard user != nil else { return }
+            for key in docs.keys where rooms[key]?.roomChat != projectDocChatId {
+                emitSnapshot(key)
+            }
+        }
+    }
     #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
     func setFixtureUser(_ who: AuthUser) { user = who }
@@ -992,6 +1008,8 @@ final class AppModel: ObservableObject {
     @Published var shellGrants: [Id: [ShellGrant]] = [:]
     /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
     @Published var handoff: [String: HandoffState] = [:]
+    /// Subnet registration cards: where this phone's signing stands, by approval id.
+    @Published var registrations: [String: RegistrationState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -1771,6 +1789,8 @@ final class AppModel: ObservableObject {
             // picture is a solid disc with nothing to animate, so there is no flag to read.
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Whether the relay takes the newer poll fields (absent on an older relay = no).
+            PollOptionsFlag.shared.set(features?.poll_options ?? false)
             // Who may add me to groups (absent on an older relay = anyone).
             if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
                 groupAddPolicy = policy
@@ -2046,6 +2066,7 @@ final class AppModel: ObservableObject {
         projectSecrets = [:]
         shellGrants = [:]
         handoff = [:]
+        registrations = [:]
         secretsBusy = false
         devices = []
         devicesLoaded = false
@@ -2423,6 +2444,7 @@ final class AppModel: ObservableObject {
         let started = Date()
         // Import and the Loro → Message conversion run off the main thread; the
         // main actor only receives finished docs and message arrays.
+        let viewer = myUserId
         let docs: [(DeviceStore.SavedDoc, CoreChatDoc, [Message]?)] = await Task.detached(priority: .userInitiated) {
             saved.compactMap { s in
                 let doc = CoreChatDoc(key: s.key)
@@ -2432,7 +2454,7 @@ final class AppModel: ObservableObject {
                     NSLog("store: snapshot for \(s.key) unreadable: \(error.localizedDescription)")
                     return nil
                 }
-                let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll()
+                let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll(as: viewer)
                 if let messages, AppModel.storedCopyIsBlank(rows: messages.count, docCount: doc.count, cursor: s.cursor) {
                     // Resuming at the saved cursor would fetch nothing and leave the chat
                     // blank for good; start the room from scratch instead.
@@ -2670,7 +2692,7 @@ final class AppModel: ObservableObject {
                 peopleChats.append(clone)
             }
             // Store-restore shape: the doc and its decoded list land before the room starts.
-            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll(as: myUserId)))
             // No relay in the rig: the socket would redial forever and flap the link
             // (each flap publishes `caughtUp`). The doc's change handler stays.
             self.rooms[key]?.stop()
@@ -2723,7 +2745,7 @@ final class AppModel: ObservableObject {
             }
         }
         doc.commit()
-        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll()))
+        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll(as: myUserId)))
         rooms[chatId]?.stop()
         caughtUp.insert(chatId)
     }
@@ -2884,6 +2906,24 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        room.onRebuild = { [weak self] error in
+            guard let self else { return }
+            // The relay will never take one of this chat's pushes, and everything written
+            // since depends on it. The room (already stopped) and its document go, with the
+            // saved copy and the "not sent yet" marks; a new room on an empty document reads
+            // the chat back from the relay. The rows on screen stay until it has.
+            self.rooms[key] = nil
+            self.docs[key] = nil
+            self.unacked[key] = nil
+            self.pushRefused.remove(key)
+            self.pushRefusalText[key] = nil
+            self.pushRefusalReason[key] = nil
+            self.roomRestoredCursors[key] = nil
+            self.caughtUp.remove(key)
+            self.forgetDoc(key)
+            self.fail(error)
+            self.ensureRoom(projectId: projectId, key: key, roomChat: roomChat)
+        }
         rooms[key] = room
         roomCreatedAt[key] = Date()
         if let effective {
@@ -3042,14 +3082,15 @@ final class AppModel: ObservableObject {
         // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
         // is thread-safe — and applied when it is back, unless a newer read superseded it.
         if doc.count < Self.asyncSnapshotMinRows {
-            applySnapshot(chatId, list: doc.readAll())
+            applySnapshot(chatId, list: doc.readAll(as: myUserId))
             return
         }
+        let viewer = myUserId
         Task.detached(priority: .userInitiated) { [weak self] in
             #if DEBUG
             let t0 = Date()
             #endif
-            let list = doc.readAll()
+            let list = doc.readAll(as: viewer)
             #if DEBUG
             PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
             #endif
@@ -3114,7 +3155,7 @@ final class AppModel: ObservableObject {
         var needSnapshot = false
         let pendingIds = unacked[chatId] ?? []
         for ix in indexes.sorted() {
-            guard var m = doc.readMessage(ix) else { continue }
+            guard var m = doc.readMessage(ix, as: myUserId) else { continue }
             if m.role == .user { m.pending = pendingIds.contains(m.id) }
             if ix < list.count, list[ix].id == m.id {
                 list[ix] = m
@@ -4270,8 +4311,12 @@ final class AppModel: ObservableObject {
         }
         do {
             if let poll {
+                // A relay from before the poll options refuses the newer shape: the older one.
+                let posted = poll.posted(relayTakesOptions: PollOptionsFlag.shared.on)
                 try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
-                                          multiple: poll.multiple, deviceId: deviceId, author: author, mentions: mentions)
+                                          multiple: poll.multiple, showVoters: posted.showVoters,
+                                          closesInMs: posted.closesInMs, deviceId: deviceId,
+                                          author: author, mentions: mentions)
             } else {
                 try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                           author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
@@ -6139,6 +6184,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Close my own poll, now: it keeps its counts and takes no more votes.
+    func closePoll(chatId: Id, messageId: Id) {
+        guard let me = myUserId, let doc = docs[chatId] else { return }
+        do {
+            try doc.closePoll(messageId: messageId, sender: me)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail("close the poll", error)
+        }
+    }
+
     /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
     /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
     /// relay-signed row. No push notification. In a people group, this device also writes a
@@ -6321,7 +6378,7 @@ final class AppModel: ObservableObject {
         if let published = messages[chatId] {
             list = published
         } else if let doc = docs[chatId], doc.count > 0 {
-            list = doc.readAll()
+            list = doc.readAll(as: myUserId)
         } else {
             list = []
         }
@@ -6337,7 +6394,7 @@ final class AppModel: ObservableObject {
         } else if let rows = channelRows[chatId] {
             list = rows
         } else if let doc = docs[chatId], doc.count > 0 {
-            list = doc.readAll()
+            list = doc.readAll(as: myUserId)
         } else {
             list = []
         }
@@ -6848,13 +6905,37 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A registration this phone signed is in a finalized block (`Sync/Wallet.swift`): answer
+    /// its card with what was signed, so the agent learns it from the device that did it.
+    func answerRegistrationCard(chatId: Id, approvalId: String, _ registration: SubnetRegistration, limit: UInt64, block: String) {
+        markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["approve"])
+        guard let doc = docs[chatId] else { return }
+        let payload: [String: Any] = [
+            "approvalId": approvalId,
+            "registration": ["netuid": Int(registration.netuid), "hotkey": registration.hotkey,
+                             "limit_rao": String(limit), "block": block] as [String: Any],
+        ]
+        try? doc.pushCommand("approve", payload: payload, device: deviceId)
+        doc.commit()
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
+        var registration: SubnetRegistration?
         for m in messages[chatId] ?? [] {
             for p in m.parts {
-                if case .question(_, let q) = p, q.questionId == questionId { secretRequestId = q.secretRequestId }
+                if case .question(_, let q) = p, q.questionId == questionId {
+                    secretRequestId = q.secretRequestId
+                    registration = q.registration
+                }
             }
+        }
+        // A registration is not approved by a tap: the tap asks for the price, the price is
+        // confirmed, and the card is answered only once the chain has it (`Sync/Wallet.swift`).
+        if let registration, choice == "approve" {
+            quoteRegistration(chatId: chatId, approvalId: approvalId, registration)
+            return
         }
         markQuestionAnswered(chatId: chatId, questionId: questionId, answer: [choice])
         let approve = choice != "deny" && choice != "reject"
@@ -6993,7 +7074,7 @@ final class AppModel: ObservableObject {
         replyRef: ReplyRef? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
-        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
+        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1, as: myUserId), row.id == messageId {
             row.pending = true
             var next = messages
             next[chatId, default: []].append(row)

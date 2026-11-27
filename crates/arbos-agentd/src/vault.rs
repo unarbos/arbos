@@ -649,6 +649,7 @@ pub fn tool_specs() -> Vec<Value> {
         alias_request,
     ];
     out.extend(crate::handoff::tool_specs());
+    out.extend(crate::register::tool_specs());
     out
 }
 

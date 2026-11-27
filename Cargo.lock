@@ -581,6 +581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subxt",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -611,6 +612,20 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "arbos-subnets"
+version = "0.6.424"
+dependencies = [
+ "anyhow",
+ "hex",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "twox-hash 2.1.5",
 ]
 
 [[package]]

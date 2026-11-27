@@ -643,6 +643,7 @@ impl Db {
                 "secrets",
                 "secret_access",
                 "secret_requests",
+                "approval_requests",
                 "user_keys",
                 "user_secrets_settings",
                 "user_pins",

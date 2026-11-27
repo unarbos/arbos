@@ -256,6 +256,52 @@ fn index_json(state: &AppState, principal: &Principal, s: &Skill) -> Value {
     })
 }
 
+/// The skills this relay ships (`crates/arbos-relay/skills/`): how playbooks work, and the
+/// playbooks themselves.
+const BUILT_IN: &[&str] = &[
+    include_str!("../skills/playbooks.md"),
+    include_str!("../skills/playbook-morning-brief.md"),
+    include_str!("../skills/playbook-weekly-planner.md"),
+    include_str!("../skills/playbook-watchlist.md"),
+];
+
+/// File the built-in skills, at start. They are shared and belong to no project, which is what
+/// lets every box read them and no caller write them ([`ownerless`]).
+///
+/// A built-in whose text changed in a release replaces the stored one. A slug that somebody's
+/// own skill already holds is theirs: the built-in is skipped and the relay says so, because a
+/// slug is unique across the relay and overwriting it would put this text in their library.
+pub fn seed_built_in(db: &crate::db::Db) -> anyhow::Result<()> {
+    for md in BUILT_IN {
+        let mut skill = Skill::from_markdown(md);
+        skill.shared = true;
+        match db.skill(&skill.slug)? {
+            None => {
+                skill.id = ulid();
+                skill.created_at = now_ms();
+                skill.updated_at = skill.created_at;
+                db.insert_skill(&skill)?;
+            }
+            Some(theirs) if theirs.origin_project_id.is_some() => {
+                tracing::warn!(slug = %skill.slug, "built-in skill not filed: the slug is taken");
+            }
+            Some(old) => {
+                let same = old.body == skill.body
+                    && old.name == skill.name
+                    && old.description == skill.description
+                    && old.when_to_use == skill.when_to_use
+                    && old.tags == skill.tags
+                    && old.shared;
+                if !same {
+                    skill.id = old.id;
+                    db.update_skill(&skill)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Queue `skills_changed` for every box so the index cache refreshes before its 60 s timer.
 fn notify_boxes(state: &AppState, slug: &str) {
     if let Ok(ids) = state.db.sandbox_project_ids() {
@@ -1528,5 +1574,57 @@ mod tests {
 
     fn slugs(skills: &[Skill]) -> Vec<String> {
         skills.iter().map(|s| s.slug.clone()).collect()
+    }
+    /// The built-in playbooks: every box reads them, filing them twice changes nothing, and a
+    /// slug somebody already uses is left to them.
+    #[tokio::test]
+    async fn built_in_skills_reach_every_box_and_never_overwrite_a_users_own() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let hers = project_of(&state, &alice, "Comms");
+        skill_with(
+            &state,
+            Some(&hers),
+            "playbook-watchlist",
+            false,
+            ALICES_BODY,
+        );
+
+        seed_built_in(&state.db).expect("seed");
+        let slugs = |scope: &SkillScope| -> Vec<String> {
+            let mut v: Vec<String> = state
+                .db
+                .list_skills(scope)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.slug)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            slugs(&SkillScope::Project("somebody-elses".into())),
+            [
+                "playbook-morning-brief",
+                "playbook-weekly-planner",
+                "playbooks"
+            ],
+            "a box that owns nothing still reads the built-ins, and not Alice's own skill"
+        );
+        let watch = state.db.skill("playbook-watchlist").unwrap().unwrap();
+        assert_eq!(watch.body, ALICES_BODY, "her skill keeps its slug and text");
+
+        let before = state.db.skills_rev(&SkillScope::Everything).unwrap();
+        seed_built_in(&state.db).expect("seed again");
+        assert_eq!(
+            state.db.skills_rev(&SkillScope::Everything).unwrap(),
+            before,
+            "an unchanged built-in is not rewritten, so no box refetches its index"
+        );
+
+        let brief = state.db.skill("playbook-morning-brief").unwrap().unwrap();
+        assert!(brief.origin_project_id.is_none() && brief.shared);
+        assert!(brief.description.starts_with("Playbook:") && !brief.body.is_empty());
+        assert!(!brief.when_to_use.is_empty() && brief.tags.contains(&"playbook".to_owned()));
     }
 }

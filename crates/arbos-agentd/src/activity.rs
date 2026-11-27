@@ -97,6 +97,7 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
         "submit_feedback" => Some("Filing your feedback".into()),
         "publish_site" | "unpublish_site" | "list_sites" => Some("Publishing the site".into()),
         "connector_call" | "connectors_list" => Some("Checking your connected accounts".into()),
+        "bittensor_subnet" => Some("Reading up on the subnet".into()),
         "arbos_app" => Some(
             match args
                 .get("cmd")
@@ -388,6 +389,7 @@ fn code_label(code: &str) -> Option<String> {
         "vault_list" | "vault_request" | "secrets_list" | "secrets_request" | "egress"
         | "browser_fill" => "Using your secrets",
         "connector_call" | "connectors_list" => "Checking your connected accounts",
+        "bittensor_subnet" => "Reading up on the subnet",
         "web_search" => "Searching the web",
         "web_fetch" => "Reading a web page",
         "submit_feedback" => "Filing your feedback",

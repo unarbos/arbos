@@ -668,8 +668,18 @@ struct Question: Equatable {
     /// Secret hand-off: the request card (`payload.kind = secret_offer`) — Name + masked
     /// Value + Save, no answer rows. The payload carries names only.
     var secretOffer: SecretOffer? = nil
+    /// A subnet registration card (`payload.kind = subnet_register`): Register is answered by
+    /// this phone signing with the wallet, not by a plain approve.
+    var registration: SubnetRegistration? = nil
 
     var hasChoices: Bool { !options.isEmpty }
+}
+
+/// What this phone signs for a subnet registration card: the two fields the card names. The
+/// transaction is built here from them; nothing else in the payload is signed.
+struct SubnetRegistration: Equatable {
+    var netuid: UInt16
+    var hotkey: String
 }
 
 /// What the secret request card needs from its payload (secret hand-off, 2026-10-26).
@@ -688,11 +698,27 @@ struct Poll: Equatable {
     var options: [ChoiceOption]
     /// How many options one person may hold: 1, or the option count for "multiple answers".
     var max: Int
-    /// Option id → the senders (`user:<id>`) who hold it.
+    /// Option id → the senders (`user:<id>`) this phone may name: everyone, unless the author
+    /// turned "Show who voted" off, and then my own vote and nobody else's. The core hands
+    /// over no other name (`arbos_core::doc::project_poll`).
     var votes: [String: [String]]
+    /// Option id → how many hold it, and how many people voted.
+    var counts: [String: Int] = [:]
+    var voters = 0
+    /// "Show who voted", the author's choice, fixed with the poll. nil on a poll from before
+    /// the choice existed: it names its voters as it always has, and cannot be closed.
+    var showVoters: Bool? = nil
+    /// When it closes or closed (ms since the epoch); nil runs until its author closes it.
+    var deadline: Int64? = nil
 
     var multiple: Bool { max > 1 }
-    var voters: Int { Set(votes.values.joined()).count }
+    /// Its author can close it (every poll posted since closing exists).
+    var closable: Bool { showVoters != nil }
+
+    /// The core's one rule (`arbos_core::poll::closed`); `now` is `pollNowMs()`, the relay's
+    /// clock as this phone knows it. The counts
+    /// are the core reducer's, which goes by each vote's own time.
+    func closed(now: Int64) -> Bool { pollClosed(deadline: deadline, nowMs: now) }
 
     /// The option ids `sender` holds, in the poll's order.
     func picked(by sender: String?) -> [String] {
@@ -708,9 +734,46 @@ struct Poll: Equatable {
         return multiple ? mine + [id] : [id]
     }
 
-    /// The card's foot: "Ana's poll · 3 voted · pick one".
-    func foot(by name: String?) -> String {
-        "\(name.map { "\($0)'s poll" } ?? "Your poll") · \(voters) voted · \(multiple ? "pick any" : "pick one")"
+    /// The most voters the line under the card names; the rest are a count.
+    static let votersNamed = 12
+
+    /// The line that lists an option's voters: "Lisbon: Ana, Ben and 3 others". `names` is
+    /// one entry per voter, nil for someone the reader is not shown by name — no longer in
+    /// the chat, or blocked. At most `votersNamed` names, so a large group stays one line
+    /// or two.
+    static func voterLine(label: String, names: [String?]) -> String {
+        let named = names.compactMap { $0 }.prefix(votersNamed)
+        let others = names.count - named.count
+        if names.isEmpty { return "\(label): no votes" }
+        let rest = others == 0 ? nil : named.isEmpty ? "\(others) \(others == 1 ? "person" : "people")"
+            : "\(others) \(others == 1 ? "other" : "others")"
+        let list = named.joined(separator: ", ")
+        return "\(label): " + [list.isEmpty ? nil : list, rest].compactMap { $0 }.joined(separator: " and ")
+    }
+
+    /// The card's foot, in the core's words (`arbos_core::poll::foot`): "Ana's poll · 3 voted ·
+    /// pick one · names shown · closes in 2 h", or "… · closed" once it is.
+    func foot(by name: String?, now: Int64 = pollNowMs()) -> String {
+        pollFoot(by: name, voted: UInt32(voters), multiple: multiple, showVoters: showVoters == true,
+                 closed: closed(now: now), leftMs: deadline.map { $0 - now })
+    }
+}
+
+/// Remote flag `features.poll_options` from `GET /me`: the relay takes polls with "Show who
+/// voted", a duration and a close. Off on a relay from before them (it refuses such a poll,
+/// and a refused push undoes what is unsent in the chat): the sheet then offers none of the three and
+/// the poll is posted in the older shape.
+///
+/// Held in memory only, for the account and relay that answered: off at every launch until
+/// `/me` answers, and off again at sign-out. A stored copy would outlive the relay it came
+/// from and let a poll be posted to one that refuses it.
+final class PollOptionsFlag: ObservableObject {
+    static let shared = PollOptionsFlag()
+    @Published private(set) var on = false
+
+    func set(_ value: Bool) {
+        guard value != on else { return }
+        on = value
     }
 }
 
@@ -719,6 +782,17 @@ struct PollDraft: Equatable {
     var question: String
     var options: [String]
     var multiple: Bool
+    /// "Show who voted". Off: the card shows counts only.
+    var showVoters = false
+    /// How long it runs from the send, nil until its author closes it.
+    var closesInMs: Int64? = nil
+
+    /// The two newer fields as they are posted: what the sheet holds where the relay takes
+    /// them (`relayTakesOptions`, `PollOptionsFlag`), nothing where it does not — a poll of
+    /// the older shape, which every relay stores.
+    func posted(relayTakesOptions: Bool) -> (showVoters: Bool?, closesInMs: Int64?) {
+        relayTakesOptions ? (showVoters, closesInMs) : (nil, nil)
+    }
 }
 
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
@@ -1742,7 +1816,11 @@ enum DocJSON {
             guard let question = str(pm["question"]), options.count >= 2 else { return .unknown(id: id) }
             let votes = (pm["votes"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
             return .poll(id: id, poll: Poll(question: question, options: options,
-                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes))
+                                            max: (pm["max"] as? NSNumber)?.intValue ?? 1, votes: votes,
+                                            counts: (pm["counts"] as? [String: NSNumber] ?? [:]).mapValues(\.intValue),
+                                            voters: (pm["voters"] as? NSNumber)?.intValue ?? 0,
+                                            showVoters: pm["showVoters"] as? Bool,
+                                            deadline: (pm["deadline"] as? NSNumber)?.int64Value))
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))
@@ -1844,6 +1922,11 @@ enum DocJSON {
             options = []
             if state == "approved" { picked = ["saved"] }
         }
+        var registration: SubnetRegistration?
+        if str(payload?["kind"]) == "subnet_register", let n = payload?["netuid"] as? Int,
+           let netuid = UInt16(exactly: n), let hotkey = str(payload?["hotkey"]), !hotkey.isEmpty {
+            registration = SubnetRegistration(netuid: netuid, hotkey: hotkey)
+        }
         var title = (str(pm["title"]) ?? "Approve this?").trimmingCharacters(in: .whitespaces)
         if offer == nil, !title.hasSuffix("?") {
             while title.hasSuffix(".") { title.removeLast() }
@@ -1860,7 +1943,8 @@ enum DocJSON {
             approvalId: approvalId,
             secretRequestId: str(payload?["secretRequestId"]),
             shellCard: shellCard,
-            secretOffer: offer
+            secretOffer: offer,
+            registration: registration
         )
     }
 

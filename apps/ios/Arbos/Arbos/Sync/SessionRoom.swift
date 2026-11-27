@@ -51,6 +51,10 @@ final class SessionRoom {
     /// `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`) and, on a
     /// block, the other party. Read by `onPushRefused`; nil from a relay that predates it.
     private(set) var lastRefusal: PushRefusalWhy?
+    /// The relay refused a push for good and the session let go of everything unsent
+    /// (`RoomAction.rebuild`). This room has stopped: its document still holds the refused
+    /// writes, so the owner opens the chat again on an empty one and shows the error.
+    var onRebuild: ((UserError) -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
     /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
     /// sent while it is focused so peers can lift their own bubbles to full opacity.
@@ -443,6 +447,8 @@ final class SessionRoom {
             }
             session.onHeal(bytes: missing)
         case .scheduleReconnect(let afterMs):
+            // A room stopped by `.rebuild` just above has been replaced; it reports nothing more.
+            guard !stopped else { return }
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
             if code == "state_timeout" { stateTimeouts += 1 }
@@ -459,6 +465,12 @@ final class SessionRoom {
             lastError = "\(roomChat): \(code)" + (reason.map { " (\($0))" } ?? "")
             lastRefusal = PushRefusalWhy(code: code, reason: reason, byHandle: byHandle, byName: byName)
             onPushRefused?()
+        case .rebuild(_, let code, let message, let verb, let why):
+            NSLog("relay room \(roomChat): push refused for good (\(code): \(message)); reading the room back")
+            lastError = "\(roomChat): \(code)"
+            // Stopped before the owner hears: this document must never dial again.
+            stop()
+            onRebuild?(UserError(verb: verb, class: .refused(message: why), raw: "\(code): \(message)"))
         case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),

@@ -841,7 +841,6 @@ impl PrimeAdapter {
             ),
             ("ARBOS_MCP_TOKEN".into(), self.cfg.subagent_mcp_token()),
             ("ARBOS_MCP_URL".into(), self.cfg.mcp_url()),
-            ("ARBOS_BOX_TOKEN".into(), self.cfg.box_token.clone()),
             (
                 "ARBOS_MODEL_PROXY_URL".into(),
                 format!("{}/v1", self.cfg.proxy_base()),
@@ -1140,7 +1139,6 @@ impl PiAdapter {
             ("ARBOS_HOOK_URL".into(), cfg.hook_base()),
             ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token_for_role(role)),
             ("ARBOS_MCP_URL".into(), cfg.mcp_url()),
-            ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
             // D86: the extension applies the script guardrails (default deadline) when on.
             (
                 "ARBOS_CODE_MODE".into(),
@@ -1828,6 +1826,7 @@ impl ClaudeCodeAdapter {
         let mut cmd = tokio::process::Command::new(&self.cfg.claude_bin);
         cmd.args(&args)
             .current_dir(cwd)
+            .env_remove(crate::rpc_child::BOX_TOKEN_ENV)
             .env("CLAUDE_CONFIG_DIR", self.cfg.state_dir.join("claude"))
             .env("ANTHROPIC_BASE_URL", self.cfg.proxy_base())
             .env(

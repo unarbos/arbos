@@ -79,6 +79,18 @@ impl Db {
         })
     }
 
+    /// Put a user at the head of the line (an operator's admit), adding them if they are not on it.
+    pub fn waitlist_to_front(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO waitlist(user_id, created_at) VALUES (?1, 0)
+                 ON CONFLICT(user_id) DO UPDATE SET created_at = 0",
+                params![user_id],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn is_waitlisted(&self, user_id: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row(

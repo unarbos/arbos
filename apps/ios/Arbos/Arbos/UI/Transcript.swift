@@ -138,6 +138,11 @@ struct Quote: Equatable, Hashable {
     /// The message flattened to one line (`oneLine`) and cut to `maxChars`; an attachment-only
     /// message names its file, an empty one says "Message".
     static func line(of message: Message, maxChars: Int) -> String {
+        // A poll is quoted by its question, not by the list of options its text part spells
+        // out (tester report, 2026-11-14).
+        if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+            return firstWords("Poll: \(poll.question)", maxChars: maxChars)
+        }
         var line = oneLine(message.plainText)
         if line.isEmpty {
             for part in message.parts {
@@ -415,7 +420,8 @@ enum Transcript {
     /// Rows that can carry a message's reaction chips: prose and media.
     static func bearsReactions(_ kind: RowKind) -> Bool {
         switch kind {
-        case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+        // A poll too: its menu offers the reaction row, and the Mac draws reactions on it.
+        case .user, .other, .member, .assistant, .image, .file, .voiceMemo, .poll: return true
         default: return false
         }
     }
@@ -580,6 +586,10 @@ enum Transcript {
                 // A poll is the card and nothing else: its text part is the same poll in plain
                 // words, for builds without polls.
                 if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+                    // Whose poll decides its side and who is offered "Close poll". In a people
+                    // chat that takes knowing who I am: until the account has loaded, no poll
+                    // is mine.
+                    let mine = people ? (me != nil && message.sender == me) : mine
                     chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
                                      kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone",
                                                  handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
@@ -1604,6 +1614,8 @@ struct RowView: View, Equatable {
 
     /// Chip long-press: which emoji's sender list is open under the chips.
     @State private var selectedReactionEmoji: String? = nil
+    /// The poll option whose voters are listed under the card (a tap on its count).
+    @State private var pollVotersOption: String? = nil
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
@@ -2039,26 +2051,15 @@ struct RowView: View, Equatable {
                 }
             }
         case .poll(let poll, let by, let handle, let avatar):
-            // Mine sits right at my bubble's cap; someone else's after their avatar, like their bubble.
-            let card = QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
-                                    options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
-                                    multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: true,
-                                    onPick: { id in
-                                        guard let me = model.myUserId else { return }
-                                        model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
-                                    },
-                                    foot: poll.foot(by: by))
-            if by == nil {
-                card.frame(maxWidth: maxBubble, alignment: .trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            } else {
-                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                    avatarColumn {
-                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                    }
-                    card.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            // A poll with a time still to run redraws by itself, so the card closes and its
+            // "closes in" line moves without waiting for the row to change: every 30 s, on a
+            // beat that lands on the closing time itself.
+            if let deadline = poll.deadline, !poll.closed(now: pollNowMs()) {
+                TimelineView(.periodic(from: Date(timeIntervalSince1970: Double(deadline % 30_000) / 1000), by: 30)) { _ in
+                    pollCard(poll, by: by, handle: handle, avatar: avatar)
                 }
+            } else {
+                pollCard(poll, by: by, handle: handle, avatar: avatar)
             }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
@@ -2250,6 +2251,68 @@ struct RowView: View, Equatable {
         }
         .padding(.leading, reactionLeading)
         .accessibilityLabel("\(reaction.emoji) from \(names)")
+    }
+
+    /// A poll (`docs/polls.md`): the question card's row — after the avatar lane, the cap
+    /// width of an incoming bubble. Open, a tap on a row votes; closed, it shows its final
+    /// counts and takes no tap. Where its author chose "Show who voted", a tap on a count
+    /// lists that option's voters under the card, as a held reaction chip does. Its maker
+    /// closes or deletes it from the hold menu (`MessageMenu`).
+    private func pollCard(_ poll: Poll, by: String?, handle: String, avatar: String?) -> some View {
+        let lane = Theme.memberLane(composerInset: composerInset)
+        let closed = poll.closed(now: pollNowMs())
+        let namesFor = poll.showVoters != false ? poll.options.first { $0.id == pollVotersOption } : nil
+        let card = QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                                options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.counts[$0.id] ?? 0)") },
+                                multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: !closed,
+                                onPick: { id in
+                                    // A hold that opened the message menu is not a vote.
+                                    guard let me = model.myUserId, !ChatGestures.heldIntoMenu,
+                                          !poll.closed(now: pollNowMs()) else { return }
+                                    model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                                },
+                                foot: poll.foot(by: by),
+                                // Like a vote, not the lifted finger of a hold that opened the
+                                // message menu.
+                                onHint: poll.showVoters != false ? { id in
+                                    guard !ChatGestures.heldIntoMenu else { return }
+                                    pollVotersOption = pollVotersOption == id ? nil : id
+                                } : nil)
+        // Mine sits right at my bubble's cap; someone else's after their avatar, like their bubble.
+        return VStack(alignment: by == nil ? .trailing : .leading, spacing: 4) {
+            if by == nil {
+                card.frame(maxWidth: maxBubble, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    avatarColumn {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    card.frame(maxWidth: maxBubble - lane, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let option = namesFor {
+                Text(Poll.voterLine(label: option.label, names: (poll.votes[option.id] ?? []).map(pollVoterName)))
+                    .font(theme.font(12))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: by == nil ? .trailing : .leading)
+                    .padding(.leading, by == nil ? 0 : lane)
+                    .accessibilityIdentifier("poll-voters")
+            }
+        }
+    }
+
+    /// A poll voter's name for the list under the card, from the chat's roster: nil for
+    /// someone who is no longer a member or whom I blocked — they are counted, not named.
+    private func pollVoterName(_ sender: String) -> String? {
+        if sender == model.myUserId { return "You" }
+        guard let member = model.peopleChat(chatId)?.members.first(where: { $0.member == sender }),
+              BlockRow.entry(in: model.blocked, id: member.id, handle: member.handle) == nil
+        else { return nil }
+        return member.displayName
     }
 
     /// Display name for a reaction sender id (`user:…` / `agent:…`).

@@ -1610,6 +1610,7 @@ mod tests {
             last_run_at: None,
             next_run_at: Some(now + 3_600_000),
             fire_url: None,
+            recent_runs: Vec::new(),
         };
         let s = routine_status(&r, now);
         assert!(s.starts_with("Webhook · next "), "{s}");

@@ -1443,12 +1443,17 @@ public struct MeFeaturesDto: Codable {
 	/// Voice mode — spoken replies, the voice picker, reply playback (default off since
 	/// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
 	public let voice_mode: Bool?
+	/// The relay takes polls with a visibility flag, a duration and a close (`docs/polls.md`
+	/// §11). Absent on a relay from before them, which refuses such a poll: a client then
+	/// posts polls of the older shape and offers none of the three.
+	public let poll_options: Bool?
 
-	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?, voice_mode: Bool?) {
+	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?, voice_mode: Bool?, poll_options: Bool?) {
 		self.vault_connect = vault_connect
 		self.leaf_avatars = leaf_avatars
 		self.leaf_lottie = leaf_lottie
 		self.voice_mode = voice_mode
+		self.poll_options = poll_options
 	}
 }
 
@@ -2145,8 +2150,11 @@ public struct RoutineDto: Codable {
 	public let next_run_at: Int64?
 	/// Webhook routines only (omitted otherwise).
 	public let fire_url: String?
+	/// Status of each of the latest runs, newest first, at most seven: how the routine has been
+	/// going, without a history request per routine.
+	public let recent_runs: [String]?
 
-	public init(id: String, project_id: String, chat_id: String, name: String, prompt: String, enabled: Bool, created_at: Int64, last_run_at: Int64?, next_run_at: Int64?, fire_url: String?) {
+	public init(id: String, project_id: String, chat_id: String, name: String, prompt: String, enabled: Bool, created_at: Int64, last_run_at: Int64?, next_run_at: Int64?, fire_url: String?, recent_runs: [String]?) {
 		self.id = id
 		self.project_id = project_id
 		self.chat_id = chat_id
@@ -2157,6 +2165,7 @@ public struct RoutineDto: Codable {
 		self.last_run_at = last_run_at
 		self.next_run_at = next_run_at
 		self.fire_url = fire_url
+		self.recent_runs = recent_runs
 	}
 }
 

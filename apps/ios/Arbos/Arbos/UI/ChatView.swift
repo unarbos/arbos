@@ -247,6 +247,8 @@ struct ChatSession: View {
     /// Rows added per step. Small on purpose: a step builds and lays out this many
     /// bubbles in one frame (≈4 ms each in a Debug simulator build).
     static let windowStep = 30
+    /// Rows a reveal's window keeps above its target (see `includeInWindow`).
+    static let revealRowsAbove = 5
     /// Most rows the view tree holds while reading history. Past this, each step
     /// that adds older rows at the top also drops the same number of newest rows
     /// below the viewport, and the first row on screen is re-pinned, so the cost
@@ -416,6 +418,8 @@ struct ChatSession: View {
     @State private var showProfile = false
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
     @State private var confirmUnblock = false
+    /// The poll "Close this poll?" is asking about (hold menu → Close poll).
+    @State private var closingPoll: Id?
     @State private var showSearch = false
     /// The result row whose tap just closed the bar (one run-loop turn), so the transcript's
     /// own close-on-tap steps aside ([feedback iphone-search-close-2026-10-28]).
@@ -669,7 +673,12 @@ struct ChatSession: View {
         // rows the stack has just built.
         let below = Self.windowStep / 2
         let skip = max(0, all.count - ix - 1 - below)
-        let count = min(all.count - skip, Self.windowInitial)
+        // A short slice, not a full `windowInitial`: with 80 rows slid in under a scroll offset
+        // carried over from the stack it replaced, the lazy stack could re-place its rows
+        // forever inside one transaction once the reveal had arrived (main thread never
+        // returns; sampled in `LazySubviewPlacements.updateValue`). The reader grows it by
+        // scrolling, as from any window.
+        let count = min(all.count - skip, below + 1 + Self.revealRowsAbove)
         revealTrace("include-in-window",
                     "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
                     + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
@@ -1546,7 +1555,8 @@ struct ChatSession: View {
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true,
-                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty),
+                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty,
+                                                canClosePoll: canClosePoll(row)),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -1633,6 +1643,15 @@ struct ChatSession: View {
                 }
                 .environment(\.theme, theme)
             }
+        }
+        // A close is final, so it asks first, with the app's one confirm.
+        .confirm(ConfirmSpec(title: "Close this poll?",
+                             message: "It keeps its counts and takes no more votes. It cannot be opened again.",
+                             action: "Close poll"),
+                 isPresented: Binding(get: { closingPoll != nil }, set: { if !$0 { closingPoll = nil } })) {
+            guard account.accepts(model), let messageId = closingPoll else { return }
+            closingPoll = nil
+            model.closePoll(chatId: chatId, messageId: messageId)
         }
         .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
             guard account.accepts(model) else { return }
@@ -2783,6 +2802,8 @@ struct ChatSession: View {
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
                 guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
+                // A reveal owns the window until it has landed.
+                guard revealingRow == nil else { return }
                 // One step per quarter second at most: the reporter now fires per scroll sample
                 // inside the top band (lazy rows), and a flick's deceleration there should bring
                 // a few slices in, not run away through the whole history.
@@ -3162,6 +3183,12 @@ struct ChatSession: View {
         // Before the scroll, so the corrections can tell this reveal from the next one.
         highlightedMessage = messageId
         lastRevealedMessage = messageId
+        // Claimed before the window moves, so the short slice `includeInWindow` slides in is
+        // not grown from the near-top reporter before the reveal has settled on it.
+        if !DebugHooks.revealPreFix {
+            revealFrame.clear()
+            revealingRow = RevealTarget(rowId: target.id, messageId: messageId)
+        }
         if includeInWindow(messageId: messageId) {
             // The window has just moved onto the target, so the rows on screen are not the
             // rows that were there a moment ago. A jump across a hundred rows of history has
@@ -3405,9 +3432,11 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
             return false
-        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+        // A poll is a message like any other: it is replied to, and its author deletes it
+        // (tester report, 2026-11-14). Edit stays off (`canEditMessage`).
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image, .poll:
             return messageById[row.messageId] != nil
         }
     }
@@ -3466,6 +3495,12 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
+    /// Close poll is offered to a poll's maker while it is open (and can be closed at all).
+    private func canClosePoll(_ row: Row) -> Bool {
+        guard case .poll(let poll, let by, _, _) = row.kind else { return false }
+        return by == nil && poll.closable && !poll.closed(now: pollNowMs())
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
     /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
@@ -3499,6 +3534,8 @@ struct ChatSession: View {
             model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
+        case .closePoll:
+            closingPoll = row.messageId
         case .removePreview:
             model.removeLinkPreview(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         case .delete:
@@ -3520,7 +3557,8 @@ struct ChatSession: View {
     /// Own user text the long-press menu may offer Edit for.
     private func canEditMessage(_ row: Row) -> Bool {
         guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
-        guard isOwnMessage(m) else { return false }
+        // A poll is not editable; its text is only the poll in plain words.
+        guard isOwnMessage(m), !m.parts.contains(where: { $0.pollValue != nil }) else { return false }
         return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -4967,6 +5005,8 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
+                                        // Two quick taps on a poll are two votes, not a heart.
+                                        if case .poll = row.kind { return }
                                         // Next turn of the run loop: the chip's own tap has then
                                         // run, whichever of the two handlers SwiftUI calls first.
                                         DispatchQueue.main.async {
@@ -5553,7 +5593,10 @@ final class ComposerDraft: ObservableObject {
     /// A temporary strong snapshot. Lifetime tests keep only weak references to
     /// their newly hosted drafts, while explicitly retaining pre-existing ones.
     static var liveInstances: [ComposerDraft] { liveObjects.allObjects }
-    init() { Self.liveObjects.add(self) }
+    /// The pool is the table's: when an add makes it grow it reads every entry back, the new one
+    /// included, as an autoreleased reference, and without a pool here that reference kept the
+    /// draft alive past its owner, until whichever pool the caller happened to be in drained.
+    init() { autoreleasepool { Self.liveObjects.add(self) } }
     #endif
 }
 

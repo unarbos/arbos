@@ -21,6 +21,7 @@ mod boxd;
 mod boxes;
 mod browser;
 mod calls;
+mod chain;
 mod channels;
 mod connectors;
 mod credits;
@@ -35,6 +36,7 @@ mod db_push;
 mod db_secrets;
 mod db_voice;
 mod debug_api;
+mod deposits;
 mod diag;
 mod export;
 mod features;
@@ -94,6 +96,7 @@ mod sites;
 mod skills;
 mod state;
 mod stickers;
+mod subnets;
 mod unfurl;
 mod upgrade;
 mod usage;
@@ -250,6 +253,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("ARBOS_AUTH_MODE=github needs ARBOS_GITHUB_CLIENT_ID and ARBOS_GITHUB_CLIENT_SECRET (or the ARBOS_GITHUB_OAUTH_CLIENT_* names)");
     }
 
+    let deposit_address = env_nonempty("ARBOS_DEPOSIT_ADDRESS");
+    if let Some(a) = &deposit_address {
+        anyhow::ensure!(
+            wallets::public_key(a).is_some(),
+            "ARBOS_DEPOSIT_ADDRESS is not a Bittensor address"
+        );
+    }
+
     let cfg = Config {
         public_url,
         data_dir: args.data.clone(),
@@ -257,6 +268,36 @@ async fn main() -> anyhow::Result<()> {
         openrouter_key,
         anthropic_key,
         openai_key,
+        subnets: [
+            (
+                "saygm",
+                "SAYGM_API_KEY",
+                "ARBOS_SAYGM_BASE",
+                "https://api.saygm.com",
+            ),
+            (
+                "engy",
+                "ENGY_API_KEY",
+                "ARBOS_ENGY_BASE",
+                "https://api.engy.ai",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, key, base, default)| {
+            let subnet = state::Subnet {
+                name,
+                key: env_nonempty(key)?,
+                base: env_nonempty(base).unwrap_or_else(|| default.to_owned()),
+                models: Default::default(),
+            };
+            // A bad base turns that provider off; it does not stop the relay.
+            if !subnet.base_ok() {
+                tracing::warn!("{base} must be https:// (http:// only to loopback): {name} is off");
+                return None;
+            }
+            Some(subnet)
+        })
+        .collect(),
         openai_base: args.openai_base.clone(),
         openai_direct_base: env_nonempty("ARBOS_OPENAI_DIRECT_BASE")
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
@@ -298,10 +339,17 @@ async fn main() -> anyhow::Result<()> {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
         vault_mock: std::env::var("ARBOS_VAULT_MOCK").is_ok_and(|v| v == "1"),
+        local_approval_enforce: std::env::var("ARBOS_LOCAL_APPROVAL").is_ok_and(|v| v == "enforce"),
         auth_mode,
         github_client_id,
         github_client_secret,
         auth_redirects: auth_redirects_from_env(),
+        deposit_address,
+        deposit_max_tao: env_f64("ARBOS_DEPOSIT_MAX_TAO", 25.0),
+        deposit_daily_max_tao: env_f64("ARBOS_DEPOSIT_DAILY_MAX_TAO", 100.0),
+        // An archive node: catching up after downtime reads blocks a pruning node has dropped.
+        chain_rpc: env_nonempty("ARBOS_CHAIN_RPC")
+            .unwrap_or_else(|| "https://archive.sub.latent.to".to_owned()),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
         default_account_limit: credits::SpendLimit::from_env("ARBOS_DEFAULT_DAILY_CAP_USD"),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
@@ -409,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("no devices paired yet; one-time pairing code (1 h): {code}");
     }
 
+    skills::seed_built_in(&db)?;
     db.local_devices_reset()?;
     state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
@@ -416,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    deposits::spawn_watcher(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     boxd::spawn_idle_sleeper(state.clone()).await;
@@ -702,6 +752,7 @@ fn app(state: AppState) -> Router {
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
         .route("/users/{id}/wallet", get(wallets::user_wallet))
+        .route("/me/credits/deposit", get(deposits::info))
         .route(
             "/me/wallet",
             put(wallets::put_wallet).delete(wallets::delete_wallet),
@@ -933,6 +984,11 @@ fn app(state: AppState) -> Router {
             get(goals::get).patch(goals::patch).delete(goals::delete),
         )
         .route("/projects/{id}/goals/{gid}/log", post(goals::append_log))
+        .route("/subnets", get(subnets::list))
+        .route(
+            "/subnets/{netuid}",
+            get(subnets::get).put(subnets::put).delete(subnets::delete),
+        )
         .route("/skills", get(skills::list).post(skills::create))
         .route("/skills/search", get(skills::list))
         .route("/skills/index", get(skills::index))
@@ -951,6 +1007,11 @@ fn app(state: AppState) -> Router {
             axum::routing::patch(local::patch).delete(local::delete),
         )
         .route("/projects/{id}/local/{device}/exec", post(local::exec))
+        .route(
+            "/projects/{id}/local/{device}/requests",
+            post(local::request),
+        )
+        .route("/local/requests/{id}/decide", post(local::decide))
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",

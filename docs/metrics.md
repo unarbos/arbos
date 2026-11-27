@@ -110,8 +110,9 @@ route template (`/chats/{id}/messages`), never the path; a request that matches 
 | `arbos_relay_box_wake_duration_seconds` | histogram | | wake started → the box connected back; what a waiting user feels |
 | `arbos_relay_room_pushes_total` | counter | `result` = `stored` `dup` `refused` | room pushes |
 | `arbos_relay_room_push_refusals_total` | counter | `code` | refused room pushes by refusal code (`too_large`, `rate_limited`, `not_available`, the push guard's codes) |
+| `arbos_relay_room_checkpoints_total` | counter | `result` | checkpoint requests from boxes: `stored`, `too_soon` (inside the 30 s interval), `upload_incomplete` (the box's replica lacks rows), `room_incomplete` (the relay holds a row its own doc cannot apply; that room does not compact), `below_floor`, `error` |
 | `arbos_relay_notifications_total` | counter | `result` = `enqueued` `deduped` `delivered` `retried` `dropped_expired` `dropped_permanent` `dropped_no_token` | device notifications (APNs) |
-| `arbos_relay_model_requests_total` | counter | `provider` = `openrouter` `anthropic` `openai` `other`, `class` = `2xx`…`5xx` `unreachable` | upstream model calls, by the provider the relay sent them to |
+| `arbos_relay_model_requests_total` | counter | `provider` = `openrouter` `anthropic` `openai` `saygm` `engy` `other`, `class` = `2xx`…`5xx` `unreachable` | upstream model calls, by the provider the relay sent them to |
 | `arbos_relay_model_response_seconds` | histogram | | time for the provider to answer with response headers (not the whole stream) |
 | `arbos_relay_tokens_total` | counter | `kind` = `input` `output` `cache_read` `cache_write` | tokens the proxy metered, every caller included. The four kinds are disjoint (`input` is uncached input). Counted when a call ends, because the provider reports usage last; present at 0 from the start |
 | `arbos_relay_spend_today_usd` | gauge | | relay-wide debits since 00:00 UTC, machine cost excluded; what the kill switch compares with the cap |
