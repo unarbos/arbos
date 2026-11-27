@@ -18,7 +18,7 @@ A sign-up is refused a machine, and put on the waitlist, when any of these holds
 
 The memory gate is the eviction floor: a host that is stopping idle machines for memory (§6) makes no new ones. A `waitlisted` event and the journal line name the gate that shut and give the numbers. The operator's admit (`POST /admin/waitlist/{id}/admit`) passes the same three gates and answers 409 `host_full` while one is shut; the cap is raised with one call, but the disk and memory floors are env settings, so getting past them means changing the env file and restarting the relay. On a host with less than 64 GB of memory, lower the memory floor or every sign-up is waitlisted.
 
-The waitlist is first come, first served, and slow: once a minute, when there is room, the one person at its head is taken off it, told their computer is ready, and woken. Sixty people in line take an hour. Keep the cap above demand so the line stays empty; the Mac app in particular leaves a new user who is waitlisted on its first-run screen. A machine its user stopped keeps its slot, so Start is never refused.
+The waitlist is first come, first served. Once a minute the people at its head, as many as there are free slots, are woken; each leaves the line and is told their computer is ready when their machine's create passes the gate, not before. A newcomer stands behind everyone already in line, and a person whose create fails keeps their place. The operator's admit moves one person to the head of the line and wakes them. Keep the cap above demand so the line stays empty; the Mac app in particular leaves a new user who is waitlisted on its first-run screen. A machine its user stopped keeps its slot, so Start is never refused. While the spend kill switch is on (§7) the line does not move.
 
 ## 2. The capacity number
 
@@ -48,7 +48,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
    curl -sS -X PUT -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"max_boxes":300}' http://127.0.0.1:7700/admin/fleet
    ```
 
-   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80 until 2026-11-18, 150 since). Raising the cap does not empty a waitlist at once: people in line are let through one a minute. Do not raise it while the spend kill switch is on (§7): each person let through then is told their computer is ready, is refused the wake, and is left with a machine in `error` until they press Start.
+   The answer is the new capacity; `max_boxes` must be 300 and `has_room` `true`. The value is kept in the relay's database and wins over `ARBOS_HOST_MAX_BOXES`, so editing the env file alone changes nothing once it has been set this way (on this host it has: 80 until 2026-11-18, 150 since). Raising the cap lets the waitlist through, up to the new free slots, on the next tick: within a minute those people are woken, their machines are made eight at a time, and each is told their computer is ready as theirs passes the gate.
 
 2. **[production]** In `/etc/arbos/relay.env` (read at the next relay restart; a restart does not stop machines, they reconnect within seconds):
 
@@ -127,7 +127,7 @@ Eighty per cent is 240 machines, or free disk under 100 GB, or available memory 
    Up to 20 per call, the same choice and the same effect as step 3. Three cautions. Not within two minutes of a relay restart: the relay learns which machines are mid-turn from their keepalives, and for the first minute it knows of none. Let the call finish: each stop waits up to 30 s for the machine to shut down, and an interrupted call leaves the rest running. And a relay restart forgets who was evicted: always-on starts every one of them again within a minute, so evict after a deploy, not before.
 
    Do not use `docker stop` by hand: the relay sees a dead container and starts it again within ten seconds.
-5. **[production]** To stop taking sign-ups while you work, lower the cap to the current resident count with the call in §3; newcomers are waitlisted in order and let through one a minute once it is raised.
+5. **[production]** To stop taking sign-ups while you work, lower the cap to the current resident count with the call in §3; newcomers are waitlisted in order and admitted when it is raised.
 6. A second host. The gVisor fleet in this document is one host only. More hosts are supported only through the `boxd` provider (`ARBOS_BOXD_URL`, `ARBOS_BOXD_NODES_FILE`; `crates/arbos-boxd/README.md`, "More than one host"), which is not deployed on this host and is not a launch-day switch: it needs the daemon installed on each host, mutual TLS between them, and the relay moved onto the daemon's bridge. Until then the levers are the ones above and a bigger disk.
 
 ## 7. The spend cap that stops everyone
