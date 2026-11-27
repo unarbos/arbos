@@ -215,11 +215,14 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         let window = app.windows.firstMatch
         drag(app, by: 0.5, times: 6)
 
-        // A row under the header and above the middle of the window, so it is clear of where
-        // the composer and the keyboard will be.
+        // A row whose top is under the header and above the middle of the window, so the edge
+        // measured is clear of where the composer and the keyboard will be. Its top and not the
+        // whole row: the drags do not stop at the same place every run, and when they left the
+        // tall "Launch day timeline" answer (long-412) across the header, the row after it ended
+        // below the middle and no row was wholly inside the band (runs 45900232485, 44828925578).
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch.frame
-        guard let row = uniqueRow(app, where: { $0.minY > header.maxY && $0.maxY < window.frame.midY }) else {
-            return XCTFail("a row sits in the upper half of the screen after scrolling up")
+        guard let row = uniqueRow(app, where: { $0.minY > header.maxY && $0.minY < window.frame.midY }) else {
+            return XCTFail("a row starts in the upper half of the screen after scrolling up")
         }
         let id = row.identifier
         let before = row.frame
