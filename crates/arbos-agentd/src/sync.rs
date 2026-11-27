@@ -2828,8 +2828,10 @@ mod tests {
             let mut mirror = room.message_identities();
             loop {
                 let before = room.frontiers();
-                let status = room.import(&bytes).unwrap();
-                assert!(status.pending.is_none(), "a frame applies whole");
+                assert!(
+                    room.import_exactly(&bytes).unwrap(),
+                    "a frame applies whole"
+                );
                 let changes = room.messages_changed(&before, &room.frontiers(), &mirror);
                 assert!(!changes.unreadable);
                 for (id, field) in &changes.rewritten {

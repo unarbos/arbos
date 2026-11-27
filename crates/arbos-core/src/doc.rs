@@ -917,6 +917,24 @@ impl ChatDoc {
         Ok(self.doc.import(bytes)?)
     }
 
+    /// Import `bytes` and say whether the import was exactly that payload: every change in
+    /// it applied, and no change applied that it did not carry. `Ok(false)` leaves the doc
+    /// holding whatever the import did; the caller discards it.
+    ///
+    /// For a caller that judges an update by the diff its import produces. Changes the import
+    /// holds back are missing from that diff, and changes held back earlier that this import
+    /// releases are in it without being the update's own.
+    pub fn import_exactly(&mut self, bytes: &[u8]) -> anyhow::Result<bool> {
+        let meta = LoroDoc::decode_import_blob_meta(bytes, true)?;
+        let status = self.doc.import(bytes)?;
+        let own = |peer, vv: &VersionVector| vv.get(peer).copied().unwrap_or(0);
+        Ok(status.pending.is_none()
+            && status.success.iter().all(|(peer, (start, end))| {
+                own(peer, &meta.partial_start_vv) <= *start
+                    && *end <= own(peer, &meta.partial_end_vv)
+            }))
+    }
+
     pub fn oplog_vv(&self) -> VersionVector {
         self.doc.oplog_vv()
     }
@@ -2728,6 +2746,17 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
     VersionVector::decode(bytes).ok()
 }
 
+/// True when `update` starts beyond `vv` for one of the peers it carries. A peer's changes
+/// apply in order, so such an update cannot apply in full to a doc at `vv`; `false` says
+/// nothing either way. Reads the blob's metadata only.
+pub fn update_skips_ahead(update: &[u8], vv: &VersionVector) -> bool {
+    LoroDoc::decode_import_blob_meta(update, true).is_ok_and(|meta| {
+        meta.partial_start_vv
+            .iter()
+            .any(|(peer, start)| *start > vv.get(peer).copied().unwrap_or(0))
+    })
+}
+
 /// True when every op in `update` is already covered by `vv`. See [`ChatDoc::update_covered_by`].
 pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
     ChatDoc::update_covered_by(update, vv)
@@ -3458,10 +3487,38 @@ mod message_change_tests {
         let update = late.export_updates_since(&mark);
 
         let (before, mirror) = (room.frontiers(), room.message_identities());
-        assert!(room.import(&update).unwrap().pending.is_none());
+        assert!(room.import_exactly(&update).unwrap());
         let c = room.messages_changed(&before, &room.frontiers(), &mirror);
         assert!(!c.unreadable);
         assert!(c.ids_after.is_empty());
+    }
+
+    #[test]
+    fn an_import_is_exact_only_when_it_is_the_payload_and_nothing_else() {
+        let a = ChatDoc::new(Some(1), false);
+        a.append_user_message("m1", "one", "dev", &with("user:alice"))
+            .unwrap();
+        let first = a.export_updates_since(&VersionVector::default());
+        let mark = a.oplog_vv();
+        a.append_user_message("m2", "two", "dev", &with("user:alice"))
+            .unwrap();
+        let second = a.export_updates_since(&mark);
+
+        let mut room = ChatDoc::new(None, false);
+        assert!(!update_skips_ahead(&first, &room.oplog_vv()));
+        assert!(update_skips_ahead(&second, &room.oplog_vv()));
+        assert!(!room.import_exactly(&second).unwrap(), "held back");
+        assert!(
+            !room.import_exactly(&first).unwrap(),
+            "applies, and with it a change it did not carry"
+        );
+
+        let mut room = ChatDoc::new(None, false);
+        assert!(room.import_exactly(&first).unwrap());
+        assert!(room.import_exactly(&second).unwrap());
+        let mut room = ChatDoc::new(None, false);
+        assert!(room.import_exactly(&a.snapshot()).unwrap(), "a snapshot");
+        assert!(room.import_exactly(b"not an update").is_err());
     }
 
     /// An entry that arrives without an id is reported as an insert with an empty id, so the
