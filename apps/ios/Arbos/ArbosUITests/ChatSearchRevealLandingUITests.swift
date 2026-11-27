@@ -1055,13 +1055,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// about half the time" into "fails on this row every time", and it is why neither arm
     /// may go back to letting the gestures choose. The name is kept as it was so the gate's
     /// history for it stays readable.
-    func testAResultOutsideTheWindowLandsAfterTheFixAgain() throws {
-        // Skipped for the app, not for the rig. With the rig aiming true (the tap went to
-        // `long-307` at a checked point, 2026-11-13, iPhone 17 simulator), one run in six left
-        // the app's main thread busy for over two minutes after the tap: "Unable to perform
-        // work on main run loop, process main thread busy for 30.0s", three times running.
-        // The reveal of this row can hang. Take this skip out with the fix for that.
-        try XCTSkipIf(true, "the reveal of long-307 was seen hanging the main thread; app bug, not rig")
+    func testAResultOutsideTheWindowLandsAfterTheFixAgain() {
         run(scrollUp: 0, preFix: false, wanted: Self.stuckTarget)
     }
 }
