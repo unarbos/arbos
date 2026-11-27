@@ -113,7 +113,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SkillsCmd,
     },
-    /// Channels (Slack, Telegram, WhatsApp, Beeper): pairing codes, bindings, mock inbound/outbox.
+    /// Channels (Slack, Telegram, WhatsApp, Discord, Beeper): pairing codes, bindings, mock inbound/outbox.
     Channels {
         #[command(subcommand)]
         cmd: ChannelsCmd,
@@ -1409,7 +1409,7 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 } else {
                     println!(
-                        "{}  (valid 10 min) → send `/pair {}` from Slack, Telegram, WhatsApp, or a Beeper chat",
+                        "{}  (valid 10 min) → send `/pair {}` from Slack, Telegram, WhatsApp, Discord, or a Beeper chat",
                         v["code"].as_str().unwrap_or(""),
                         v["code"].as_str().unwrap_or("")
                     );

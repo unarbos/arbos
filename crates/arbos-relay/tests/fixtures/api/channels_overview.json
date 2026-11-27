@@ -47,6 +47,13 @@
       "label": "Beeper (Harness Comms)",
       "platform": "beeper",
       "state": "mock"
+    },
+    {
+      "detail": "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+      "inbound": "relay holds a Discord Gateway connection",
+      "label": "Discord",
+      "platform": "discord",
+      "state": "mock"
     }
   ]
 }

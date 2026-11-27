@@ -1,4 +1,4 @@
-//! Settings → Channels (F7): reach a Project from Slack, Telegram, WhatsApp, or a Beeper chat.
+//! Settings → Channels (F7): reach a Project from Slack, Telegram, WhatsApp, Discord, or a Beeper chat.
 //! Platform rows show whether the relay holds the platform's credentials (or runs in mock
 //! mode); "New pairing code" mints a 6-digit code with a 10-minute countdown that the user
 //! sends as `/pair <code>` from the channel; bound chats can be unbound.
@@ -117,6 +117,7 @@ impl ChannelsPanel {
             "telegram" => "✈",
             "whatsapp" => "☎",
             "beeper" => "◎",
+            "discord" => "◆",
             _ => "•",
         }
     }
@@ -249,7 +250,7 @@ impl ChannelsPanel {
                             .text_size(px(11.0))
                             .text_color(theme.text_muted)
                             .child(format!(
-                                "Send  /pair {}  from Slack, Telegram, WhatsApp, or a Beeper chat you own. One use.",
+                                "Send  /pair {}  from Slack, Telegram, WhatsApp, Discord, or a Beeper chat you own. One use.",
                                 code.code
                             )),
                     );
