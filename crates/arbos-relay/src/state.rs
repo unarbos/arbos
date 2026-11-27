@@ -11,6 +11,42 @@ use arbos_core::wire::BoxState;
 
 use crate::db::Db;
 
+/// One subnet inference provider: OpenAI chat completions under `{base}/v1`, Anthropic messages
+/// at `{base}/v1/messages`, cost reported in `usage.cost`.
+#[derive(Clone)]
+pub struct Subnet {
+    pub name: &'static str,
+    pub base: String,
+    pub key: String,
+    pub models: Arc<std::sync::Mutex<SubnetModels>>,
+}
+
+/// A provider's model list as last fetched for the catalog, and until when it is served
+/// (`proxy::subnet_models`).
+pub type SubnetModels = Option<(std::time::Instant, Vec<serde_json::Value>)>;
+
+impl Subnet {
+    /// The key leaves only over TLS: an `https://` base, or `http://` to this machine.
+    pub fn base_ok(&self) -> bool {
+        url::Url::parse(&self.base).is_ok_and(|u| {
+            u.scheme() == "https"
+                || u.scheme() == "http"
+                    && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+        })
+    }
+}
+
+/// The key is never printed.
+impl std::fmt::Debug for Subnet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subnet")
+            .field("name", &self.name)
+            .field("base", &self.base)
+            .field("key", &"…")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub public_url: String,
@@ -19,6 +55,9 @@ pub struct Config {
     pub openrouter_key: Option<String>,
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
+    /// Bittensor subnet inference providers the relay holds a key for (`SAYGM_API_KEY`,
+    /// `ENGY_API_KEY`). A model id that starts with a provider's name and a slash goes there.
+    pub subnets: Vec<Subnet>,
     pub openai_base: String,
     /// Upstream for `/proxy/v1/images/generations` (OpenAI's own API; OpenRouter has no images endpoint).
     pub openai_images_base: String,
@@ -807,6 +846,7 @@ pub(crate) mod test_support {
             openrouter_key: None,
             anthropic_key: None,
             openai_key: None,
+            subnets: Vec::new(),
             openai_base: String::new(),
             anthropic_base: String::new(),
             default_snapshot: String::new(),
