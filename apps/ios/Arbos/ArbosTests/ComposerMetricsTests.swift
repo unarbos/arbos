@@ -521,4 +521,19 @@ final class ComposerDraftLifetimeTests: XCTestCase {
             XCTAssertTrue(released(observed), "the observer itself must not retain the draft")
         }
     }
+
+    /// The inventory is a weak table, and a weak table that grows hands every entry, the one
+    /// just added included, to the caller's autorelease pool. A draft made on such a turn
+    /// outlived its owner until that pool drained, which the two tests above read as retained.
+    func testTheInventoryDoesNotKeepANewDraftAlive() {
+        // The table grows as live drafts pile up; 100 kept ones cross several growth steps.
+        var kept: [ComposerDraft] = []
+        for index in 0..<300 {
+            if index.isMultiple(of: 3) { kept.append(ComposerDraft()) }
+            var draft: ComposerDraft? = ComposerDraft()
+            let reference = DraftReference(draft!)
+            draft = nil
+            XCTAssertNil(reference.value, "draft \(index) outlived its only owner")
+        }
+    }
 }
