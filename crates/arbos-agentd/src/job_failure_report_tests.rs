@@ -50,8 +50,11 @@ const SETTLE: Duration = Duration::from_secs(30);
 
 /// The rows a client would actually draw for `msg_id`: `hidden` rows are skipped by both apps,
 /// so a hidden row is not a row the user saw — which is the whole measurement of this bug.
-fn visible_replies(host: &SharedHost, msg_id: &str) -> Vec<MessageView> {
-    let h = host.try_lock().expect("host free");
+///
+/// It waits for the host rather than `try_lock`ing it: the worker task is still running beside
+/// the case and takes the same lock to write the very row this looks for.
+async fn visible_replies(host: &SharedHost, msg_id: &str) -> Vec<MessageView> {
+    let h = host.lock().await;
     h.doc
         .messages()
         .into_iter()
@@ -64,10 +67,10 @@ fn visible_replies(host: &SharedHost, msg_id: &str) -> Vec<MessageView> {
         .collect()
 }
 
-async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+async fn wait_until(what: &str, mut done: impl AsyncFnMut() -> bool) {
     let start = Instant::now();
     while start.elapsed() < SETTLE {
-        if done() {
+        if done().await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -142,7 +145,7 @@ async fn a_job_that_loses_every_worker_tells_the_user_it_died() {
     let (agent, root, host, ask, job_id) = burst_ask(chat).await;
 
     let (s, j) = (agent.clone(), job_id.clone());
-    wait_until("the job ran out of workers and settled", move || {
+    wait_until("the job ran out of workers and settled", async move || {
         s.store
             .job(&j)
             .ok()
@@ -164,12 +167,12 @@ async fn a_job_that_loses_every_worker_tells_the_user_it_died() {
     // a beat before the reporting path runs, so the chat is given the same budget.
     let h = host.clone();
     let a = ask.clone();
-    wait_until("the chat was told the job died", move || {
-        !visible_replies(&h, &a).is_empty()
+    wait_until("the chat was told the job died", async move || {
+        !visible_replies(&h, &a).await.is_empty()
     })
     .await;
 
-    let told = visible_replies(&host, &ask);
+    let told = visible_replies(&host, &ask).await;
     assert_eq!(
         told.len(),
         1,
@@ -192,7 +195,7 @@ async fn the_failure_row_is_recorded_as_delivered_so_it_is_written_once() {
     let (agent, root, host, ask, job_id) = burst_ask(chat).await;
 
     let (s, j) = (agent.clone(), job_id.clone());
-    wait_until("the job settled and the chat was told", move || {
+    wait_until("the job settled and the chat was told", async move || {
         s.store
             .job(&j)
             .ok()
@@ -209,7 +212,7 @@ async fn the_failure_row_is_recorded_as_delivered_so_it_is_written_once() {
          result and from a fallback turn"
     );
     assert_eq!(
-        visible_replies(&host, &ask).len(),
+        visible_replies(&host, &ask).await.len(),
         1,
         "and the row it stands for is in the chat"
     );
@@ -306,7 +309,7 @@ async fn a_jobs_own_acknowledgement_is_not_mistaken_for_its_answer() {
     })
     .await;
 
-    let rows = visible_replies(&host, &ask);
+    let rows = visible_replies(&host, &ask).await;
     assert_eq!(
         rows.len(),
         2,
@@ -353,7 +356,7 @@ async fn a_job_whose_ask_was_already_answered_says_nothing_more() {
         })
         .await;
 
-    let rows = visible_replies(&host, &ask);
+    let rows = visible_replies(&host, &ask).await;
     assert_eq!(
         rows.len(),
         1,
