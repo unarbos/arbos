@@ -67,7 +67,9 @@ If scheduling fails, keep the settings file and say it is not scheduled.
 - **Run.** Read the playbook's skill and the settings file, apply the preferences and do the
   work inside the approvals you already have. A scheduled run is your own instruction, not a
   yes from the owner: anything that sends, posts, books, buys, deletes or changes something
-  outside the project still asks first. Update only the state and preferences that changed.
+  outside the project still asks first. Before you call anything done, check it at its source
+  in this run; a source you could not read is a gap to report, not "nothing new". With nothing
+  to tell them, update state and post nothing. Update only the state and preferences that changed.
   If the skill is gone or a preference no longer fits it, say what needs fixing instead of
   guessing.
 
