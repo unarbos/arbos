@@ -8,6 +8,12 @@ image() { sed -n "s|^ *image: \($1:.*\)|\1|p" docker-compose.yml | head -n 1; }
 promtool() { docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" -w /etc/prometheus --entrypoint promtool "$(image prom/prometheus)" "$@"; }
 
 promtool check config prometheus.yml subnet.yml
+# ...and with the jobs in available/ switched on, as copying them into enabled/ would
+docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" -v "$PWD/prometheus/available:/etc/prometheus/enabled:ro" \
+  -w /etc/prometheus --entrypoint promtool "$(image prom/prometheus)" check config prometheus.yml
+if grep -q arbos-agentd prometheus/prometheus.yml || ls prometheus/enabled/*.yml >/dev/null 2>&1; then
+  echo "the per-box job is switched on in the repo; it belongs in prometheus/available/ only" >&2; exit 1
+fi
 promtool check rules rules.yml subnet-rules.yml
 promtool test rules rules_test.yml
 docker run --rm -v "$PWD/alertmanager:/etc/alertmanager:ro" --entrypoint amtool "$(image prom/alertmanager)" check-config /etc/alertmanager/alertmanager.yml

@@ -2959,6 +2959,42 @@ mod covered_push_tests {
         }
     }
 
+    /// A push that imports and whose diff the relay still cannot read is refused with the code
+    /// a device stays connected on, and nothing is stored. The room's doc is rebuilt for the
+    /// next push, so the same change sent again is taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_diff_that_cannot_be_read_is_refused_and_the_next_push_reads_a_rebuilt_doc() {
+        let state = test_state(AuthMode::Github);
+        let (room, bob_doc, _, bob_token) = chat_with_bobs_message(&state);
+        let head = state.db.room_state(&room).unwrap().head;
+        // The room's mirror of ids out of step with its list: no row can be named.
+        let mut cached = super::build_room_doc(&state, &room).unwrap();
+        cached.message_ids.clear();
+        *state.room(&room).await.doc_cache.lock().unwrap() = Some(cached);
+        let mark = bob_doc.oplog_vv();
+        bob_doc.set_message_fields("m-bob", &[("preview", json!("x"))]);
+        let edit = bob_doc.export_updates_since(&mark);
+        let addr = serve(state.clone()).await;
+
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &bob_token,
+            "dev:bob",
+            &[("edit".into(), edit.clone())],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error, "{}", frames[0].header);
+        assert_eq!(frames[0].header["code"], "not_available");
+        assert_eq!(frames[0].header["batchId"], "edit");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head);
+
+        let frames =
+            push_after_catchup(addr, &room, &bob_token, "dev:bob", &[("edit".into(), edit)]).await;
+        assert_eq!(frames[0].ty, FrameType::Ack, "{}", frames[0].header);
+        assert_eq!(state.db.room_state(&room).unwrap().head, head + 1);
+    }
+
     /// In a people chat a sender the gates refuse gets the gates' answer for a push the guard
     /// refuses too, so the device stays connected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
