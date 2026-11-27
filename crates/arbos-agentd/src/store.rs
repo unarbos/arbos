@@ -2443,6 +2443,13 @@ mod tests {
             "never closes the topic, and an answer is taken once"
         );
         assert!(may("brief", 12), "other topics open again after a day");
+
+        s.insert_offer("d", "brief", 12 * DAY).unwrap();
+        s.answer_offer("d", "typed", 12 * DAY).unwrap();
+        assert!(
+            !may("brief", 12) && may("brief", 13),
+            "a typed reply is an answer"
+        );
     }
 
     /// A job running since a moment ago, on the step its worker last reported.

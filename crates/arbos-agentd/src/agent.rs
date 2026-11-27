@@ -7172,8 +7172,7 @@ impl Agent {
             }
         };
         let _ = self.store.answer_ask(question_id);
-        // Only a tap on one of the three answers counts: a typed reply leaves the offer resting
-        // as unanswered, the longer rest.
+        // A tap on one of the three answers; a typed reply is recorded where it is read.
         if let Some(a) = value.as_str().filter(|a| OFFER_ANSWERS.contains(a)) {
             let _ = self.store.answer_offer(question_id, a, now_ms());
         }
@@ -7329,6 +7328,9 @@ impl Agent {
             prompt_text = format!("Answer to your question \"{question}\":\n{rendered}");
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
+            // Typed instead of tapped: the person answered, so the short rest; what they meant
+            // reaches the model as words.
+            let _ = self.store.answer_offer(&ask_id, "typed", now_ms());
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
             answers_my_question = true;
         }
