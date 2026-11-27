@@ -1,5 +1,5 @@
 //! The `channel_message` push (F7), dispatched by the push poller in `routines.rs`: a message
-//! from Slack / Telegram / WhatsApp / Beeper lands in the bound chat as a user message with
+//! from Slack / Telegram / WhatsApp / Beeper / Discord lands in the bound chat as a user message with
 //! `sender = channel:<platform>:<external user id>`, runs as a normal turn, and the reply prose
 //! goes back through `POST /projects/{id}/channels/reply`.
 
@@ -33,6 +33,7 @@ pub fn prompt_note(m: &MessageView) -> Option<String> {
         "telegram" => "Telegram",
         "whatsapp" => "WhatsApp",
         "beeper" => "Beeper",
+        "discord" => "Discord",
         other => other,
     };
     Some(format!(
