@@ -152,7 +152,11 @@ pub enum Trigger {
 
 impl Trigger {
     pub fn parse(v: &Value) -> Result<Self, String> {
-        match v.get("kind").and_then(Value::as_str) {
+        let kind = v.get("kind").and_then(Value::as_str);
+        if kind != Some("cron") && v.get("check").is_some_and(|c| !c.is_null()) {
+            return Err("only a cron trigger takes a check".into());
+        }
+        match kind {
             Some("cron") => {
                 let expr = v
                     .get("expr")
@@ -801,6 +805,13 @@ mod tests {
         let t = checked(json!({ "provider": "google", "action": "list_threads" })).unwrap();
         assert_eq!(t.to_json()["check"]["action"], "list_threads");
         assert!(Trigger::parse(&t.to_json()).is_ok());
+        assert!(
+            Trigger::parse(
+                &json!({ "kind": "once", "in_seconds": 60, "check": t.to_json()["check"] })
+            )
+            .is_err(),
+            "a check on anything but cron is refused, not dropped"
+        );
 
         for bad in [
             json!({ "provider": "google", "action": "send", "args": { "to": "a@b.c", "subject": "s", "body": "b" } }),
