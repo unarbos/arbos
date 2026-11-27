@@ -1326,6 +1326,7 @@ pub(crate) async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String,
     };
     let soon: HashSet<String> = due
         .iter()
+        .filter(|rt| !has_check(rt))
         .filter_map(|rt| state.user_of(&rt.project_id))
         .collect();
     let turns = state.turn_running.lock().await.clone();
@@ -1363,6 +1364,12 @@ pub(crate) async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String,
     *idle_since = kept;
 }
 
+/// A routine with a check needs the box only once its check finds something new, so it neither
+/// wakes a sleeping box ahead of time nor holds an idle one up.
+fn has_check(rt: &crate::db::Routine) -> bool {
+    rt.trigger.get("check").is_some_and(|c| !c.is_null())
+}
+
 /// The routine lookahead (§4.2), on the routine scheduler's tick: a sleeping `boxd` box whose
 /// user has a routine due within [`PREFETCH_HEAD_START_MS`] is asked back from the object store
 /// if it is cold, and woken once the routine is within [`ROUTINE_HEAD_START_MS`]. The same
@@ -1377,8 +1384,7 @@ pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
     // user → their soonest routine. The rows come soonest first.
     let mut users: HashMap<String, i64> = HashMap::new();
     for rt in &due {
-        // A routine with a check wakes the box only once its check finds something new.
-        if rt.trigger.get("check").is_some_and(|c| !c.is_null()) {
+        if has_check(rt) {
             continue;
         }
         if let (Some(user_id), Some(at)) = (state.user_of(&rt.project_id), rt.next_run_at) {
@@ -2602,6 +2608,23 @@ mod tests {
         .await
         .unwrap();
         state.set_box_state(&user, BoxState::Awake, None).await;
+        // A routine due soon holds a box up, but not one that makes a check first.
+        state
+            .db
+            .insert_routine(&crate::db::Routine {
+                id: "checked".into(),
+                project_id: crate::people::tests_support::project_of(&state, &user, "First"),
+                chat_id: "c".into(),
+                name: "n".into(),
+                prompt: "p".into(),
+                trigger: json!({ "kind": "cron", "expr": "* * * * *", "tz": "UTC",
+                    "check": { "provider": "google", "action": "list_threads", "args": {} } }),
+                enabled: true,
+                created_at: 0,
+                last_run_at: None,
+                next_run_at: Some(now_ms() + 60_000),
+            })
+            .unwrap();
         let long_ago = now_ms() - IDLE_MS - 1;
         let clock = || HashMap::from([(user.clone(), long_ago)]);
         let sleeps = || {

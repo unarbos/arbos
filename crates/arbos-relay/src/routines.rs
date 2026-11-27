@@ -62,6 +62,11 @@ fn require_once_in_future(trigger: &Trigger) -> Result<(), String> {
 /// Largest serialized `args` a check may carry.
 const CHECK_ARGS_MAX: usize = 2048;
 
+/// Longest the scheduler waits for one check. Checks run one after another on the scheduler's
+/// own loop and the relay's HTTP client has no timeout, so a stalled upstream would otherwise
+/// stop every routine on the relay.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A read-only connector call (`{ provider, action, args? }`) a cron routine makes before it
 /// runs. Same reach as the box's own `POST /connectors/call`, minus writes and sends.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -109,10 +114,12 @@ enum Checked {
 
 async fn run_check(state: &AppState, rt: &Routine, check: &Check) -> Checked {
     let args = Value::Object(check.args.clone());
-    let reply = match connectors::broker_call(state, &check.provider, &check.action, &args).await {
-        Ok(v) if v["ok"].as_bool() == Some(true) => v,
-        Ok(v) => return Checked::Unreadable(format!("HTTP {}", v["status"])),
-        Err((_, e)) => return Checked::Unreadable(e),
+    let call = connectors::broker_call(state, &check.provider, &check.action, &args);
+    let reply = match tokio::time::timeout(CHECK_TIMEOUT, call).await {
+        Ok(Ok(v)) if v["ok"].as_bool() == Some(true) => v,
+        Ok(Ok(v)) => return Checked::Unreadable(format!("HTTP {}", v["status"])),
+        Ok(Err((_, e))) => return Checked::Unreadable(e),
+        Err(_) => return Checked::Unreadable("timed out".into()),
     };
     let hash = hex::encode(Sha256::digest(reply["data"].to_string()));
     match state.db.routine_check_changed(&rt.id, &hash) {
@@ -340,6 +347,69 @@ pub async fn fire_event(state: &AppState, project_id: &str, event: &str, context
     }
 }
 
+/// One due routine: advance its schedule, make its check if it has one, and fire it.
+async fn run_due(state: &AppState, rt: &Routine, now: i64) {
+    let trigger = match Trigger::parse(&rt.trigger) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(routine = %rt.id, error = %e, "unparseable trigger; disabling");
+            let _ = state
+                .db
+                .update_routine(&rt.id, None, None, None, None, Some(false), None);
+            return;
+        }
+    };
+    let (fires, next) = schedule_step(&trigger, rt.next_run_at, now);
+    // Advance before firing so a slow wake cannot make the next tick fire it again.
+    let _ = state.db.mark_routine_fired(&rt.id, now, next);
+    // One-shot routines disable after they fire so they leave the due set cleanly.
+    if fires && matches!(trigger, Trigger::Once { .. }) {
+        let _ = state
+            .db
+            .update_routine(&rt.id, None, None, None, None, Some(false), None);
+    }
+    let mut context = None;
+    if let (
+        true,
+        Trigger::Cron {
+            check: Some(check), ..
+        },
+    ) = (fires, &trigger)
+    {
+        match run_check(state, rt, check).await {
+            Checked::Unchanged => {
+                let _ = state.db.insert_routine_run(&RoutineRun {
+                    id: ulid(),
+                    routine_id: rt.id.clone(),
+                    started_at: now,
+                    finished_at: Some(now),
+                    status: "skipped".into(),
+                    message_id: None,
+                    note: Some("check: nothing new".into()),
+                });
+                return;
+            }
+            Checked::Changed => {}
+            Checked::Unreadable(why) => {
+                context = Some(json!({ "check_failed": why }));
+            }
+        }
+    }
+    if fires {
+        let cause = match &trigger {
+            Trigger::Cron { .. } => "cron",
+            Trigger::Once { .. } => "once",
+            Trigger::Webhook { .. } | Trigger::Event { .. } => "schedule",
+        };
+        if let Err(e) = fire(state, rt, cause, context).await {
+            tracing::warn!(routine = %rt.id, error = %e, "routine fire failed");
+            // Nothing was queued, so no failed run will clear what the check just recorded:
+            // an empty hash matches no answer, and the next tick runs instead of skipping.
+            let _ = state.db.routine_check_changed(&rt.id, "");
+        }
+    }
+}
+
 pub async fn spawn_scheduler(state: AppState) {
     tokio::spawn(async move {
         let mut awake_prev: HashMap<String, bool> = HashMap::new();
@@ -355,69 +425,7 @@ pub async fn spawn_scheduler(state: AppState) {
                 }
             };
             for rt in due {
-                let trigger = match Trigger::parse(&rt.trigger) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!(routine = %rt.id, error = %e, "unparseable trigger; disabling");
-                        let _ = state.db.update_routine(
-                            &rt.id,
-                            None,
-                            None,
-                            None,
-                            None,
-                            Some(false),
-                            None,
-                        );
-                        continue;
-                    }
-                };
-                let (fires, next) = schedule_step(&trigger, rt.next_run_at, now);
-                // Advance before firing so a slow wake cannot make the next tick fire it again.
-                let _ = state.db.mark_routine_fired(&rt.id, now, next);
-                // One-shot routines disable after they fire so they leave the due set cleanly.
-                if fires && matches!(trigger, Trigger::Once { .. }) {
-                    let _ =
-                        state
-                            .db
-                            .update_routine(&rt.id, None, None, None, None, Some(false), None);
-                }
-                let mut context = None;
-                if let (
-                    true,
-                    Trigger::Cron {
-                        check: Some(check), ..
-                    },
-                ) = (fires, &trigger)
-                {
-                    match run_check(&state, &rt, check).await {
-                        Checked::Unchanged => {
-                            let _ = state.db.insert_routine_run(&RoutineRun {
-                                id: ulid(),
-                                routine_id: rt.id.clone(),
-                                started_at: now,
-                                finished_at: Some(now),
-                                status: "skipped".into(),
-                                message_id: None,
-                                note: Some("check: nothing new".into()),
-                            });
-                            continue;
-                        }
-                        Checked::Changed => {}
-                        Checked::Unreadable(why) => {
-                            context = Some(json!({ "check_failed": why }));
-                        }
-                    }
-                }
-                if fires {
-                    let cause = match &trigger {
-                        Trigger::Cron { .. } => "cron",
-                        Trigger::Once { .. } => "once",
-                        Trigger::Webhook { .. } | Trigger::Event { .. } => "schedule",
-                    };
-                    if let Err(e) = fire(&state, &rt, cause, context).await {
-                        tracing::warn!(routine = %rt.id, error = %e, "routine fire failed");
-                    }
-                }
+                run_due(&state, &rt, now).await;
             }
             if let Ok(stale) = state.db.stale_routine_runs(RUN_STALE_MS) {
                 for run in stale {
@@ -867,6 +875,71 @@ mod tests {
             .update_routine_run(&run.id, "failed", None, None)
             .unwrap();
         assert_eq!(run_check(&state, &rt, &check).await, Checked::Changed);
+    }
+
+    /// The scheduler's own step: an unreadable check still fires and says so, a changed answer
+    /// fires, and an unchanged one leaves a `skipped` run and queues nothing for the box.
+    #[tokio::test]
+    async fn a_due_checked_routine_skips_only_on_an_unchanged_answer() {
+        use crate::state::{test_support::test_state, AuthMode};
+        let state = test_state(AuthMode::Github);
+        let trigger = checked(json!({ "provider": "google", "action": "list_threads" })).unwrap();
+        let rt = Routine {
+            id: ulid(),
+            project_id: "p1".into(),
+            chat_id: "c1".into(),
+            name: "inbox".into(),
+            prompt: "Tell me what is new.".into(),
+            trigger: trigger.to_json(),
+            enabled: true,
+            created_at: 0,
+            last_run_at: None,
+            next_run_at: Some(0),
+        };
+        state.db.insert_routine(&rt).unwrap();
+        let pushed = || state.db.take_pushes("p1").unwrap();
+        let statuses = || -> Vec<String> {
+            let runs = state.db.routine_runs(&rt.id, 10).unwrap();
+            runs.into_iter().map(|r| r.status).collect()
+        };
+
+        // Not connected: it fires, and the prompt carries the reason.
+        run_due(&state, &rt, 1).await;
+        let pushes = pushed();
+        assert_eq!(pushes.len(), 1);
+        let prompt = pushes[0].2["prompt"].as_str().unwrap();
+        assert!(prompt.contains("check_failed"), "{prompt}");
+
+        state
+            .db
+            .upsert_connector(&crate::db::Connector {
+                id: ulid(),
+                provider: "google".into(),
+                label: "me".into(),
+                scopes: vec![],
+                status: "connected".into(),
+                config: json!({}),
+                created_at: 0,
+                last_used_at: None,
+                last_error: None,
+            })
+            .unwrap();
+        run_due(&state, &rt, 2).await;
+        let pushes = pushed();
+        assert_eq!(pushes.len(), 1);
+        assert!(!pushes[0].2["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("check_failed"));
+        assert_eq!(statuses(), ["queued", "queued"]);
+
+        run_due(&state, &rt, 3).await;
+        assert!(pushed().is_empty(), "an unchanged answer reached the box");
+        let runs = state.db.routine_runs(&rt.id, 10).unwrap();
+        assert_eq!(runs.len(), 3);
+        let skipped = runs.iter().find(|r| r.status == "skipped").expect("a row");
+        assert_eq!(skipped.note.as_deref(), Some("check: nothing new"));
+        assert_eq!(skipped.finished_at, Some(3));
     }
 
     fn at(s: &str) -> i64 {
