@@ -26,6 +26,8 @@ members = [
     "crates/arbos-update",
     # The box supervisor on a compute host (docs/box-scaling.md §4.1). Depends on nothing in the workspace.
     "crates/arbos-boxd",
+    # Keeps the relay's Bittensor skills current from the chain and subnet repositories. Depends on nothing in the workspace.
+    "crates/arbos-subnets",
 ]
 
 [workspace.package]

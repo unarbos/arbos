@@ -6,6 +6,7 @@ mod agent_messages;
 mod app;
 mod approval;
 mod attachments;
+mod bittensor;
 mod budget;
 #[cfg(test)]
 mod cancel_handles_tests;

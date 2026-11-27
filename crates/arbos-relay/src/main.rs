@@ -96,6 +96,7 @@ mod sites;
 mod skills;
 mod state;
 mod stickers;
+mod subnets;
 mod unfurl;
 mod upgrade;
 mod usage;
@@ -983,6 +984,11 @@ fn app(state: AppState) -> Router {
             get(goals::get).patch(goals::patch).delete(goals::delete),
         )
         .route("/projects/{id}/goals/{gid}/log", post(goals::append_log))
+        .route("/subnets", get(subnets::list))
+        .route(
+            "/subnets/{netuid}",
+            get(subnets::get).put(subnets::put).delete(subnets::delete),
+        )
         .route("/skills", get(skills::list).post(skills::create))
         .route("/skills/search", get(skills::list))
         .route("/skills/index", get(skills::index))

@@ -5,7 +5,8 @@
 //! local_run, local_read, local_list, deliver_file, generate_image, post_chart, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
 //! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
-//! web_search, web_fetch, submit_feedback, publish_site, unpublish_site, list_sites.
+//! web_search, web_fetch, submit_feedback, publish_site, unpublish_site, list_sites,
+//! bittensor_subnet.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -90,6 +91,7 @@ fn tools(chat_text_max: Option<usize>) -> Value {
     ]);
     if let Some(a) = list.as_array_mut() {
         a.extend(crate::connectors::tool_specs());
+        a.extend(crate::bittensor::tool_specs());
         a.extend(crate::local::tool_specs());
         a.extend(crate::media::tool_specs());
         a.extend(crate::chart::tool_specs());
@@ -861,6 +863,7 @@ async fn call_tool(
             Err(e) => err_result(e),
         },
         "connectors_list" => crate::connectors::connectors_list(a).await,
+        "bittensor_subnet" => crate::bittensor::bittensor_subnet(a, args).await,
         "connector_call" => crate::connectors::connector_call(a, args, &chat_for_scratch).await,
         "skills_list" => {
             if a.skills.is_stale() {

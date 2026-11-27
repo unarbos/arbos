@@ -802,6 +802,7 @@ impl Db {
         c.execute_batch(crate::pins::PINS_SCHEMA)?;
         c.execute_batch(crate::wallets::WALLETS_SCHEMA)?;
         c.execute_batch(crate::deposits::DEPOSITS_SCHEMA)?;
+        c.execute_batch(crate::subnets::SUBNETS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);

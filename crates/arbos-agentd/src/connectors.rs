@@ -92,7 +92,7 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
-async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
+pub(crate) async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
     let r = agent
         .http_client()
         .get(format!("{}{}", agent.cfg.relay_url, path))
