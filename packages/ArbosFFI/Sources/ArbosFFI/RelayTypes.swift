@@ -2145,8 +2145,11 @@ public struct RoutineDto: Codable {
 	public let next_run_at: Int64?
 	/// Webhook routines only (omitted otherwise).
 	public let fire_url: String?
+	/// Status of each of the latest runs, newest first, at most seven: how the routine has been
+	/// going, without a history request per routine.
+	public let recent_runs: [String]?
 
-	public init(id: String, project_id: String, chat_id: String, name: String, prompt: String, enabled: Bool, created_at: Int64, last_run_at: Int64?, next_run_at: Int64?, fire_url: String?) {
+	public init(id: String, project_id: String, chat_id: String, name: String, prompt: String, enabled: Bool, created_at: Int64, last_run_at: Int64?, next_run_at: Int64?, fire_url: String?, recent_runs: [String]?) {
 		self.id = id
 		self.project_id = project_id
 		self.chat_id = chat_id
@@ -2157,6 +2160,7 @@ public struct RoutineDto: Codable {
 		self.last_run_at = last_run_at
 		self.next_run_at = next_run_at
 		self.fire_url = fire_url
+		self.recent_runs = recent_runs
 	}
 }
 

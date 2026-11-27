@@ -8,6 +8,15 @@
   "next_run_at": 1700086400000,
   "project_id": "proj_fixture",
   "prompt": "Review open goals.",
+  "recent_runs": [
+    "running",
+    "done",
+    "skipped",
+    "skipped",
+    "done",
+    "failed",
+    "done"
+  ],
   "trigger": {
     "expr": "0 9 * * 1-5",
     "kind": "cron",

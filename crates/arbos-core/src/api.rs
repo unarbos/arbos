@@ -1040,6 +1040,10 @@ pub struct RoutineDto {
     /// Webhook routines only (omitted otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire_url: Option<String>,
+    /// Status of each of the latest runs, newest first, at most seven: how the routine has been
+    /// going, without a history request per routine.
+    #[serde(default)]
+    pub recent_runs: Vec<String>,
 }
 
 /// One routine history row (`db::RoutineRun`).
