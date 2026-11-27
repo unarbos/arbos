@@ -426,6 +426,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("no devices paired yet; one-time pairing code (1 h): {code}");
     }
 
+    skills::seed_built_in(&db)?;
     db.local_devices_reset()?;
     state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
