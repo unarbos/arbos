@@ -11,6 +11,7 @@
 //! target at `/vault/mock/echo`, so the whole flow runs on one machine.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -42,6 +43,64 @@ fn internal(e: impl std::fmt::Display) -> ApiErr {
 
 fn bad(e: impl std::fmt::Display) -> ApiErr {
     err(StatusCode::BAD_REQUEST, "bad_request", e.to_string())
+}
+
+// ---- destination filter --------------------------------------------------------------------------
+
+/// Whether `/egress` may connect to `ip`. The request leaves from the relay host, so anything
+/// that is not a public address is the relay's own network, not the box's: the loopback metrics
+/// listener, the box daemon, the homeserver, a cloud metadata service.
+fn is_public(ip: IpAddr) -> bool {
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(v6) => {
+            // `::a.b.c.d`, `::ffff:a.b.c.d` and NAT64 `64:ff9b::a.b.c.d` reach the IPv4 address.
+            let s = v6.segments();
+            if let Some(v4) = v6.to_ipv4() {
+                v4
+            } else if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8)
+            } else {
+                // Not unique-local fc00::/7, link-local fe80::/10 or multicast.
+                return !(v6.is_multicast()
+                    || (s[0] & 0xfe00) == 0xfc00
+                    || (s[0] & 0xffc0) == 0xfe80);
+            }
+        }
+    };
+    let o = v4.octets();
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || v4.is_documentation()
+        || o[0] == 0
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64/10 carrier-grade NAT
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0/24 protocol assignments
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18/15 benchmarking
+        || o[0] >= 240) // reserved
+}
+
+/// The addresses a destination resolves to, refused unless every one is public. The caller
+/// connects to exactly these, so a name cannot answer differently between check and connect.
+async fn public_addrs(url: &reqwest::Url, allow_private: bool) -> Result<Vec<SocketAddr>, String> {
+    let port = url.port_or_known_default().ok_or("url has no port")?;
+    let addrs: Vec<SocketAddr> = match url.host().ok_or("url has no host")? {
+        url::Host::Ipv4(ip) => vec![(ip, port).into()],
+        url::Host::Ipv6(ip) => vec![(ip, port).into()],
+        url::Host::Domain(name) => tokio::net::lookup_host((name, port))
+            .await
+            .map_err(|e| format!("{name}: {e}"))?
+            .collect(),
+    };
+    if addrs.is_empty() {
+        return Err("destination does not resolve".into());
+    }
+    if !allow_private && !addrs.iter().all(|a| is_public(a.ip())) {
+        return Err("destination is not a public address".into());
+    }
+    Ok(addrs)
 }
 
 // ---- host allow-list and placeholder substitution (pure; the invariant tests cover these) -----
@@ -345,6 +404,19 @@ pub async fn egress(
         Ok(request) => request,
         Err(error) => return Ok(failed(error)),
     };
+    // The destination is checked before any authorization is spent too. Mock mode's echo target
+    // is the relay itself, so it is the one case that may stay local.
+    let addrs = public_addrs(&url, state.cfg.vault_mock)
+        .await
+        .map_err(bad)?;
+    // A client of its own: pinned to the addresses just checked, and no redirects — a redirect
+    // would be followed to a destination nobody checked, carrying the substituted headers. The
+    // box sees the 3xx and its Location and can ask again.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(&host, &addrs)
+        .build()
+        .map_err(internal)?;
     let grants = plan
         .used
         .iter()
@@ -395,7 +467,7 @@ pub async fn egress(
             )?;
         }
     }
-    let resp = match state.http.execute(request).await {
+    let resp = match client.execute(request).await {
         Ok(response) => response,
         Err(error) => return Ok(failed(error)),
     };
@@ -799,6 +871,40 @@ pub async fn mock_echo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/egress` leaves from the relay host: nothing that is not a public address is reachable,
+    /// whether written as an address, an IPv6 form of one, or a name that resolves to one.
+    #[tokio::test]
+    async fn egress_refuses_destinations_that_are_not_public() {
+        for refused in [
+            "http://127.0.0.1:9100/metrics",
+            "http://localhost:9100/metrics",
+            "http://[::1]/",
+            "http://0.0.0.0/",
+            "http://10.0.0.5/",
+            "http://172.17.0.1/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.64.0.1/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[64:ff9b::a00:1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://2130706433/",
+        ] {
+            let url = reqwest::Url::parse(refused).unwrap();
+            assert!(public_addrs(&url, false).await.is_err(), "{refused}");
+        }
+        for allowed in ["https://1.1.1.1/", "http://[2606:4700:4700::1111]/"] {
+            let url = reqwest::Url::parse(allowed).unwrap();
+            assert!(public_addrs(&url, false).await.is_ok(), "{allowed}");
+        }
+        let local = reqwest::Url::parse("http://127.0.0.1:7707/vault/mock/echo").unwrap();
+        assert!(
+            public_addrs(&local, true).await.is_ok(),
+            "mock mode stays local"
+        );
+    }
 
     fn items() -> Vec<Resolved> {
         vec![
