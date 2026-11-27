@@ -194,3 +194,33 @@ pub async fn wallet_cash_cheque(
         },
     )
 }
+
+/// What registering a miner on subnet `netuid` costs right now on Finney, in rao. Show it
+/// beside the limit the person is asked to approve.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn wallet_registration_fee(netuid: u16) -> Result<String, WalletError> {
+    Ok(chain::registration_fee(Net::Main, netuid)
+        .await?
+        .to_string())
+}
+
+/// Sign the registration of `hotkey` as a miner on subnet `netuid`, paid by this wallet, for a
+/// fee of at most `limit_rao` (decimal rao). The app builds this from the card's own fields
+/// after the person approved them; no bytes from anyone else are ever signed. Hand the result
+/// to `wallet_cash_cheque` to submit it and follow it; it is good for about 13 minutes
+/// (`arbos_wallet::chain::REGISTER_PERIOD`).
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn wallet_sign_registration(
+    phrase: String,
+    netuid: u16,
+    hotkey: String,
+    limit_rao: String,
+) -> Result<String, WalletError> {
+    let seed = seed(&phrase)?;
+    let limit: u64 = limit_rao
+        .parse()
+        .map_err(|_| WalletError::Invalid("not an amount".into()))?;
+    let (snap, nonce) = chain::snapshot(Net::Main, &seed.address()).await?;
+    let bytes = chain::sign_registration(&snap, &seed, netuid, &hotkey, limit, nonce)?;
+    Ok(format!("0x{}", hex::encode(bytes)))
+}

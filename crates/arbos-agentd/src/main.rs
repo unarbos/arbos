@@ -111,6 +111,7 @@ mod pi_slot;
 mod refusal_line_and_window_notice_tests;
 #[cfg(test)]
 mod refused_turn_window_tests;
+mod register;
 mod relay_error;
 mod reply;
 mod resources;

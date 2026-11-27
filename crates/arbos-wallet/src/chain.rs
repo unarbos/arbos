@@ -336,6 +336,63 @@ fn inspect_at(
     })
 }
 
+// ---- registering a miner ----------------------------------------------------------------------
+
+/// How long a signed registration can land for, counted from the snapshot's block: about 13
+/// minutes. An approval is for the fee the person just saw, not for whatever it is tonight. A
+/// power of two (the era encoding).
+pub const REGISTER_PERIOD: u64 = 64;
+
+fn register_limit(
+    netuid: u16,
+    hotkey: [u8; 32],
+    limit_rao: u64,
+) -> impl subxt::transactions::Payload {
+    subxt::dynamic::tx(
+        "SubtensorModule",
+        "register_limit",
+        vec![
+            Value::u128(netuid.into()),
+            Value::from_bytes(hotkey),
+            Value::u128(limit_rao.into()),
+        ],
+    )
+}
+
+/// Sign `SubtensorModule.register_limit`: this wallet pays the registration fee that puts
+/// `hotkey` on subnet `netuid` as a miner, and only if the fee is `limit_rao` or less when it
+/// lands. Nothing else can be made of the signature: the subnet, the hotkey and the most that
+/// can be spent are all inside it, with the chain, the nonce and the expiry.
+///
+/// The fee is burned, not lent: it does not come back when the miner later loses its slot.
+///
+/// The bytes have a cheque's shape (the extrinsic, then the block it is anchored to), so
+/// [`cash`] submits them and follows them to a finalized block the same way.
+pub fn sign_registration(
+    snap: &Snapshot,
+    seed: &Seed,
+    netuid: u16,
+    hotkey: &str,
+    limit_rao: u64,
+    nonce: u64,
+) -> crate::Result<Vec<u8>> {
+    if now().saturating_sub(snap.at) / BLOCK_SECS > REGISTER_PERIOD / 2 {
+        return Err(err("the chain was last read too long ago; read it again"));
+    }
+    let block = u32::try_from(snap.block).map_err(|_| err("bad block number"))?;
+    let hash = h256(&snap.block_hash)?;
+    let at = offline(snap)?.at_block(0u64).map_err(err)?;
+    let call = register_limit(netuid, parse_address(hotkey)?, limit_rao);
+    let mut partial = at
+        .transactions()
+        .create_v4_signable_offline(&call, params(nonce, REGISTER_PERIOD, snap.block, hash))
+        .map_err(err)?;
+    let mut bytes = partial.sign(&seed.keypair()).map_err(err)?.into_encoded();
+    bytes.extend_from_slice(&block.to_le_bytes());
+    bytes.extend_from_slice(&hash.0);
+    Ok(bytes)
+}
+
 // ---- online -----------------------------------------------------------------------------------
 
 struct HttpRpc {
@@ -501,6 +558,28 @@ pub async fn balance(net: Net, address: &str) -> crate::Result<u128> {
     let addr = subxt::dynamic::storage::<([u8; 32],), Info>("System", "Account");
     let v = at.storage().fetch(addr, (acc,)).await.map_err(err)?;
     Ok(v.decode().map_err(err)?.data.free)
+}
+
+/// What registering a miner on `netuid` costs right now, in rao. It moves with demand, block by
+/// block: show it, and sign for a limit, never for "whatever it is".
+pub async fn registration_fee(net: Net, netuid: u16) -> crate::Result<u64> {
+    let at = api(net).await?.at_current_block().await.map_err(err)?;
+    let addr = subxt::dynamic::storage::<(u16,), u64>("SubtensorModule", "Burn");
+    let v = at.storage().fetch(addr, (netuid,)).await.map_err(err)?;
+    v.decode().map_err(err)
+}
+
+/// Whether `hotkey` holds a miner's slot on `netuid`.
+pub async fn is_registered(net: Net, netuid: u16, hotkey: &str) -> crate::Result<bool> {
+    let hotkey = parse_address(hotkey)?;
+    let at = api(net).await?.at_current_block().await.map_err(err)?;
+    let addr = subxt::dynamic::storage::<(u16, [u8; 32]), u16>("SubtensorModule", "Uids");
+    Ok(at
+        .storage()
+        .try_fetch(addr, (netuid, hotkey))
+        .await
+        .map_err(err)?
+        .is_some())
 }
 
 /// Where a cheque landed; enough for anyone to check it on chain.
@@ -834,6 +913,104 @@ mod tests {
         let expired = cash(Net::Local, &short, None).await.unwrap_err();
         assert!(expired.to_string().contains("expired"), "{expired}");
         assert_eq!(balance(Net::Local, &payee).await.unwrap(), 1_500_000_000);
+    }
+
+    #[test]
+    fn a_registration_signs_the_subnet_the_hotkey_and_the_limit_and_nothing_else() {
+        #[derive(subxt::ext::scale_decode::DecodeAsType)]
+        #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+        struct Fields {
+            netuid: u16,
+            hotkey: AccountId32,
+            limit_price: u64,
+        }
+        let mut snap = snapshot_fixture();
+        snap.at = now();
+        let (payer, hotkey) = (Seed::generate(), Seed::generate().address());
+        let bytes = sign_registration(&snap, &payer, 51, &hotkey, 2_500_000_000, 7).unwrap();
+        let (raw, block, _) = split(&bytes).unwrap();
+        assert_eq!(block, snap.block);
+        let at = offline(&snap).unwrap().at_block(0u64).unwrap();
+        let exts = futures::executor::block_on(at.extrinsics().from_bytes(vec![raw.to_vec()]));
+        let ext = exts.iter().next().unwrap().unwrap();
+        assert_eq!(
+            (ext.pallet_name(), ext.call_name()),
+            ("SubtensorModule", "register_limit")
+        );
+        let f: Fields = ext.decode_call_data_fields_unchecked_as().unwrap();
+        assert_eq!((f.netuid, f.limit_price), (51, 2_500_000_000));
+        assert_eq!(f.hotkey.0, parse_address(&hotkey).unwrap());
+        assert_eq!(
+            ext.address_bytes().unwrap()[1..],
+            parse_address(&payer.address()).unwrap()
+        );
+        assert_eq!(ext.transaction_extensions().unwrap().nonce(), Some(7));
+        // It is not a cheque, and a stale reading of the chain signs nothing.
+        assert!(inspect(&snap, &bytes).is_err());
+        snap.at -= BLOCK_SECS * (REGISTER_PERIOD / 2 + 1);
+        assert!(sign_registration(&snap, &payer, 51, &hotkey, 1, 7).is_err());
+        assert!(
+            sign_registration(&snapshot_fixture(), &payer, 51, "not an address", 1, 7).is_err()
+        );
+    }
+
+    /// On a local subtensor (see the cheque test): a funded wallet registers a fresh hotkey on
+    /// subnet 1 for the fee it read, a limit under the fee registers nothing, and the fee is
+    /// what left the wallet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registration_lands_within_its_limit_and_not_above_it() {
+        if std::env::var("ARBOS_WALLET_LOCALNET").as_deref() != Ok("1") {
+            return;
+        }
+        let net = Net::Local;
+        let (payer, netuid) = (Seed::generate(), 1);
+        let api = api(net).await.unwrap();
+        let fund = transfer(
+            parse_address(&payer.address()).unwrap(),
+            1000 * crate::RAO_PER_TAO,
+        );
+        let alice = subxt_signer::sr25519::dev::alice();
+        let at = api.at_current_block().await.unwrap();
+        let tx = at
+            .transactions()
+            .create_signed(&fund, &alice, Default::default())
+            .await
+            .unwrap();
+        let mut funding = tx.encoded().to_vec();
+        funding.extend_from_slice(&[0; ANCHOR]);
+        assert!(matches!(
+            cash(net, &funding, None).await.unwrap(),
+            Cashed::Paid(_)
+        ));
+
+        let fee = registration_fee(net, netuid).await.unwrap();
+        assert!(fee > 1, "subnet {netuid} has a fee: {fee}");
+        let had = balance(net, &payer.address()).await.unwrap();
+
+        // A limit under the fee: the chain takes the extrinsic and registers nothing.
+        let cheap = Seed::generate().address();
+        let (snap, nonce) = snapshot(net, &payer.address()).await.unwrap();
+        let low = sign_registration(&snap, &payer, netuid, &cheap, fee / 2, nonce).unwrap();
+        assert!(cash(net, &low, None).await.is_err());
+        assert!(!is_registered(net, netuid, &cheap).await.unwrap());
+
+        let hotkey = Seed::generate().address();
+        let (snap, nonce) = snapshot(net, &payer.address()).await.unwrap();
+        let fee = registration_fee(net, netuid).await.unwrap();
+        let limit = fee + fee / 10;
+        let bytes = sign_registration(&snap, &payer, netuid, &hotkey, limit, nonce).unwrap();
+        assert!(matches!(
+            cash(net, &bytes, None).await.unwrap(),
+            Cashed::Paid(_)
+        ));
+        assert!(is_registered(net, netuid, &hotkey).await.unwrap());
+        let spent = had - balance(net, &payer.address()).await.unwrap();
+        assert!(
+            spent >= u128::from(fee) && spent < u128::from(limit) + crate::RAO_PER_TAO / 100,
+            "{spent} for a fee of {fee}"
+        );
+        // The same signature registers nobody twice.
+        assert!(cash(net, &bytes, None).await.is_err());
     }
 
     #[test]

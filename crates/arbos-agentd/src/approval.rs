@@ -643,6 +643,7 @@ impl Agent {
         // Secret hand-off: the request card's answer names the saved secret (ids and names,
         // never a value) for the tool waiting on it; the offer card's Save runs the save.
         crate::handoff::note_card_answer(approval_id, payload);
+        crate::register::note_card_answer(approval_id, payload);
         let detected = self
             .store
             .approval(approval_id)

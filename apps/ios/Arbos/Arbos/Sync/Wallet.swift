@@ -452,3 +452,73 @@ extension AppModel {
         (UserDefaults.standard.dictionary(forKey: "pendingCheques") as? [String: String])?[bytes] != nil
     }
 }
+
+// MARK: Subnet registration card
+
+extension AppModel {
+    /// Where this phone stands with a registration card.
+    enum RegistrationState: Equatable {
+        case quoting
+        /// The fee read from the chain and the most this phone will sign for (fee + 10%).
+        case quoted(chatId: Id, SubnetRegistration, fee: UInt64, limit: UInt64)
+        case paying
+        case failed(String)
+    }
+
+    /// Register tapped: read the fee so the person approves a number, not a blank.
+    func quoteRegistration(chatId: Id, approvalId: String, _ registration: SubnetRegistration) {
+        guard registrations[approvalId] == nil else { return }
+        guard walletPhrase != nil else {
+            registrations[approvalId] = .failed("Set up your wallet first.")
+            return
+        }
+        registrations[approvalId] = .quoting
+        guard let work = accountWork() else { return }
+        Task { @MainActor in
+            do {
+                guard let fee = UInt64(try await walletRegistrationFee(netuid: registration.netuid)) else {
+                    throw WalletError.Chain("The chain gave no fee for that subnet.")
+                }
+                guard accountLifetime.accepts(work.owner) else { return }
+                // 10% headroom: the fee moves every block, and the chain takes only the fee.
+                let (limit, overflow) = fee.addingReportingOverflow(fee / 10)
+                registrations[approvalId] = overflow ? .failed("That fee is not a real amount.")
+                    : .quoted(chatId: chatId, registration, fee: fee, limit: limit)
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
+                registrations[approvalId] = .failed(walletWords(error))
+            }
+        }
+    }
+
+    /// The price was confirmed: sign exactly this subnet, hotkey and limit, send it, and answer
+    /// the card only when the chain has finalized it.
+    func payRegistration(chatId: Id, approvalId: String, _ registration: SubnetRegistration, limit: UInt64) {
+        guard case .quoted = registrations[approvalId], let phrase = walletPhrase, let work = accountWork() else { return }
+        registrations[approvalId] = .paying
+        Task { @MainActor in
+            do {
+                let bytes = try await walletSignRegistration(phrase: phrase, netuid: registration.netuid,
+                                                             hotkey: registration.hotkey, limitRao: String(limit))
+                var since: UInt64?
+                // The signature is good for 64 blocks (~13 min); 150 looks at 6 s cover it.
+                for _ in 0..<150 {
+                    guard accountLifetime.accepts(work.owner) else { return }
+                    switch try await walletCashCheque(bytes: bytes, since: since) {
+                    case .paid(let block):
+                        answerRegistrationCard(chatId: chatId, approvalId: approvalId, registration, limit: limit, block: block)
+                        registrations[approvalId] = nil
+                        return
+                    case .pending(let s):
+                        since = s
+                        try await Task.sleep(nanoseconds: 6_000_000_000)
+                    }
+                }
+                registrations[approvalId] = .failed("The chain hasn't confirmed it yet. Check your wallet before trying again.")
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
+                registrations[approvalId] = .failed(walletWords(error))
+            }
+        }
+    }
+}

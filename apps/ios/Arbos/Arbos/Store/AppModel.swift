@@ -1008,6 +1008,8 @@ final class AppModel: ObservableObject {
     @Published var shellGrants: [Id: [ShellGrant]] = [:]
     /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
     @Published var handoff: [String: HandoffState] = [:]
+    /// Subnet registration cards: where this phone's signing stands, by approval id.
+    @Published var registrations: [String: RegistrationState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -2064,6 +2066,7 @@ final class AppModel: ObservableObject {
         projectSecrets = [:]
         shellGrants = [:]
         handoff = [:]
+        registrations = [:]
         secretsBusy = false
         devices = []
         devicesLoaded = false
@@ -6902,13 +6905,37 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A registration this phone signed is in a finalized block (`Sync/Wallet.swift`): answer
+    /// its card with what was signed, so the agent learns it from the device that did it.
+    func answerRegistrationCard(chatId: Id, approvalId: String, _ registration: SubnetRegistration, limit: UInt64, block: String) {
+        markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["approve"])
+        guard let doc = docs[chatId] else { return }
+        let payload: [String: Any] = [
+            "approvalId": approvalId,
+            "registration": ["netuid": Int(registration.netuid), "hotkey": registration.hotkey,
+                             "limit_rao": String(limit), "block": block] as [String: Any],
+        ]
+        try? doc.pushCommand("approve", payload: payload, device: deviceId)
+        doc.commit()
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
+        var registration: SubnetRegistration?
         for m in messages[chatId] ?? [] {
             for p in m.parts {
-                if case .question(_, let q) = p, q.questionId == questionId { secretRequestId = q.secretRequestId }
+                if case .question(_, let q) = p, q.questionId == questionId {
+                    secretRequestId = q.secretRequestId
+                    registration = q.registration
+                }
             }
+        }
+        // A registration is not approved by a tap: the tap asks for the price, the price is
+        // confirmed, and the card is answered only once the chain has it (`Sync/Wallet.swift`).
+        if let registration, choice == "approve" {
+            quoteRegistration(chatId: chatId, approvalId: approvalId, registration)
+            return
         }
         markQuestionAnswered(chatId: chatId, questionId: questionId, answer: [choice])
         let approve = choice != "deny" && choice != "reject"
