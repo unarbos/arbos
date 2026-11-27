@@ -567,6 +567,7 @@ mod tests {
             0.9,
             3,
             &[],
+            crate::store::PROVENANCE_OWNER,
         );
         for (dir, file) in [
             (agent.cfg.pi_sessions_dir(), "20261026_main.jsonl"),
