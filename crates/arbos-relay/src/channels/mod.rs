@@ -1,5 +1,5 @@
-//! Channels (F7): reach a Project from Slack, Telegram, WhatsApp (Cloud API) and Beeper (through
-//! the Harness Comms API). The relay owns the platform adapters; a box only ever sees a
+//! Channels (F7): reach a Project from Slack, Telegram, WhatsApp (Cloud API), Discord and Beeper
+//! (through the Harness Comms API). The relay owns the platform adapters; a box only ever sees a
 //! `channel_message` push and answers with `POST /projects/{id}/channels/reply`.
 //!
 //! Identity: an external (user, chat) pair must be bound to a project chat first. Settings →
@@ -10,6 +10,7 @@
 //! `POST /channels/mock/inbound` injects messages, so the whole loop runs without credentials.
 
 pub mod beeper;
+pub mod discord;
 pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
@@ -53,14 +54,16 @@ pub enum Platform {
     Telegram,
     Whatsapp,
     Beeper,
+    Discord,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 4] = [
+    pub const ALL: [Platform; 5] = [
         Platform::Slack,
         Platform::Telegram,
         Platform::Whatsapp,
         Platform::Beeper,
+        Platform::Discord,
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -69,6 +72,7 @@ impl Platform {
             "telegram" => Some(Platform::Telegram),
             "whatsapp" => Some(Platform::Whatsapp),
             "beeper" => Some(Platform::Beeper),
+            "discord" => Some(Platform::Discord),
             _ => None,
         }
     }
@@ -79,6 +83,7 @@ impl Platform {
             Platform::Telegram => "telegram",
             Platform::Whatsapp => "whatsapp",
             Platform::Beeper => "beeper",
+            Platform::Discord => "discord",
         }
     }
 
@@ -88,6 +93,7 @@ impl Platform {
             Platform::Telegram => "Telegram",
             Platform::Whatsapp => "WhatsApp (Cloud API)",
             Platform::Beeper => "Beeper (Harness Comms)",
+            Platform::Discord => "Discord",
         }
     }
 }
@@ -123,6 +129,7 @@ pub fn platform_state(state: &AppState, p: Platform) -> (PlatformState, String) 
         Platform::Telegram => telegram::status(state),
         Platform::Whatsapp => whatsapp::status(state),
         Platform::Beeper => beeper::status(state),
+        Platform::Discord => discord::status(state),
     };
     (
         if ok {
@@ -393,6 +400,7 @@ pub async fn send(
         Platform::Telegram => telegram::send(state, external_chat_id, &text).await,
         Platform::Whatsapp => whatsapp::send(state, external_chat_id, &text).await,
         Platform::Beeper => beeper::send(state, external_chat_id, &text, request_id).await,
+        Platform::Discord => discord::send(state, external_chat_id, &text).await,
     };
     match &r {
         Ok(v) => {
@@ -489,6 +497,7 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
                     )
                 }
                 Platform::Beeper => "relay polls POST /v1/messages/poll".to_owned(),
+                Platform::Discord => "relay holds a Discord Gateway connection".to_owned(),
             };
             ChannelPlatformDto {
                 platform: p.as_str().to_owned(),
@@ -711,7 +720,7 @@ pub async fn mock_inbound(
     }
     let platform = Platform::parse(&b.platform).ok_or((
         StatusCode::BAD_REQUEST,
-        "platform must be slack|telegram|whatsapp|beeper".to_owned(),
+        "platform must be slack|telegram|whatsapp|beeper|discord".to_owned(),
     ))?;
     let sender_name = b
         .sender_name
@@ -760,10 +769,12 @@ pub async fn mock_outbox(State(state): State<AppState>, principal: Principal) ->
     Ok(Json(json!({ "mock": mock_on(&state), "items": items })).into_response())
 }
 
-/// Background pollers: Beeper (always, when Harness Comms is connected) and Telegram long polling.
+/// Background pollers: Beeper (always, when Harness Comms is connected), Telegram long polling
+/// and the Discord Gateway connection.
 pub async fn spawn_pollers(state: AppState) {
     beeper::spawn_poller(state.clone()).await;
-    telegram::spawn_poller(state).await;
+    telegram::spawn_poller(state.clone()).await;
+    discord::spawn_gateway(state).await;
 }
 
 #[cfg(test)]

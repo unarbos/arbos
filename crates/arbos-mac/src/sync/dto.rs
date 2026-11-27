@@ -1919,7 +1919,7 @@ mod tests {
     fn channels_from_fixtures() {
         let view = ChannelsView::from(&load_json::<ChannelsOverviewDto>("channels_overview.json"));
         assert!(view.loaded && view.mock);
-        assert_eq!(view.platforms.len(), 4);
+        assert_eq!(view.platforms.len(), 5);
         assert!(view
             .platforms
             .iter()

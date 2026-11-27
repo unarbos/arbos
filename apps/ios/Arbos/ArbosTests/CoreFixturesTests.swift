@@ -673,7 +673,7 @@ final class CoreFixturesTests: XCTestCase {
     func testChannelsSkillsLocalFeedbackFixtures() throws {
         let overview = try JSONDecoder().decode(ChannelsOverviewDto.self, from: try apiFixtureData("channels_overview.json"))
         XCTAssertTrue(overview.mock)
-        XCTAssertEqual(overview.platforms.count, 4)
+        XCTAssertEqual(overview.platforms.count, 5)
         XCTAssertEqual(overview.bindings.first?.externalChatId, "tg_chat_fixture")
         XCTAssertEqual(overview.pairing?.code, "PAIR42")
 
