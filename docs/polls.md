@@ -366,9 +366,9 @@ only once.
 
   These are corrections and not refusals because honest devices produce every one of them: a
   vote cast offline or in the second the author closed, a phone whose clock is off, a close
-  from the author's second device, a stale device healing a room. The client re-sends a
-  refused push on every reconnect and nothing queued behind it can go, so a refusal would cut
-  that device off the chat for good.
+  from the author's second device, a stale device healing a room. A refused push costs its
+  device every write in the chat it had not yet delivered (`docs/crdt-sync.md` §11.1), so a
+  refusal is kept for what no honest device writes.
 
   **A correction is part of the push.** It is computed and applied to the room's doc under
   the room's admission lock, and stored with the push in one database transaction
@@ -449,7 +449,8 @@ does not know about closing would otherwise keep offering votes on a closed poll
 show voter names on hover (Mac) for a poll whose author hid them.
 
 **A new app against an older relay.** A relay without this change refuses the new shape as
-`bad_poll`, and a refused push is sent again for ever. Release order alone does not protect
+`bad_poll`, and a refused push undoes what its device had not yet delivered in the chat
+(a build before `docs/crdt-sync.md` §11.1 sends it again for ever). Release order alone does not protect
 anyone, so the relay says what it takes: `features.poll_options` on `GET /me`. Without it
 (an older relay, or before `/me` has answered once) the apps offer no "Show who voted", no
 duration and no Close poll, and post polls in the older shape (`Poll::older`), which every
@@ -478,13 +479,12 @@ it is as exact as that device's clock.
 out. Before the account has loaded no poll is drawn as the reader's own, so nobody is
 offered "Close poll" on someone else's.
 
-**A refused push.** A push the relay refuses for its contents stays queued and is sent again
-on every reconnect, with everything behind it; the client cannot drop it, because later
-updates from the same device depend on it. The shared client now reports it
-(`RoomAction::PushRefused`), so both apps show their standing "not being delivered" note on
-the chat until a push is acknowledged. Taking the refused row back out needs the device to
-discard its unacknowledged state and read the chat again from the relay, which no client
-does yet for any refusal.
+**A refused push.** A push the relay refuses for its contents is let go of, with everything
+that device had not yet delivered in the chat, because later updates from the same device
+depend on it. The shared client empties its queue and tells the app (`RoomAction::Rebuild`);
+the app starts the chat's document again from the relay's checkpoint and rows and shows one
+error ("Couldn't record your vote. The server did not accept it, so it was undone."). What
+the person does next is delivered. `docs/crdt-sync.md` §11.1 has the codes and the cost.
 
 **Not built:** editing a poll. The poll field is written once and the relay refuses a rewrite
 (`poll_fixed`); allowing it while there are no votes needs a rule for a vote and an edit

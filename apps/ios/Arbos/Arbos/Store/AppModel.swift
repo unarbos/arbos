@@ -2903,6 +2903,24 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        room.onRebuild = { [weak self] error in
+            guard let self else { return }
+            // The relay will never take one of this chat's pushes, and everything written
+            // since depends on it. The room (already stopped) and its document go, with the
+            // saved copy and the "not sent yet" marks; a new room on an empty document reads
+            // the chat back from the relay. The rows on screen stay until it has.
+            self.rooms[key] = nil
+            self.docs[key] = nil
+            self.unacked[key] = nil
+            self.pushRefused.remove(key)
+            self.pushRefusalText[key] = nil
+            self.pushRefusalReason[key] = nil
+            self.roomRestoredCursors[key] = nil
+            self.caughtUp.remove(key)
+            self.forgetDoc(key)
+            self.fail(error)
+            self.ensureRoom(projectId: projectId, key: key, roomChat: roomChat)
+        }
         rooms[key] = room
         roomCreatedAt[key] = Date()
         if let effective {

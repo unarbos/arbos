@@ -400,8 +400,8 @@ pub fn check_push(
 ///
 /// What is *not* refused is anything an honest device can push in a race: a vote that reaches
 /// the relay after the poll closed, a vote whose device clock is off, a second close from the
-/// author's other device. A refused push is re-sent on every reconnect and nothing behind it
-/// in that device's queue can go, so a refusal there would cut an honest device off the chat.
+/// author's other device. A refused push costs its device every write in the chat it had not
+/// yet delivered (docs/crdt-sync.md §11.1), so a refusal there would undo an honest device's work.
 /// Those pushes are stored and, in the same step, put right by the relay: see [`corrections`].
 ///
 /// The one allowance: a poll row arriving whole under an id the relay stored a row for itself,

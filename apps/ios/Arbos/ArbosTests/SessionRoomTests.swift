@@ -403,6 +403,57 @@ final class SessionRoomTests: XCTestCase {
         room.stop()
     }
 
+    /// A push the relay refuses for what it holds is let go of: the room stops (its document
+    /// still holds the refused write), keeps nothing to send, and tells its owner once, with
+    /// the sentence to show. The owner opens the chat again on an empty document.
+    func testAPushRefusedForGoodStopsTheRoomAndTellsItsOwnerOnce() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "people",
+            key: "chat",
+            roomChat: "chat",
+            doc: CoreChatDoc(key: "chat"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            pending: [("batch-1", Data("pending".utf8))],
+            deviceId: { "dev:me" }
+        )
+        var said: [String] = []
+        var saved: [[(String, Data)]] = []
+        var pushRefusedCalls = 0
+        room.onRebuild = { said.append($0.sentence) }
+        room.onPendingChanged = { saved.append($0) }
+        room.onPushRefused = { pushRefusedCalls += 1 }
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock = try XCTUnwrap(sockets.current)
+        sock.fireOpen()
+        try await waitUntil { !sock.sent.isEmpty }
+        sock.deliver(try encodeState(checkpointSeq: 0, frontier: Data()))
+        try await waitUntil {
+            sock.sent.contains { (try? decodeFrame(bytes: $0))?.ty == .rowsReq }
+        }
+        sock.deliver(try encodeFrame(ty: .rowsDone, headerJson: #"{"headSeq":0}"#, payload: Data()))
+        try await waitUntil { self.pushBatchIds(sock.sent) == ["batch-1"] }
+
+        sock.deliver(try encodeFrame(
+            ty: .error,
+            headerJson: #"{"code":"bad_vote","message":"a vote on a timed poll carries its time","batchId":"batch-1"}"#,
+            payload: Data()
+        ))
+        try await waitUntil { !said.isEmpty }
+        for _ in 0..<30 {
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(said, ["Couldn't record your vote. The server did not accept it, so it was undone."])
+        XCTAssertTrue(room.pendingBatches.isEmpty)
+        XCTAssertEqual(saved.last?.count, 0, "the empty queue is what gets saved")
+        XCTAssertEqual(pushRefusedCalls, 0)
+        XCTAssertEqual(sockets.sockets.count, 1, "this room does not dial again")
+    }
+
     /// [feedback 2005]: only pushes that change who may post into a chat nudge its room.
     func testChatToRetryNamesOnlyMembershipAndSettingsChanges() {
         XCTAssertEqual(

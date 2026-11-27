@@ -5937,6 +5937,63 @@ async fn perform_room_actions(
                         );
                     }
                 }
+                RoomAction::Rebuild {
+                    batch_id: _,
+                    code,
+                    message,
+                    verb,
+                    why,
+                } => {
+                    // The relay will never take this push. Its ops are in this document and
+                    // everything written since depends on them, so the room starts again on
+                    // an empty one, which the next connection fills from the relay: the saved
+                    // copy and the "not sent yet" marks go, the user is told once, and the
+                    // room is opened again as if for the first time. That retires this
+                    // document, which ends this loop.
+                    eprintln!(
+                        "relay room {}: push refused for good ({code}: {message}); reading the room back",
+                        session.room()
+                    );
+                    let Some(was_refused) = shared.docs.publish_if_current(key, room_doc, || {
+                        shared.pending_messages.lock().unwrap().ack_room(key);
+                        shared.room_seq.lock().unwrap().remove(key);
+                        shared.dirty.lock().unwrap().remove(key);
+                        shared.push_refused.lock().unwrap().remove(room_chat)
+                    }) else {
+                        anyhow::bail!("room document retired");
+                    };
+                    shared.with_store(|s| s.delete_doc(key));
+                    if was_refused {
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::PushRefused {
+                                chat_id: room_chat.to_string(),
+                                refused: false,
+                                why: PushRefusal::default(),
+                            },
+                        );
+                    }
+                    emit_doc_event(
+                        shared,
+                        key,
+                        room_doc,
+                        SyncEvent::Failure {
+                            error: UserError::new(
+                                verb,
+                                ErrorClass::Refused { message: Some(why) },
+                                format!("{code}: {message}"),
+                            ),
+                            retry: None,
+                        },
+                    );
+                    // Dropping the room's entry aborts this very task at its next await, so
+                    // the entry is held until the new room is in place.
+                    let old = shared.rooms.lock().unwrap().remove(key);
+                    ensure_room(shared, project_id, key, room_chat);
+                    drop(old);
+                }
                 RoomAction::BoxState {
                     state,
                     detail,
@@ -8275,7 +8332,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             selections,
         } => {
             // Not before the account is known: a vote written as nobody is one the relay
-            // refuses, and a refused push is sent again for ever.
+            // refuses, and a refused push undoes what is unsent in the chat.
             let Some(me) = shared.viewer() else {
                 shared.fail("cast your vote", "the account is not loaded yet".to_owned());
                 return;
@@ -11801,6 +11858,130 @@ mod blob_body_tests {
         assert_eq!(mime, "video/quicktime");
         assert_eq!(bytes, expected);
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod refused_push_tests {
+    use super::*;
+    use arbos_core::wire::{Frame, FrameType};
+    use tokio::net::{TcpListener, TcpStream};
+
+    type Ws = tokio_tungstenite::WebSocketStream<TcpStream>;
+
+    async fn send(ws: &mut Ws, ty: FrameType, header: Value) {
+        let bytes = Frame::new(ty, header, Vec::new()).encode();
+        ws.send(WsMessage::Binary(bytes)).await.unwrap();
+    }
+
+    /// The next frame of this type; presence and the like are passed over.
+    async fn recv(ws: &mut Ws, ty: FrameType) -> Frame {
+        loop {
+            let WsMessage::Binary(bytes) = ws.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            let frame = Frame::decode(bytes).unwrap().unwrap();
+            if frame.ty == ty {
+                return frame;
+            }
+        }
+    }
+
+    /// Take the next room connection through its handshake for a room whose head is `head`
+    /// and which has no rows to send. Returns the socket and the cursor the app said hello with.
+    async fn accept(listener: &TcpListener, head: i64) -> (Ws, i64) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello = recv(&mut ws, FrameType::Hello).await;
+        send(&mut ws, FrameType::State, json!({ "checkpointSeq": 0 })).await;
+        recv(&mut ws, FrameType::RowsReq).await;
+        send(&mut ws, FrameType::RowsDone, json!({ "headSeq": head })).await;
+        (ws, hello.header["cursor"].as_i64().unwrap())
+    }
+
+    fn write(shared: &Shared, id: &str) {
+        let handle = shared.docs.get("c1").unwrap();
+        let doc = handle.lock().unwrap();
+        doc.core
+            .append_user_message(id, id, "test-device", &Default::default())
+            .unwrap();
+        doc.core.doc.commit();
+    }
+
+    /// The relay refuses a push for good: the room is opened again on an empty document read
+    /// from cursor 0, the user is told once, and the next write reaches the relay whole.
+    #[tokio::test]
+    async fn a_push_refused_for_good_reopens_the_room_and_says_so_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (events, mut events_rx) = mpsc::unbounded_channel();
+        let (coordinator, _) = mpsc::unbounded_channel();
+        let ui = UiControl::default();
+        let context = RelayContext {
+            http: reqwest::Client::new(),
+            http_url: format!("http://{addr}"),
+            ws_url: format!("ws://{addr}"),
+            events,
+            ui: ui.clone(),
+            call_registry: Arc::new(CallRegistry::new(format!("http://{addr}"))),
+            coordinator,
+        };
+        let shared = Shared::new(
+            &context,
+            ui.ticket().unwrap(),
+            credentials::DeviceCredentials {
+                relay_url: format!("http://{addr}"),
+                device_id: "test-device".into(),
+                access_token: "test-token".into(),
+                refresh_token: None,
+                expires_at: 0,
+                user: None,
+            },
+        );
+        ensure_room(&shared, "p1", "c1", "c1");
+        let (mut ws, _) = accept(&listener, 5).await;
+        let first = shared.docs.get("c1").unwrap();
+
+        write(&shared, "m1");
+        let push = recv(&mut ws, FrameType::Push).await;
+        send(
+            &mut ws,
+            FrameType::Error,
+            json!({ "code": "not_yours", "message": "no", "batchId": push.header["batchId"] }),
+        )
+        .await;
+
+        let (mut ws, cursor) = accept(&listener, 5).await;
+        assert_eq!(cursor, 0, "the room is read from the start");
+        let second = shared.docs.get("c1").unwrap();
+        assert!(first.is_retired() && !Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            second.lock().unwrap().len(),
+            0,
+            "the refused message is gone"
+        );
+
+        write(&shared, "m2");
+        let push = recv(&mut ws, FrameType::Push).await;
+        let mut relay = arbos_core::doc::ChatDoc::new(None, false);
+        assert!(
+            relay.import(&push.payload).unwrap().pending.is_none(),
+            "the later write depends on nothing the relay refused"
+        );
+        assert_eq!(relay.message_ids(), ["m2"]);
+
+        let mut said = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            if let SyncEvent::ForAccount { event, .. } = event {
+                if let SyncEvent::Failure { error, .. } = *event {
+                    said.push(error.sentence());
+                }
+            }
+        }
+        assert_eq!(
+            said,
+            ["Couldn't save your last change. The server did not accept it, so it was undone."]
+        );
     }
 }
 

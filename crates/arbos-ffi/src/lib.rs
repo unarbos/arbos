@@ -117,6 +117,15 @@ pub enum RoomAction {
         by_handle: Option<String>,
         by_name: Option<String>,
     },
+    /// The relay refused a push for good: the session let go of every unacknowledged batch.
+    /// Start the room's document again empty and show "Couldn't `verb`. `why`" once.
+    Rebuild {
+        batch_id: String,
+        code: String,
+        message: String,
+        verb: String,
+        why: String,
+    },
     Presence {
         device: Option<String>,
         handle: Option<String>,
@@ -183,6 +192,19 @@ impl From<ClientAction> for RoomAction {
                 reason,
                 by_handle,
                 by_name,
+            },
+            ClientAction::Rebuild {
+                batch_id,
+                code,
+                message,
+                verb,
+                why,
+            } => Self::Rebuild {
+                batch_id,
+                code,
+                message,
+                verb,
+                why,
             },
             ClientAction::Presence {
                 device,
