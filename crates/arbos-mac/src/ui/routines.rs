@@ -259,6 +259,31 @@ impl RoutinesPanel {
             .child(label.into())
     }
 
+    fn status_color(status: RoutineRunStatus, theme: &Theme) -> gpui::Hsla {
+        match status {
+            RoutineRunStatus::Done => theme.accent,
+            RoutineRunStatus::Failed => theme.danger,
+            RoutineRunStatus::Running | RoutineRunStatus::Queued => theme.warn,
+            RoutineRunStatus::Skipped | RoutineRunStatus::Other => theme.text_faint,
+        }
+    }
+
+    /// The latest runs as dots, oldest on the left: how a routine has been going at a glance.
+    /// The words for each run are in its history.
+    fn run_strip(recent: &[RoutineRunStatus], theme: &Theme) -> Div {
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(3.0))
+            .children(recent.iter().rev().map(|s| {
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(Self::status_color(*s, theme))
+            }))
+    }
+
     fn header(&self, title: String, right: Vec<gpui::AnyElement>, theme: &Theme) -> Div {
         let mut row = div().flex().items_center().justify_between().child(
             div()
@@ -365,7 +390,8 @@ impl RoutinesPanel {
                                         })
                                         .child(r.name.clone()),
                                 )
-                                .child(Self::chip(r.trigger.label(), theme.text_muted, &theme)),
+                                .child(Self::chip(r.trigger.label(), theme.text_muted, &theme))
+                                .child(Self::run_strip(&r.recent_runs, &theme)),
                         )
                         .child(
                             div()
@@ -722,12 +748,7 @@ impl RoutinesPanel {
             );
         }
         for run in runs.iter().take(20) {
-            let color = match run.status {
-                RoutineRunStatus::Done => theme.accent,
-                RoutineRunStatus::Failed => theme.danger,
-                RoutineRunStatus::Running | RoutineRunStatus::Queued => theme.warn,
-                RoutineRunStatus::Skipped | RoutineRunStatus::Other => theme.text_faint,
-            };
+            let color = Self::status_color(run.status, &theme);
             let duration = match run.finished_at {
                 Some(f) => format!("{:.0} s", ((f - run.started_at) as f64 / 1000.0).max(0.0)),
                 None => "…".to_owned(),

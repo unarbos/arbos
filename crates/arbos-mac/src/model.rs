@@ -3917,6 +3917,9 @@ pub struct Routine {
     /// Webhook routines only: the URL that fires them (carries the secret).
     #[serde(default)]
     pub fire_url: Option<String>,
+    /// The latest runs' outcomes, newest first (at most seven).
+    #[serde(default)]
+    pub recent_runs: Vec<RoutineRunStatus>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

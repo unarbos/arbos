@@ -9,6 +9,7 @@
   "next_run_at": null,
   "project_id": "proj_fixture",
   "prompt": "A deploy finished; summarize.",
+  "recent_runs": [],
   "trigger": {
     "kind": "webhook",
     "secret": "fixture-webhook-secret-not-real"
