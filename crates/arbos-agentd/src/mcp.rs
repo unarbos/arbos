@@ -829,12 +829,7 @@ async fn call_tool(
         "ask_user" => {
             let q = s("question").unwrap_or_default();
             match a
-                .hook_ask_user(
-                    &q,
-                    args.get("widget"),
-                    args.get("offer").and_then(Value::as_str),
-                    &chat_for_scratch,
-                )
+                .hook_ask_user(&q, args.get("widget"), args.get("offer"), &chat_for_scratch)
                 .await
             {
                 Ok(_) => text_result(
