@@ -163,6 +163,8 @@ pub enum SettingTarget {
     SecretsConnect,
     /// The Send feedback sheet (⌘⌥F).
     Feedback,
+    /// The Needs you sheet (`ui::needs_you`).
+    NeedsYou,
     /// My pane › Profile.
     Profile,
     /// An owned agent's pane on Details with one settings row dropped down.
@@ -260,7 +262,7 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
 /// platform list and the shared item id, and moves into the shared index when
 /// the iPhone's own page ships.
 struct MacOnlyPage {
-    page: SettingsPage,
+    target: SettingTarget,
     title: &'static str,
     path: &'static str,
     keywords: &'static [&'static str],
@@ -285,20 +287,34 @@ impl MacOnlyPage {
     }
 }
 
-const MAC_ONLY: &[MacOnlyPage] = &[MacOnlyPage {
-    page: SettingsPage::AgentLinks,
-    title: "Agent access link",
-    path: "Settings",
-    keywords: &[
-        "agent access",
-        "agent link",
-        "read only",
-        "reply as me",
-        "share chats",
-        "give an agent access",
-        "revoke link",
-    ],
-}];
+const MAC_ONLY: &[MacOnlyPage] = &[
+    MacOnlyPage {
+        target: SettingTarget::NeedsYou,
+        title: "Needs you",
+        path: "Approvals and questions waiting on you",
+        keywords: &[
+            "approvals",
+            "questions",
+            "waiting",
+            "pending",
+            "secret requests",
+        ],
+    },
+    MacOnlyPage {
+        target: SettingTarget::Page(SettingsPage::AgentLinks),
+        title: "Agent access link",
+        path: "Settings",
+        keywords: &[
+            "agent access",
+            "agent link",
+            "read only",
+            "reply as me",
+            "share chats",
+            "give an agent access",
+            "revoke link",
+        ],
+    },
+];
 
 /// The glyph for a built row (its target says which item it was).
 pub fn target_glyph(target: &SettingTarget) -> &'static str {
@@ -323,6 +339,7 @@ pub fn target_glyph(target: &SettingTarget) -> &'static str {
             | SettingsPage::Skills,
         ) => "gearshape",
         SettingTarget::Feedback => "square.and.pencil",
+        SettingTarget::NeedsYou => "exclamationmark.circle",
         SettingTarget::Profile => "person.fill",
         SettingTarget::Agent { pick, .. } => match pick {
             AgentPick::Model => "cpu",
@@ -425,7 +442,7 @@ pub fn settings_entries(query: &str, agents: &[AgentRow]) -> Vec<Entry> {
             subtitle,
             when: u64::MAX - out.len() as u64,
             rank: Rank::Direct(matched),
-            target: Target::Setting(SettingTarget::Page(page.page)),
+            target: Target::Setting(page.target.clone()),
         });
     }
     out
@@ -1056,6 +1073,7 @@ mod tests {
             SettingTarget::SecretsNew,
             SettingTarget::SecretsConnect,
             SettingTarget::Feedback,
+            SettingTarget::NeedsYou,
             SettingTarget::Profile,
         ]);
         for pick in [AgentPick::Model, AgentPick::Reasoning, AgentPick::Voice] {
@@ -1135,6 +1153,7 @@ mod tests {
         assert!(find("new secret").contains(&Target::Setting(SettingTarget::SecretsNew)));
         assert!(find("1password").contains(&Target::Setting(SettingTarget::SecretsConnect)));
         assert!(find("feedback").contains(&Target::Setting(SettingTarget::Feedback)));
+        assert!(find("needs you").contains(&Target::Setting(SettingTarget::NeedsYou)));
         assert!(find("profile").contains(&Target::Setting(SettingTarget::Profile)));
         // Jacob's examples: theme → Appearance, token → Secrets.
         assert_eq!(
