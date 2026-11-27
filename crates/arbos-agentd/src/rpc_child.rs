@@ -288,6 +288,13 @@ impl std::fmt::Display for ChildExit {
     }
 }
 
+/// The box's relay credential, as agentd receives it. No agent process gets it, named or
+/// inherited: it is box-wide, and with it a child could call the relay as the box and skip every
+/// gate agentd puts in front of a relay call — `local_run`'s approval card among them. A child
+/// reaches the relay only through agentd (the MCP server and the model stub), with a credential
+/// scoped to its own session.
+pub const BOX_TOKEN_ENV: &str = "ARBOS_BOX_TOKEN";
+
 impl RpcChild {
     /// Spawn `program args…` with `envs` in `cwd`; stderr goes to `log_path`.
     pub async fn spawn(
@@ -327,6 +334,7 @@ impl RpcChild {
                 Ok(())
             });
         }
+        cmd.env_remove(BOX_TOKEN_ENV);
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -842,5 +850,51 @@ for line in sys.stdin:
             alive,
             "the child is still serving; only that answer was lost"
         );
+    }
+
+    /// The box token is in agentd's own environment, and a child inherits what it is not denied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_child_does_not_inherit_the_box_token() {
+        std::env::set_var(BOX_TOKEN_ENV, "abx_must_not_reach_a_child");
+        let dir = std::env::temp_dir().join(format!("arbos-box-token-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("child.py");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+for line in sys.stdin:
+    c = json.loads(line)
+    print(json.dumps({"type": "response", "id": c.get("id"), "command": "get_state", "success": True, "data": json.dumps(dict(os.environ))}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let child = RpcChild::spawn(
+            "fake-pi-env",
+            &script.display().to_string(),
+            &[],
+            &[("ARBOS_SESSION_ID".into(), "s1".into())],
+            &dir,
+            &dir.join("child.log"),
+            None,
+        )
+        .await
+        .unwrap();
+        let env = child
+            .call_ok(RpcCommand::GetState {
+                id: child.next_id("gs"),
+            })
+            .await
+            .unwrap()
+            .to_string();
+        child.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            env.contains("ARBOS_SESSION_ID"),
+            "the child answered with its environment: {env}"
+        );
+        assert!(!env.contains("abx_must_not_reach_a_child"), "{env}");
+        assert!(!env.contains(BOX_TOKEN_ENV), "{env}");
     }
 }
