@@ -338,6 +338,9 @@ pub async fn spawn_scheduler(state: AppState) {
 
 // ---- endpoints --------------------------------------------------------------------------------
 
+/// How many run outcomes a routine row carries.
+const RECENT_RUNS: i64 = 7;
+
 pub(crate) fn routine_dto(state: &AppState, rt: &Routine) -> RoutineDto {
     let fire_url = rt
         .trigger
@@ -362,6 +365,12 @@ pub(crate) fn routine_dto(state: &AppState, rt: &Routine) -> RoutineDto {
         last_run_at: rt.last_run_at,
         next_run_at: rt.next_run_at,
         fire_url,
+        // One small indexed read per routine: a list query with a window if lists grow long.
+        recent_runs: state
+            .db
+            .routine_runs(&rt.id, RECENT_RUNS)
+            .map(|runs| runs.into_iter().map(|r| r.status).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -816,6 +825,26 @@ mod tests {
             last_run_at: Some(FIXED_AT - 86_400_000),
             next_run_at: Some(FIXED_AT + 86_400_000),
         };
+        // Eight runs: the row carries the latest seven, newest first.
+        for (i, status) in [
+            "done", "done", "failed", "done", "skipped", "skipped", "done", "running",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state
+                .db
+                .insert_routine_run(&RoutineRun {
+                    id: format!("run_{i}"),
+                    routine_id: schedule.id.clone(),
+                    started_at: FIXED_AT + i as i64,
+                    finished_at: None,
+                    status: status.into(),
+                    message_id: None,
+                    note: None,
+                })
+                .unwrap();
+        }
         assert_builder("routine_schedule.json", routine_json(&state, &schedule));
 
         let webhook = Routine {

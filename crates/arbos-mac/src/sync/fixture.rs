@@ -2768,6 +2768,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 last_run_at: None,
                 next_run_at,
                 fire_url,
+                recent_runs: Vec::new(),
             });
             emit_routines(shared, &project_id);
         }
@@ -5769,6 +5770,10 @@ fn seed_routines() -> Vec<Routine> {
             last_run_at: Some(t - 5 * hour),
             next_run_at: Some(t + 19 * hour),
             fire_url: None,
+            recent_runs: {
+                use RoutineRunStatus::{Done, Failed, Skipped};
+                vec![Done, Skipped, Skipped, Failed, Done, Done, Done]
+            },
         },
         Routine {
             id: ROUTINE_PRS.into(),
@@ -5785,6 +5790,7 @@ fn seed_routines() -> Vec<Routine> {
             last_run_at: Some(t - 26 * hour),
             next_run_at: None,
             fire_url: None,
+            recent_runs: vec![RoutineRunStatus::Failed],
         },
         Routine {
             id: ROUTINE_DEPLOY.into(),
@@ -5802,6 +5808,7 @@ fn seed_routines() -> Vec<Routine> {
             fire_url: Some(format!(
                 "http://127.0.0.1:7700/routines/{ROUTINE_DEPLOY}/fire?secret=…"
             )),
+            recent_runs: vec![RoutineRunStatus::Done],
         },
     ]
 }
