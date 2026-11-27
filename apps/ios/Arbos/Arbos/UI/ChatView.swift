@@ -5593,7 +5593,10 @@ final class ComposerDraft: ObservableObject {
     /// A temporary strong snapshot. Lifetime tests keep only weak references to
     /// their newly hosted drafts, while explicitly retaining pre-existing ones.
     static var liveInstances: [ComposerDraft] { liveObjects.allObjects }
-    init() { Self.liveObjects.add(self) }
+    /// The pool is the table's: when an add makes it grow it reads every entry back, the new one
+    /// included, as an autoreleased reference, and without a pool here that reference kept the
+    /// draft alive past its owner, until whichever pool the caller happened to be in drained.
+    init() { autoreleasepool { Self.liveObjects.add(self) } }
     #endif
 }
 
