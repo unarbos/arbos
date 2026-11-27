@@ -75,8 +75,8 @@ fn tools(chat_text_max: Option<usize>) -> Value {
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "send_message", "description": send_message_description(chat_text_max),
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string", "description": "The words to post or send" }, "message": { "type": "string", "description": "Alias of `text`, accepted so a call does not fail on the field name" } } } },
-        { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
-          "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
+        { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form). Pass `offer` (a short topic slug such as `morning-brief`) when the question is your own suggestion the user did not ask for: the card then offers Do it, Not now and Don't suggest this, and the call is refused while an earlier offer is resting or the topic was closed.",
+          "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema(), "offer": { "type": "string", "pattern": "^[a-z0-9-]{1,48}$" } }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Prefer for long or research-heavy work.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string" }, "brief": { "type": "string" }, "isolate": { "type": "boolean" } }, "required": ["name","purpose","brief"] } },
         { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } },
@@ -829,7 +829,12 @@ async fn call_tool(
         "ask_user" => {
             let q = s("question").unwrap_or_default();
             match a
-                .hook_ask_user(&q, args.get("widget"), &chat_for_scratch)
+                .hook_ask_user(
+                    &q,
+                    args.get("widget"),
+                    args.get("offer").and_then(Value::as_str),
+                    &chat_for_scratch,
+                )
                 .await
             {
                 Ok(_) => text_result(

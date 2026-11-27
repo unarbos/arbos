@@ -1000,6 +1000,32 @@ pub const SUBAGENT_MAX_CONCURRENT: usize = 4;
 
 /// Pack section for every subagent: an unknown service, API or tool is researched, not guessed
 /// at and not handed back to the user. Mirrors the main agent's rule in `prompts/router.md`.
+/// The answers an offer card carries, by id; the labels are in [`offer_widget`].
+const OFFER_ANSWERS: [&str; 3] = ["do", "later", "never"];
+
+fn offer_widget() -> Widget {
+    let option = |id: &str, label: &str| arbos_core::widget::ChoiceOption {
+        id: id.into(),
+        label: label.into(),
+    };
+    Widget::Choice {
+        options: vec![
+            option("do", "Do it"),
+            option("later", "Not now"),
+            option("never", "Don't suggest this"),
+        ],
+    }
+}
+
+/// A topic is the key "never" closes, so it is a slug, not prose. Exact match only: a model
+/// that renames a closed topic gets past it, and then only the rest between offers holds.
+fn valid_offer_topic(topic: &str) -> bool {
+    (1..=48).contains(&topic.len())
+        && topic
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the task involves a service, API, CLI or library you do not know, or a call fails (not found, unknown endpoint, auth error, unexpected shape), find the answer yourself; guessing more than one or two URLs is not research. Until one path works: `web_search` for the service's API reference or developer docs and `web_fetch` them (the docs site, its OpenAPI/Swagger spec at `/openapi.json`, `/swagger.json`, `/docs`, `/redoc`, `/llms.txt`, the README); find the official SDK or CLI, install it (`uv tool install`, `pip install`, `npm i -g`, a release binary) and read its `--help` and, when needed, its source for the real base URL, routes and auth header; read the service's GitHub repositories and examples; read the error body. Read what you fetched before the next call. Authenticated calls go through `egress` with the secret's placeholder in a header or the body.\n\nReport `blocked` or `needs_input` only for a real blocker: a credential or account that does not exist, a choice only the user can make between real options you found, a spend decision, or a service that is down after you checked it against its docs. Never ask for docs, an API reference, an endpoint, or for the user to install something. Money: anything that charges the user beyond what the brief states (renting, buying, subscribing, paying) needs their go-ahead first: show the chosen option with its price (and a cheaper alternative when one exists) and ask with `ask_user`; listing options and quoting prices is free.\n\nSecret notes: each secret the owner stored comes with their note (`use_notes` in `secrets_list`, comments in your shell's secrets.env); the note is the policy for that key — for `egress` and for any CLI, SDK or script that reads the real `$NAME`. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. A note without spending guidance leaves the money rule above in force. Never pass a confirmation-skipping flag (`--yes`, `-y`, `--force`, `--no-confirm` and the like) to a command that charges unless the note allows that spend.\n\n";
 
 /// Pack section for every subagent: the slim excerpt of `prompts/core.md` a helper needs —
@@ -7146,6 +7172,11 @@ impl Agent {
             }
         };
         let _ = self.store.answer_ask(question_id);
+        // Only a tap on one of the three answers counts: a typed reply leaves the offer resting
+        // as unanswered, the longer rest.
+        if let Some(a) = value.as_str().filter(|a| OFFER_ANSWERS.contains(a)) {
+            let _ = self.store.answer_offer(question_id, a, now_ms());
+        }
         {
             let h = host.lock().await;
             h.doc.answer_question_part(question_id, &value);
@@ -12088,19 +12119,31 @@ impl Agent {
     ///
     /// When the turn is in a side thread but the prompt came from another agent (group /
     /// Projects ⇄), the card is posted on the pinned main chat so the owner can find it.
+    ///
+    /// `offer` marks an unasked suggestion and names its topic. The card then carries the three
+    /// fixed answers, and the ask is refused in a room and while [`Store::offer_refusal`] says so:
+    /// how often the user is offered something is decided here, not by the model.
     pub async fn hook_ask_user(
         &self,
         question: &str,
         widget: Option<&Value>,
+        offer: Option<&str>,
         session_id: &str,
     ) -> Result<String> {
-        let widget = match Widget::parse(widget) {
-            Ok(w) => w,
-            Err(e) => {
+        if let Some(topic) = offer {
+            if !valid_offer_topic(topic) {
+                return Err(anyhow!(
+                    "offer must be a short topic slug: a-z, 0-9 and '-', at most 48"
+                ));
+            }
+        }
+        let widget = match offer {
+            Some(_) => Some(offer_widget()),
+            None => Widget::parse(widget).unwrap_or_else(|e| {
                 // An invalid widget degrades to a plain question rather than losing the turn.
                 tracing::warn!(error = %e, "ask_user widget rejected; asking as plain text");
                 None
-            }
+            }),
         };
         let widget_json = widget.as_ref().and_then(|w| serde_json::to_value(w).ok());
         let mut tl = self.turn.lock().await;
@@ -12143,6 +12186,19 @@ impl Agent {
             turn_chat.clone()
         };
         let id = ulid();
+        if let Some(topic) = offer {
+            let why = if from_other_agent {
+                Some("offers are not made in a room or to another agent")
+            } else {
+                self.store.offer_refusal(topic, now_ms())?
+            };
+            if let Some(why) = why {
+                return Err(anyhow!(
+                    "Not offered: {why}. Do not make this offer another way; carry on without it."
+                ));
+            }
+            self.store.insert_offer(&id, topic, now_ms())?;
+        }
         self.store.insert_ask(
             &id,
             Some(&chat_id),
