@@ -3864,6 +3864,9 @@ mod status_cell_tests {
                 }
             }
             s.selected_project = Some("quiet".into());
+            // The default column, not whatever `<config>/sidebar_width` holds on
+            // the machine running the tests: under `HANDLE_MIN` a DM row has no `@handle`.
+            s.sidebar_width = crate::ui::theme::SIDEBAR_WIDTH;
             cx.notify();
         });
         let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
