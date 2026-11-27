@@ -1,0 +1,12 @@
+# The admin dashboards, in the main organisation. The Subnet view lives in its own organisation and
+# is loaded by grafana-access.sh (Grafana will not start if a file here names a missing organisation).
+apiVersion: 1
+providers:
+  - name: arbos
+    orgId: 1
+    folder: Arbos
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

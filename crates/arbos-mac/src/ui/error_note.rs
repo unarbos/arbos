@@ -188,6 +188,7 @@ pub fn render(
             .text_color(theme.text)
             .cursor_pointer()
             .hover(|s| s.opacity(0.85))
+            .active(|s| s.opacity(0.7))
             .child(label)
     };
     match action {
@@ -230,6 +231,7 @@ pub fn render(
                 .text_color(theme.text_muted)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.8))
+                .active(|s| s.opacity(0.6))
                 .child("Details")
                 .child(sf_symbols::glyph(
                     if details_open {
@@ -320,6 +322,7 @@ pub fn render(
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.7))
+                    .active(|s| s.opacity(0.6))
                     .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                     .on_click(move |e, w, cx| f(e, w, cx)),
             );
@@ -413,6 +416,7 @@ fn details_block(id: &str, error: &UserError, theme: &Theme) -> Stateful<Div> {
                 .text_color(theme.text)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
                 .child("Copy")
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));

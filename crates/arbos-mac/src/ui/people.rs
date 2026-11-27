@@ -459,6 +459,7 @@ pub fn new_chat_sheet(
                                 div()
                                     .text_size(px(TEXT_SMALL))
                                     .text_color(theme.text_muted)
+                                    .truncate()
                                     .child(format!("@{}", person.handle)),
                             ),
                     )
@@ -536,28 +537,34 @@ pub fn new_chat_sheet(
     };
     let right = if add_to.is_some() {
         Some(
-            glass::primary_button("add-members-go", "Add", &theme)
-                .h(px(34.0))
-                .when(!can_add, |el| el.opacity(0.45))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if !can_add {
-                        return;
-                    }
-                    let sent = this.state.update(cx, |s, cx| s.add_members_to_group(cx));
-                    if sent {
-                        this.close_new_chat_sheet(window, cx);
-                    }
-                })),
+            if can_add {
+                glass::primary_button
+            } else {
+                glass::primary_button_off
+            }("add-members-go", "Add", &theme)
+            .h(px(34.0))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if !can_add {
+                    return;
+                }
+                let sent = this.state.update(cx, |s, cx| s.add_members_to_group(cx));
+                if sent {
+                    this.close_new_chat_sheet(window, cx);
+                }
+            })),
         )
     } else if group_mode {
         Some(
-            glass::primary_button(
+            if can_create {
+                glass::primary_button
+            } else {
+                glass::primary_button_off
+            }(
                 "new-group-create",
                 if busy { "Creating…" } else { "Create" },
                 &theme,
             )
             .h(px(34.0))
-            .when(!can_create, |el| el.opacity(0.45))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !can_create {
                     return;
@@ -886,6 +893,7 @@ fn new_group_body(
                             div()
                                 .text_size(px(TEXT_SMALL))
                                 .text_color(theme.text_muted)
+                                .truncate()
                                 .child(format!("@{}", person.handle)),
                         ),
                 )
@@ -1133,6 +1141,7 @@ pub fn members_popover(
                             div()
                                 .text_size(px(12.5))
                                 .text_color(theme.text)
+                                .truncate()
                                 .child(format!("{} · @{}", a.name, a.handle)),
                         )
                         .child(

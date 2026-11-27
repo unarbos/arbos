@@ -974,6 +974,7 @@ pub async fn chat_history(
         state
             .http
             .get(format!("{url}/w/{id}/history/{chat}"))
+            .bearer_auth(&sb.mcp_token)
             .query(&q)
     })
     .await;
@@ -1140,7 +1141,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
 
 pub(crate) fn project_owner_dto(state: &AppState, user_id: &str) -> ProjectOwnerDto {
     let s = crate::notify::Sender::user(state, user_id);
-    let seen = state.db.user_last_seen(user_id).ok().flatten();
+    let seen = state.seen_at(user_id, state.db.user_last_seen(user_id).ok().flatten());
     project_owner_from_sender(user_id, s, seen)
 }
 
@@ -1404,8 +1405,22 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
         let provider = boxes::provider_for_user(&state, &user_id);
-        match boxes::ensure_user_box(&state, &user_id, provider).await {
-            Ok(_) => {}
+        // A host fleet box is made by the wake queue below, a bounded number at a time and in
+        // order: made here, inside the request, fifty first taps were fifty creates at once.
+        // Only the gate is asked now, so a full host still answers at once.
+        let made = if provider == boxes::Provider::Gvisor {
+            match crate::fleet::try_admit(&state, &user_id).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(anyhow::anyhow!(crate::fleet::WAITLISTED)),
+                Err(e) => Err(e),
+            }
+        } else {
+            boxes::ensure_user_box(&state, &user_id, provider)
+                .await
+                .map(|_| ())
+        };
+        match made {
+            Ok(()) => {}
             Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
                 return Err((
                     StatusCode::CONFLICT,

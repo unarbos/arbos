@@ -960,6 +960,20 @@ async fn stale_wake_check(state: &AppState, user_id: &str, since: i64) -> bool {
     if box_reachable(state, user_id).await || now_ms() - since < HELLO_DEADLINE_MS {
         return false;
     }
+    // The deadline is for a box that was started. One still in line behind other wakes, or whose
+    // sandbox is still being made (a first image pull takes minutes), has not been: in a burst of
+    // sign-ups everyone past the first minute of the queue was bounced and then left at
+    // `error · box cannot reach relay`, with no box and nothing to make one.
+    if state.db.wake_job_waiting(user_id).unwrap_or(false)
+        || state
+            .restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .contains_key(user_id)
+    {
+        return false;
+    }
     // An upgrade stops agentd on purpose while it packs /work (minutes for a multi-GB
     // workspace); bouncing the sandbox underneath it kills the toolbox session mid-pack.
     if state.upgrading.lock().await.contains_key(user_id) {
@@ -1055,6 +1069,7 @@ async fn box_connected_inner(state: &AppState, user_id: &str) {
         // already awake, or a wake job gave up); it is not a measurement.
         let elapsed = now_ms() - t0;
         if elapsed <= STALE_WAKE_TIMER_MS {
+            crate::metrics::box_woke(elapsed);
             let _ = state
                 .db
                 .record_timing(user_id, "wake_to_box_connected_ms", elapsed, None);
@@ -1538,11 +1553,19 @@ pub(crate) async fn run_wake_jobs(state: &AppState) {
     }
 }
 
-/// Start the wake jobs that are due. The wake of a `boxd` box runs on a task of its own, so no
-/// box waits for another's: how many a node wakes at once is the node's to say
-/// (`boxd::WAKES_PER_NODE`), and a box whose wake is still under way is not started again. Every
-/// other wake runs here, one after another, as it always has; so does the making of a box, whose
-/// placement reads each node's free disk and must see the box made before it.
+/// Host-fleet (gVisor) starts and creates under way at once. Each is a handful of `docker` calls
+/// and a sandbox boot: one at a time (as it was) put the fiftieth of fifty sign-ups minutes
+/// behind the first, and a host reboot an hour behind for 300 boxes. Fixed at 8; make it a
+/// setting if a host's Docker daemon turns out to want fewer.
+const FLEET_WAKES: usize = 8;
+static FLEET_WAKE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(FLEET_WAKES);
+
+/// Start the wake jobs that are due. The wake of a `boxd` box runs on a task of its
+/// own, so no box waits for another's: how many a node wakes at once is the node's to say
+/// (`boxd::WAKES_PER_NODE`), and a box whose wake is still under way is not started again. A host
+/// fleet box, made or started, runs on a task too, [`FLEET_WAKES`] at a time. Every other wake runs here, one after another, as it always has; so does
+/// the making of a `boxd` box, whose placement reads each node's free disk and must see the box
+/// made before it.
 async fn start_wake_jobs(state: &AppState, waking: &mut Waking) {
     let jobs = match state.db.due_wake_jobs() {
         Ok(j) => j,
@@ -1553,14 +1576,30 @@ async fn start_wake_jobs(state: &AppState, waking: &mut Waking) {
         if waking.contains_key(&job.0) {
             continue;
         }
-        let on_boxd = matches!(state.db.user_box(&job.0), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str());
-        if on_boxd {
-            let state = state.clone();
-            let user_id = job.0.clone();
-            let wake = tokio::spawn(async move { run_wake_job(&state, job).await });
-            waking.insert(user_id, wake);
-        } else {
-            run_wake_job(state, job).await;
+        let provider = match state.db.user_box(&job.0) {
+            Ok(Some(sb)) => Provider::parse(&sb.provider),
+            Ok(None) => Some(provider_for_user(state, &job.0)).filter(|p| *p == Provider::Gvisor),
+            Err(_) => None,
+        };
+        match provider {
+            Some(Provider::Boxd) => {
+                let state = state.clone();
+                let user_id = job.0.clone();
+                let wake = tokio::spawn(async move { run_wake_job(&state, job).await });
+                waking.insert(user_id, wake);
+            }
+            Some(Provider::Gvisor) => {
+                let state = state.clone();
+                let user_id = job.0.clone();
+                let wake = tokio::spawn(async move {
+                    // Never closed, so this cannot fail; the queue behind it is first come,
+                    // first served.
+                    let _slot = FLEET_WAKE_SLOTS.acquire().await;
+                    run_wake_job(&state, job).await
+                });
+                waking.insert(user_id, wake);
+            }
+            _ => run_wake_job(state, job).await,
         }
     }
 }
@@ -1588,9 +1627,12 @@ async fn run_wake_job(state: &AppState, (user_id, reason, attempts): (String, St
         return;
     }
     // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-    let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+    let _ = state.db.start_wake_job(&user_id, 120_000);
     tracing::info!(%user_id, %reason, attempts, "waking box");
-    match start_box(state, &user_id).await {
+    let started = std::time::Instant::now();
+    let start = start_box(state, &user_id).await;
+    crate::metrics::box_start(&start, started.elapsed());
+    match start {
         Ok(()) => {}
         Err(e) if e.to_string() == crate::boxd::FETCHING => {
             // Not a failed wake: the daemon is bringing a cold box back from the object
@@ -1967,6 +2009,83 @@ mod zero_project_tests {
             .insert(user.clone(), now_ms() - 120_000);
         sweep_box_liveness(&state).await;
         assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+    }
+
+    /// Fifty people sign up in a minute and their boxes are made a few at a time. The ones still
+    /// in line have no box that could have said hello, so the hello deadline is not theirs: they
+    /// stay waking, with their job, however long the line is. Once a wake has been started the
+    /// deadline applies as before.
+    #[tokio::test]
+    async fn a_wake_still_in_line_is_not_a_box_that_cannot_reach_the_relay() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+        ensure_awake(&state, &user, "signin").await;
+        assert!(state.db.wake_job_waiting(&user).unwrap());
+        let long_ago = now_ms() - HELLO_DEADLINE_MS - 5_000;
+        for _ in 0..3 {
+            state
+                .box_states
+                .write()
+                .await
+                .insert(user.clone(), (BoxState::Waking, long_ago));
+            sweep_box_liveness(&state).await;
+            assert_eq!(state.box_state(&user).await.0, BoxState::Waking);
+            assert!(state.db.wake_job_waiting(&user).unwrap(), "the job is kept");
+        }
+        assert!(state.stale_bounces.lock().await.get(&user).is_none());
+
+        // The runner picked it up (`run_wake_job` marks it in flight) and the box never came.
+        state.db.start_wake_job(&user, 120_000).unwrap();
+        assert!(!state.db.wake_job_waiting(&user).unwrap());
+        assert!(stale_wake_check(&state, &user, long_ago).await);
+    }
+
+    /// A wake that fails is tried three times, as the runner says, before the box is left in
+    /// `error`. Marking the job in flight counted as a failed attempt, so it was two.
+    #[tokio::test]
+    async fn a_failed_wake_is_tried_three_times() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+        // A local box whose tokens file is gone: every start fails before anything is spawned.
+        state
+            .db
+            .upsert_box(&Sandbox {
+                user_id: user.clone(),
+                provider: "process".into(),
+                sandbox_id: Some(format!("local-{user}")),
+                daytona_state: None,
+                device_id: format!("box:local-{user}"),
+                box_token_hash: "h".into(),
+                mcp_token: "m".into(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        ensure_awake(&state, &user, "api").await;
+        for attempt in 1..=3 {
+            // Bring the retry's due time forward; the count of attempts is kept.
+            state.db.upsert_wake_job(&user, "api").unwrap();
+            run_wake_jobs(&state).await;
+            let (st, _) = state.box_state(&user).await;
+            if attempt < 3 {
+                assert_eq!(st, BoxState::Waking, "after attempt {attempt}");
+                assert_eq!(state.db.due_wake_jobs().unwrap().len(), 0, "backing off");
+            } else {
+                assert_eq!(st, BoxState::Error);
+            }
+        }
+        state.db.upsert_wake_job(&user, "api").unwrap();
+        assert_eq!(
+            state.db.due_wake_jobs().unwrap()[0].2,
+            0,
+            "the job was finished"
+        );
     }
 
     #[tokio::test]

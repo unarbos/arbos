@@ -18,8 +18,9 @@ struct InCallOverlay: View {
     var inline = false
 
     @State private var pipOffset: CGSize = .zero
-    @State private var pipDrag: CGSize = .zero
-    @State private var pillDrag: CGFloat = 0
+    /// Gesture state: a cancelled drag lets the tile go too, on the spring the snap uses.
+    @GestureState(resetTransaction: Transaction(animation: .spring(duration: 0.35))) private var pipDrag: CGSize = .zero
+    @GestureState private var pillDrag: CGFloat = 0
 
     private var isVideo: Bool { calls.call?.kind == .video }
 
@@ -139,13 +140,16 @@ struct InCallOverlay: View {
                 .overlay(Capsule().strokeBorder(hairline, lineWidth: 1))
                 .contentShape(Capsule())
                 .onTapGesture { calls.restore() }
-                .offset(y: min(0, pillDrag))
+                // Follows a pull down (the direction that restores) with resistance; a pull up barely gives.
+                .offset(y: pillDrag * (pillDrag > 0 ? 0.5 : 0.15))
+                .animation(.spring(duration: 0.3), value: pillDrag == 0)
                 .gesture(
                     DragGesture(minimumDistance: 8)
-                        .onChanged { v in pillDrag = v.translation.height }
+                        // Gesture state: a cancelled drag lets the pill go too.
+                        .updating($pillDrag) { v, drag, _ in drag = v.translation.height }
                         .onEnded { v in
-                            withAnimation(.spring(duration: 0.3)) { pillDrag = 0 }
-                            if v.translation.height > 40 { calls.restore() }
+                            if v.translation.height > 40 || v.predictedEndTranslation.height > 120,
+                               v.translation.height > abs(v.translation.width) { calls.restore() }
                         }
                 )
                 .accessibilityElement(children: .combine)
@@ -157,7 +161,7 @@ struct InCallOverlay: View {
             .padding(.top, inline ? 0 : 56)
             Spacer(minLength: 0)
         }
-        .transition(.move(edge: .top).combined(with: .opacity))
+        .transition(.fromTop)
     }
 
     // MARK: Video picture-in-picture
@@ -217,7 +221,7 @@ struct InCallOverlay: View {
         .position(x: home.x + pipOffset.width + pipDrag.width, y: home.y + pipOffset.height + pipDrag.height)
         .gesture(
             DragGesture(minimumDistance: 6)
-                .onChanged { v in pipDrag = v.translation }
+                .updating($pipDrag) { v, drag, _ in drag = v.translation }
                 .onEnded { v in
                     // Snap to the nearest corner, kept inside the safe area.
                     let x = home.x + pipOffset.width + v.predictedEndTranslation.width
@@ -228,7 +232,6 @@ struct InCallOverlay: View {
                     let targetY = top ? pipSize.height / 2 + 60 : size.height - pipSize.height / 2 - 96
                     withAnimation(.spring(duration: 0.35)) {
                         pipOffset = CGSize(width: targetX - home.x, height: targetY - home.y)
-                        pipDrag = .zero
                     }
                 }
         )

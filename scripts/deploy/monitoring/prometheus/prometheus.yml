@@ -1,0 +1,84 @@
+# Scrapes loopback only (host networking). Rules: rules.yml (alerts) and subnet-rules.yml (the
+# label-free aggregates the Subnet view is built from).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+# Scrape jobs that are ready but not switched on are in available/; Prometheus loads only what is in
+# enabled/, which is empty in the repo. available/agentd.yml, the per-box job, says when and how.
+scrape_config_files:
+  - enabled/*.yml
+
+rule_files:
+  - rules.yml
+  - subnet-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: cadvisor
+    scrape_interval: 30s # cAdvisor refreshes every 30 s (--housekeeping_interval)
+    static_configs:
+      - targets: ["127.0.0.1:9180"]
+    metric_relabel_configs:
+      # Keep Docker containers (they have a name), the root cgroup, and the service cgroups we chart.
+      - source_labels: [name, id]
+        separator: ;
+        regex: .+;.*|;/|;/system\.slice/(arbos-[^/]+|caddy|docker|containerd|livekit)\.service
+        action: keep
+
+  # The relay's metrics listener (ARBOS_RELAY_METRICS_LISTEN, loopback only, no auth; names in
+  # docs/metrics.md). Until the relay serves it these targets are down or absent;
+  # ScrapeTargetDown leaves out a target that has never answered.
+  - job_name: relay
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+
+  # The relay's own view of every registered box (state, turn running, tokens), for the Swarm
+  # dashboard: ten series per box, read from the relay's memory. `box` is an opaque id, but the
+  # info series names each box's container, so this job belongs to this Prometheus only; the
+  # Subnet one receives `subnet:*` aggregates and nothing from here. 404 until the relay serves it.
+  - job_name: relay-boxes
+    scrape_interval: 5s
+    metrics_path: /metrics/boxes
+    sample_limit: 5000
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+
+  # Is the relay answering, asked directly (no Caddy, no DNS, no TLS in the way).
+  - job_name: relay-health
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["http://127.0.0.1:7700/healthz"]
+    relabel_configs: &probe
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  # What a user's device sees: DNS, Caddy, the certificate, then the relay / the site.
+  - job_name: public-https
+    metrics_path: /probe
+    scrape_interval: 30s
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://relay.arbos.life/healthz
+          - https://arbos.life/
+    relabel_configs: *probe

@@ -482,6 +482,11 @@ final class AppModel: ObservableObject {
         /// Home's "+" — New Message (Jacob, 2026-11-10: the compose panel pushes in from
         /// the right like a chat and Settings, instead of rising as a bottom sheet).
         case newMessage
+        /// The Archived chats list behind Home's footer. A route, not a page presented
+        /// beside the path: opening a chat changes the path, which drops every page
+        /// presented outside it, and back from that chat went to Home (tester report,
+        /// 2026-11-17).
+        case archived
     }
 
     // MARK: Servers (D88)
@@ -534,6 +539,16 @@ final class AppModel: ObservableObject {
     /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
     /// Set through `applyNativeRooms`.
     private(set) var nativeRooms: [Id: String] = [:]
+    /// My reactions on native chats' rows shown before the homeserver confirmed them, by chat
+    /// (`reactNativePeople`).
+    var heldReactions: [Id: [HeldReaction]] = [:]
+    /// How long a held reaction waits for its echo once the homeserver call has returned, and
+    /// how long for a call that does not return. Variables so a test does not wait them out.
+    var reactionEchoGrace: Duration = .seconds(10)
+    var reactionSendLimit: Duration = .seconds(60)
+    /// Tests stand in for the Matrix client's reaction call here (chat, message, key, on);
+    /// false is "the row has no event yet". Nil outside tests.
+    var nativeReact: ((Id, Id, String, Bool) async throws -> Bool)?
     /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
     @Published var walletPrompt: WalletPrompt?
 
@@ -2332,7 +2347,11 @@ final class AppModel: ObservableObject {
                 pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = UserError.classify("load your chats", error)
+            let failure = UserError.classify("load your chats", error)
+            // The raw detail is for whoever reads the log; the line under Home shows the sentence.
+            // As an argument, never the format: the raw words can be the relay's body.
+            NSLog("registry: reload failed: %@", failure.raw.isEmpty ? failure.sentence : failure.raw)
+            registryError = failure
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -4114,20 +4133,20 @@ final class AppModel: ObservableObject {
         chatId: String, text: String, replyTo: String?, address: String? = nil,
         chipMentions: [String] = [], attachments: [PendingAttachment] = [],
         forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
-        replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []
+        replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = [], poll: PollDraft? = nil
     ) {
         if let draft = draftDM, draft.id == chatId {
             sendDraftDM(draft) { [weak self] dmId in
                 self?.sendPeople(
                     chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
                     attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
-                    replyRef: replyRef, extraParts: extraParts)
+                    replyRef: replyRef, extraParts: extraParts, poll: poll)
             }
             return
         }
         if nativeRooms[chatId] != nil {
             // Text, files and an answer to a row of this chat go to the homeserver so far.
-            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
+            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty, poll == nil {
                 sendNativePeople(chatId: chatId, text: text, replyTo: replyTo, attachments: attachments)
             } else {
                 failRefused("send your message", Self.nativeTextOnly)
@@ -4210,14 +4229,14 @@ final class AppModel: ObservableObject {
             commitPeople(
                 chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                 mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
-                replyRef: replyRef, extraParts: extraParts)
+                replyRef: replyRef, extraParts: extraParts, poll: poll)
             return
         }
         guard let work = accountWork() else { return }
         markUnacked(chatId: chatId, messageId: messageId)
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -4243,16 +4262,21 @@ final class AppModel: ObservableObject {
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
                               forwardedFrom: String? = nil, replyRef: ReplyRef? = nil,
-                              extraParts: [[String: Any]] = []) {
+                              extraParts: [[String: Any]] = [], poll: PollDraft? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
             print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
         }
         do {
-            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
-                                      replyRef: replyRef)
+            if let poll {
+                try doc.insertPollMessage(id: messageId, question: poll.question, options: poll.options,
+                                          multiple: poll.multiple, deviceId: deviceId, author: author, mentions: mentions)
+            } else {
+                try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
+                                          author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
+                                          replyRef: replyRef)
+            }
             for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
@@ -4265,9 +4289,13 @@ final class AppModel: ObservableObject {
         #endif
         // Bubble at once — same as channels / optimistic new chats. onChange still
         // reconciles; live coalesce + async full re-reads must not gate the send.
-        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
-                              attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions, doc: doc, replyRef: replyRef)
+        // A poll is drawn from the doc's own row (its card needs the projected part), not painted
+        // ahead of it as a text bubble.
+        if poll == nil {
+            paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                                  attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
+                                  author: author, mentions: mentions, doc: doc, replyRef: replyRef)
+        }
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
@@ -4635,6 +4663,15 @@ final class AppModel: ObservableObject {
 
     /// Group profile › Invite links › list.
     func groupInvites(_ chatId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ServerInviteLink] {
+        #if DEBUG || ARBOS_FIXTURE
+        // Rig: the fixture group lists two links, mine and Mira's (copy tick, who may revoke).
+        if isFixture {
+            return [("fx-inv-mine", "fx-me"), ("fx-inv-mira", "fx-u3")].map { id, by in
+                ServerInviteLink(id: id, code: id, url: "https://arbos.life/g/\(id)", createdAt: 0, expiresAt: nil,
+                                 usesLeft: nil, usable: true, createdBy: by)
+            }
+        }
+        #endif
         if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
         guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
         let api = work.api
@@ -5313,6 +5350,19 @@ final class AppModel: ObservableObject {
     func showNewMessage() {
         if case .newMessage? = path.last { return }
         path.append(.newMessage)
+    }
+
+    /// Open the Archived chats list from Home's footer.
+    func showArchived() {
+        if case .archived? = path.last { return }
+        path.append(.archived)
+    }
+
+    /// Open a row of the Archived chats list. Opening replaces the path; the list goes
+    /// back under whatever opened, so back returns to it.
+    func openFromArchived(_ open: () -> Void) {
+        open()
+        if path.first != .archived { path.insert(.archived, at: 0) }
     }
 
     /// Leave the New Message push (and any Create screen stacked on it) for Home.
@@ -6009,28 +6059,83 @@ final class AppModel: ObservableObject {
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
+    ///
+    /// The chip is painted onto `messages` in this same turn — before the doc's
+    /// `onChange` hop, the live coalesce window, or a relay / homeserver ACK —
+    /// so the transcript shows it the moment the tap returns
+    /// ([feedback iphone-reaction-instant-2026-11-13]; TestFlight
+    /// app-01M7B901FGH3KDZPX8T7DYXPPZ / #3048). A later snapshot reconciles; a
+    /// failed write rolls the paint back.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
-        #if DEBUG || ARBOS_FIXTURE
-        if isFixture {
-            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
-            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
-            messages[chatId] = list
-            Haptics.pick()
-            return
-        }
-        #endif
+        let emoji = MessageReaction.writeKey(emoji)
         if nativeRooms[chatId] != nil {
             reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
             return
         }
+        // Chip first — same frame as the tap. The fixture short-circuit used to
+        // paint here and return; the live path only wrote the doc and waited for
+        // onChange, so the chip lagged a beat. Both paths paint now.
+        guard paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me) else { return }
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture, docs[chatId] == nil {
+            Haptics.pick()
+            return
+        }
+        #endif
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
             doc.commit()
             Haptics.pick()
         } catch {
+            _ = paintLocalReaction(chatId: chatId, messageId: messageId, emoji: emoji, sender: me)
             fail("update the reaction", error)
+        }
+    }
+
+    /// Toggle my reaction on the in-memory row so the chip appears or disappears
+    /// in the same turn as the tap. Returns false when the message is not in the list.
+    /// Reassigns the whole dictionary so `@Published` fires (subscript writes alone
+    /// have left ChatView's rows stale — see `applySnapshot`). Native people chats
+    /// and channels live in `channelRows`; Loro rooms live in `messages`.
+    @discardableResult
+    func paintLocalReaction(chatId: Id, messageId: Id, emoji: String, sender: String) -> Bool {
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: sender)
+            var next = messages
+            next[chatId] = list
+            messages = next
+            return true
+        }
+        if var list = channelRows[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: sender)
+            var next = channelRows
+            next[chatId] = list
+            channelRows = next
+            return true
+        }
+        return false
+    }
+
+    /// Post a poll in a people chat (`docs/polls.md`). False when the fields are not a poll
+    /// within bounds, and nothing was sent.
+    @discardableResult
+    func sendPoll(chatId: Id, draft: PollDraft) -> Bool {
+        guard let text = pollText(question: draft.question, options: draft.options, multiple: draft.multiple) else { return false }
+        sendPeople(chatId: chatId, text: text, replyTo: nil, poll: draft)
+        return true
+    }
+
+    /// My vote on a poll: `selections` replaces whatever I held; empty retracts it.
+    func votePoll(chatId: Id, messageId: Id, selections: [String]) {
+        guard let me = myUserId, let doc = docs[chatId] else { return }
+        do {
+            try doc.setPollVote(messageId: messageId, sender: me, selections: selections)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail("cast your vote", error)
         }
     }
 
@@ -6452,7 +6557,7 @@ final class AppModel: ObservableObject {
         guard let work = accountWork() else { return }
         Task {
             guard accountLifetime.accepts(work.owner) else { return }
-            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api, owner: work.owner) else { return }
             guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
@@ -6582,13 +6687,21 @@ final class AppModel: ObservableObject {
 
     /// Keep two bodies in flight; preserve key/row/error order independently of
     /// completion order. The caller owns account admission and the final commit.
-    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI) async -> [AttachmentUpload]? {
+    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI,
+                                   owner: WorkLifetime.Ticket) async -> [AttachmentUpload]? {
         guard !Task.isCancelled else { return nil }
         let plans = attachments.map { input in
             let key = Self.blobKey(for: input.name)
             let row = Attachment(name: input.name, mime: input.mime, blobRef: key,
                                  kind: Self.attachmentKind(mime: input.mime, name: input.name))
             return (input: input, key: key, row: row)
+        }
+        // A video sent from here has its poster made from the bytes in hand (tester report,
+        // 2026-11-17); the upload itself is unchanged.
+        for plan in plans {
+            if let poster = VideoThumb.key(owner: owner, slot: slot, kind: MediaAlbum.kind(of: plan.row) ?? .file, blobRef: plan.key) {
+                VideoThumb.remember(plan.input.data, name: plan.input.name, for: poster)
+            }
         }
         return await withTaskGroup(of: (Int, AttachmentUpload).self) { group in
             var results = [AttachmentUpload?](repeating: nil, count: plans.count)
@@ -7796,29 +7909,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) {
-        guard let work = accountWork() else { return }
+    /// True once the relay made the agent; a refusal is the claimed failure on the Create page,
+    /// which stays open (a name already in use is the common one).
+    func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) async -> Bool {
+        guard let work = accountWork() else { return false }
         let api = work.api
-        Task {
-            guard accountLifetime.accepts(work.owner) else { return }
-            do {
-                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
-                guard accountLifetime.accepts(work.owner) else { return }
-                // The Create sheet's picture goes into the new agent's own slot first, so the
-                // list refresh already shows it.
-                if let picture, let id, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
-                    guard accountLifetime.accepts(work.owner) else { return }
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
-                        _ = try? await api.setProjectImageKey(id, key: key)
-                    }
+        do {
+            let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
+            guard accountLifetime.accepts(work.owner) else { return false }
+            // The Create sheet's picture goes into the new agent's own slot first, so the
+            // list refresh already shows it.
+            if let picture, let id, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
+                guard accountLifetime.accepts(work.owner) else { return false }
+                let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
+                    _ = try? await api.setProjectImageKey(id, key: key)
                 }
-                await refreshRegistry(expectedOwner: work.owner)
-                guard accountLifetime.accepts(work.owner) else { return }
-            } catch {
-                guard accountLifetime.accepts(work.owner) else { return };
-                fail("create the agent", error)
             }
+            await refreshRegistry(expectedOwner: work.owner)
+            return accountLifetime.accepts(work.owner)
+        } catch {
+            guard accountLifetime.accepts(work.owner) else { return false }
+            fail("create the agent", error)
+            return false
         }
     }
 

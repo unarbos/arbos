@@ -306,6 +306,9 @@ pub fn row_state(
             el.child(
                 div()
                     .flex_shrink_0()
+                    // A long model id or image path ends in an ellipsis inside the card.
+                    .max_w(gpui::relative(0.6))
+                    .truncate()
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.label_muted())
                     .child(d),
@@ -474,6 +477,7 @@ pub fn text_pill(
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg)
         .hover(|s| s.opacity(0.88))
+        .active(|s| s.opacity(0.76))
         .child(label.to_string())
 }
 
@@ -545,6 +549,7 @@ pub fn confirm_button(
             el.bg(theme.danger)
                 .text_color(gpui::white())
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
         })
         .when(!danger, |el| {
             highlight::washed(

@@ -1,6 +1,7 @@
 # Polls in chats
 
-Status: **Proposed design** (2026-11-11). Nothing here is built. For const to approve before any code.
+Status: **Built for people chats on Loro** (2026-11-12): DMs and groups, Mac and iPhone, section 10.
+The Matrix parts below (server channels, vote events, closing a poll) are still the proposed design.
 
 Companion docs: [`docs/crdt-sync.md`](crdt-sync.md) (chat-doc schema, reactions), and the proposed
 `docs/matrix-groups-e2ee-spec.md` (branch `cursor/matrix-groups-e2ee-spec-59c0`, not on `main`), which
@@ -262,3 +263,40 @@ closes do not notify and do not raise unread.
 - `matrix-sdk-ui`'s poll support was not read: the crate is not in our lockfile.
 - Old-build behaviour (fallback text shown, poll part ignored) is from reading the `Part` decoders,
   not from running an old build.
+
+---
+
+## 10. What is built (2026-11-12)
+
+Open decision 1 was taken the other way: polls work in today's DMs and groups, on the Loro chat
+doc, which is option (b) of section 3 with one change that removes its cost.
+
+**Stored shape.** A poll message is a user row whose text part is the fallback of section 6.
+The poll is one plain value on the message, `poll: { question, options: [{ id, label }], max }`,
+and each vote is a field on the message, `"vote|<sender>": ["<option id>", …]` (empty = retracted).
+They are message fields rather than a part and a nested map because `push_guard` already sees
+every field a push writes on a message and nothing deeper: the ownership check is a few lines on
+the diff it had, not a new walk of the doc. One key per person is "one vote per user"; Loro's
+last-write-wins on that key is "the latest vote wins".
+
+**Reader shape.** `arbos_core::doc::project_poll` gives the apps the `poll` part of section 4,
+`votes` folded in. The text part stays on the row for previews, search, notifications, agents
+and builds without polls.
+
+**Relay** (`push_guard::check_polls`), refusing the push:
+
+- `bad_poll`: the poll does not pass `arbos_core::poll` (types, unknown fields, bounds of section 5).
+- `poll_fixed`: the `poll` field written on a message that already exists. No edits, and no
+  poll hung on someone's earlier message.
+- `not_yours`: a vote under a name the socket may not write as. The name in the key is never trusted.
+- `not_a_member`: the voter is not in the chat.
+- `bad_vote`: selections that are not a list of known option ids, without repeats, at most `max`;
+  or the vote field removed.
+
+A row arriving whole that the relay already attested (a heal of lost history) carries its votes
+as they are, as it carries its sender.
+
+**Not built:** closing a poll (a Loro doc has no server order to say which votes came after the
+close, and a refused push is re-sent forever by an honest device, so the relay cannot refuse a
+late vote), server channels, native Matrix people chats, the agent tools, names of voters on
+iPhone, deleting a poll from iPhone.

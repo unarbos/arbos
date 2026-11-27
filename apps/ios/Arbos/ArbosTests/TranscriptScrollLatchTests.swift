@@ -92,6 +92,140 @@ final class TranscriptScrollLatchTests: XCTestCase {
                        "400 pt of transcript below them is still history")
     }
 
+    /// The keyboard rising under a reader at the end (TestFlight reports, 2026-11-13).
+    ///
+    /// The numbers are the simulator's: the sample for the rise has the container 301 pt
+    /// shorter and the offset where it was, so the distance reads 364 pt for a reader who was
+    /// 63 pt from the end and did not move. Reading that as "away" unpinned them on every
+    /// keyboard open — the chevron over the live bottom, and the last bubble left under the
+    /// composer by whatever changed next.
+    func testTheKeyboardRisingUnderAReaderAtTheEndKeepsThemThere() {
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 364, pinned: true),
+                       .stick,
+                       "they were following the end before the resize and still are")
+
+        // A reader who had gone up into history keeps their place through the same rise.
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 778, newContainer: 477,
+                                                     distance: 900, pinned: false),
+                       .reread(away: true))
+    }
+
+    /// The keyboard opening (tester report, 2026-11-14: "I'd prefer it just stays where you
+    /// were"). At the end it still carries the reader to the newest row, which is #3051; up
+    /// in history it leaves them where they are.
+    ///
+    /// For a reader at rest where their own scrolling left them, "at the end" is the
+    /// measurement alone: the latch gives the same answer pinned or not.
+    func testTheKeyboardOpeningFollowsTheEndForAReaderMeasuredThere() {
+        let slack = TranscriptScrollLatch.keyboardSlack
+        func follows(_ fromEnd: CGFloat) -> Bool {
+            // The reader's own scrolling put them here: touched, nothing animating, and the
+            // latch in either state.
+            let pinned = TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: fromEnd, pinned: true, held: true, animating: false, coastingToEnd: false, revealing: false)
+            let unpinned = TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: fromEnd, pinned: false, held: true, animating: false, coastingToEnd: false, revealing: false)
+            XCTAssertEqual(pinned, unpinned, "the latch does not change the answer at \(fromEnd)")
+            return pinned
+        }
+        XCTAssertTrue(follows(0), "at rest on the newest row")
+        XCTAssertTrue(follows(slack), "the newest row still clear of the fade over the composer")
+        XCTAssertFalse(follows(slack + 1), "scrolled up past that: keep the place")
+        XCTAssertFalse(follows(44), "one short bubble up is already past it")
+        XCTAssertFalse(follows(900), "far up, or taken to an old message by a reveal")
+        XCTAssertEqual(slack, Theme.transcriptTail, "the slack is the transcript's own tail, not a device's number")
+    }
+
+    /// What the reporter samples rests on the top inset at the end, so the rule is given the
+    /// distance with that taken off and means the same on every phone.
+    func testTheDistanceToTheEndDoesNotIncludeTheTopInset() {
+        for inset in [CGFloat(20), 47, 59, 62] {
+            XCTAssertEqual(TranscriptScrollLatch.fromEnd(sampled: inset, topInset: inset), 0,
+                           "at rest on the end with a \(inset) pt inset")
+            XCTAssertEqual(TranscriptScrollLatch.fromEnd(sampled: inset + 300, topInset: inset), 300)
+        }
+    }
+
+    /// A scroll to the end that code started is animated, and half way through it the
+    /// measurement is a number from the middle of history. The keyboard follows where it is
+    /// going: the chevron's hop, a send, a tall message arriving under a reader at the end.
+    func testTheKeyboardOpeningFollowsAScrollToTheEndThatIsStillInFlight() {
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 1500, pinned: true, held: false, animating: false, coastingToEnd: false, revealing: false),
+                      "the chevron pinned and the hop has not produced a sample yet")
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 700, pinned: true, held: false, animating: true, coastingToEnd: false, revealing: false),
+                      "mid-hop")
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 90, pinned: true, held: true, animating: true, coastingToEnd: false, revealing: false),
+                      "a reader who scrolled to the end themselves, mid-scroll to a tall new message")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 700, pinned: false, held: false, animating: true, coastingToEnd: false, revealing: false),
+                       "a reveal animates too, and is not going to the end")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 44, pinned: true, held: true, animating: false, coastingToEnd: false, revealing: false),
+                       "pinned by the latch's wider threshold, by their own scrolling, and at rest: not in flight")
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 44, pinned: true, held: true, animating: false, coastingToEnd: true, revealing: false),
+                      "the same 44 pt, but their flick is still carrying them to the end")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 400, pinned: false, held: true, animating: false, coastingToEnd: true, revealing: false),
+                       "a flick toward the end that is still far out has not arrived")
+    }
+
+    /// Below iOS 18 nothing measures, the size-change anchor cannot be given up, and the
+    /// bottom anchor moves the reader to the end on its own. Saying "keep" there would leave
+    /// them at the end with a latch that says they are not.
+    func testWithNothingMeasuredTheKeyboardFollowsTheEndAsItAlwaysDid() {
+        XCTAssertTrue(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: nil, pinned: false, held: true, animating: false, coastingToEnd: false, revealing: false))
+    }
+
+    /// A reveal in progress is going to its row. Right after the row window slides the
+    /// transcript sits on that window's end, which measures as the end; following from there
+    /// would cancel the reveal.
+    func testTheKeyboardOpeningDoesNotFollowTheEndDuringAReveal() {
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 0, pinned: false, held: false,
+                                                                animating: false, coastingToEnd: false, revealing: true))
+        XCTAssertFalse(TranscriptScrollLatch.keyboardFollowsEnd(fromEnd: 0, pinned: true, held: false,
+                                                                animating: true, coastingToEnd: false, revealing: true))
+    }
+
+    /// The composer tapped while a flick toward the end is still coasting. Once the flick's
+    /// own samples have latched the reader at the end, the keyboard's resize keeps them there
+    /// rather than putting the offset back under it. Decided on the resize itself: a keyboard
+    /// shown for the first time can arrive long after the tap.
+    func testAKeyboardRisingOnACoastSticksOnlyForAReaderTheFlickHasLatchedAtTheEnd() {
+        func rose(coasting: Bool = true, towardEnd: Bool = true, from old: CGFloat = 778, to new: CGFloat = 477,
+                  pinned: Bool) -> Bool {
+            TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(coasting: coasting, towardEnd: towardEnd,
+                                                               oldContainer: old, newContainer: new, pinned: pinned)
+        }
+        XCTAssertTrue(rose(pinned: true), "arrived: stay on the newest row")
+        XCTAssertFalse(rose(towardEnd: false, pinned: true),
+                       "a flick into history, still latched at the end for its first points: the reader is leaving")
+        XCTAssertFalse(rose(pinned: false), "still in history: the offset is put back as before")
+        XCTAssertFalse(rose(coasting: false, pinned: true), "a finger on the glass owns the offset")
+        XCTAssertFalse(rose(from: 477, to: 778, pinned: true),
+                       "the keyboard leaving is the reader's own drag finishing: #3034, untouched")
+        XCTAssertFalse(rose(from: 778, to: 778, pinned: true), "no resize, nothing to decide")
+    }
+
+    /// A keyboard dragged part of the way down and let go comes back up during the coast.
+    /// The reader is 250 pt up in history; the raw sample, taken against the container the
+    /// drag had enlarged, says 112, inside the threshold. The latch is measured against the
+    /// container the gesture began with and says away, and it is the latch that decides.
+    func testAnAbortedKeyboardDragDoesNotSnapAReaderInHistoryToTheEnd() {
+        let keyboardUp: CGFloat = 477, pulledDown: CGFloat = 677
+        let raw: CGFloat = 250 + 62 - (pulledDown - keyboardUp)
+        XCTAssertEqual(raw, 112)
+        XCTAssertFalse(TranscriptScrollLatch.away(distance: raw), "the raw sample is the trap")
+        let latched = TranscriptScrollLatch.distance(sampled: raw, container: pulledDown, gestureStart: keyboardUp)
+        XCTAssertTrue(TranscriptScrollLatch.away(distance: latched), "the latch has them in history")
+        XCTAssertFalse(TranscriptScrollLatch.keyboardRoseOnACoastAtTheEnd(
+            coasting: true, towardEnd: true, oldContainer: pulledDown, newContainer: keyboardUp,
+            pinned: !TranscriptScrollLatch.away(distance: latched)))
+    }
+
+    /// A chevron tap or a send during a coast clears `held`; what is left of the coast must
+    /// not write the latch back. A finger on the glass always may.
+    func testWhatIsLeftOfACoastDoesNotUndoAPinThatCodeTook() {
+        XCTAssertTrue(TranscriptScrollLatch.coastOvertaken(coasting: true, held: false))
+        XCTAssertFalse(TranscriptScrollLatch.coastOvertaken(coasting: true, held: true), "an ordinary coast")
+        XCTAssertFalse(TranscriptScrollLatch.coastOvertaken(coasting: false, held: false), "a finger, or nothing moving")
+    }
+
     /// A sample where nothing moved must not disturb the latch — the reporter fires on every
     /// scroll sample, so "read it again" has to mean "when something moved it".
     func testASampleWithNothingMovingLeavesTheAnswerAlone() {

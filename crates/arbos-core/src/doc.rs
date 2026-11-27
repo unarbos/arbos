@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalRequest, ApprovalState};
 use crate::ids::{now_ms, ulid};
+use crate::poll::Poll;
 use crate::widget::QuestionState;
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -87,11 +88,16 @@ pub struct MessageChanges {
     /// from the doc by the time the diff is read — and it is what tells a box's own
     /// unattributed row apart from a person's. See `push_guard`'s removal arm.
     pub removed: Vec<MessageIdentity>,
-    /// Messages the update added, each with the `sender` written on it (`None` when absent).
+    /// Entries the update added, each with the `sender` written on it (`None` when absent).
+    /// One with no readable `id` is reported under the empty id.
+    /// A row that was missing `id` or `sender` and gained one is reported here again, under
+    /// the id and sender it now has: that is the message still arriving.
     pub inserted: Vec<(String, Option<String>)>,
     /// `(message id, field)` for each field written onto a message that was already in the
     /// list. Only messages are reported: an edit inside a message's `parts` is not a field on
     /// the message, and a part map carries its own `id` that must not be mistaken for one.
+    /// The id is the one the message had before the update, so a write to `id` itself is
+    /// reported here like any other field.
     pub rewritten: Vec<(String, String)>,
     /// Every message id, in list order, as the list stands at `to`.
     ///
@@ -100,6 +106,10 @@ pub struct MessageChanges {
     /// diff name the wrong message as deleted. Applying the delta is the only exact way, and
     /// the walk that reports the changes is already doing it.
     pub ids_after: Vec<MessageIdentity>,
+    /// `(message id, its poll fields after the update)` for each message the update inserted
+    /// with a poll on it, and each one it wrote a poll field on: [`POLL_FIELD`] and the
+    /// [`POLL_VOTE_PREFIX`] keys. [`Self::rewritten`] says which of them were written.
+    pub polls: Vec<(String, Value)>,
     /// The diff could not be read, so nothing above is known to be complete. A caller deciding
     /// authorisation must treat this as "anything may have changed".
     pub unreadable: bool,
@@ -303,6 +313,65 @@ pub fn project_reactions(json: &mut Value) {
         }
     }
     obj.insert("reactions".into(), Value::Object(nested));
+}
+
+/// The message field a poll is stored in (`docs/polls.md`): one plain value, written with the
+/// message and never again.
+pub const POLL_FIELD: &str = "poll";
+
+/// Prefix of the message field holding one person's vote: `"vote|<sender>" → ["<option id>"]`.
+///
+/// Votes are fields on the message, not a nested map like `reactions`, because the relay's
+/// push guard sees which fields a push wrote on a message and nothing deeper. A vote stored
+/// here is one it can check the owner of.
+pub const POLL_VOTE_PREFIX: &str = "vote|";
+
+fn is_poll_key(key: &str) -> bool {
+    key == POLL_FIELD || key.starts_with(POLL_VOTE_PREFIX)
+}
+
+/// The poll fields of a message map, as a JSON object (empty when it has none).
+fn poll_fields(m: &LoroMap) -> Value {
+    let mut out = serde_json::Map::new();
+    if let LoroValue::Map(fields) = m.get_value() {
+        for (key, value) in fields.iter().filter(|(k, _)| is_poll_key(k)) {
+            out.insert(key.clone(), lv_to_json(value));
+        }
+    }
+    Value::Object(out)
+}
+
+/// Reader projection: a message carrying a valid poll gains a `poll` part with the tally
+/// folded in — `votes: { "<option id>": ["<sender>", …] }` — after its text part, which stays
+/// as the plain form for previews, search and copy. An invalid poll is left alone and the
+/// message reads as its text. Call before deserializing a message row.
+pub fn project_poll(json: &mut Value) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    let Some(poll) = obj.get(POLL_FIELD).and_then(Poll::parse) else {
+        return;
+    };
+    // Sorted, so every reader lists an option's voters in the same order whatever order the
+    // doc's map hands its keys over in.
+    let mut votes: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+    for (key, value) in obj.iter() {
+        let Some(sender) = key.strip_prefix(POLL_VOTE_PREFIX) else {
+            continue;
+        };
+        for option in poll.selections(value).unwrap_or_default() {
+            votes.entry(option).or_default().push(sender);
+        }
+    }
+    votes.values_mut().for_each(|who| who.sort_unstable());
+    let votes = serde_json::json!(votes);
+    let mut part = serde_json::to_value(&poll).unwrap_or_default();
+    part["id"] = Value::from("poll");
+    part["kind"] = Value::from("poll");
+    part["votes"] = votes;
+    if let Some(Value::Array(parts)) = obj.get_mut("parts") {
+        parts.push(part);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,6 +941,7 @@ impl ChatDoc {
         let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
         project_hidden_parts(&mut json);
         project_reactions(&mut json);
+        project_poll(&mut json);
         Some(json)
     }
 
@@ -1104,6 +1174,50 @@ impl ChatDoc {
             }
         }
         Ok(())
+    }
+
+    /// Client write: a poll (`docs/polls.md`). A user row whose text part is the poll's plain
+    /// form — all a build without polls shows — with the poll itself in [`POLL_FIELD`].
+    /// Does not commit.
+    pub fn append_poll_message(
+        &self,
+        msg_id: &str,
+        poll: &Poll,
+        device_id: &str,
+        opts: &UserMessageOpts,
+    ) -> CoreResult<()> {
+        self.append_user_message(msg_id, &poll.fallback_text(), device_id, opts)?;
+        let m = self
+            .find_message(msg_id)
+            .ok_or_else(|| CoreError::msg("poll message missing"))?;
+        let value = serde_json::to_value(poll).map_err(|e| CoreError::msg(e.to_string()))?;
+        loro_err(m.insert(POLL_FIELD, json_to_lv(&value)))
+    }
+
+    /// Client write: `sender`'s vote on a poll, replacing any earlier one; empty retracts.
+    /// One key per person, last write wins. Does not commit. No-op when the message is
+    /// missing; an error when it holds no poll or the selection is not one the poll allows.
+    pub fn set_poll_vote(
+        &self,
+        msg_id: &str,
+        sender: &str,
+        selections: &[String],
+    ) -> CoreResult<()> {
+        let Some(m) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        let picked = Value::from(selections);
+        let allowed = poll_fields(&m)
+            .get(POLL_FIELD)
+            .and_then(Poll::parse)
+            .is_some_and(|poll| poll.selections(&picked).is_some());
+        if sender.is_empty() || !allowed {
+            return Err(CoreError::msg("not a vote this poll allows"));
+        }
+        loro_err(m.insert(
+            format!("{POLL_VOTE_PREFIX}{sender}").as_str(),
+            json_to_lv(&picked),
+        ))
     }
 
     /// Client write: remove one message from the shared `messages` list (delete for
@@ -2057,12 +2171,14 @@ impl ChatDoc {
         let msgs = self.messages_list();
         let mut out = Vec::with_capacity(msgs.len());
         for i in 0..msgs.len() {
-            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
-                continue;
-            };
-            if let Some(id) = map_str(&m, "id") {
-                out.push((id, map_str(&m, "sender")));
-            }
+            // Every entry takes a place, readable or not: [`Self::messages_changed`] names a
+            // row by its position here, exactly as the mirror it carries forward does.
+            out.push(match msgs.get(i) {
+                Some(ValueOrContainer::Container(Container::Map(m))) => {
+                    (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"))
+                }
+                _ => Default::default(),
+            });
         }
         out
     }
@@ -2099,22 +2215,25 @@ impl ChatDoc {
             out.unreadable = true;
             return out;
         };
-        let mut saw_list = false;
+        // Each place in the list at `to`: who is there, and whether the row was there at `from`.
+        let mut after: Vec<MessageIdentity> = before_ids.to_vec();
+        let mut existed = vec![true; before_ids.len()];
         for (cid, diff) in batch.iter() {
             match diff {
                 Diff::List(items) if is_messages_root(cid) => {
-                    saw_list = true;
                     // Delta encoding over the list as it stood at `from`: retain and delete
                     // both consume the old list, insert does not. Walking it is also how
                     // `ids_after` is built, since applying the delta is the only exact way to
                     // know the order the list ends up in.
-                    let mut after = Vec::with_capacity(before_ids.len());
+                    after.clear();
+                    existed.clear();
                     let mut old = 0usize;
                     for item in items {
                         match item {
                             ListDiffItem::Retain { retain } => {
                                 let end = (old + retain).min(before_ids.len());
                                 after.extend_from_slice(&before_ids[old.min(end)..end]);
+                                existed.resize(after.len(), true);
                                 old += retain;
                             }
                             ListDiffItem::Delete { delete } => {
@@ -2129,44 +2248,88 @@ impl ChatDoc {
                                         ValueOrContainer::Container(Container::Map(m)) => Some(m),
                                         _ => None,
                                     };
-                                    let id = m.and_then(|m| map_str(m, "id"));
-                                    // An entry with no readable id still takes up a position.
-                                    // Holding an unnameable placeholder keeps the mirror in
-                                    // step, so a later delete over it reports an id no message
-                                    // can have instead of a neighbour's.
-                                    after.push((
-                                        id.clone().unwrap_or_default(),
-                                        m.and_then(|m| map_str(m, "sender")),
-                                    ));
-                                    if let (Some(id), Some(m)) = (id, m) {
-                                        out.inserted.push((id, map_str(m, "sender")));
+                                    // An entry with no readable id still takes up a position
+                                    // and is still reported, under the empty id no message can
+                                    // have: the mirror stays in step, and the caller hears of
+                                    // an entry it cannot name instead of never hearing of it.
+                                    let id = m.and_then(|m| map_str(m, "id")).unwrap_or_default();
+                                    let sender = m.and_then(|m| map_str(m, "sender"));
+                                    after.push((id.clone(), sender.clone()));
+                                    existed.push(false);
+                                    if let Some(m) = m {
+                                        let poll = poll_fields(m);
+                                        if poll.as_object().is_some_and(|o| !o.is_empty()) {
+                                            out.polls.push((id.clone(), poll));
+                                        }
                                     }
+                                    out.inserted.push((id, sender));
                                 }
                             }
                         }
                     }
                     after.extend_from_slice(&before_ids[old.min(before_ids.len())..]);
-                    out.ids_after = after;
-                }
-                Diff::Map(delta) => {
-                    // A map somewhere in the doc. It is a message only if its own `id` is one
-                    // of the ids the list held at `from`; parts carry an `id` too.
-                    let Some(id) = self.doc.try_get_map(cid).and_then(|m| map_str(&m, "id")) else {
-                        continue;
-                    };
-                    if !before_ids.iter().any(|(b, _)| *b == id) {
-                        continue;
-                    }
-                    for key in delta.updated.keys() {
-                        out.rewritten.push((id.clone(), key.to_string()));
-                    }
+                    existed.resize(after.len(), true);
                 }
                 _ => {}
             }
         }
-        if !saw_list {
-            out.ids_after = before_ids.to_vec();
+        for (cid, diff) in batch.iter() {
+            let Diff::Map(delta) = diff else { continue };
+            // A map somewhere in the doc. It is a message only if it sits directly in the
+            // `messages` list, and it is the message at that place: the `id` it carries is a
+            // field like any other, which this very update may have written. A row that
+            // arrived with the update is reported whole above.
+            // A map the doc cannot place could be a message: nothing can be said about it.
+            let Some(path) = self.doc.get_path_to_container(cid) else {
+                out.unreadable = true;
+                continue;
+            };
+            let [(root, _), (_, Index::Seq(i))] = path.as_slice() else {
+                continue;
+            };
+            if !is_messages_root(root) {
+                continue;
+            }
+            let (Some(true), Some(m)) = (existed.get(*i), self.doc.try_get_map(cid)) else {
+                if *i >= existed.len() {
+                    out.unreadable = true; // the mirror is not this list: nothing can be named
+                }
+                continue;
+            };
+            let (id, sender) = after[*i].clone();
+            let now = (map_str(&m, "id").unwrap_or_default(), map_str(&m, "sender"));
+            // Every writer creates the row and then sets `id`, `role` and `sender`, in that
+            // order, and an update may end between any two of them (a box cuts a backlog by
+            // size). A header field the row did not have yet, written by the peer that
+            // created the row, is therefore the message still arriving, not a rewrite: once
+            // the row has its id it is reported as inserted, to be judged as one, under the
+            // name it now carries. Written by any other peer it is a rewrite like any other.
+            let creator = match cid {
+                ContainerID::Normal { peer, .. } => Some(*peer),
+                ContainerID::Root { .. } => None,
+            };
+            let mut arrived = false;
+            for key in delta.updated.keys() {
+                let missing = match key.as_ref() {
+                    "id" => id.is_empty(),
+                    "role" | "sender" => sender.is_none(),
+                    _ => false,
+                };
+                if missing && creator.is_some() && m.get_last_editor(key) == creator {
+                    arrived = true;
+                } else {
+                    out.rewritten.push((id.clone(), key.to_string()));
+                }
+            }
+            if arrived && !now.0.is_empty() {
+                out.inserted.push(now.clone());
+            }
+            if delta.updated.keys().any(|k| is_poll_key(k)) {
+                out.polls.push((id, poll_fields(&m)));
+            }
+            after[*i] = now;
         }
+        out.ids_after = after;
         out
     }
 
@@ -2517,6 +2680,7 @@ mod secret_redaction_tests {
 #[cfg(test)]
 mod message_change_tests {
     use super::*;
+    use serde_json::json;
 
     fn with(sender: &str) -> UserMessageOpts {
         UserMessageOpts {
@@ -2564,6 +2728,106 @@ mod message_change_tests {
         assert!(changes.inserted.is_empty());
         assert!(changes.rewritten.is_empty());
         assert!(!changes.unreadable);
+    }
+
+    /// A poll and its votes are fields on the message, so the diff names them: the poll with
+    /// the row that carries it, each vote as a field written on an existing row, both with the
+    /// values the caller needs to judge them.
+    #[test]
+    fn a_poll_and_each_vote_are_reported_with_their_values() {
+        let (doc, ids) = seeded();
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        let before = doc.frontiers();
+        doc.append_poll_message("p1", &poll, "dev", &with("user:alice"))
+            .unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.polls,
+            [("p1".to_owned(), json!({ "poll": poll }))],
+            "the poll arrives with its row"
+        );
+        assert!(changes.rewritten.is_empty());
+
+        let ids = changes.ids_after;
+        let before = doc.frontiers();
+        doc.set_poll_vote("p1", "user:bob", &["2".to_owned()])
+            .unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.rewritten,
+            [("p1".to_owned(), "vote|user:bob".to_owned())]
+        );
+        assert_eq!(
+            changes.polls,
+            [(
+                "p1".to_owned(),
+                json!({ "poll": poll, "vote|user:bob": ["2"] })
+            )]
+        );
+
+        // The writer refuses what the poll does not allow, and a row without a poll.
+        assert!(doc
+            .set_poll_vote("p1", "user:bob", &["1".into(), "2".into()])
+            .is_err());
+        assert!(doc.set_poll_vote("p1", "user:bob", &["9".into()]).is_err());
+        assert!(doc.set_poll_vote("m1", "user:bob", &["1".into()]).is_err());
+        assert!(doc.set_poll_vote("gone", "user:bob", &["1".into()]).is_ok());
+    }
+
+    /// Readers get the design's `poll` part with the tally folded in. One key per person, so a
+    /// changed vote replaces the old one, a retraction empties it, and two replicas that voted
+    /// apart agree once merged.
+    #[test]
+    fn a_poll_projects_as_a_part_with_the_latest_vote_per_person() {
+        let mut a = ChatDoc::new(Some(10), false);
+        let poll = Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap();
+        a.append_poll_message("p1", &poll, "dev:a", &with("user:alice"))
+            .unwrap();
+        a.commit_now();
+        let mut b = ChatDoc::new(Some(20), false);
+        b.import(&a.snapshot()).unwrap();
+
+        let (base_a, base_b) = (a.oplog_vv(), b.oplog_vv());
+        a.set_poll_vote("p1", "user:alice", &["1".into()]).unwrap();
+        a.set_poll_vote("p1", "user:alice", &["2".into()]).unwrap();
+        a.set_poll_vote("p1", "user:carol", &["1".into()]).unwrap();
+        a.set_poll_vote("p1", "user:carol", &[]).unwrap();
+        a.commit_now();
+        b.set_poll_vote("p1", "user:bob", &["2".into()]).unwrap();
+        b.commit_now();
+        let (upd_a, upd_b) = (
+            a.export_updates_since(&base_a),
+            b.export_updates_since(&base_b),
+        );
+        a.import(&upd_b).unwrap();
+        b.import(&upd_a).unwrap();
+
+        for peer in [&a, &b] {
+            let row = &peer.projected_rows()[0];
+            let parts = row["parts"].as_array().unwrap();
+            assert_eq!(parts[0]["kind"], "text");
+            assert_eq!(message_text(row), "Poll: Where?\n1. Lisbon\n2. Berlin");
+            assert_eq!(
+                parts[1],
+                json!({ "id": "poll", "kind": "poll", "question": "Where?", "max": 1,
+                    "options": [{ "id": "1", "label": "Lisbon" }, { "id": "2", "label": "Berlin" }],
+                    "votes": { "2": ["user:alice", "user:bob"] } })
+            );
+        }
+
+        // A poll that does not validate is not a poll: the row keeps only its text.
+        let mut row = json!({ "poll": { "question": "Q", "options": [], "max": 1 },
+            "parts": [{ "id": "t", "kind": "text", "text": "Poll: Q" }] });
+        let untouched = row.clone();
+        project_poll(&mut row);
+        assert_eq!(row, untouched);
+        // And a vote the poll does not allow counts for nothing.
+        let mut row = json!({ "poll": poll, "vote|user:x": ["9"], "vote|user:y": ["1", "2"],
+            "parts": [] });
+        project_poll(&mut row);
+        assert_eq!(row["parts"][0]["votes"], json!({}));
     }
 
     /// An insert reports the `sender` the writer put on the row, which is what lets the caller
@@ -2657,7 +2921,8 @@ mod message_change_tests {
         doc.commit_now();
 
         let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
-        assert_eq!(changes.ids_after, ids);
+        assert_eq!(just_ids(&changes.ids_after), just_ids(&ids));
+        assert_eq!(changes.ids_after, doc.message_identities());
     }
 
     /// Editing a message's text touches a part, not the message, and parts carry their own
@@ -2680,6 +2945,127 @@ mod message_change_tests {
         );
         assert!(changes.removed.is_empty());
         assert!(changes.inserted.is_empty());
+    }
+
+    /// A message is the row at its place in the list. An update that rewrites or removes a
+    /// row's `id` is still reported against the id the row had, with every field it wrote,
+    /// and the mirror follows the row to whatever it is called afterwards.
+    #[test]
+    fn a_row_whose_id_is_written_is_reported_under_the_id_it_had() {
+        for new_id in [Some("mX"), None] {
+            let (doc, ids) = seeded();
+            let before = doc.frontiers();
+            let m2 = doc.find_message("m2").unwrap();
+            m2.insert("sender", "user:carol").unwrap();
+            match new_id {
+                Some(id) => m2.insert("id", id).unwrap(),
+                None => m2.delete("id").unwrap(),
+            }
+            doc.commit_now();
+
+            let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+            let mut rewritten = changes.rewritten.clone();
+            rewritten.sort();
+            assert_eq!(
+                rewritten,
+                [
+                    ("m2".to_owned(), "id".to_owned()),
+                    ("m2".to_owned(), "sender".to_owned())
+                ]
+            );
+            assert_eq!(
+                changes.ids_after[1],
+                (
+                    new_id.unwrap_or_default().to_owned(),
+                    Some("user:carol".to_owned())
+                )
+            );
+            assert_eq!(
+                changes.ids_after,
+                doc.message_identities(),
+                "a mirror rebuilt from the doc is the one carried forward"
+            );
+        }
+    }
+
+    /// A row with no readable id still takes up a place, in a mirror built from the doc as in
+    /// one carried forward, so a later delete names the message that went and not a neighbour.
+    #[test]
+    fn a_row_with_no_id_keeps_its_place_in_the_mirror() {
+        let (doc, _) = seeded();
+        doc.messages_list().insert(0, "not a message").unwrap();
+        doc.commit_now();
+        let ids = doc.message_identities();
+        assert_eq!(just_ids(&ids), ["", "m1", "m2", "m3"]);
+
+        let before = doc.frontiers();
+        doc.delete_message("m2").unwrap();
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.removed,
+            [("m2".to_owned(), Some("user:bob".to_owned()))]
+        );
+    }
+
+    /// A mirror that is not this list cannot name the row a write landed on, so the diff says
+    /// it could not be read rather than naming a row by guesswork.
+    #[test]
+    fn a_mirror_out_of_step_with_the_list_makes_the_diff_unreadable() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.set_message_fields("m3", &[("preview", Value::from("off"))]);
+        doc.commit_now();
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids[..2]);
+        assert!(changes.unreadable);
+    }
+
+    /// The import of a payload is exact when it applied all of the payload and nothing else.
+    /// A write to a message that is no longer in the list has no place in it, and that is an
+    /// ordinary thing to read: someone removed the message while the write was on its way.
+    #[test]
+    fn a_write_to_a_message_removed_meanwhile_is_readable() {
+        let mut room = ChatDoc::new(Some(1), false);
+        room.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let mut late = ChatDoc::new(Some(2), false);
+        late.import(&room.snapshot()).unwrap();
+        room.delete_message("m1").unwrap();
+        room.commit_now();
+        let mark = late.oplog_vv();
+        late.set_message_fields("m1", &[("preview", json!("x"))]);
+        late.set_reaction("m1", "👍", "user:a", true).unwrap();
+        late.append_user_message("m2", "yo", "dev", &UserMessageOpts::default())
+            .unwrap();
+        late.delete_message("m2").unwrap();
+        let update = late.export_updates_since(&mark);
+
+        let (before, mirror) = (room.frontiers(), room.message_identities());
+        assert!(room.import(&update).unwrap().pending.is_none());
+        let c = room.messages_changed(&before, &room.frontiers(), &mirror);
+        assert!(!c.unreadable);
+        assert!(c.ids_after.is_empty());
+    }
+
+    /// An entry that arrives without an id is reported as an insert with an empty id, so the
+    /// caller can refuse it rather than never hear of it.
+    #[test]
+    fn an_entry_inserted_without_an_id_is_reported() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        let m = doc.messages_list().push_container(LoroMap::new()).unwrap();
+        m.insert("sender", "user:bob").unwrap();
+        doc.messages_list().push("not a message").unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.inserted,
+            [
+                (String::new(), Some("user:bob".to_owned())),
+                (String::new(), None)
+            ]
+        );
     }
 }
 

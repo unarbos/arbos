@@ -5,9 +5,9 @@
 #   sudo -E scripts/feedback/install-feedback-loop.sh --since 2026-10-15T19:50:00Z   # (re)start from a date
 #
 # What it does
-#   /opt/arbos-feedback/            feedback_poller.py + agent-prompt.md (copied from this directory)
-#   /etc/arbos/feedback.env         secrets, root:root 0600 — App Store Connect key, Cursor API key,
-#                                   GitHub token. Pulled from the 1Password vault "Arbos" with `op` when
+#   /opt/arbos-feedback/            feedback_poller.py (copied from this directory)
+#   /etc/arbos/feedback.env         secrets, root:root 0600 — App Store Connect key and GitHub token.
+#                                   Pulled from the 1Password vault "Arbos" with `op` when
 #                                   OP_SERVICE_ACCOUNT_TOKEN is in the environment (or in /etc/arbos/op.env),
 #                                   else taken from the caller's environment, else kept from the old file.
 #   /etc/arbos/feedback-priority.txt   emails / @handles that go first and skip the per-tester cap (Jacob)
@@ -19,10 +19,10 @@
 # Environment knobs (written into feedback.env; defaults in brackets):
 #   ASC_KEY_ID [ZV82D3ZWRT]  ASC_ISSUER_ID [4623d589-1653-444a-b497-93116044e272]  ASC_APP_ID [6812503407]
 #   ASC_KEY_P8_B64 (base64 of the .p8; vault: item "Appe Cert Apple Developer", file AuthKey_<id>.p8)
-#   CURSOR_API_KEY (vault: "New New Cursor")   GITHUB_TOKEN (vault: "Arbos GitHub PAT (workflow)")
+#   GITHUB_TOKEN (vault: "Arbos GitHub PAT (workflow)")
 #   ARBOS_RELAY_URL [https://relay.arbos.life] + ARBOS_RELAY_ADMIN_TOKEN (vault: relay admin token) — Mac sheet intake
 #   OPENROUTER_API_KEY (vault: OpenRouter) + FEEDBACK_SCREEN_MODEL [openai/gpt-4o-mini] — malicious-intent screen
-#   GITHUB_REPO [unarbos/arbos]  FEEDBACK_PRIORITY [jake@bittensor.com,@unconst]  FEEDBACK_AGENT_MODEL []
+#   GITHUB_REPO [unarbos/arbos]  FEEDBACK_PRIORITY [jake@bittensor.com,@unconst]
 #   FEEDBACK_MIN_INTERVAL_S [90]  FEEDBACK_MAX_PER_DAY [120]  FEEDBACK_TESTER_MAX_PER_DAY [20]  FEEDBACK_DEDUPE_DAYS [7]
 set -euo pipefail
 
@@ -65,7 +65,6 @@ say "files"
 install -d -m 0755 "$INSTALL_DIR"
 install -m 0644 "$HERE/feedback_state.py" "$INSTALL_DIR/feedback_state.py"
 install -m 0755 "$HERE/feedback_poller.py" "$INSTALL_DIR/feedback_poller.py"
-install -m 0644 "$HERE/agent-prompt.md" "$INSTALL_DIR/agent-prompt.md"
 install -m 0644 "$HERE/arbos-feedback-poller.service" /etc/systemd/system/arbos-feedback-poller.service
 install -m 0644 "$HERE/arbos-feedback-poller.timer" /etc/systemd/system/arbos-feedback-poller.timer
 
@@ -90,7 +89,6 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
     p8=$(opread "op://Arbos/phsrnmu3qfpqx6lbumafjo3uom/AuthKey_${ASC_KEY_ID}.p8")
     [[ -n "$p8" ]] && ASC_KEY_P8_B64=$(printf '%s\n' "$p8" | base64 -w0)
   fi
-  : "${CURSOR_API_KEY:=$(opread 'op://Arbos/eagoyh7fpynfmzx4xm2agtqaim/notesPlain' | tr -d '[:space:]')}"
   : "${GITHUB_TOKEN:=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential' | tr -d '[:space:]')}"
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential' | tr -d '[:space:]')}"
   : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential' | tr -d '[:space:]')}"
@@ -109,11 +107,10 @@ if [[ -s /etc/arbos/ec2-mac.pem ]]; then
 fi
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN ARBOS_RELAY_ADMIN_TOKEN OPENROUTER_API_KEY FEEDBACK_PRIORITY FEEDBACK_AGENT_MODEL FEEDBACK_SCREEN_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY FEEDBACK_TESTER_MAX_PER_DAY FEEDBACK_DEDUPE_DAYS IOS_GATE_SSH IOS_GATE_TIMEOUT_S RUST_GATE_SSH RUST_GATE_TIMEOUT_S TESTFLIGHT_PUBLIC_GROUP_ID FEEDBACK_INTERNAL_MAX_PER_DAY; do keep "$k"; done
+  for k in ASC_KEY_P8_B64 GITHUB_TOKEN ARBOS_RELAY_ADMIN_TOKEN OPENROUTER_API_KEY FEEDBACK_PRIORITY FEEDBACK_SCREEN_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY FEEDBACK_TESTER_MAX_PER_DAY FEEDBACK_DEDUPE_DAYS IOS_GATE_SSH IOS_GATE_TIMEOUT_S RUST_GATE_SSH RUST_GATE_TIMEOUT_S TESTFLIGHT_PUBLIC_GROUP_ID FEEDBACK_INTERNAL_MAX_PER_DAY; do keep "$k"; done
 fi
 missing=()
 [[ -n "${ASC_KEY_P8_B64:-}" ]] || missing+=(ASC_KEY_P8_B64)
-[[ -n "${CURSOR_API_KEY:-}" ]] || missing+=(CURSOR_API_KEY)
 [[ -n "${GITHUB_TOKEN:-}" ]] || missing+=(GITHUB_TOKEN)
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "missing: ${missing[*]} (export them, or give me OP_SERVICE_ACCOUNT_TOKEN for the Arbos vault)" >&2
@@ -126,8 +123,6 @@ ASC_KEY_ID=$ASC_KEY_ID
 ASC_ISSUER_ID=$ASC_ISSUER_ID
 ASC_APP_ID=$ASC_APP_ID
 ASC_KEY_P8_B64=$ASC_KEY_P8_B64
-CURSOR_API_KEY=$CURSOR_API_KEY
-FEEDBACK_AGENT_MODEL=${FEEDBACK_AGENT_MODEL:-}
 GITHUB_TOKEN=$GITHUB_TOKEN
 GITHUB_REPO=$GITHUB_REPO
 ARBOS_RELAY_URL=$ARBOS_RELAY_URL

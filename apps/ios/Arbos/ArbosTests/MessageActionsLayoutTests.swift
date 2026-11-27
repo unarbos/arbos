@@ -154,6 +154,64 @@ final class MessageActionsLayoutTests: XCTestCase {
         let l = MessageActionsLayout.compute(i)
         assertInsideVisibleArea(l, i)
     }
+
+    /// The emoji keyboard on a small phone (iPhone SE: 667 pt, emoji keyboard 335 pt) with
+    /// the longest menu: with the menu the group cannot fit and Delete ends under the
+    /// keyboard (tester report, 2026-11-13). With the picker open the
+    /// menu is hidden, so the capsule and the bubble fit above the keyboard wherever the
+    /// bubble was pressed — top, middle or bottom of the screen, short or tall.
+    func testPickerOpenFitsCapsuleAndBubbleAboveTheEmojiKeyboard() {
+        let longest = CGFloat(MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true,
+                                                hasPreview: true, hasLink: true).count) * 44 + 8
+        func se(_ bubble: CGRect, pickerOpen: Bool) -> MessageActionsLayout.Input {
+            .init(bubble: bubble, capsuleHeight: capsule, menuHeight: longest, height: 667, safeTop: 20, safeBottom: 0,
+                  keyboardInset: 335, pickerOpen: pickerOpen)
+        }
+        let withMenu = MessageActionsLayout.compute(se(CGRect(x: 16, y: 300, width: 343, height: 60), pickerOpen: false))
+        XCTAssertGreaterThan(withMenu.menuY + longest, withMenu.visibleBottom, "the bug: the menu runs under the keyboard")
+
+        for y in [CGFloat(30), 300, 600] {
+            for h in [CGFloat(40), 60, 900] {
+                let i = se(CGRect(x: 16, y: y, width: 343, height: h), pickerOpen: true)
+                let l = MessageActionsLayout.compute(i)
+                XCTAssertGreaterThanOrEqual(l.capsuleY, l.visibleTop, "y \(y) h \(h)")
+                XCTAssertEqual(l.bubbleY, l.capsuleY + capsule + i.gap, "y \(y) h \(h)")
+                XCTAssertLessThanOrEqual(l.bubbleY + l.bubbleHeight, l.visibleBottom, "y \(y) h \(h)")
+                XCTAssertEqual(l.bubbleHeight, min(h, l.visibleBottom - l.bubbleY), "only a too-tall bubble is cut")
+            }
+        }
+        // A bubble that already fits with its capsule stays where the finger pressed it.
+        let still = se(CGRect(x: 16, y: 120, width: 343, height: 60), pickerOpen: true)
+        XCTAssertEqual(MessageActionsLayout.compute(still).bubbleShift(from: still), 0)
+    }
+
+    /// A message taller than the screen (tester report, 2026-11-14): the capsule and the whole
+    /// menu stay on screen and the message gets the room between them to scroll in. A name
+    /// line lifted above the bubble is part of that height and changes nothing else.
+    func testAMessageTallerThanTheScreenScrollsBetweenTheCapsuleAndTheMenu() {
+        for nameLift: CGFloat in [0, 20] {
+            let pressed = CGRect(x: 16, y: -400, width: 361, height: 2400)
+            let i = input(bubble: CGRect(x: 16, y: pressed.minY - nameLift, width: 361, height: pressed.height + nameLift))
+            let l = MessageActionsLayout.compute(i)
+            assertInsideVisibleArea(l, i)
+            XCTAssertEqual(l.capsuleY, l.visibleTop)
+            XCTAssertEqual(l.menuY + menuHeight, l.visibleBottom, "every menu row is reachable")
+            XCTAssertEqual(l.bubbleHeight, l.visibleBottom - l.visibleTop - capsule - menuHeight - 16, "the scroll window")
+            XCTAssertLessThan(l.bubbleHeight, i.bubble.height, "shorter than the message: it scrolls")
+        }
+    }
+
+    /// A named bubble that fits: the name line goes above the pressed bubble, which stays
+    /// where the finger is, and the capsule sits above the name.
+    func testANameLineLiftsAboveABubbleThatStaysPut() {
+        let pressed = CGRect(x: 16, y: 300, width: 361, height: 60), nameLift: CGFloat = 20
+        let i = input(bubble: CGRect(x: 16, y: pressed.minY - nameLift, width: 361, height: pressed.height + nameLift))
+        let l = MessageActionsLayout.compute(i)
+        assertInsideVisibleArea(l, i)
+        XCTAssertEqual(l.bubbleY + nameLift, pressed.minY)
+        XCTAssertEqual(l.capsuleY + capsule + i.gap, pressed.minY - nameLift)
+        XCTAssertEqual(l.menuY, pressed.maxY + i.gap)
+    }
 }
 
 /// The keyboard goes down when the bubble menu opens and comes back only when it was up

@@ -293,6 +293,7 @@ struct TasksSheet: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Text(" · \(job.elapsedLabel)")
+                        .monospacedDigit()
                         .fixedSize()
                         .accessibilityIdentifier("tasks-row-elapsed")
                 }

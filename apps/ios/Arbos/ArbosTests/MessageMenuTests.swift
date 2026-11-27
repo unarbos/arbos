@@ -39,7 +39,14 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 8)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 9)
+    }
+
+    func testCopyLinkSitsUnderCopyOnlyWhenTheTextSharesALink() {
+        XCTAssertEqual(MessageMenu.items(forMessage: true, hasLink: true),
+                       [.copy, .copyLink, .reply, .forward, .replyInDM, .delete])
+        XCTAssertFalse(MessageMenu.items(forMessage: true).contains(.copyLink))
+        XCTAssertEqual(MessageMenu.items(forMessage: false, hasLink: true), [.copy])
     }
 
     func testOnlyDeleteIsDestructive() {

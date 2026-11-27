@@ -72,6 +72,7 @@
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
 		A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
+		A1BB000000000000000000F1 /* HoldMenuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB000000000000000000F0 /* HoldMenuUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
 		A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* PresenceAnchorUITests.swift */; };
 		A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */; };
@@ -173,6 +174,7 @@
 		A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */; };
 		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1C1000000000000000000D2 /* ServerChannelSenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */; };
+		A1C1000000000000000000F2 /* InviteLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1000000000000000000F1 /* InviteLinkTests.swift */; };
 		A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000071 /* ReplyInDMTests.swift */; };
 		A1D100000000000000000092 /* ReplyCountBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000091 /* ReplyCountBadgeTests.swift */; };
 		A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000001 /* DeliveryStateTests.swift */; };
@@ -206,6 +208,7 @@
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A1NAV0000000000000000002 /* HomeNavPushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1NAV0000000000000000001 /* HomeNavPushTests.swift */; };
 		A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */; };
+		A1D82000000000000000C2 /* FirstLoginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D82000000000000000C1 /* FirstLoginTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
 		A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000003 /* BlockedStateTests.swift */; };
 		A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE9C000000000000000003 /* DevicesVisibleTests.swift */; };
@@ -362,6 +365,7 @@
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeChatListNoFilterUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
+		A1BB000000000000000000F0 /* HoldMenuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldMenuUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000042 /* PresenceAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceAnchorUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEndAnchorUITests.swift; sourceTree = "<group>"; };
@@ -464,6 +468,7 @@
 		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
 		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelSenderTests.swift; sourceTree = "<group>"; };
+		A1C1000000000000000000F1 /* InviteLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteLinkTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000071 /* ReplyInDMTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyInDMTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000091 /* ReplyCountBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyCountBadgeTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000001 /* DeliveryStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeliveryStateTests.swift; sourceTree = "<group>"; };
@@ -498,6 +503,7 @@
 		A1NAV0000000000000000001 /* HomeNavPushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNavPushTests.swift; sourceTree = "<group>"; };
 		A1ENT0000000000000000011 /* EntityProfileStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntityProfileStructureTests.swift; sourceTree = "<group>"; };
 		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
+		A1D82000000000000000C1 /* FirstLoginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLoginTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000003 /* BlockedStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedStateTests.swift; sourceTree = "<group>"; };
 		A1DE9C000000000000000003 /* DevicesVisibleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesVisibleTests.swift; sourceTree = "<group>"; };
@@ -801,6 +807,7 @@
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */,
+				A1D82000000000000000C1 /* FirstLoginTests.swift */,
 				A1CF0000000000000000B080 /* PillGlassTests.swift */,
 				A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */,
 				A1D0C10500000000000000A0 /* ViewerChromeTests.swift */,
@@ -841,6 +848,7 @@
 				A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 				A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */,
+				A1C1000000000000000000F1 /* InviteLinkTests.swift */,
 				A1D100000000000000000071 /* ReplyInDMTests.swift */,
 				A1D100000000000000000091 /* ReplyCountBadgeTests.swift */,
 				A1D100000000000000000001 /* DeliveryStateTests.swift */,
@@ -893,6 +901,7 @@
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
 				A1BB00000000000000000032 /* HomeChatListNoFilterUITests.swift */,
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
+				A1BB000000000000000000F0 /* HoldMenuUITests.swift */,
 				A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */,
 				A1BB00000000000000000042 /* PresenceAnchorUITests.swift */,
 				A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */,
@@ -1232,6 +1241,7 @@
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */,
+				A1D82000000000000000C2 /* FirstLoginTests.swift in Sources */,
 				A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */,
 				A1CF0000000000000000B091 /* HomePreviewWhoTests.swift in Sources */,
 				A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */,
@@ -1270,6 +1280,7 @@
 				A1B5EA00000000000000A00A /* BottomSearchBarTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 				A1C1000000000000000000D2 /* ServerChannelSenderTests.swift in Sources */,
+				A1C1000000000000000000F2 /* InviteLinkTests.swift in Sources */,
 				A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */,
 				A1D100000000000000000092 /* ReplyCountBadgeTests.swift in Sources */,
 				A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */,
@@ -1322,6 +1333,7 @@
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeChatListNoFilterUITests.swift in Sources */,
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
+				A1BB000000000000000000F1 /* HoldMenuUITests.swift in Sources */,
 				A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */,
 				A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */,
 				A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */,

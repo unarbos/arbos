@@ -190,10 +190,14 @@ final class RelayAPI {
 
     /// JSON and raw-body requests share the same account admission boundary.
     /// Keep the returned bearer fixed for the request after its MainActor check.
-    private func requestBearer(auth: Bool = true) async throws -> String {
+    private func requestBearer(auth: Bool = true, call: String = "an upload") async throws -> String {
         if let authorization {
             // Admission and dynamic token capture share one MainActor turn.
-            guard let allowed = await authorization() else { throw CancellationError() }
+            // Named, not a bare CancellationError: phones show "Swift.CancellationError 1" under
+            // Home on every reload (2026-11-16) and that says nothing about which call or why.
+            guard let allowed = await authorization() else {
+                throw RelayError(status: 0, message: "not admitted: \(call)")
+            }
             return allowed
         }
         return auth ? token() : ""
@@ -206,7 +210,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let timeout { req.timeoutInterval = timeout }
-        let bearer = try await requestBearer(auth: auth)
+        let bearer = try await requestBearer(auth: auth, call: "\(method) \(path)")
         if auth { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         // What runs here (`ios/1.0.0 (202610192230)`): the relay's "installed version" signal for
         // continuous delivery (GET /admin/installs), on every call.
@@ -390,9 +394,20 @@ final class RelayAPI {
         try Task.checkCancellation()
         var out: [RegistryProject] = []
         var skippedIds: Set<String> = []
-        for result in results {
-            guard let result else { throw CancellationError() }
-            switch try result.get() {
+        for (index, result) in results.enumerated() {
+            let detail: RegistryDetail
+            if let result {
+                detail = try result.get()
+            } else {
+                // A slot the group never delivered. Phones ended the loop above after the first
+                // result with no request failed and none cancelled ("detail 2/5 never ran",
+                // 2026-11-16; not reproduced off a device), and the whole reload failed on every
+                // try. Fetched here instead, one at a time: slower, never lost. A slot skipped
+                // after a failure never gets here, the failure before it throws first.
+                NSLog("registry: detail \(index + 1)/\(results.count) not delivered by the group; fetching it directly")
+                detail = try await registryDetail(entries[index].id, archivedAt: entries[index].archivedAt)
+            }
+            switch detail {
             case .project(let project): out.append(project)
             case .skipped(let id): skippedIds.insert(id)
             case .omitted: break
@@ -487,8 +502,9 @@ final class RelayAPI {
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         // Fork: relay copies the source agent's workspace (files + memory) into the new one.
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
-        let v = try await json("POST", "/projects", body: body)
-        return (v as? [String: Any])?["id"] as? String
+        let v = try await json("POST", "/projects", body: body) as? [String: Any]
+        // The relay answers `{project: {id, …}, …}`.
+        return (v?["project"] as? [String: Any])?["id"] as? String
     }
 
     // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay

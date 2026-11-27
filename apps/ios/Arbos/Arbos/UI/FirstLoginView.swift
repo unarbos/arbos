@@ -119,7 +119,7 @@ struct FirstLoginView: View {
     private func textBlock(state: FirstLogin, cardCenter: CGPoint) -> some View {
         let work = model.accountWork()
         if state.stage == .failed {
-            VStack(spacing: 6) {
+            VStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Image(systemName: "desktopcomputer").font(.system(size: 14))
                     Text(state.title)
@@ -143,6 +143,15 @@ struct FirstLoginView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 8)
+                Button { guard model.acceptsAccountWork(work) else { return }; model.signOut() } label: {
+                    Text("Sign out")
+                        .font(theme.font(Theme.small, weight: .semibold))
+                        .foregroundStyle(theme.muted)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 9)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("first-login-sign-out")
             }
             .padding(.horizontal, 32)
             .transition(.opacity)

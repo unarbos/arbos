@@ -24,20 +24,27 @@
 //! one check and not three, and why the kind of a push is decided from what it contains rather
 //! than from what it claims.
 //!
+//! A fourth rides the same diff: **polls** (`docs/polls.md`). A poll and each person's vote are
+//! fields on the message precisely so that this module can see them — see [`check_polls`].
+//!
 //! Nothing here reads the pushed bytes for the *kind* of push, and that is deliberate. The
 //! client authors its own CRDT ops, so anything derivable from them — op order, Lamport
 //! clocks, which frontier they descend from — it can also shape at will. The relay's own
 //! record of what it was told is the only part of the picture the pusher did not write.
 
-use arbos_core::doc::MessageChanges;
+use arbos_core::doc::{MessageChanges, POLL_FIELD, POLL_VOTE_PREFIX};
+use arbos_core::poll::Poll;
 
 use crate::auth::Principal;
 use crate::moderation;
+use crate::people;
 use crate::state::AppState;
 
-/// Fields that name who a message came from. A client writes them when it writes the message;
-/// rewriting them afterwards on a row that already exists is what a forgery looks like.
-const IDENTITY_FIELDS: [&str; 2] = ["sender", "role"];
+/// Fields that name a message and who it came from. A client writes them when it writes the
+/// message; rewriting them afterwards on a row that already exists is what a forgery looks
+/// like. `id` is here for every pusher, the author included: `message_authors` and every other
+/// record the relay keeps about a message is keyed on it.
+const IDENTITY_FIELDS: [&str; 3] = ["id", "sender", "role"];
 
 /// The relay's own identity for the rows it writes (`notices::write_doc`). Those never come
 /// through a socket, so they are never checked here; the constant is for tests that spell out
@@ -186,12 +193,20 @@ pub fn check_push(
             attributed: Vec::new(),
         };
     };
-    let author_of = |id: &str| state.db.message_author(chat_id, id).ok().flatten();
+    // A record that cannot be read is not an empty one: the push is refused and sent again.
+    let author_of = |id: &str| state.db.message_author(chat_id, id);
+    let no_record = || PushCheck::Refuse {
+        code: "unavailable",
+        detail: "the record of who wrote what could not be read; send this again".to_owned(),
+    };
     // Resolved once, and only when something actually needs it: it reads the chat's roster.
     let moderates = || moderation::moderates(state, principal, project_id, chat_id);
 
     for (id, was) in &changes.removed {
-        let mine = author_of(id).is_some_and(|a| me.owns(state, &a));
+        let Ok(author) = author_of(id) else {
+            return no_record();
+        };
+        let mine = author.is_some_and(|a| me.owns(state, &a));
         if !mine && !me.wrote_unattributed(was.as_deref()) && !moderates() {
             return PushCheck::Refuse {
                 code: "not_yours",
@@ -213,6 +228,10 @@ pub fn check_push(
         }
     }
 
+    if let Some(refusal) = check_polls(state, &me, chat_id, changes) {
+        return refusal;
+    }
+
     // A second row wearing an id the list already holds. Nothing legitimate does this: a
     // message id is a ulid, and a heal re-inserts a row the list is *missing*, so after a real
     // heal the id appears once. Two rows under one id is a client minting a new message under a
@@ -229,6 +248,18 @@ pub fn check_push(
     // message as far as the record is concerned: the id already has an author, so the
     // `(Some(a), s)` arm reads it as a heal of attested history and attests nothing new.
     for (id, _) in &changes.inserted {
+        // An entry the relay cannot name is one it cannot attribute, gate or later protect.
+        // A device writes a message whole. A box may cut a backlog between a row and its id,
+        // so its row waits unnamed and is judged below when the id arrives.
+        if id.is_empty() {
+            if matches!(me, Pusher::BoxOf(_)) {
+                continue;
+            }
+            return PushCheck::Refuse {
+                code: "bad_message",
+                detail: "every entry in a chat's messages is a message with an id".to_owned(),
+            };
+        }
         if changes.ids_after.iter().filter(|(x, _)| x == id).count() > 1 {
             return PushCheck::Refuse {
                 code: "duplicate_id",
@@ -239,15 +270,20 @@ pub fn check_push(
         }
     }
 
-    let mut carries_new_message = false;
+    // A row still waiting for its id is a message on its way in: gated now, and again,
+    // with everything else, when the id arrives.
+    let mut carries_new_message = changes.inserted.iter().any(|(id, _)| id.is_empty());
     let mut attributed = Vec::new();
-    for (id, sender) in &changes.inserted {
+    for (id, sender) in changes.inserted.iter().filter(|(id, _)| !id.is_empty()) {
         let mut attest = || {
             if let Some(who) = me.attribution(state, sender.as_deref()) {
                 attributed.push((id.clone(), who));
             }
         };
-        match (author_of(id).as_deref(), sender.as_deref()) {
+        let Ok(author) = author_of(id) else {
+            return no_record();
+        };
+        match (author.as_deref(), sender.as_deref()) {
             // History the relay attested to you: your own old rows, which is most of what a
             // device heals a room with.
             (Some(a), _) if me.owns(state, a) => {}
@@ -311,13 +347,108 @@ pub fn check_push(
     // says nothing about any one of them — and treating that silence as proof of a new message
     // would refuse the heal of a room's whole history, which is the one case heals exist for.
     // Each announce narrows this, one chat at a time.
-    if carries_new_message && !state.db.chat_has_authors(chat_id).unwrap_or(false) {
+    // A record that cannot be read is not a silent one: the push stays a new message, gated.
+    if carries_new_message && !state.db.chat_has_authors(chat_id).unwrap_or(true) {
         carries_new_message = false;
     }
     PushCheck::Allow {
         carries_new_message,
         attributed,
     }
+}
+
+/// What a push may do to a poll: post one within bounds, and cast, change or retract the
+/// pusher's own vote. Everything else is refused.
+///
+/// - The poll is written with its message and never again, so nobody edits a question after
+///   people answered it or hangs a poll on a message that was not one.
+/// - A vote is the field `vote|<voter>`, and the voter has to be a name this socket may write
+///   under and a member of the chat. The name in the key is never taken on trust.
+/// - One vote per person is the storage itself: one key each, last write wins.
+///
+/// The one allowance is the one the insert arms make: a row arriving whole that the relay has
+/// already attested is history a heal carries, and it carries the votes on it. A device cannot
+/// push its own vote and leave out everyone else's when it restores a row the relay lost.
+fn check_polls(
+    state: &AppState,
+    me: &Pusher,
+    chat_id: &str,
+    changes: &MessageChanges,
+) -> Option<PushCheck> {
+    let refuse = |code, detail| Some(PushCheck::Refuse { code, detail });
+    for (id, fields) in &changes.polls {
+        let arrives = changes.inserted.iter().any(|(i, _)| i == id);
+        let written: Vec<&str> = changes
+            .rewritten
+            .iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, field)| field.as_str())
+            .collect();
+        if written.contains(&POLL_FIELD) {
+            return refuse(
+                "poll_fixed",
+                format!("the poll on {id} is written with its message; it is not editable"),
+            );
+        }
+        let Some(poll) = fields.get(POLL_FIELD).and_then(Poll::parse) else {
+            return refuse(
+                "bad_poll",
+                format!("{id} does not hold a poll within bounds"),
+            );
+        };
+        let attested = arrives
+            && state
+                .db
+                .message_author(chat_id, id)
+                .ok()
+                .flatten()
+                .is_some();
+        // Every vote on a row that arrives whole; on a row already here, the ones this push
+        // wrote — including one it removed, which is why this walks the written fields and
+        // not the fields that are left.
+        let votes: Vec<&str> = if arrives {
+            fields
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, _)| k.as_str())
+                .collect()
+        } else {
+            written
+        };
+        for key in votes {
+            let Some(voter) = key.strip_prefix(POLL_VOTE_PREFIX) else {
+                continue;
+            };
+            if !fields
+                .get(key)
+                .is_some_and(|v| poll.selections(v).is_some())
+            {
+                return refuse(
+                    "bad_vote",
+                    format!("the vote on {id} is not a choice that poll allows"),
+                );
+            }
+            if attested {
+                continue;
+            }
+            if !me.owns(state, voter) {
+                return refuse(
+                    "not_yours",
+                    format!("the vote on {id} is {voter}'s to cast"),
+                );
+            }
+            let member = people::load_chat(state, chat_id)
+                .is_ok_and(|cm| cm.members.iter().any(|m| m.member == voter));
+            if !member {
+                return refuse(
+                    "not_a_member",
+                    format!("{voter} is not a member of the chat {id} is in"),
+                );
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -369,6 +500,86 @@ mod tests {
                 .unwrap();
         }
         (chat, alice, bob, alice_dev, bob_dev)
+    }
+
+    /// A box sends a backlog too big for one push as a run of pushes, cut wherever its own
+    /// history reaches the size limit. A message's first fields can therefore arrive in one
+    /// push and the rest in the next. Wherever the cut falls, both pushes are taken, and the
+    /// message ends up named as it was written.
+    #[test]
+    fn a_boxs_message_cut_across_two_pushes_at_any_op_is_taken() {
+        use arbos_core::doc::ChatDoc;
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 101);
+        let the_box = Principal::Box { user_id: alice };
+        let src = ChatDoc::new(Some(9), false);
+        src.init_meta("c", "p", 1);
+        let from = src.oplog_vv().get(&9).copied().unwrap();
+        src.start_assistant_message("m_reply", "", "box:test");
+        let end = src.oplog_vv().get(&9).copied().unwrap();
+        let span = |a, b| {
+            src.doc
+                .export(loro::ExportMode::UpdatesInRange {
+                    spans: std::borrow::Cow::Owned(vec![loro::IdSpan::new(9, a, b)]),
+                })
+                .unwrap()
+        };
+        for cut in from + 1..end {
+            let mut room = ChatDoc::new(Some(1), false);
+            room.import(&span(0, from)).unwrap();
+            let mut mirror = room.message_identities();
+            for (a, b) in [(from, cut), (cut, end)] {
+                let before = room.frontiers();
+                assert!(room.import(&span(a, b)).unwrap().pending.is_none());
+                let changes = room.messages_changed(&before, &room.frontiers(), &mirror);
+                let check = check_push(&state, &the_box, "p", "c", false, &changes);
+                assert!(!refused(&check), "cut at {cut}, ops {a}..{b}: {check:?}");
+                mirror = changes.ids_after;
+            }
+            assert_eq!(mirror, [("m_reply".to_owned(), Some("agent".to_owned()))]);
+        }
+    }
+
+    /// The fields a message is created with may arrive after its row only while the row lacks
+    /// them and only from the peer that created the row. From anyone else they are a rewrite,
+    /// refused like any other, so a row a box has not finished sending is not there to take.
+    #[test]
+    fn a_rows_first_fields_arriving_from_another_peer_are_a_rewrite() {
+        use arbos_core::doc::ChatDoc;
+        let state = test_state(AuthMode::Github);
+        let (chat, _alice, _bob, _alice_dev, bob_dev) = chat_with_two(&state);
+        for (has, writes) in [
+            (None, "id"),
+            (Some("m_reply"), "role"),
+            (Some("m_reply"), "sender"),
+        ] {
+            let room = ChatDoc::new(Some(9), false);
+            let row = room
+                .messages_list()
+                .push_container(loro::LoroMap::new())
+                .unwrap();
+            if let Some(id) = has {
+                row.insert("id", id).unwrap();
+            }
+            room.doc.commit();
+            let mut d = ChatDoc::new(Some(2), false);
+            d.import(&room.snapshot()).unwrap();
+            let (before, mirror) = (d.frontiers(), d.message_identities());
+            let loro::ValueOrContainer::Container(loro::Container::Map(m)) =
+                d.messages_list().get(0).unwrap()
+            else {
+                unreachable!()
+            };
+            m.insert(writes, "user:someone").unwrap();
+            d.doc.commit();
+            let c = d.messages_changed(&before, &d.frontiers(), &mirror);
+            assert!(c.inserted.is_empty(), "{writes}: {:?}", c.inserted);
+            let check = check_push(&state, &bob_dev, PEOPLE_PROJECT, &chat, false, &c);
+            assert!(
+                refused(&check),
+                "{writes} written on a row another peer began"
+            );
+        }
     }
 
     /// The long path through this check. A member who writes a *new* id is recorded under their
@@ -936,6 +1147,591 @@ mod tests {
                 &changes()
             )),
             Some(false)
+        );
+    }
+
+    // ---- polls -------------------------------------------------------------------------
+
+    use arbos_core::doc::{ChatDoc, MessageIdentity, UserMessageOpts};
+    use serde_json::json;
+
+    /// A room doc as the relay holds it, and the diff of one push against it — the real
+    /// `messages_changed`, so these tests cover the stored shape and the check together.
+    struct Room {
+        doc: ChatDoc,
+        ids: Vec<MessageIdentity>,
+    }
+
+    impl Room {
+        fn new() -> Self {
+            Self {
+                doc: ChatDoc::new(Some(1), false),
+                ids: Vec::new(),
+            }
+        }
+
+        fn push(&mut self, write: impl FnOnce(&ChatDoc)) -> MessageChanges {
+            let before = self.doc.frontiers();
+            self.doc.transact(write);
+            let changes = self
+                .doc
+                .messages_changed(&before, &self.doc.frontiers(), &self.ids);
+            self.ids = changes.ids_after.clone();
+            changes
+        }
+
+        /// Write a raw field on a message, as a client that skips the core writers would.
+        fn set(&mut self, id: &str, field: &str, value: serde_json::Value) -> MessageChanges {
+            self.push(|d| d.set_message_fields(id, &[(field, value)]))
+        }
+    }
+
+    fn poll() -> Poll {
+        Poll::new("Where?", &["Lisbon".into(), "Berlin".into()], false).unwrap()
+    }
+
+    fn as_user(user: &str) -> UserMessageOpts {
+        UserMessageOpts {
+            sender: Some(format!("user:{user}")),
+            ..Default::default()
+        }
+    }
+
+    fn code(c: &PushCheck) -> Option<&'static str> {
+        match c {
+            PushCheck::Refuse { code, .. } => Some(code),
+            PushCheck::Allow { .. } => None,
+        }
+    }
+
+    /// Alice and Bob in a chat, with Alice's poll `p1` posted and attested.
+    fn chat_with_a_poll(state: &AppState) -> (Room, String, String, String, Principal, Principal) {
+        let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(state);
+        let mut room = Room::new();
+        let c = room.push(|d| {
+            d.append_poll_message("p1", &poll(), "dev", &as_user(&alice))
+                .unwrap()
+        });
+        let PushCheck::Allow {
+            carries_new_message,
+            attributed,
+        } = check_push(state, &alice_dev, PEOPLE_PROJECT, &chat, false, &c)
+        else {
+            panic!("a poll within bounds is a message like any other");
+        };
+        assert!(carries_new_message);
+        assert_eq!(attributed, [("p1".to_owned(), format!("user:{alice}"))]);
+        state
+            .db
+            .record_message_author(&chat, "p1", &format!("user:{alice}"))
+            .unwrap();
+        (room, chat, alice, bob, alice_dev, bob_dev)
+    }
+
+    #[test]
+    fn a_member_casts_changes_and_retracts_their_own_vote() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _alice, bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let me = format!("user:{bob}");
+        for picked in [vec!["1".to_owned()], vec!["2".to_owned()], vec![]] {
+            let c = room.push(|d| d.set_poll_vote("p1", &me, &picked).unwrap());
+            assert_eq!(
+                kind(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some(false),
+                "a vote is not a new message: {picked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_poll_out_of_bounds_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, _bob, alice_dev, _bob_dev) = chat_with_two(&state);
+        let good = serde_json::to_value(poll()).unwrap();
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit); 5] = [
+            ("an unknown field", |p| p["anonymous"] = json!(true)),
+            ("one option", |p| {
+                p["options"].as_array_mut().unwrap().truncate(1)
+            }),
+            ("eleven options", |p| {
+                p["options"] = (0..11)
+                    .map(|i| json!({ "id": i.to_string(), "label": "x" }))
+                    .collect()
+            }),
+            ("a question over the limit", |p| {
+                p["question"] = json!("q".repeat(301))
+            }),
+            ("a wrong type", |p| p["max"] = json!("1")),
+        ];
+        for (what, edit) in cases {
+            let mut bad = good.clone();
+            edit(&mut bad);
+            let mut room = Room::new();
+            let c = room.push(|d| {
+                d.append_user_message("p_bad", "Poll: x", "dev", &as_user(&alice))
+                    .unwrap();
+                d.set_message_fields("p_bad", &[(POLL_FIELD, bad)]);
+            });
+            assert_eq!(
+                code(&check_push(
+                    &state,
+                    &alice_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some("bad_poll"),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_poll_cannot_be_edited_or_hung_on_an_existing_message() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, _bob, alice_dev, _bob_dev) = chat_with_a_poll(&state);
+        let mut other = poll();
+        other.question = "Who pays?".into();
+
+        // Not even by its author: people answered the question as it was asked.
+        let c = room.set("p1", POLL_FIELD, serde_json::to_value(&other).unwrap());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("poll_fixed")
+        );
+
+        room.push(|d| {
+            d.append_user_message("plain", "hello", "dev", &as_user(&alice))
+                .unwrap()
+        });
+        let c = room.set("plain", POLL_FIELD, serde_json::to_value(&other).unwrap());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("poll_fixed")
+        );
+    }
+
+    /// The voter is the socket, never the name in the key.
+    #[test]
+    fn a_vote_cannot_be_cast_changed_or_removed_under_someone_elses_name() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, _bob, alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let alices = format!("{POLL_VOTE_PREFIX}user:{alice}");
+
+        let c = room.set("p1", &alices, json!(["2"]));
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("not_yours"),
+            "Bob writing Alice's vote"
+        );
+        // The same bytes from Alice's own socket are her vote.
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            None
+        );
+        // Emptying it is still writing it.
+        let c = room.set("p1", &alices, json!([]));
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some("not_yours"),
+            "claiming a heal changes nothing"
+        );
+        // Removing the field outright is refused for anyone: a retraction is an empty list.
+        let c = room.set("p1", &alices, serde_json::Value::Null);
+        let c2 = room.push(|d| {
+            d.find_message("p1").unwrap().delete(&alices).unwrap();
+        });
+        for (c, who) in [(&c, &bob_dev), (&c2, &bob_dev), (&c2, &alice_dev)] {
+            assert_eq!(
+                code(&check_push(&state, who, PEOPLE_PROJECT, &chat, false, c)),
+                Some("bad_vote")
+            );
+        }
+    }
+
+    #[test]
+    fn a_vote_the_poll_does_not_allow_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let mine = format!("{POLL_VOTE_PREFIX}user:{bob}");
+        for (what, value) in [
+            ("an unknown option", json!(["9"])),
+            ("two answers to a single-choice poll", json!(["1", "2"])),
+            ("a repeat", json!(["1", "1"])),
+            ("not a list", json!("1")),
+            ("not strings", json!([1])),
+            (
+                "an object with extra fields",
+                json!({ "selections": ["1"] }),
+            ),
+        ] {
+            let c = room.set("p1", &mine, value);
+            assert_eq!(
+                code(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some("bad_vote"),
+                "{what}"
+            );
+        }
+
+        // A vote on a message that holds no poll is a vote on nothing.
+        room.push(|d| {
+            d.append_user_message("plain", "hello", "dev", &as_user(&alice))
+                .unwrap()
+        });
+        let c = room.set("plain", &mine, json!(["1"]));
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("bad_poll")
+        );
+    }
+
+    #[test]
+    fn only_a_member_of_the_chat_may_vote() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _alice, _bob, _alice_dev, _bob_dev) = chat_with_a_poll(&state);
+        let (carol, carol_dev) = person(&state, 103);
+        let c = room.push(|d| {
+            d.set_poll_vote("p1", &format!("user:{carol}"), &["1".to_owned()])
+                .unwrap()
+        });
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &carol_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("not_a_member")
+        );
+    }
+
+    /// A poll cannot arrive with other people's votes already on it — unless the relay has
+    /// attested that row before, which is a heal restoring it with the votes it had.
+    #[test]
+    fn a_new_poll_cannot_arrive_with_someone_elses_vote_on_it() {
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(&state);
+        let stuffed = |id: &str| {
+            let mut room = Room::new();
+            room.push(|d| {
+                d.append_poll_message(id, &poll(), "dev", &as_user(&alice))
+                    .unwrap();
+                d.set_poll_vote(id, &format!("user:{alice}"), &["1".to_owned()])
+                    .unwrap();
+                d.set_poll_vote(id, &format!("user:{bob}"), &["1".to_owned()])
+                    .unwrap();
+            })
+        };
+        let c = stuffed("p_new");
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("not_yours"),
+            "the author voting for Bob on her own poll"
+        );
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some("not_yours"),
+            "the heal flag is a claim; the record is what decides"
+        );
+
+        // `m_alice` is a row the relay attested. Bob's device restoring it restores its votes.
+        let c = stuffed("m_alice");
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some(false)
+        );
+    }
+
+    // ---- a message's id ----------------------------------------------------------------
+
+    /// Alice and Bob in a chat whose doc holds `m_alice`, attested to Alice.
+    fn chat_with_alices_message(state: &AppState) -> (Room, String, String, Principal, Principal) {
+        let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(state);
+        let mut room = Room::new();
+        room.push(|d| {
+            d.append_user_message("m_bob", "hi", "dev", &as_user(&bob))
+                .unwrap();
+            d.append_user_message("m_alice", "hello", "dev", &as_user(&alice))
+                .unwrap()
+        });
+        (room, chat, bob, alice_dev, bob_dev)
+    }
+
+    /// Write `new_id` over the `id` of `m_alice` (`None` removes it), after `also` wrote
+    /// other fields on it.
+    fn write_id(
+        room: &mut Room,
+        new_id: Option<serde_json::Value>,
+        also: impl FnOnce(&ChatDoc),
+    ) -> MessageChanges {
+        room.push(|d| {
+            also(d);
+            match new_id {
+                Some(id) => d.set_message_fields("m_alice", &[("id", id)]),
+                None => d.find_message("m_alice").unwrap().delete("id").unwrap(),
+            }
+        })
+    }
+
+    /// What `id` may not be made into: another id, one the chat already holds, the empty
+    /// string, something that is not a string, or nothing.
+    fn id_writes() -> [Option<serde_json::Value>; 5] {
+        [
+            Some(json!("m_other")),
+            Some(json!("m_bob")),
+            Some(json!("")),
+            Some(json!(7)),
+            None,
+        ]
+    }
+
+    /// Every field a push writes on an existing message is judged.
+    #[test]
+    fn every_field_written_on_an_existing_message_is_judged() {
+        for new_id in id_writes() {
+            let state = test_state(AuthMode::Github);
+            let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+            let c = write_id(&mut room, new_id.clone(), |d| {
+                d.set_message_fields("m_alice", &[("sender", json!(format!("user:{bob}")))])
+            });
+            assert_eq!(
+                code(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some("not_yours"),
+                "{new_id:?}"
+            );
+        }
+    }
+
+    /// Every vote a push writes on an existing poll is judged.
+    #[test]
+    fn every_vote_written_on_an_existing_poll_is_judged() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, alice, _bob, _alice_dev, bob_dev) = chat_with_a_poll(&state);
+        let c = room.push(|d| {
+            d.set_poll_vote("p1", &format!("user:{alice}"), &["1".to_owned()])
+                .unwrap();
+            d.find_message("p1")
+                .unwrap()
+                .insert("id", "p_other")
+                .unwrap();
+        });
+        assert!(refused(&check_push(
+            &state,
+            &bob_dev,
+            PEOPLE_PROJECT,
+            &chat,
+            false,
+            &c
+        )));
+    }
+
+    /// What people do to messages every day writes no identity field: a reaction, an edit of
+    /// the text, a status or preview field, on one's own message or on someone else's.
+    #[test]
+    fn ordinary_writes_to_an_existing_message_are_allowed() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let me = format!("user:{bob}");
+        let mut allowed = |what: &str, write: &dyn Fn(&ChatDoc)| {
+            let c = room.push(write);
+            assert_eq!(
+                kind(&check_push(
+                    &state,
+                    &bob_dev,
+                    PEOPLE_PROJECT,
+                    &chat,
+                    false,
+                    &c
+                )),
+                Some(false),
+                "{what}"
+            );
+        };
+        allowed("a reaction", &|d| {
+            d.set_reaction("m_alice", "👍", &me, true).unwrap()
+        });
+        allowed("a reaction taken back", &|d| {
+            d.set_reaction("m_alice", "👍", &me, false).unwrap()
+        });
+        allowed("an edit", &|d| {
+            d.edit_message_text("m_alice", "changed").unwrap()
+        });
+        allowed("a field", &|d| {
+            d.set_message_fields("m_alice", &[("preview", json!("off"))])
+        });
+    }
+
+    /// Every entry in `messages` arrives as a message with an id. One without is refused, so
+    /// no row sits in a chat that the relay never attributed and cannot name afterwards.
+    #[test]
+    fn an_entry_without_an_id_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _bob, _alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let c = room.push(|d| d.messages_list().push("not a message").unwrap());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("bad_message")
+        );
+    }
+
+    /// `id` is written with the message and never again: not by a member, and not by the
+    /// author either, since every record the relay keeps about a message is keyed on it.
+    #[test]
+    fn a_messages_id_is_not_writable() {
+        for new_id in id_writes() {
+            let state = test_state(AuthMode::Github);
+            let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);
+            let c = write_id(&mut room, new_id.clone(), |_| ());
+            for (who, dev) in [("a member", &bob_dev), ("the author", &alice_dev)] {
+                assert_eq!(
+                    code(&check_push(&state, dev, PEOPLE_PROJECT, &chat, false, &c)),
+                    Some("not_yours"),
+                    "{who} writing {new_id:?} over the id"
+                );
+            }
+        }
+    }
+
+    /// Taking a row out and putting one in at the same place is a removal and an insert,
+    /// each judged as such, whatever id and name the new row carries.
+    #[test]
+    fn a_row_put_where_another_was_removed_is_a_removal_and_an_insert() {
+        let state = test_state(AuthMode::Github);
+        let (mut room, chat, _bob, alice_dev, bob_dev) = chat_with_alices_message(&state);
+        let author = state.db.message_author(&chat, "m_alice").unwrap().unwrap();
+        let c = room.push(|d| {
+            d.delete_message("m_alice").unwrap();
+            d.append_user_message(
+                "m_alice",
+                "other words",
+                "dev",
+                &UserMessageOpts {
+                    sender: Some(author.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        assert_eq!(c.removed.len(), 1);
+        assert_eq!(c.inserted.len(), 1);
+        assert!(c.rewritten.is_empty());
+        assert_eq!(
+            code(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some("not_yours")
+        );
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &alice_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                false,
+                &c
+            )),
+            Some(false),
+            "the author replacing her own row"
         );
     }
 }

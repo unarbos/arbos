@@ -162,7 +162,7 @@ struct SettingsView: View {
                     ProfilePane(
                         hero: PaneHero(
                             picture: .image(AnyView(profilePicture)),
-                            name: model.user?.name ?? model.user?.login ?? "Arbos",
+                            name: model.user?.name.flatMap { $0.isEmpty ? nil : $0 } ?? model.user?.login ?? "Arbos",
                             subtitle: who
                         ),
                         tabs: PaneKinds.ownProfile,
@@ -389,7 +389,7 @@ struct SettingsView: View {
         let canEdit = model.user != nil && !model.isFixture
         let rows: [AnyView] = [
             AnyView(Button { editProfile(origin: origin) } label: {
-                PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
+                PaneRow(title: "Name", value: model.user?.name.flatMap { $0.isEmpty ? nil : $0 } ?? model.user?.login ?? "Arbos", valueTint: theme.text)
             }
             .buttonStyle(.plain)
             .disabled(!canEdit)),
@@ -856,7 +856,7 @@ struct MachinePage: View {
                             SettingsValueRow("Background jobs", value: MachineMetrics.jobsValue(r.jobsRunning ?? 0))
                         case .breakdown:
                             Button {
-                                withAnimation(.easeInOut(duration: 0.2)) { breakdownOpen.toggle() }
+                                withAnimation(.easeOut(duration: 0.2)) { breakdownOpen.toggle() }
                             } label: {
                                 HStack(spacing: 12) {
                                     Text("Per-agent usage").font(theme.font(Theme.body)).foregroundStyle(theme.text)

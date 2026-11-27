@@ -129,7 +129,7 @@ struct RootView: View {
                 InCallOverlay(expected: expectedPeople)
                     .environmentObject(model)
                     .environment(\.theme, theme)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.fromTop)
             }
         }
         .animation(.spring(duration: 0.3), value: calls.isPresented)
@@ -220,7 +220,7 @@ struct RootView: View {
         guard model.isPaired else { return }
         let screen: String
         switch model.path.last {
-        case .none: screen = "home"
+        case .none, .archived?: screen = "home"
         case .profile?: screen = "profile"
         case .ownProfile?: screen = "settings"
         case .newMessage?: screen = "new-message"

@@ -150,6 +150,7 @@ impl Shell {
                     .text_color(if danger { theme.danger } else { theme.accent })
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.8))
+                    .active(|s| s.opacity(0.6))
                     .child(label)
             };
         let link_button = |id: &'static str, label: &'static str, danger: bool, theme: &Theme| {

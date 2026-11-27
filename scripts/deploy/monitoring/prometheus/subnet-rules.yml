@@ -1,0 +1,150 @@
+# Aggregates for the Arbos front page, which the partner's organisation reads too. Every `subnet:*`
+# expression ends in an aggregation with no `by`, so the result has no labels: nothing here can
+# name a box, a user, a container or the host, and nothing is per box. The one label that leaves
+# is `bucket`, on a count of machines. rules_test.yml feeds these rules labelled series and fails
+# if any other label comes out; check-rules.py reads this file and fails on a rule that could.
+#
+# An `arbos:*` rule is the team's own, exact figure, and what the team's copy of the front page
+# reads. The partner's Prometheus federates `subnet:*` only, so those never leave. What does leave
+# is coarse, so that one machine's comings and goings cannot be read off by comparing two samples:
+#   - a count of machines: 0, "fewer than 5" (-5), or rounded to the nearest 5
+#   - an amount of tokens or calls: two significant figures (the token rate: one, while fewer
+#     than 5 machines are using tokens)
+# The numbers and the exact expressions are in check-rules.py, which fails if a rule here differs.
+#
+# A counter with labels does not exist until its first event, so a healthy system has no "failed"
+# series at all. The failure rules fall back to 0 while the relay (or any agentd) is reporting, so
+# healthy reads 0 and "no data" still reads as no data.
+groups:
+  - name: subnet
+    rules:
+      - record: arbos:box_tokens_per_minute
+        expr: 60 * sum by (box) (rate(arbos_relay_box_tokens_total[5m]))
+      - record: arbos:tokens:rate5m
+        expr: sum(rate(arbos_relay_tokens_total[5m]))
+      # How many machines use how many tokens a minute. 0, not nothing, for an empty group.
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute == 0) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "idle" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute > 0 < 1e4) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "under 10K" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e4 < 1e5) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "10K to 100K" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e5 < 1e6) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "100K to 1M" }
+      - record: arbos:boxes_by_token_rate
+        expr: count(arbos:box_tokens_per_minute >= 1e6) or 0 * count(arbos:box_tokens_per_minute)
+        labels: { bucket: "over 1M" }
+
+      - record: subnet:boxes_by_token_rate
+        expr: round(arbos:boxes_by_token_rate >= 5, 5) or arbos:boxes_by_token_rate == 0 or arbos:boxes_by_token_rate * 0 - 5
+      - record: subnet:relay_up
+        expr: min(probe_success{job="relay-health"})
+      # The relay's own public name only. arbos.life is behind Cloudflare, which can challenge a
+      # probe while the service is fine; that probe stays on the admin dashboard.
+      - record: subnet:public_up
+        expr: min(probe_success{job="public-https", instance=~"https://relay[.].*"})
+      - record: arbos:boxes_running
+        expr: count(container_last_seen{name=~"arbos-box-.+"}) or vector(0)
+      - record: subnet:boxes_running
+        expr: round(arbos:boxes_running >= 5, 5) or arbos:boxes_running == 0 or arbos:boxes_running * 0 - 5
+      - record: arbos:boxes_working
+        expr: sum(arbos_relay_boxes_turn_running)
+      - record: subnet:boxes_working
+        expr: round(arbos:boxes_working >= 5, 5) or arbos:boxes_working == 0 or arbos:boxes_working * 0 - 5
+      - record: arbos:boxes_asleep
+        expr: sum(arbos_relay_boxes{state="asleep"}) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:boxes_asleep
+        expr: round(arbos:boxes_asleep >= 5, 5) or arbos:boxes_asleep == 0 or arbos:boxes_asleep * 0 - 5
+      - record: arbos:boxes_awake
+        expr: sum(arbos_relay_boxes{state="awake"})
+      - record: subnet:boxes_awake
+        expr: round(arbos:boxes_awake >= 5, 5) or arbos:boxes_awake == 0 or arbos:boxes_awake * 0 - 5
+      - record: arbos:boxes_idle
+        expr: clamp_min(sum(arbos_relay_boxes{state="awake"}) - sum(arbos_relay_boxes_turn_running), 0)
+      - record: subnet:boxes_idle
+        expr: round(arbos:boxes_idle >= 5, 5) or arbos:boxes_idle == 0 or arbos:boxes_idle * 0 - 5
+      - record: arbos:boxes_waking
+        expr: sum(arbos_relay_boxes{state="waking"})
+      - record: subnet:boxes_waking
+        expr: round(arbos:boxes_waking >= 5, 5) or arbos:boxes_waking == 0 or arbos:boxes_waking * 0 - 5
+      - record: arbos:boxes_error
+        expr: sum(arbos_relay_boxes{state="error"})
+      - record: subnet:boxes_error
+        expr: round(arbos:boxes_error >= 5, 5) or arbos:boxes_error == 0 or arbos:boxes_error * 0 - 5
+      - record: arbos:boxes_waitlisted
+        expr: sum(arbos_relay_waitlist_length)
+      - record: subnet:boxes_waitlisted
+        expr: round(arbos:boxes_waitlisted >= 5, 5) or arbos:boxes_waitlisted == 0 or arbos:boxes_waitlisted * 0 - 5
+      - record: subnet:boxes_max
+        expr: max(arbos_relay_boxes_max)
+      # Awake boxes whose agentd answers the scrape, and those whose last scrape failed (an image
+      # from before agentd had /metrics, unreachable, rejected): turn numbers cover only the first
+      # group. A box that has not been asked yet (`pending`) is in neither: while the per-box scrape
+      # job is off every awake box is pending, and that is not a fleet that fails to report.
+      - record: arbos:boxes_reporting
+        expr: sum(arbos_relay_box_scrapes{result="ok"}) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:boxes_reporting
+        expr: round(arbos:boxes_reporting >= 5, 5) or arbos:boxes_reporting == 0 or arbos:boxes_reporting * 0 - 5
+      - record: arbos:boxes_not_reporting
+        expr: sum(arbos_relay_box_scrapes{result!~"ok|pending"}) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:boxes_not_reporting
+        expr: round(arbos:boxes_not_reporting >= 5, 5) or arbos:boxes_not_reporting == 0 or arbos:boxes_not_reporting * 0 - 5
+      - record: subnet:box_starts:rate5m
+        expr: sum(rate(arbos_relay_box_starts_total[5m])) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:box_start_failures:rate5m
+        expr: sum(rate(arbos_relay_box_starts_total{result="failed"}[5m])) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:turns_started:rate5m
+        expr: sum(rate(arbos_agentd_turns_started_total[5m]))
+      - record: subnet:turns_finished:rate5m
+        expr: sum(rate(arbos_agentd_turns_finished_total[5m]))
+      - record: subnet:turns_failed:rate5m
+        expr: sum(rate(arbos_agentd_turns_finished_total{result="error"}[5m])) or 0 * count(arbos_agentd_uptime_seconds)
+      - record: subnet:turns_active
+        expr: sum(arbos_agentd_turns_running)
+      - record: subnet:queue_depth
+        expr: sum(arbos_agentd_sends_waiting)
+      # `>= 0` drops the NaN a quantile gives when no turn finished in the window: the series is then
+      # absent, and the Subnet view shows its "no data yet" state instead of NaN.
+      - record: subnet:turn_duration_seconds:p50
+        expr: max(histogram_quantile(0.5, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))) >= 0
+      - record: subnet:turn_duration_seconds:p95
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_agentd_turn_duration_seconds_bucket[5m])))) >= 0
+      - record: subnet:model_error_ratio
+        # `> 0`: with no call in the window this is absent, not 0/0 = NaN.
+        expr: (sum(rate(arbos_relay_model_requests_total{class!="2xx"}[5m])) or 0 * max(arbos_relay_uptime_seconds)) / (sum(rate(arbos_relay_model_requests_total[5m])) > 0)
+      # Both counters are labelled, so after a relay restart neither exists until the first call or
+      # the first start: 0 per minute then, not "no data".
+      - record: arbos:model_requests:rate5m
+        expr: sum(rate(arbos_relay_model_requests_total[5m])) or 0 * max(arbos_relay_uptime_seconds)
+      - record: subnet:model_requests:rate5m
+        expr: round((arbos:model_requests:rate5m > 0) / 10 ^ (floor(log10(arbos:model_requests:rate5m > 0)) - 1)) * 10 ^ (floor(log10(arbos:model_requests:rate5m > 0)) - 1) or arbos:model_requests:rate5m
+      # Every token the proxy metered, all kinds and all callers together. No fallback to 0: the
+      # counter is there from the relay's start, so its absence means a relay from before it had
+      # one, and "no data yet" is then the true reading.
+      - record: subnet:tokens:rate5m
+        expr: >
+          (round((arbos:tokens:rate5m > 0) / 10 ^ (floor(log10(arbos:tokens:rate5m > 0)) - 1)) * 10 ^ (floor(log10(arbos:tokens:rate5m > 0)) - 1) and on () count(arbos:box_tokens_per_minute > 0) >= 5) or round((arbos:tokens:rate5m > 0) / 10 ^ floor(log10(arbos:tokens:rate5m > 0))) * 10 ^ floor(log10(arbos:tokens:rate5m > 0)) or arbos:tokens:rate5m
+      # 1 while the relay has a token counter at all, whether or not it has a rate yet.
+      - record: subnet:relay_counts_tokens
+        expr: 0 * count(arbos_relay_tokens_total) + 1
+      - record: arbos:tokens:increase24h
+        expr: sum(increase(arbos_relay_tokens_total[24h]))
+      - record: subnet:tokens:increase24h
+        expr: round((arbos:tokens:increase24h > 0) / 10 ^ (floor(log10(arbos:tokens:increase24h > 0)) - 1)) * 10 ^ (floor(log10(arbos:tokens:increase24h > 0)) - 1) or arbos:tokens:increase24h
+      # A share, not an amount, and to the whole percent: how much is spent is the team's own figure.
+      - record: subnet:spend_cap_ratio
+        expr: round(max(arbos_relay_spend_today_usd) / max(arbos_relay_spend_daily_cap_usd > 0), 0.01)
+      - record: subnet:model_response_seconds:p95
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_model_response_seconds_bucket[5m])))) >= 0
+      - record: subnet:box_wake_seconds:p95
+        expr: max(histogram_quantile(0.95, sum by (le) (rate(arbos_relay_box_wake_duration_seconds_bucket[5m])))) >= 0
+      - record: subnet:host_cpu_used_ratio
+        expr: sum(rate(node_cpu_seconds_total{mode!="idle"}[5m])) / count(node_cpu_seconds_total{mode="idle"})
+      - record: subnet:host_memory_used_ratio
+        expr: 1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)
+      - record: subnet:host_disk_free_ratio
+        expr: min(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes)

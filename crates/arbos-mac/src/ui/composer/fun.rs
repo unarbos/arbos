@@ -1,6 +1,6 @@
 //! Emoji · Stickers · GIFs picker (ARB-544, Jacob 2026-10-28, option B): the composer's `+`
-//! opens a two-row menu — "Photo or file…" (the file prompt) and "Emoji, stickers & GIFs" —
-//! and the second row opens this card above the composer, left-aligned to `+`, in the `@`
+//! opens a menu — "Photo or file…" (the file prompt), "Emoji, stickers & GIFs" and, in a
+//! people chat, "Poll" (`poll.rs`) — and the second row opens this card above the composer, left-aligned to `+`, in the `@`
 //! mention picker's card style. Mock: `media/feedback/emoji-sticker-gif/sheet-picker-mock-b.png`.
 //!
 //! - **Emoji** — search, Recents, one Unicode category at a time (strip at the bottom), a skin
@@ -453,7 +453,14 @@ impl Composer {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.open_fun(FunTab::Emoji, cx);
                 })),
-            );
+            )
+            .when(self.can_poll(cx), |menu| {
+                menu.child(
+                    row("attach-menu-poll", "text.alignleft", "Poll", &theme)
+                        .debug_selector(|| "composer-attach-poll".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.open_poll(window, cx))),
+                )
+            });
         menu.into_any_element()
     }
 

@@ -972,10 +972,10 @@ struct ChartViewer: View {
     }
 
     private func flash(_ text: String) {
-        withAnimation { toast = text }
+        withAnimation(.easeOut(duration: 0.2)) { toast = text }
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.8))
-            if toast == text { withAnimation { toast = nil } }
+            if toast == text { withAnimation(.easeOut(duration: 0.2)) { toast = nil } }
         }
     }
 

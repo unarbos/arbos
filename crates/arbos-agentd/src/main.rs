@@ -29,6 +29,8 @@ mod goals;
 mod groups;
 mod handoff;
 mod harness;
+#[cfg(test)]
+mod helper_start_failure_tests;
 mod hooks;
 mod http;
 mod identity;
@@ -48,9 +50,16 @@ mod job_cancel_window_tests;
 #[cfg(test)]
 mod job_correction_routing_tests;
 #[cfg(test)]
+mod job_deadline_tests;
+mod job_delivery;
+#[cfg(test)]
+mod job_failure_report_tests;
+#[cfg(test)]
 mod job_finished_sweep_tests;
 #[cfg(test)]
 mod job_handoff_leak_tests;
+#[cfg(test)]
+mod job_kill_unlock_probe_tests;
 #[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
@@ -77,6 +86,8 @@ mod job_steer_inherit_tests;
 mod job_steer_race_tests;
 #[cfg(test)]
 mod job_wait_tier_tests;
+#[cfg(test)]
+mod job_waiting_sweep_tests;
 mod jobs_view;
 mod llm;
 mod local;
@@ -84,10 +95,13 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+mod metrics;
 #[cfg(test)]
 mod model_switch_tests;
 #[cfg(test)]
 mod model_usage_tests;
+#[cfg(test)]
+mod over_cap_agent_end_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
@@ -119,6 +133,8 @@ mod silence;
 mod sites;
 mod skills;
 mod sleep;
+#[cfg(test)]
+mod soak_tests;
 mod status;
 mod steer_gate;
 mod store;
@@ -130,6 +146,8 @@ mod truncate;
 #[cfg(test)]
 mod turn_end_race_tests;
 #[cfg(test)]
+mod turn_hung_tests;
+#[cfg(test)]
 mod turn_marks_tests;
 mod vault;
 mod voice;
@@ -139,6 +157,8 @@ mod worker_lifetime;
 mod worker_model_refusal_tests;
 #[cfg(test)]
 mod worker_retention_tests;
+#[cfg(test)]
+mod worker_trim_tests;
 mod workspace;
 
 use std::time::{Duration, Instant};

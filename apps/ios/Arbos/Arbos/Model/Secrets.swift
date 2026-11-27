@@ -531,7 +531,10 @@ enum SecretsText {
 
     static func ago(_ ms: Int64) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
-        if Date().timeIntervalSince(date) < 60 { return "just now" }
+        let age = Date().timeIntervalSince(date)
+        if age < 60 { return "just now" }
+        // Past a week a relative stamp stops helping ("8 mo. ago"): the date instead.
+        if age > 7 * 86_400 { return shortDate(ms) }
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
         return f.localizedString(for: date, relativeTo: Date())

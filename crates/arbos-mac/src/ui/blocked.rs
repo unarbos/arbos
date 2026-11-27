@@ -162,6 +162,7 @@ pub fn hidden_row(row_id: &str, count: usize, who: &str, theme: &Theme) -> (Div,
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .hover(|s| s.opacity(0.8))
+        .active(|s| s.opacity(0.6))
         .child(UNBLOCK_LABEL);
     (line, unblock)
 }
@@ -185,6 +186,7 @@ pub fn composer_bar(person: &Person, theme: &Theme) -> (Div, Stateful<Div>) {
         .text_color(theme.accent)
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.7))
         .child(UNBLOCK_LABEL);
     let bar = div()
         .w_full()

@@ -36,6 +36,7 @@ use arbos_core::api::{
     UnreadDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
+use arbos_core::poll::Poll;
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use arbos_matrix::{
     Backup, Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow,
@@ -205,6 +206,7 @@ struct QueuedSend {
     forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
+    poll: Option<Poll>,
 }
 
 /// A bubble-menu Forward's extra freight on a send: who wrote the original
@@ -6477,6 +6479,10 @@ async fn fetch_blob_response(
         let r = shared
             .http
             .get(blob_request_url(shared, id, key))
+            // The shared 30 s deadline covers reading the body too, which can cut a
+            // large video short. Do not turn a slow download into a partial file;
+            // reqwest has no per-request "no timeout", so allow a generous hour.
+            .timeout(Duration::from_secs(60 * 60))
             .bearer_auth(&token)
             .send()
             .await?;
@@ -6684,6 +6690,7 @@ fn enqueue_send(
     forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
+    poll: Option<Poll>,
 ) {
     let account = shared.account_lifetime.lock().unwrap();
     if !account.accepts(shared.session_owner) {
@@ -6705,6 +6712,7 @@ fn enqueue_send(
             forwarded,
             reply_ref,
             mentions,
+            poll,
         ),
     );
 }
@@ -6906,10 +6914,14 @@ async fn send_message(
     forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
+    poll: Option<Poll>,
 ) {
     if shared.is_native(&chat_id) {
-        let carried =
-            answer.is_none() && forwarded.is_none() && reply_ref.is_none() && command == "send";
+        let carried = answer.is_none()
+            && forwarded.is_none()
+            && reply_ref.is_none()
+            && poll.is_none()
+            && command == "send";
         let sent = if carried {
             let reply_to = reply_to.as_deref();
             native_send(
@@ -6951,6 +6963,7 @@ async fn send_message(
                     forwarded,
                     reply_ref,
                     mentions,
+                    poll,
                 });
                 return;
             }
@@ -7086,7 +7099,10 @@ async fn send_message(
         };
         let device = shared.device_id();
         doc.core.transact(|d| {
-            let _ = d.append_user_message(&message_id, &text, &device, &opts);
+            let _ = match poll.as_ref() {
+                Some(poll) => d.append_poll_message(&message_id, poll, &device, &opts),
+                None => d.append_user_message(&message_id, &text, &device, &opts),
+            };
             if let Some(f) = forwarded.as_ref() {
                 d.set_message_fields(&message_id, &[("forwardedFrom", json!(f.from))]);
                 for part in &chart_parts {
@@ -7352,6 +7368,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::Transcribe {
@@ -7523,6 +7540,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
+                                q.poll,
                             );
                         }
                     }
@@ -8206,7 +8224,45 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_ref,
                 mentions,
+                None,
             );
+        }
+        ClientCommand::SendPoll {
+            chat_id,
+            message_id,
+            poll,
+        } => {
+            enqueue_send(
+                shared,
+                chat_id,
+                message_id,
+                poll.fallback_text(),
+                Vec::new(),
+                None,
+                "send",
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(poll),
+            );
+        }
+        ClientCommand::VotePoll {
+            chat_id,
+            message_id,
+            selections,
+        } => {
+            let me = format!("user:{}", shared.me_id());
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
+                if let Err(e) = doc
+                    .core
+                    .transact(|d| d.set_poll_vote(&message_id, &me, &selections))
+                {
+                    eprintln!("relay: poll vote: {e:#}");
+                }
+            };
         }
         ClientCommand::SendMedia {
             chat_id,
@@ -8227,6 +8283,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::GifSearch { query, pos } => {
@@ -8292,6 +8349,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::ForwardMessage {
@@ -8327,6 +8385,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }),
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::Steer {
@@ -8348,6 +8407,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::Answer {
@@ -8371,6 +8431,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
+                None,
             );
         }
         ClientCommand::Stop { chat_id } => {
@@ -8835,6 +8896,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
+                                q.poll,
                             );
                         }
                     }
@@ -11629,6 +11691,73 @@ fn hostname() -> String {
 impl Drop for Room {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod blob_body_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_video_body_is_read_past_the_shared_request_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let video = b"large QuickTime video bytes after the deadline".to_vec();
+        let expected = video.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/quicktime\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                video.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            // Keep this comfortably beyond the old deadline for a paused Tokio clock.
+            sleep(Duration::from_mins(1)).await;
+            socket.write_all(&video).await.unwrap();
+        });
+
+        let (events, _) = mpsc::unbounded_channel();
+        let (coordinator, _) = mpsc::unbounded_channel();
+        let ui = UiControl::default();
+        let context = RelayContext {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap(),
+            http_url: url.clone(),
+            ws_url: String::new(),
+            events,
+            ui: ui.clone(),
+            call_registry: Arc::new(CallRegistry::new(url.clone())),
+            coordinator,
+        };
+        let shared = Shared::new(
+            &context,
+            ui.ticket().unwrap(),
+            credentials::DeviceCredentials {
+                relay_url: url,
+                device_id: "test-device".into(),
+                access_token: "test-token".into(),
+                refresh_token: None,
+                expires_at: 0,
+                user: None,
+            },
+        );
+
+        let result =
+            tokio::task::spawn(
+                async move { fetch_blob_bytes(&shared, "project", "photo.mov").await },
+            );
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let (mime, bytes) = result.await.unwrap().expect("complete video response");
+        assert_eq!(mime, "video/quicktime");
+        assert_eq!(bytes, expected);
+        server.await.unwrap();
     }
 }
 

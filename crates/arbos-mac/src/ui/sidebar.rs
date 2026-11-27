@@ -228,9 +228,12 @@ pub(crate) fn resize_handle(
         .on_drag(SidebarResizeDrag, {
             let shell = cx.entity().downgrade();
             let drag = drag.clone();
-            move |_, _, _, cx| {
+            move |_, offset, _, cx| {
                 if let Some(shell) = shell.upgrade() {
                     shell.update(cx, |this, cx| {
+                        // From the pointer to the pane's edge, kept for the whole drag so
+                        // the edge does not jump to the pointer on the first move.
+                        this.sidebar_grab = split_handle::HIT_WIDTH - f32::from(offset.x);
                         this.state.update(cx, |s, _| s.begin_sidebar_edge_drag());
                     });
                 }
@@ -240,8 +243,9 @@ pub(crate) fn resize_handle(
         })
         .on_drag_move(
             cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
-                // The column docks at the window's left, so mouse x is the width.
-                let x = f32::from(ev.event.position.x);
+                // The column docks at the window's left, so mouse x (plus the grab offset) is
+                // the width.
+                let x = f32::from(ev.event.position.x) + this.sidebar_grab;
                 this.state.update(cx, |s, cx| s.drag_sidebar_edge(x, cx));
             }),
         )
@@ -1268,7 +1272,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .mb(px(4.0))
                 .text_size(px(TEXT_TINY))
                 .text_color(theme.text_muted)
-                .child("Hidden chats")
+                .child("Archived chats")
                 .child(
                     div()
                         .id("sidebar-hidden-back")
@@ -1289,7 +1293,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                     .text_center()
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
-                    .child("Nothing hidden."),
+                    .child("No archived chats"),
             );
         }
     }
@@ -1345,7 +1349,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .text_color(theme.text_muted)
                 .cursor_pointer()
                 .map(|el| highlight::row(el, false, Shape::Own, &theme))
-                .child(format!("Hidden chats · {hidden_count}"))
+                .child(format!("Archived chats · {hidden_count}"))
                 .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -2245,6 +2249,9 @@ fn render_row(
                             el.child(
                                 div()
                                     .flex_shrink_0()
+                                    // A long handle is capped at the name's own minimum and ends in an ellipsis.
+                                    .max_w(px(sidebar_fit::NAME_MIN))
+                                    .truncate()
                                     .text_size(px(TEXT_TINY))
                                     .text_color(theme.text_muted)
                                     .debug_selector(move || format!("row-handle-{handle_id}"))
@@ -2623,6 +2630,7 @@ pub(crate) fn confirm_button(
             el.bg(theme.danger)
                 .text_color(gpui::white())
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
         })
         .when(!danger, |el| {
             highlight::washed(

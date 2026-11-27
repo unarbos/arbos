@@ -7,12 +7,13 @@
 //! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
 //! open from the sidebar row's control-click menu.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     actions, deferred, div, fill, img, point, prelude::*, px, relative, size, App, Bounds,
@@ -49,6 +50,7 @@ use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 mod fun;
 /// The bundled starter stickers (generated).
 mod fun_starter;
+mod poll;
 
 actions!(
     composer,
@@ -243,6 +245,14 @@ struct Layout {
     pill_mask: Bounds<Pixels>,
 }
 
+/// Half of the caret's blink: on this long, then off this long (macOS's own is about this).
+const CARET_BLINK_MS: u64 = 530;
+
+/// Is the caret drawn this long after it last moved? On for the first half-period.
+fn caret_lit(since_moved: Duration) -> bool {
+    (since_moved.as_millis() / CARET_BLINK_MS as u128) % 2 == 0
+}
+
 pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
@@ -255,6 +265,14 @@ pub struct ComposerInput {
     /// Every other move paints a boundary caret at the end of the row above,
     /// as NSTextView's upstream affinity does.
     caret_downstream: bool,
+    /// The caret blinks as the system's does: solid from the last time it moved or the text
+    /// changed (`caret_moved`, noticed at paint through `caret_seen`), then on and off every
+    /// [`CARET_BLINK_MS`]. A paint that has a caret to show sets `caret_live`, and the ticker
+    /// only redraws a field that set it, so a field without focus costs one idle wake.
+    caret_seen: Cell<(usize, usize, bool)>,
+    caret_moved: Cell<Instant>,
+    caret_live: Cell<bool>,
+    _caret_ticker: gpui::Task<()>,
     layout: Option<Layout>,
     is_selecting: bool,
     /// The pointer over the committed chips (hover / pressed), by chip range.
@@ -327,6 +345,22 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             caret_downstream: false,
+            caret_seen: Cell::new((usize::MAX, 0, false)),
+            caret_moved: Cell::new(Instant::now()),
+            caret_live: Cell::new(false),
+            _caret_ticker: cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(CARET_BLINK_MS))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.caret_live.replace(false) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }),
             layout: None,
             is_selecting: false,
             chips: mention::ChipPointer::default(),
@@ -2170,29 +2204,39 @@ impl Element for InputElement {
         let mut pills = Vec::new();
         let mut pictures = Vec::new();
         let mut chip_hits = Vec::new();
-        for ((t, mention), alpha) in tokens.iter().zip(token_mentions).zip(pill_alphas) {
-            let (Some(a), Some(b)) = (
-                position_for_index(&lines, t.range.start, bounds.size.width, text_center),
-                position_for_index(&lines, t.range.end, bounds.size.width, text_center),
-            ) else {
+        let token_fragments: Vec<Vec<(Pixels, Pixels, Pixels)>> = tokens
+            .iter()
+            .map(|t| {
+                let (Some(a), Some(b)) = (
+                    position_for_index(&lines, t.range.start, bounds.size.width, text_center),
+                    position_for_index(&lines, t.range.end, bounds.size.width, text_center),
+                ) else {
+                    return Vec::new();
+                };
+                if a.y == b.y {
+                    vec![(a.x, b.x, a.y)]
+                } else {
+                    vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
+                }
+            })
+            .collect();
+        let token_pills = mention::pills(&token_fragments.concat(), lh);
+        let mut token_pills = token_pills.iter();
+        for (((t, mention), alpha), fragments) in tokens
+            .iter()
+            .zip(token_mentions)
+            .zip(pill_alphas)
+            .zip(token_fragments)
+        {
+            let Some(&(ax, _, ay)) = fragments.first() else {
                 continue;
             };
-            let fragments: Vec<(Pixels, Pixels, Pixels)> = if a.y == b.y {
-                vec![(a.x, b.x, a.y)]
-            } else {
-                vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
-            };
+            let a = point(ax, ay);
             let mut rects = Vec::with_capacity(fragments.len());
-            for (x0, x1, top) in fragments {
+            for pill in (&mut token_pills).take(fragments.len()) {
                 let pill = Bounds::new(
-                    point(
-                        bounds.left() + x0 - px(mention::PILL_PAD_X),
-                        bounds.top() + top - dy - px(mention::PILL_PAD_Y),
-                    ),
-                    size(
-                        x1 - x0 + px(mention::PILL_PAD_X * 2.0),
-                        lh + px(mention::PILL_PAD_Y * 2.0),
-                    ),
+                    point(bounds.left(), bounds.top() - dy) + pill.origin,
+                    pill.size,
                 );
                 rects.push(pill);
                 pills.push(
@@ -2242,7 +2286,19 @@ impl Element for InputElement {
         let mut cursor_quad = None;
         let mut selections = Vec::new();
         if content.is_empty() || selected_range.is_empty() {
-            if let Some(pos) = cursor_pos {
+            let input = self.input.read(cx);
+            // Live only in the key window, as AppKit's caret is: a background window neither
+            // shows a caret nor wakes the ticker. Gaining focus counts as a move, so it starts solid.
+            let live = input.focus_handle.is_focused(window) && window.is_window_active();
+            let seen = (cursor, content.len(), live);
+            if input.caret_seen.replace(seen) != seen {
+                input.caret_moved.set(Instant::now());
+            }
+            if live {
+                input.caret_live.set(true);
+            }
+            let lit = live && caret_lit(input.caret_moved.get().elapsed());
+            if let Some(pos) = cursor_pos.filter(|_| lit) {
                 cursor_quad = Some(fill(
                     Bounds::new(
                         point(bounds.left() + pos.x, bounds.top() + pos.y - dy + px(1.0)),
@@ -2860,6 +2916,8 @@ pub struct Composer {
     rig_draft: Option<String>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
+    /// The poll form above the field, while it is open (`+` → Poll).
+    poll: Option<poll::PollDraft>,
     /// Where the trailing controls are between the empty field's mic + phone
     /// and the send arrow, so typing and clearing cross-fade them.
     send_swap: SendSwap,
@@ -2970,6 +3028,7 @@ impl Composer {
                 .ok()
                 .filter(|v| !v.is_empty()),
             fun: fun::FunState::new(fun_search),
+            poll: None,
             // A new composer starts on an empty field: mic + phone, settled.
             send_swap: SendSwap::settled(false, Instant::now()),
         }
@@ -3235,7 +3294,10 @@ impl Composer {
                                 .text_size(px(TEXT_BODY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
-                                .truncate()
+                                // The middle gives: the version and extension are what differ.
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
                                 .child(staged.file_name()),
                         )
                         .child(
@@ -3573,7 +3635,10 @@ impl Composer {
                     div()
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
-                        .whitespace_nowrap()
+                        // Capped so a long name leaves the handle (what tells two people
+                        // apart) its room.
+                        .max_w(px(180.0))
+                        .truncate()
                         .child(match c.description {
                             Some(_) => format!("@{}", c.handle),
                             None => c.name.clone(),
@@ -3587,6 +3652,7 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
+                        .text_ellipsis()
                         .child(match c.description {
                             Some(d) => format!("· {d}"),
                             None => format!("@{}", c.handle),
@@ -3838,6 +3904,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 .child(
                     div()
                         .text_size(px(TEXT_TINY))
@@ -3859,6 +3926,7 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
+                .active(|s| s.opacity(0.76))
                 // The disc itself never fades: it is the same white circle in
                 // both states, so it holds still and only its mark changes.
                 .child(if crossfade {
@@ -4294,6 +4362,10 @@ impl Render for Composer {
         }
         if self.fun.open {
             field_wrap = field_wrap.child(above_field(self.render_fun(cx)));
+        }
+        if let Some(draft) = self.poll.take() {
+            field_wrap = field_wrap.child(above_field(self.render_poll(&draft, cx)));
+            self.poll = Some(draft);
         }
         column.child(field_wrap)
     }
@@ -4857,6 +4929,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn the_caret_is_solid_after_a_move_then_blinks_on_the_half_period() {
+        let ms = Duration::from_millis;
+        assert!(caret_lit(ms(0)) && caret_lit(ms(CARET_BLINK_MS - 1)));
+        assert!(!caret_lit(ms(CARET_BLINK_MS)) && !caret_lit(ms(2 * CARET_BLINK_MS - 1)));
+        assert!(caret_lit(ms(2 * CARET_BLINK_MS)));
+    }
 
     fn image(format: gpui::ImageFormat, bytes: &[u8]) -> gpui::Image {
         let bytes = bytes.to_vec();
@@ -5703,6 +5783,33 @@ mod mention_token_tests {
                 .any(|r| r.left() > bounds.left() + px(mention::PILL_PAD_X))),
             "a mid-row chip too"
         );
+    }
+
+    /// Tester (Nov 14): mention pills drew into each other. Chips one space
+    /// apart on a row keep clear space between their pills (`mention::pills`,
+    /// the same placement a sent bubble uses).
+    #[gpui::test]
+    fn chips_one_space_apart_keep_a_gap(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        for _ in 0..3 {
+            cx.simulate_input("@s");
+            cx.update(|_, cx| {
+                input.update(cx, |i, cx| {
+                    i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+                })
+            });
+            cx.run_until_parked();
+        }
+        let rects: Vec<Bounds<Pixels>> = cx.update(|_, cx| {
+            let l = input.read(cx).layout.as_ref().unwrap();
+            l.chips.iter().flat_map(|(_, r)| r.clone()).collect()
+        });
+        assert_eq!(rects.len(), 3, "three chips on one row: {rects:?}");
+        for pair in rects.windows(2) {
+            assert_eq!(pair[0].top(), pair[1].top());
+            let gap = f32::from(pair[1].left() - pair[0].right());
+            assert!(gap >= 1.0, "{gap} between {pair:?}");
+        }
     }
 
     #[gpui::test]
@@ -7143,6 +7250,59 @@ mod overlay_tests {
         );
         let gap = f32::from(closed.field.top() - picker.bottom());
         assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
+    }
+
+    /// `+` offers Poll in a people chat only, and the form sends once it holds a poll the
+    /// relay would take: a question and two options.
+    #[gpui::test]
+    fn plus_offers_a_poll_in_a_people_chat_and_the_form_sends_a_valid_one(cx: &mut TestAppContext) {
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let none = gpui::Modifiers::default();
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Project);
+        composer.update(vcx, |c, cx| c.toggle_attach_menu(cx));
+        settle(&state, &shell, vcx);
+        assert!(vcx.debug_bounds("composer-attach-menu").is_some());
+        assert!(
+            vcx.debug_bounds("composer-attach-poll").is_none(),
+            "no polls in an agent's own chat"
+        );
+
+        state.update(vcx, |s, _| s.projects[0].kind = SpaceKind::Group);
+        settle(&state, &shell, vcx);
+        let row = vcx
+            .debug_bounds("composer-attach-poll")
+            .expect("Poll is on the + menu in a group")
+            .center();
+        vcx.simulate_click(row, none);
+        settle(&state, &shell, vcx);
+        let send = vcx
+            .debug_bounds("composer-poll-send")
+            .expect("the form opens")
+            .center();
+
+        // Empty fields are not a poll: Send does nothing and the form stays.
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(composer.read_with(&*vcx, |c, _| c.poll.is_some()));
+
+        composer.update(vcx, |c, cx| {
+            c.fill_poll_for_test("Where?", &["Lisbon", "Berlin"], cx)
+        });
+        settle(&state, &shell, vcx);
+        let send = vcx.debug_bounds("composer-poll-send").unwrap().center();
+        vcx.simulate_click(send, none);
+        settle(&state, &shell, vcx);
+        assert!(
+            composer.read_with(&*vcx, |c, _| c.poll.is_none()),
+            "a valid poll is sent and the form closes"
+        );
     }
 
     #[gpui::test]

@@ -179,6 +179,7 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
                     .text_color(if copied { theme.online } else { p.title })
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
+                    .active(|s| s.opacity(0.7))
                     .child(sf_symbols::glyph(
                         if copied { "checkmark" } else { "doc.on.doc" },
                         13.0,
@@ -296,6 +297,7 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
         .text_color(theme.on_primary)
         .cursor_pointer()
         .hover(|s| s.opacity(0.88))
+        .active(|s| s.opacity(0.76))
         .child("Done")
         .on_click(cx.listener(|this, _, _, cx| {
             this.state.update(cx, |s, cx| s.close_connect_reveal(cx));

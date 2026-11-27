@@ -599,7 +599,7 @@ extension AppModel {
     /// Does this route show one of these channels — the channel itself, or its own page?
     private func shows(channelIds: Set<Id>, route: Route) -> Bool {
         switch route {
-        case .server, .ownProfile, .newMessage: return false
+        case .server, .ownProfile, .newMessage, .archived: return false
         case .chat(let chatId, _): return channelIds.contains(chatId)
         case .profile(let target):
             switch target {
@@ -904,6 +904,7 @@ extension AppModel {
         applyNativeRooms([:])
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
+        heldReactions = [:]
         channelAtStart = []
         channelLoading = []
         historyAsked = []
@@ -963,6 +964,11 @@ extension AppModel {
             ? Self.nativeMessages(rows, chatId: channelId, members: nativeMembers(channelId))
             : rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
         for i in decoded.indices { _ = fillChannelSender(&decoded[i]) }
+        if let me = myUserId, var held = heldReactions[channelId] {
+            let next = Self.holdReactions(&decoded, held: &held, me: me, now: nowMs())
+            heldReactions[channelId] = held.isEmpty ? nil : held
+            for h in next { sendNativeReaction(chatId: channelId, h, me: me) }
+        }
         let ids = Set(decoded.map(\.id))
         let cutoff = nowMs() - 60_000
         for m in channelRows[channelId] ?? [] where !native && m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
@@ -1288,29 +1294,168 @@ extension AppModel {
         return String(decoding: try JSONSerialization.data(withJSONObject: part), as: UTF8.self)
     }
 
-    /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
-    /// arrives.
+    /// Flip my reaction on a native chat's row. The row changes at once and the homeserver's
+    /// event confirms it (`holdReactions`); a send that fails puts the row back.
     func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
-        guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId,
-              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
+        guard reactionsAlive() != nil, let me = myUserId,
+              channelRows[chatId]?.contains(where: { $0.id == messageId }) == true else { return }
         // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
-        // Ceiling: one another app put on with a skin tone is not taken back from here.
+        // Ceiling: one another app put on with a skin tone is not taken back from here; the
+        // client finds nothing under this key and the row goes back (`reactionEchoGrace`).
         let key = MessageReaction.normalizeEmoji(emoji)
-        let mine = messages(of: chatId).first { $0.id == messageId }?.reactions
-            .contains { $0.emoji == key && $0.senders.contains(me) } ?? false
+        let send = holdReaction(chatId: chatId, messageId: messageId, emoji: key, me: me)
+        Haptics.pick()
+        // Nil: one is on its way for this emoji, and this tap goes out when it is confirmed.
+        guard let send else { return }
+        sendNativeReaction(chatId: chatId, send, me: me)
+    }
+
+    /// Whether this Matrix session is still the one a reaction was sent in; nil when there is
+    /// none to send through.
+    private func reactionsAlive() -> (() -> Bool)? {
+        if nativeReact != nil { return { true } }
+        guard matrixClient != nil, case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return nil }
+        return { [weak self] in self?.acceptsMatrix(owner) == true }
+    }
+
+    /// The homeserver call. False: the row has no event yet (it is still being sent), so there
+    /// is nothing to react to.
+    private func reactOnHomeserver(chatId: Id, messageId: Id, key: String, on: Bool) async throws -> Bool {
+        if let nativeReact { return try await nativeReact(chatId, messageId, key, on) }
+        guard let client = matrixClient, let room = nativeRoom(chatId),
+              let event = await nativeEventId(client, room: room, messageId: messageId) else { return false }
+        try await client.react(roomId: room, eventId: event, key: key, on: on)
+        return true
+    }
+
+    /// Ask the homeserver for `h.sent`. Everything that comes back acts on this send only
+    /// (`h.send`): a later tap's entry is another send.
+    private func sendNativeReaction(chatId: Id, _ h: HeldReaction, me: String) {
+        guard let alive = reactionsAlive() else { return }
         Task {
-            guard acceptsMatrix(owner), !Task.isCancelled,
-                  let event = await nativeEventId(client, room: room, messageId: messageId),
-                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            guard alive(), !Task.isCancelled else { return }
             do {
-                try await client.react(roomId: room, eventId: event, key: key, on: !mine)
-                guard acceptsMatrix(owner), !Task.isCancelled else { return }
-                Haptics.pick()
+                guard try await reactOnHomeserver(chatId: chatId, messageId: h.messageId, key: h.emoji, on: h.sent) else {
+                    if alive() { dropReaction(chatId: chatId, send: h.send, me: me) }
+                    return
+                }
+                // Accepted, and the echo normally follows at once. The client also answers
+                // like this when it had nothing to send (no reaction of mine under this exact
+                // key): no echo will come, so the row goes back to the homeserver's.
+                try? await Task.sleep(for: reactionEchoGrace)
+                if alive() { expireReaction(chatId: chatId, send: h.send, me: me) }
             } catch {
-                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                guard alive(), !Task.isCancelled else { return }
+                dropReaction(chatId: chatId, send: h.send, me: me)
                 fail("update the reaction", error)
             }
         }
+        // A send that hangs does not pin the row either, timeline or no timeline.
+        Task {
+            try? await Task.sleep(for: reactionSendLimit)
+            if alive() { expireReaction(chatId: chatId, send: h.send, me: me) }
+        }
+    }
+
+    /// A reaction of mine shown ahead of the homeserver.
+    struct HeldReaction: Equatable {
+        var messageId: Id
+        var emoji: String
+        /// What the row shows: the last thing tapped.
+        var on: Bool
+        /// What the homeserver was last asked for. When it differs from `on` (tapped again
+        /// meanwhile), `on` goes out once this one is confirmed.
+        var sent: Bool
+        /// When it was sent (ms).
+        var at: Int64
+        /// The send this entry is waiting on. A failure or an expiry names its send, so one
+        /// that comes late leaves a newer entry for the same emoji alone.
+        var send = UUID()
+        /// No echo came for `send` while a tap was waiting behind it: nothing is timing this
+        /// entry any more (`expireReaction`).
+        var overdue = false
+    }
+
+    /// Show my reaction flipped on a native chat's row before the homeserver has it, and
+    /// remember what was asked for so a timeline that arrives first does not undo it. Returns
+    /// the entry to send; nil when there is nothing to send now: no such row, or one is
+    /// already on its way for this emoji. Then the row still flips with the tap (taking a
+    /// reaction off is as quick as putting it on; tester reports, 2026-11-13 and 2026-11-16)
+    /// and the homeserver is asked when it confirms the first, because the client can only
+    /// take back a reaction whose event it has seen.
+    func holdReaction(chatId: Id, messageId: Id, emoji: String, me: String) -> HeldReaction? {
+        guard var rows = channelRows[chatId], let i = rows.firstIndex(where: { $0.id == messageId }) else { return nil }
+        let on = !rows[i].reactions.contains { $0.emoji == emoji && $0.senders.contains(me) }
+        rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: emoji, sender: me)
+        channelRows[chatId] = rows
+        if let h = heldReactions[chatId]?.firstIndex(where: { $0.messageId == messageId && $0.emoji == emoji }) {
+            heldReactions[chatId]?[h].on = on
+            // Back to what was sent, and that send's echo never came: nothing would send
+            // this tap or take the row back, so it goes out as a send of its own.
+            guard on == heldReactions[chatId]?[h].sent, heldReactions[chatId]?[h].overdue == true else { return nil }
+            heldReactions[chatId]?[h].send = UUID()
+            heldReactions[chatId]?[h].at = nowMs()
+            heldReactions[chatId]?[h].overdue = false
+            return heldReactions[chatId]?[h]
+        }
+        let held = HeldReaction(messageId: messageId, emoji: emoji, on: on, sent: on, at: nowMs())
+        heldReactions[chatId, default: []].append(held)
+        return held
+    }
+
+    /// The send was refused: forget its entry and put the row back to what the homeserver
+    /// has, the opposite of what was sent.
+    func dropReaction(chatId: Id, send: UUID, me: String) {
+        guard let held = heldReactions[chatId]?.first(where: { $0.send == send }) else { return }
+        heldReactions[chatId]?.removeAll { $0.send == send }
+        if heldReactions[chatId]?.isEmpty == true { heldReactions[chatId] = nil }
+        guard var rows = channelRows[chatId], let i = rows.firstIndex(where: { $0.id == held.messageId }),
+              rows[i].reactions.contains(where: { $0.emoji == held.emoji && $0.senders.contains(me) }) == held.sent else { return }
+        rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: held.emoji, sender: me)
+        channelRows[chatId] = rows
+    }
+
+    /// No echo came for the send: the row goes back as for a refused one. An entry that was
+    /// tapped again meanwhile stays, since its row already shows what the homeserver has and
+    /// the echo, if it does come, is what lets the last tap go out (`holdReactions`). It is
+    /// marked, so a tap that brings it back to what was sent is sent anew (`holdReaction`).
+    func expireReaction(chatId: Id, send: UUID, me: String) {
+        guard let h = heldReactions[chatId]?.firstIndex(where: { $0.send == send }) else { return }
+        guard heldReactions[chatId]?[h].on == heldReactions[chatId]?[h].sent else {
+            heldReactions[chatId]?[h].overdue = true
+            return
+        }
+        dropReaction(chatId: chatId, send: send, me: me)
+    }
+
+    /// How long an entry with a tap waiting behind its send is kept for a late echo (ms).
+    /// Every other entry expires through its own send (`reactionEchoGrace`, `reactionSendLimit`).
+    static let waitingTapMs: Int64 = 600_000
+
+    /// Lay my held reactions over rows fresh from the homeserver, and return the ones to send
+    /// next: confirmed, but tapped again meanwhile. One the rows agree with and that is what
+    /// was last tapped is forgotten; so is one whose row is gone, or one that has had a tap
+    /// waiting behind it for `waitingTapMs`.
+    @discardableResult
+    static func holdReactions(_ rows: inout [Message], held: inout [HeldReaction], me: String, now: Int64) -> [HeldReaction] {
+        var next: [HeldReaction] = []
+        held = held.compactMap { h in
+            guard h.on == h.sent || h.at > now - waitingTapMs,
+                  let i = rows.firstIndex(where: { $0.id == h.messageId }) else { return nil }
+            var h = h
+            let has = rows[i].reactions.contains { $0.emoji == h.emoji && $0.senders.contains(me) }
+            if has == h.sent {
+                guard h.on != h.sent else { return nil }
+                h.sent = h.on
+                h.at = now
+                h.send = UUID()
+                h.overdue = false
+                next.append(h)
+            }
+            if has != h.on { rows[i].reactions = MessageReaction.toggling(rows[i].reactions, emoji: h.emoji, sender: me) }
+            return h
+        }
+        return next
     }
 
     /// Remove a native chat's message; the homeserver decides whether this person may.

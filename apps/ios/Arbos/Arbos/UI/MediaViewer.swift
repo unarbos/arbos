@@ -196,6 +196,14 @@ enum MediaOrigin {
     case publicPicture(ObjectIdentifier, WorkLifetime.State)
     case unavailable
 
+    /// The account the viewer was opened under, where there is one.
+    var owner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let owner), .fixture(let owner): return owner
+        case .publicPicture, .unavailable: return nil
+        }
+    }
+
     @MainActor
     init(_ model: AppModel, account: ChatAccountContext? = nil) {
         guard !Task.isCancelled else { self = .unavailable; return }
@@ -275,7 +283,7 @@ struct MediaViewer: View {
     var body: some View {
         let origin = self.origin ?? capturedOrigin ?? MediaOrigin(model)
         ZStack {
-            Color.black.opacity(1 - Double(dismissProgress) * 0.65).ignoresSafeArea()
+            Color.black.opacity(max(0, 1 - Double(dismissProgress) * 0.65)).ignoresSafeArea()
             if album.count > 1 {
                 TabView(selection: $index) {
                     ForEach(Array(album.enumerated()), id: \.element.id) { i, item in
@@ -298,6 +306,8 @@ struct MediaViewer: View {
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
+        // The cover itself is clear, so the black layer above fades to the chat during the dismiss drag.
+        .presentationBackground(.clear)
         .onAppear {
             if capturedOrigin == nil { capturedOrigin = origin }
             guard origin.allowsView(model) else { return }
@@ -562,6 +572,11 @@ struct MediaViewer: View {
 /// Matte an opaque dark fill. Both have a 1 pt rim and a 1 pt lift, so the
 /// white glyphs read on white, dark and busy pictures alike.
 enum ViewerChrome {
+    /// Whether a released pull down closes the viewer: a real pull (24 pt) whose projected
+    /// end, the pull plus 0.15 s of its speed, is past 120 pt.
+    static func dragCloses(pull: CGFloat, velocity: CGFloat) -> Bool {
+        pull > 24 && pull + velocity * 0.15 > 120
+    }
     /// Black over the glass: what keeps a white picture from showing through.
     static let glassPlate: Double = 0.6
     /// White over the plate (the round-button wash).
@@ -664,6 +679,8 @@ private struct DismissDrag: ViewModifier {
     let onClose: () -> Void
     var enabled: Bool = true
     @State private var offset: CGFloat = 0
+    /// The progress at which the viewer's backdrop (`1 - progress * 0.65`) is fully clear.
+    static let gone: CGFloat = 1 / 0.65
 
     func body(content: Content) -> some View {
         content
@@ -728,13 +745,28 @@ private struct VerticalDismissProbe: UIViewRepresentable {
                 offset.wrappedValue = t.y
                 progress.wrappedValue = min(1, t.y / 400)
             case .ended, .cancelled:
-                // `dragOffset` only advances on a clearly vertical pull, so past
-                // 120 pt is enough — do not re-test the final point (a slight
-                // sideways lift at the end used to cancel a good dismiss).
-                if dragOffset > 120 {
-                    onClose()
-                } else {
+                // Closes on where the pull is heading, not where it has been: the pull plus
+                // 0.15 s of its speed past 120 pt. A flick closes from a short pull, a pull
+                // taken back up stays, and a cancelled pan never closes. `dragOffset` only
+                // advances on a clearly vertical pull, so the final point's direction is not
+                // re-tested (a slight sideways lift at the end used to cancel a good dismiss).
+                let vy = pan.velocity(in: pan.view).y
+                if pan.state == .ended, ViewerChrome.dragCloses(pull: dragOffset, velocity: vy) {
+                    // A swiped-away page leaves by itself: it keeps falling and the backdrop
+                    // clears in place, then the cover goes with no slide. The cover is clear
+                    // (the chat shows through the drag), so the system slide would show what
+                    // is left of the tint falling after the picture.
                     withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = pan.view?.bounds.height ?? 900
+                        progress.wrappedValue = DismissDrag.gone
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [onClose] in
+                        var cut = Transaction()
+                        cut.disablesAnimations = true
+                        withTransaction(cut) { onClose() }
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                         offset.wrappedValue = 0
                         progress.wrappedValue = 0
                     }
@@ -797,9 +829,11 @@ private struct VerticalDismissProbe: UIViewRepresentable {
             pan = gr
         }
 
-        /// First ancestor large enough to be the page (the probe is zero-sized).
+        /// First ancestor large enough to be the page, past the probe's own SwiftUI host:
+        /// that host fills the background behind the page and never takes a touch, so a
+        /// recognizer on it never begins.
         private static func pageHost(from view: UIView) -> UIView? {
-            var node: UIView? = view.superview
+            var node: UIView? = view.superview?.superview
             while let current = node {
                 if current.bounds.width > 100, current.bounds.height > 100 { return current }
                 node = current.superview
@@ -837,12 +871,15 @@ private struct ZoomableImagePage: View {
                 if let image {
                     PlayingImage(image: image)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        // The picture is a UIImageView, which takes no touches by itself:
+                        // without a shape of its own the pinch and the double tap never begin.
+                        .contentShape(Rectangle())
                         .scaleEffect(scale)
                         .offset(offset)
-                        .gesture(magnify)
+                        .gesture(magnify(in: geo.size))
                         // Pan only while zoomed: an always-on DragGesture steals the
                         // album's horizontal page swipe at 1× and freezes it.
-                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
+                        .simultaneousGesture(pan(in: geo.size), including: scale > minScale + 0.01 ? .all : .subviews)
                         .onTapGesture(count: 2, perform: toggleZoom)
                         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
                         .accessibilityLabel("Image")
@@ -875,22 +912,33 @@ private struct ZoomableImagePage: View {
         }
     }
 
-    private var magnify: some Gesture {
+    private func magnify(in size: CGSize) -> some Gesture {
         MagnifyGesture()
             .onChanged { v in scale = min(max(baseScale * v.magnification, minScale), maxScale) }
             .onEnded { _ in
                 baseScale = scale
-                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } }
+                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } } else { settle(in: size) }
             }
     }
 
-    private var pan: some Gesture {
+    /// The zoomed picture springs back so it still covers the viewport (or is centred on an
+    /// axis where it is smaller); the limit is the fitted picture, not the letterboxed frame.
+    private func settle(in size: CGSize) {
+        let fit = image.map { AVMakeRect(aspectRatio: $0.size, insideRect: CGRect(origin: .zero, size: size)).size } ?? size
+        let mx = max(0, (fit.width * scale - size.width) / 2), my = max(0, (fit.height * scale - size.height) / 2)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            offset = CGSize(width: min(max(offset.width, -mx), mx), height: min(max(offset.height, -my), my))
+        }
+        baseOffset = offset
+    }
+
+    private func pan(in size: CGSize) -> some Gesture {
         DragGesture()
             .onChanged { v in
                 guard scale > minScale else { return }
                 offset = CGSize(width: baseOffset.width + v.translation.width, height: baseOffset.height + v.translation.height)
             }
-            .onEnded { _ in if scale > minScale { baseOffset = offset } }
+            .onEnded { _ in if scale > minScale { settle(in: size) } }
     }
 
     private func toggleZoom() {
@@ -978,6 +1026,11 @@ private struct VideoPage: View {
         guard let (data, _) = bytes, let file = MediaFetch.tempFile(data, name: item.name) else {
             failed = true
             return
+        }
+        // The bytes are here to be played: the transcript row gets its poster from them.
+        if let owner = origin.owner,
+           let key = VideoThumb.key(owner: owner, slot: item.slot, kind: item.kind, blobRef: item.blobRef) {
+            VideoThumb.remember(data, name: item.name, for: key)
         }
         player = AVPlayer(url: file)
     }
@@ -1210,6 +1263,9 @@ struct BlobImage: View {
     @Environment(\.theme) private var theme
     let item: MediaItem
     var origin: MediaOrigin? = nil
+    /// A thumbnail: decode off the main actor to a bitmap whose longer side is this many
+    /// pixels (`thumbnail`). nil keeps the full picture.
+    var maxPixel: CGFloat? = nil
     @State private var capturedOrigin: MediaOrigin?
     @State private var image: UIImage?
     @State private var failed = false
@@ -1234,11 +1290,29 @@ struct BlobImage: View {
         guard origin.allowsReading(item, model) else { return }
         let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })
         guard origin.allowsReading(item, model) else { return }
-        if let (data, _) = bytes, let img = UIImage(data: data) {
+        if let (data, _) = bytes, let maxPixel {
+            let small = await Task.detached(priority: .userInitiated) { Self.thumbnail(data, maxPixel: maxPixel) }.value
+            guard origin.allowsReading(item, model) else { return }
+            image = small
+            failed = small == nil
+        } else if let (data, _) = bytes, let img = UIImage(data: data) {
             image = img
         } else {
             failed = true
         }
+    }
+}
+
+extension BlobImage {
+    /// The first frame only, scaled as it is read: an animated GIF costs one small frame,
+    /// and a large photo is never decoded at full size. nil when the bytes are not a picture.
+    nonisolated static func thumbnail(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: maxPixel] as [CFString: Any] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let frame = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        return UIImage(cgImage: frame)
     }
 }
 
@@ -1260,9 +1334,47 @@ enum FixtureMedia {
         case .file:
             return (pdf(title: item.name), "application/pdf")
         case .video:
-            return nil
+            return clip.map { ($0, "video/mp4") }
         }
     }
+
+    /// A two-second 320 × 180 H.264 clip, written once: fixture videos have a frame to make a
+    /// poster from, and the poster test has a real file to read. Every wait is bounded (`nil`
+    /// rather than a hang if the encoder never answers); callers read it off the main thread.
+    static let clip: Data? = {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-clip-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (w, h) = (320, 180)
+        guard let writer = try? AVAssetWriter(outputURL: file, fileType: .mp4) else { return nil }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h])
+        writer.add(input)
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<4 {
+            var buffer: CVPixelBuffer?
+            guard let pool = adaptor.pixelBufferPool,
+                  CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            // Opaque orange in BGRA, so the poster is plainly a picture and not an empty tile.
+            memset_pattern4(CVPixelBufferGetBaseAddress(buffer), [0x20, 0x90, 0xF0, 0xFF] as [UInt8],
+                            CVPixelBufferGetDataSize(buffer))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            var waited = 0
+            while !input.isReadyForMoreMediaData, waited < 10_000 { usleep(1_000); waited += 1 }
+            guard input.isReadyForMoreMediaData else { return nil }
+            adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 2))
+        }
+        input.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(value: 2, timescale: 1))
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        guard done.wait(timeout: .now() + 30) == .success else { return nil }
+        return writer.status == .completed ? try? Data(contentsOf: file) : nil
+    }()
 
     private static func png(seed: String) -> Data? {
         var h: UInt32 = 0x811c_9dc5

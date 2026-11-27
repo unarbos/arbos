@@ -243,7 +243,7 @@ struct ToastHost: View {
                 .background(Capsule().fill(theme.card))
                 .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
                 .accessibilityIdentifier("toast-folded")
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(.fromTop)
             }
             ForEach(stack.visible) { toast in
                 ToastRow(toast: toast)
@@ -276,7 +276,7 @@ private struct ToastRow: View {
                 count: toast.count
             )
             .onLongPressGesture(minimumDuration: 0.05, pressing: { pressing in model.holdToast(toast.id, held: pressing) }, perform: {})
-            .transition(.move(edge: .top).combined(with: .opacity))
+            .transition(.fromTop)
         } else {
             Text(toast.count >= 2 ? "\(toast.text) (×\(toast.count))" : toast.text)
                 .font(theme.font(Theme.small))
@@ -290,7 +290,7 @@ private struct ToastRow: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.dismissToast(toast.id) }
                 .accessibilityIdentifier("toast-info")
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(.fromTop)
         }
     }
 }

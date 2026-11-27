@@ -33,7 +33,6 @@ enum SheetRow {
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var remoteServers: [Server] = []
@@ -374,8 +373,9 @@ struct NewChatSheet: View {
         guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
+        // The page is a pushed route since 4ac61648c: opening replaces the stack, and a
+        // dismiss after it popped the chat it had just opened, leaving an empty page.
         model.open(project: p)
-        dismiss()
         opening = false
     }
 
@@ -383,17 +383,18 @@ struct NewChatSheet: View {
         guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
+        // No `dismiss()` after an open, here or for a person below: opening replaces the
+        // stack, this page with it, and a dismiss after that popped the page just opened
+        // and left a black screen (tester report, 2026-11-15).
         if s.isMember {
             model.open(server: s)
-            dismiss()
             opening = false
             return
         }
         Task {
             guard model.acceptsAccountWork(work) else { return }
-            let opened = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
+            _ = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
             guard model.acceptsAccountWork(work) else { return }
-            if opened { dismiss() }
             opening = false
         }
     }
@@ -404,9 +405,8 @@ struct NewChatSheet: View {
         opening = true
         Task {
             guard model.acceptsAccountWork(work) else { return }
-            let opened = await model.openDM(handle: handle)
+            _ = await model.openDM(handle: handle)
             guard model.acceptsAccountWork(work) else { return }
-            if opened != nil { dismiss() }
             opening = false
         }
     }
@@ -783,8 +783,17 @@ struct CreateEntityView: View {
         let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
-            onDone()
+            creating = true
+            localError = nil
+            Task {
+                guard model.acceptsAccountWork(work) else { return }
+                let created = await model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
+                guard model.acceptsAccountWork(work) else { return }
+                if created {
+                    onDone()
+                }
+                creating = false
+            }
         case .group:
             next = true
         case .server:

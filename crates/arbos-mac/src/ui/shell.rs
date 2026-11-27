@@ -46,7 +46,7 @@ use crate::ui::member_menu;
 use crate::ui::message_menu;
 use crate::ui::mock_backdrop;
 use crate::ui::modal;
-use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::motion::{ease_out_cubic, shake_offset, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
@@ -260,6 +260,8 @@ pub struct Shell {
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
+    /// The keyboard's owner while the avatar picker is up (`modal_focus`).
+    pub(crate) avatar_focus: FocusHandle,
     /// The Generate tab's prompt.
     pub(crate) avatar_prompt_input: Entity<ComposerInput>,
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
@@ -333,6 +335,10 @@ pub struct Shell {
     pub(crate) channels: Entity<ChannelsPanel>,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
+    /// Where in its hit band the sidebar's resize handle was grabbed: pointer to pane edge.
+    pub(crate) sidebar_grab: f32,
+    /// The one timer that redraws the toast slot when the next toast expires.
+    notice_wake: Option<gpui::Task<()>>,
     /// A Finder drag is over the chat pane: the whole pane lights up
     /// (`ui::dropzone`). Set from the pane's own drag-move bounds check, so it
     /// does not depend on GPUI hover state; cleared on drop, exit and release.
@@ -521,7 +527,7 @@ pub struct Shell {
     pub(crate) pip_offset: (f32, f32),
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
     /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
-    feedback: Entity<FeedbackSheet>,
+    pub(crate) feedback: Entity<FeedbackSheet>,
 }
 
 impl Shell {
@@ -1173,6 +1179,7 @@ impl Shell {
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
+            avatar_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
             chart_viewer_focused_generation: 0,
             forward_message_focused_for: None,
@@ -1244,6 +1251,8 @@ impl Shell {
             channels,
             secrets,
             shake_started_at: None,
+            sidebar_grab: 0.0,
+            notice_wake: None,
             file_drop_over: false,
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
@@ -1454,7 +1463,24 @@ impl Shell {
         if state.server_sheet == Some(ServerSheet::RestoreKeys) {
             return Some(self.server_input.read(cx).focus_handle(cx));
         }
+        // Over Edit Agent the Name field under the picker must not type.
+        if self.avatar_picker_on_top(cx) {
+            return Some(self.avatar_focus.clone());
+        }
         None
+    }
+
+    /// The avatar picker is up with no sheet drawn over it (the render order: the Create
+    /// and server sheets, the reveals and Feedback come after it). Only then are the
+    /// keyboard and Esc its own.
+    fn avatar_picker_on_top(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        self.avatar_picker.is_some()
+            && !state.new_chat_open
+            && state.server_sheet.is_none()
+            && state.connect_reveal.is_none()
+            && state.agent_link_reveal.is_none()
+            && !self.feedback.read(cx).is_open()
     }
 
     /// Keep the keyboard inside the open sheet: whatever else took focus
@@ -2936,7 +2962,12 @@ impl Shell {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
             let closed = self.state.update(cx, |s, cx| s.close_tab(chat_id, cx));
-            if !closed {
+            // The shake is positional motion: Reduce Motion drops it. A held ⌘W does not restart
+            // one that is still running (key repeat would hold it in its first few frames).
+            let running = self
+                .shake_started_at
+                .is_some_and(|t| now_ms().saturating_sub(t) < SHAKE_MS);
+            if !closed && !running && !cx.reduce_motion() {
                 self.shake_started_at = Some(now_ms());
                 cx.notify();
             }
@@ -3326,6 +3357,11 @@ impl Shell {
                     Composer::focus(&self.composer, window, cx);
                 }
             }
+            return;
+        }
+        // The avatar picker opens over Edit Agent: Esc closes it alone.
+        if self.avatar_picker_on_top(cx) {
+            self.close_avatar_picker(cx);
             return;
         }
         if self.state.read(cx).chat_search_open() {
@@ -3992,7 +4028,7 @@ impl Shell {
             .filter(|p| p.is_people() && !p.is_people_group())
             .and_then(|p| p.person().cloned())
             .filter(|person| state.is_blocked(person));
-        if animating || shake.is_some() || presence.is_some() {
+        if animating || presence.is_some() {
             PulseClock::request(cx);
         }
 
@@ -4123,16 +4159,14 @@ impl Shell {
                 );
         };
 
-        let shake_offset = shake
-            .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
-            .unwrap_or(0.0);
+        let shake_x = shake.map(shake_offset).unwrap_or(0.0);
         // The header. With a transcript it floats over the list top like Grok's
         // (the list runs under it and fades out through the band, see below),
         // so it is appended last as an absolute overlay; everything else in the
         // column is laid out from the top as before.
         let header_bar = div()
             .relative()
-            .left(px(shake_offset))
+            .left(px(shake_x))
             // Without the sidebar the traffic lights sit over this header:
             // clear them (14 pt in, three 12 pt lights, 8 pt gaps). While the
             // sidebar slides the inset is whatever of the lights' band the
@@ -5018,7 +5052,6 @@ impl Shell {
         if stack.visible.is_empty() {
             return None;
         }
-        PulseClock::request(cx);
         let mut column = div()
             .id("toast-slot")
             .debug_selector(|| "toast-slot".into())
@@ -5057,6 +5090,7 @@ impl Shell {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.7))
+                            .active(|s| s.opacity(0.6))
                             .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, cx| {
@@ -5142,7 +5176,13 @@ impl Shell {
                     }))
                     .into_any_element(),
             };
-            column = column.child(element);
+            // A toast arrives unprompted, so it fades in (opacity only: the slot's place is a
+            // rule). Keyed by the notice, so a "×N" bump does not replay it.
+            column = column.child(div().child(element).with_animation(
+                SharedString::from(format!("notice-in-{nid}")),
+                Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
+                |el, t| el.opacity(t),
+            ));
         }
         Some(
             div()
@@ -5465,6 +5505,14 @@ impl Render for Shell {
             _ => frame,
         };
         if frame.animating() && self.rig_rail_t.is_none() {
+            window.request_animation_frame();
+        }
+        // The header shake runs at the display's rate: two cycles in `SHAKE_MS` alias into a
+        // twitch on the 30 fps pulse clock.
+        if self
+            .shake_started_at
+            .is_some_and(|t| now_ms().saturating_sub(t) < SHAKE_MS)
+        {
             window.request_animation_frame();
         }
         let live_center = width - frame.sidebar_visible - frame.pane_visible;
@@ -5790,6 +5838,12 @@ impl Render for Shell {
         if self.skills.read(cx).is_floating() {
             root = root.child(self.skills.clone());
         }
+        // Under the pickers it opens: a later child paints over an earlier one.
+        if self.agent_edit_open {
+            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
+                root = root.child(sheet);
+            }
+        }
         if self.voice_picker_open {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
                 root = root.child(voicepicker::sheet(self, space, cx));
@@ -5797,10 +5851,15 @@ impl Render for Shell {
         }
         if let Some(picker) = self.avatar_picker.clone() {
             root = root.child(avatar_picker::sheet(self, &picker, cx));
-        }
-        if self.agent_edit_open {
-            if let Some(sheet) = crate::ui::profiles::agent::edit_sheet(self, cx) {
-                root = root.child(sheet);
+        } else if self.avatar_focus.is_focused(window)
+            || self.avatar_focus.contains_focused(window, cx)
+        {
+            // Closed: the keyboard goes back to the sheet under it, else the composer.
+            if self.agent_edit_open {
+                let name = self.agent_name_input.read(cx).focus_handle(cx);
+                window.focus(&name, cx);
+            } else {
+                Composer::focus(&self.composer, window, cx);
             }
         }
         if new_chat_open {
@@ -5963,6 +6022,27 @@ impl Render for Shell {
         if let Some(notices) = self.render_notices(frame.sidebar_visible, frame.pane_visible, cx) {
             root = root.child(notices);
         }
+        // Nothing in a toast moves, so the slot is redrawn once, when the next toast runs out
+        // (a held one is looked at again each second), not on the pulse clock.
+        let now = now_ms();
+        let next = self
+            .state
+            .read(cx)
+            .live_notices()
+            .iter()
+            .map(|n| match n.held {
+                true => 1_000,
+                false => (n.at + n.ttl_ms()).saturating_sub(now).max(16),
+            })
+            .min();
+        self.notice_wake = next.map(|ms| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(ms))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+        });
         // D82: first sign-in — the terminal screen covers the shell until the
         // computer, agent and first chat exist, then morphs into the greeting.
         if let Some(onboarding) = self.state.read(cx).onboarding.clone() {

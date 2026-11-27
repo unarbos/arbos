@@ -213,7 +213,7 @@ pub fn render(
                     PICTURE,
                     theme,
                 ))
-                .child(p.name.clone())
+                .child(div().max_w(px(160.0)).truncate().child(p.name.clone()))
                 .child(
                     div()
                         .id(ElementId::Name(SharedString::from(x_id)))
@@ -393,11 +393,12 @@ fn dropdown(
                     PICTURE,
                     theme,
                 ))
-                .child(div().child(p.name.clone()))
+                .child(div().min_w_0().truncate().child(p.name.clone()))
                 .child(
                     div()
                         .text_size(px(12.5))
                         .text_color(theme.text_muted)
+                        .truncate()
                         .child(format!("@{}", Project::mention_slug(&p.name))),
                 )
                 .when(selected, |el| {

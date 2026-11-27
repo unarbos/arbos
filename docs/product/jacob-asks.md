@@ -30,6 +30,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | ask | asked | platform | what it must do | guard |
 | --- | --- | --- | --- | --- |
 | `agent-bubble-inset-2026-10-22` | 2026-10-22 | iPhone | An agent's bubble leaves 76 pt on the far side, the measured Grok number, not the old 71. | `JacobAskGuardTests.testTheAgentBubbleKeepsItsSeventySixPointInset` |
+| `iphone-first-login-recovery-2026-11-18` | 2026-11-18 | iPhone | Sign-out then sign-in treats an existing Home agent as a returning account; provisioning failure also offers Sign out. | `FirstLoginTests` |
 | `typing-indicator-left-2026-10-23` | 2026-10-23 | iPhone | The presence row over the composer names who is typing and which agents are working, one mark per handle, newest first. | `PresenceRowTests` |
 | `group-library-links-2026-10-23` | 2026-10-23 | iPhone | A group's Library lists links the way the agent pane does, through the one shared list builder. | `JacobAskGuardTests.testAGroupsLibraryListsLinksThroughTheSharedBuilder` |
 | `mention-chip-hover-2026-10-24` | 2026-10-24 | iPhone | A mention chip is accent on accent at 14 %, 30 % under the finger, so it visibly answers a touch. | `JacobAskGuardTests.testTheMentionChipStillAnswersTheFinger` |
@@ -125,7 +126,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `iphone-compose-nav-push-2026-11-10` | 2026-11-10 | iPhone | Home's + pushes New Message from the right (not a sheet); edge-swipe returns to the chat list. | `HomeNavPushUITests` |
 | `solo-1to1-no-agent-reply-quote-ios-2026-11-10` | 2026-11-10 | iPhone | In a solo 1:1 agent chat, an agent bubble never shows a reply quote header — even when the row still carries replyTo from an older box. A group or channel still quotes. A human's own reply still quotes. | `SoloAgentReplyQuoteTests` |
 | `solo-1to1-no-agent-reply-quote-mac-2026-11-10` | 2026-11-10 | Mac | Same rule on Mac: solo 1:1 agent bubbles never quote; groups and channels still do; a human's own reply still does. Guarded in-tree by `crates/arbos-mac` `solo_agent_reply_quote_tests`; the iPhone suite is the named twin. | `SoloAgentReplyQuoteTests` |
-| `iphone-composer-less-opaque-2026-11-11` | 2026-11-11 | iPhone | The Glass composer field pill fills at 12 %, not the 22 % that still read as a dark plate over the transcript. | `ComposerParityTests.testTheFieldPillLetsTheTranscriptThrough` |
+| `iphone-composer-less-opaque-2026-11-11` | 2026-11-11 | iPhone | The composer field pill is not a dark plate over the transcript: the system's clear glass, as Home's search capsule is (Doug, 2026-11-13, replacing the flat 12 % fill, which left the rows behind it sharp enough to fight the placeholder). | `ComposerParityTests.testTheFieldPillIsTheSystemGlassUnlessTheRigAsksForTheFlatFill` |
 | `connection-pill` | — | iPhone | The header pill shows the worst of the disagreeing signals, and says nothing at all while the link is live. | `JacobAskGuardTests.testTheConnectionPillShowsTheWorstSignalAndStaysQuietWhenLive` |
 | `in-call-bar` | — | iPhone | The in-call strip's chip stays 36 pt, a recorded exception to the one app-wide control height. | `JacobAskGuardTests.testTheInCallChipKeepsItsRecordedException` |
 | `reply-preview-fixed-height` | — | iPhone | The reply bar above the field is one row high whatever it quotes: the quote is flattened to a line and capped. | `JacobAskGuardTests.testTheReplyPreviewIsOneRowWhateverItQuotes` |
@@ -134,6 +135,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `iphone-create-entity-edit-style-2026-11-10` | 2026-11-10 | iPhone | Create New Agent / Group / Server / Connect uses the Edit-page hierarchy (Done/Create pill, sectioned Name and Appearance cards), not the old bottom-sheet layout. | `JacobAskGuardTests.testCreateEntityUsesTheEditPageHierarchy` |
 | `iphone-entity-nav-push-2026-11-10` | 2026-11-10 | iPhone | From + → create/profile → edit → sub-pages, every step is a navigation push with edge-swipe back; avatar / model / voice / group edit are pushes, not sheets. | `EntityNavPushUITests` |
 | `closed-app-call-ring-2026-11-11` | 2026-11-11 | iPhone | VoIP and APNs tokens re-upload on every foreground pass so a closed iPhone can still ring after the relay drops a dead Apple token (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995). | `JacobAskGuardTests.testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged` |
+| `iphone-reaction-instant-2026-11-13` | 2026-11-13 | iPhone | Tapping an emoji reaction (capsule, picker, or chip) paints the chip on the bubble in the same frame — before the doc onChange, coalesce, or relay ACK (TestFlight app-01M7B901FGH3KDZPX8T7DYXPPZ / #3048). | `OptimisticReactionTests` |
 
 ## Superseded
 

@@ -609,10 +609,14 @@ async fn forward(
     let t0 = Instant::now();
     let upstream = match req.send().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        Err(e) => {
+            crate::metrics::model_request(&url, None, t0.elapsed());
+            return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
+        }
     };
     let headers_ms = t0.elapsed().as_millis() as i64;
     let status = upstream.status();
+    crate::metrics::model_request(&url, Some(status.as_u16()), t0.elapsed());
     let upstream_marks = upstream_marks(upstream.headers());
     let mut resp_headers = HeaderMap::new();
     for (k, v) in upstream.headers() {
@@ -776,7 +780,10 @@ async fn forward(
             cost_source: Some(cost_source),
             metering_status: Some(metering_status),
         };
-        match db.record_model_usage(record) {
+        let tokens = record.tokens;
+        let recorded = db.record_model_usage(record);
+        let counted = matches!(recorded, Ok(true));
+        match recorded {
             // Observing a failed response must preserve the existing charging policy: only
             // successful responses are debited, even when an error contains usage metadata.
             Ok(true) if status.is_success() => {
@@ -795,6 +802,19 @@ async fn forward(
             }
             Ok(_) => {}
             Err(e) => tracing::error!(req_id, error = %e, "model usage not recorded"),
+        }
+        // Last, after the charge: counting a call must never be what leaves it uncharged.
+        if counted {
+            let agent = match &payer {
+                Principal::Box { user_id } => Some(user_id.as_str()),
+                _ => None,
+            };
+            let charged = if status.is_success() {
+                meter.usd()
+            } else {
+                0.0
+            };
+            crate::metrics::model_usage(agent, tokens, charged);
         }
     });
     let body = Body::from_stream(tokio_stream_wrap(rx));

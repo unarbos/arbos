@@ -83,6 +83,36 @@ final class ComposerParityUITests: XCTestCase {
                           + "the box climbed \(climb)")
     }
 
+    /// Two testers, 2026-11-13: while typing "the whole keyboard glitches away" and the box
+    /// has to be tapped again.
+    ///
+    /// The text view was a different view on each side of the wrap, so the keyboard lost its
+    /// first responder mid-word. The simulator hands focus to the new view fast enough that
+    /// the keyboard stays, but it comes back as a fresh one, on letters: the numbers plane is
+    /// what shows the swap here. Tapped key by key, as a thumb does, so the layout the last
+    /// digit caused has landed before the next.
+    func testTheKeyboardIsNotReplacedWhenTheDraftWraps() {
+        let app = openChat()
+        let box = field(app)
+        XCTAssertTrue(box.waitForExistence(timeout: appear), "the composer is on screen")
+        box.tap()
+        let numbers = app.keys["more"]
+        XCTAssertTrue(numbers.waitForExistence(timeout: 10), "the keyboard is up")
+        numbers.tap()
+
+        let top = box.frame.minY
+        let digit = app.keys["8"]
+        for typed in 0..<30 {
+            XCTAssertTrue(digit.waitForExistence(timeout: 3),
+                          "the numbers plane is still up after \(typed) digits")
+            digit.tap()
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        XCTAssertGreaterThan(top - box.frame.minY, 15, "the draft wrapped: the field grew")
+        XCTAssertEqual(box.value as? String, String(repeating: "8", count: 30),
+                       "every digit reached the draft")
+    }
+
     /// [feedback attachment-in-composer-2026-11-09]
     ///
     /// A staged picture previews inside the composer — a big rounded thumbnail of the picture
@@ -125,9 +155,13 @@ final class ComposerParityUITests: XCTestCase {
     ///
     /// The screenshot is in pixels and an element's frame is in points, so the frame is scaled
     /// by the ratio between the two rather than by an assumed device scale.
-    private func brightness(_ app: XCUIApplication, of rect: CGRect) -> Double {
-        guard let shot = app.screenshot().image.cgImage else { return 0 }
-        let scale = CGFloat(shot.width) / app.windows.firstMatch.frame.width
+    ///
+    /// The shot and the window's width are passed in, not read here: reading either through
+    /// the app waits on its accessibility tree, and on a slow runner that wait outlasted the
+    /// light this is measuring.
+    private func brightness(_ shot: XCUIScreenshot, of rect: CGRect, windowWidth: CGFloat) -> Double {
+        guard let shot = shot.image.cgImage else { return 0 }
+        let scale = CGFloat(shot.width) / windowWidth
         let box = CGRect(x: rect.minX * scale, y: rect.minY * scale,
                          width: rect.width * scale, height: rect.height * scale)
         guard let piece = shot.cropping(to: box) else { return 0 }
@@ -174,7 +208,8 @@ final class ComposerParityUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "the keyboard is up")
         Thread.sleep(forTimeInterval: 1)
         let pill = box.frame
-        let resting = brightness(app, of: pill)
+        let windowWidth = app.windows.firstMatch.frame.width
+        let resting = brightness(XCUIScreen.main.screenshot(), of: pill, windowWidth: windowWidth)
 
         // All XCUI work stays on the test thread. Held well past the arming delay; the press
         // also raises Paste / AutoFill — the highlight must not take that touch away. The
@@ -182,11 +217,14 @@ final class ComposerParityUITests: XCTestCase {
         // brightness sample run after press returns without a background queue.
         let finger = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         finger.press(forDuration: 1.2)
+        // The picture first, and straight off the screen: the light lasts `HoldHighlight.tail`
+        // (3 s) after lift, and a query of the app before this one could use all of it.
+        let shot = XCUIScreen.main.screenshot()
         let lit = probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch
         XCTAssertTrue(lit.waitForExistence(timeout: 5),
                       "touch-and-hold lights the box the way Grok's does")
 
-        let held = brightness(app, of: pill)
+        let held = brightness(shot, of: pill, windowWidth: windowWidth)
         let delta = abs(held - resting)
         // Threshold 8 (was 12): #2998 dropped `PillSurface.translucentAlpha` to 0.12, so a
         // good still reads ~10.26 mean delta on CI instead of the older denser-pill figure.
@@ -196,5 +234,66 @@ final class ComposerParityUITests: XCTestCase {
                              "the light is too faint to see: the pill read \(resting) at rest "
                              + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
+    }
+
+    private func openChatWithStaged(_ what: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "ARBOS_FIXTURE": "1",
+            "ARBOS_NO_STORE": "1",
+            "ARBOS_OPEN_PROJECT": "fx-comms",
+            "ARBOS_OPEN_CHAT": "fx-comms-main",
+            "ARBOS_FIXTURE_COMPOSER_ATTACHMENT": what,
+        ]
+        app.launch()
+        return app
+    }
+
+    /// Tester report, 2026-11-17: crop a staged picture before sending it. Cancel and Done
+    /// both come back to the composer with the picture still staged.
+    func testAStagedPictureCanBeCroppedAndCancelLeavesIt() {
+        let app = openChatWithStaged("1")
+        let edit = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "composer-edit-attachment:")).firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: appear), "a staged picture offers Edit")
+        let thumb = app.descendants(matching: .any)["composer-attachment"].firstMatch
+        let done = app.descendants(matching: .any)["crop-done"].firstMatch
+        let before = edit.identifier
+
+        edit.tap()
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "the crop screen is up")
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(thumb.waitForExistence(timeout: 10), "cancel: the picture is still staged")
+        XCTAssertEqual(edit.identifier, before, "cancel: and it is the same file")
+
+        edit.tap()
+        XCTAssertTrue(done.waitForExistence(timeout: 10))
+        let corner = app.descendants(matching: .any)["crop-handle-3"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        corner.press(forDuration: 0.1, thenDragTo: corner.withOffset(CGVector(dx: -80, dy: -80)))
+        app.buttons["Square"].firstMatch.tap()
+        done.tap()
+        XCTAssertTrue(thumb.waitForExistence(timeout: 10), "done: the cropped picture took its place")
+        XCTAssertNotEqual(edit.identifier, before, "done: a different file is staged")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "composer-attachment").count, 1)
+    }
+
+    /// Edit on a staged video must never take the app down. Embedding the system trimmer in
+    /// the SwiftUI tree aborted the app (2026-11-17); it is presented from a plain controller
+    /// now, and where the system cannot trim the file (the simulator) Edit leaves it as it was.
+    func testEditingAStagedVideoKeepsTheAppAndTheVideo() {
+        let app = openChatWithStaged("video")
+        let edit = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "composer-edit-attachment:")).firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: appear), "a staged video offers Edit")
+        edit.tap()
+        // Where the system cannot trim (the simulator) the composer's note says so; on a
+        // phone the trimmer opens and Cancel closes it.
+        let cancel = app.buttons["Cancel"].firstMatch
+        let note = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Couldn't edit that attachment")).firstMatch
+        if cancel.waitForExistence(timeout: 5) { cancel.tap() } else {
+            XCTAssertTrue(note.waitForExistence(timeout: 5), "no trimmer: the reason is on screen, not a blank flash")
+        }
+        XCTAssertEqual(app.state, .runningForeground, "the app is still running")
+        XCTAssertTrue(app.descendants(matching: .any)["composer-attachment"].firstMatch.waitForExistence(timeout: 10),
+                      "the video is still staged")
+        XCTAssertTrue(field(app).isHittable, "and the composer is usable again")
     }
 }

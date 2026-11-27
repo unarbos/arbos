@@ -66,8 +66,12 @@ enum DebugHooks {
     static var fixtureComposerAttachments: Int {
         max(0, value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT").flatMap { Int($0) } ?? 0)
     }
+    /// `ARBOS_FIXTURE_COMPOSER_ATTACHMENT=video`: open with the fixture clip staged instead.
+    static var fixtureComposerVideo: Bool { value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT") == "video" }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
+    /// `ARBOS_FIXTURE_LONG_REPLY=tall`: a reply taller than the screen, links included (hold-menu rig).
+    static var fixtureTallReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "tall" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
@@ -201,8 +205,8 @@ enum DebugHooks {
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
     /// `matte | glass`: the surface for one launch, same precedence.
     static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
-    /// `translucent`: the Glass pills as a no-blur translucent fill instead of the system glass
-    /// (mock for Jacob, [feedback iphone-composer-glass-2026-10-28] rig).
+    /// `translucent`: the composer field pill as a no-blur translucent fill instead of the
+    /// system glass ([feedback iphone-composer-glass-2026-10-28] rig).
     static var pillStyle: String? { value("ARBOS_PILL_STYLE") }
     /// `offline | relay-down | reconnecting | syncing | restart-soon`: the open chat's link state for the
     /// header's connection pill; `ARBOS_LINK_CLEARS_MS=<ms>` sets it back to live after that long.

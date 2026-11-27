@@ -185,6 +185,9 @@ enum RowKind: Equatable {
     case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
     /// A TAO cheque card (UI/WalletViews.swift), in the sender's slot like the secret ghost.
     case cheque(bytes: String, mine: Bool, handle: String, avatar: String?)
+    /// A poll (`docs/polls.md`): the question card kept open, each option with its count and my
+    /// vote marked. `by` names whose poll it is when it is not mine.
+    case poll(poll: Poll, by: String?, handle: String, avatar: String?)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -329,6 +332,32 @@ struct Row: Identifiable, Equatable {
     }
 }
 
+extension Row {
+    /// This row as the hold menu lifts it out of a group chat: someone else's bubble that
+    /// continues a sender run carries no name in the transcript, and alone on the blur it
+    /// no longer says whose it is (tester report, 2026-11-17). Nil when the row already
+    /// carries its name or has no sender to name.
+    var namedForHold: Row? {
+        var row = self
+        switch kind {
+        case .other(let text, let handle, let avatar, false, let quote, let preview):
+            row.kind = .other(text: text, handle: handle, avatar: avatar, named: true, quote: quote, preview: preview)
+        case .member(let blocks, let live, let handle, let name, let avatar, false, let agentId, let quote):
+            row.kind = .member(blocks: blocks, live: live, handle: handle, name: name, avatar: avatar, named: true,
+                               agentId: agentId, quote: quote)
+        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: source,
+                              forwardedFrom: forwardedFrom, sender: sender, named: true, quote: quote)
+        case .file(let item, let subtitle, let caption, let forwardedFrom, .some(let sender), false, let quote):
+            row.kind = .file(item: item, subtitle: subtitle, caption: caption, forwardedFrom: forwardedFrom,
+                             sender: sender, named: true, quote: quote)
+        default:
+            return nil
+        }
+        return row
+    }
+}
+
 enum Transcript {
     /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-ios-2026-10-28]):
     /// consecutive messages from one sender this close together (ms) form one **run** —
@@ -380,6 +409,42 @@ enum Transcript {
             return set(message.replyTo) || (people && message.senderHandle != nil && set(message.inReplyTo))
         case .system:
             return false
+        }
+    }
+
+    /// Rows that can carry a message's reaction chips: prose and media.
+    static func bearsReactions(_ kind: RowKind) -> Bool {
+        switch kind {
+        case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+        default: return false
+        }
+    }
+
+    /// The one message of `list` that differs from `was`, when all that differs is its
+    /// reactions; nil for any other edit. `list` and `was` hold the same ids.
+    static func reactionOnlyEdit(_ list: [Message], was: [Id: Message]) -> Message? {
+        var edited: Message?
+        for m in list where was[m.id] != m {
+            guard edited == nil, reactionOnly(m, was: was[m.id]) != nil else { return nil }
+            edited = m
+        }
+        return edited
+    }
+
+    /// `message` when it differs from `was` in its reactions and nothing else.
+    static func reactionOnly(_ message: Message, was: Message?) -> Message? {
+        guard var old = was, old.reactions != message.reactions else { return nil }
+        old.reactions = message.reactions
+        return old == message ? message : nil
+    }
+
+    /// Put `message`'s reactions on its rows as `rows(_:)` would, leaving every other row as
+    /// it is. A reaction used to rebuild the whole transcript before its chip could show.
+    static func restampReactions(_ rows: inout [Row], for message: Message) {
+        let own = rows.indices.filter { rows[$0].messageId == message.id }
+        let bearer = message.reactions.isEmpty ? nil : own.last { bearsReactions(rows[$0].kind) }
+        for i in own where rows[i].reactions != (i == bearer ? message.reactions : []) {
+            rows[i].reactions = i == bearer ? message.reactions : []
         }
     }
 
@@ -510,6 +575,14 @@ enum Transcript {
                     chunk.append(Row(id: "\(message.id)#cheque", messageId: message.id, role: mine ? .user : .project,
                                      kind: .cheque(bytes: bytes, mine: mine, handle: message.senderHandle ?? "someone",
                                                    avatar: message.senderAvatar)))
+                    break
+                }
+                // A poll is the card and nothing else: its text part is the same poll in plain
+                // words, for builds without polls.
+                if let poll = message.parts.lazy.compactMap(\.pollValue).first {
+                    chunk.append(Row(id: "\(message.id)#poll", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .poll(poll: poll, by: mine ? nil : message.senderName ?? message.senderHandle ?? "someone",
+                                                 handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
                     break
                 }
                 // Collect picture / video attachments first so a typed description can sit
@@ -754,7 +827,7 @@ enum Transcript {
                         break
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .cheque, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown:
                         break
                     }
                 }
@@ -770,7 +843,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .cheque, .unknown, .chart, .linkPreview: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .cheque, .poll, .unknown, .chart, .linkPreview: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -847,13 +920,7 @@ enum Transcript {
             if runStart, let ix = chunk.lastIndex(where: { Self.bearsAvatar($0.kind) }) {
                 chunk[ix].showsAvatar = true
             }
-            if !message.reactions.isEmpty,
-               let ix = chunk.lastIndex(where: {
-                   switch $0.kind {
-                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
-                   default: return false
-                   }
-               }) {
+            if !message.reactions.isEmpty, let ix = chunk.lastIndex(where: { bearsReactions($0.kind) }) {
                 chunk[ix].reactions = message.reactions
             }
             // Reply count on the first prose/media row so the badge sits on the message's top bubble.
@@ -895,6 +962,7 @@ enum Transcript {
         case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
+        case .poll(poll: _, by: let by, handle: _, avatar: _): return by != nil
         case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
         }
     }
@@ -1514,6 +1582,8 @@ struct RowView: View, Equatable {
     var people: Bool = false
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
+    /// How far this row is pulled left by a reply swipe (`ReplySwipe.offset`); 0 at rest.
+    var replyDrag: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// A tap on a "Messaged ◉ X" hand-off notice: open the destination chat.
@@ -1557,6 +1627,7 @@ struct RowView: View, Equatable {
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
+            && lhs.replyDrag == rhs.replyDrag
             && lhs.highlighted == rhs.highlighted
             && lhs.searchHit == rhs.searchHit
             && lhs.mentions.stamp == rhs.mentions.stamp
@@ -1601,7 +1672,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1624,6 +1695,7 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+                    .transition(.reactionPop)
                 if showReactionSenders {
                     ForEach(row.reactions, id: \.emoji) { reaction in
                         reactionSenders(reaction)
@@ -1658,6 +1730,24 @@ struct RowView: View, Equatable {
                     .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
+                    #if DEBUG
+                    // The rig's readout (`ARBOS_SWIPE_TRACE=1`): a time came on screen.
+                    .onAppear { BackSwipeTrace.note("time:\(time.filter { !$0.isWhitespace })") }
+                    #endif
+            }
+        }
+        // Swipe to reply (tester reports, 2026-11-13): drag a bubble left → the row follows
+        // and the arrow comes into the space it leaves, full ink once a release would reply.
+        .offset(x: -replyDrag)
+        .overlay(alignment: .trailing) {
+            if replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(replyDrag >= ReplySwipe.threshold ? theme.text : theme.muted)
+                    .frame(width: replyDrag)
+                    .opacity(Double(min(1, replyDrag / (ReplySwipe.threshold * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
         }
         .accessibilityElement(children: .contain)
@@ -1736,7 +1826,8 @@ struct RowView: View, Equatable {
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
-                        Button(action: openPerson) {
+                        // (The lift of a reply swipe that began on the name is not a tap on it.)
+                        Button(action: { if !ChatGestures.replySwiped { openPerson() } }) {
                             LiveSenderName(name: personName,
                                            url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
@@ -1787,7 +1878,7 @@ struct RowView: View, Equatable {
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
                         if named {
-                            Button(action: openMember) {
+                            Button(action: { if !ChatGestures.replySwiped { openMember() } }) {
                                 memberName(agent)
                             }
                             .buttonStyle(.plain)
@@ -1947,6 +2038,28 @@ struct RowView: View, Equatable {
                     Spacer(minLength: 0)
                 }
             }
+        case .poll(let poll, let by, let handle, let avatar):
+            // Mine sits right at my bubble's cap; someone else's after their avatar, like their bubble.
+            let card = QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: nil, title: poll.question,
+                                    options: poll.options.map { ChoiceOption(id: $0.id, label: $0.label, hint: "\(poll.votes[$0.id]?.count ?? 0)") },
+                                    multi: poll.multiple, picked: poll.picked(by: model.myUserId), open: true,
+                                    onPick: { id in
+                                        guard let me = model.myUserId else { return }
+                                        model.votePoll(chatId: chatId, messageId: row.messageId, selections: poll.picking(id, by: me))
+                                    },
+                                    foot: poll.foot(by: by))
+            if by == nil {
+                card.frame(maxWidth: maxBubble, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    avatarColumn {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    card.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
@@ -2046,6 +2159,11 @@ struct RowView: View, Equatable {
     /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]).
     @ViewBuilder
     private func replyCountBadge(userBubble: Bool) -> some View {
+        // This overlay spans exactly the bubble, on every kind of bubble: swipe to reply
+        // reads the bubble's frame from here (`ReplySwipeBubble`; tester reports, 2026-11-13).
+        if isMessage, ChatGestures.replySwipe {
+            ReplySwipeBubble(row: row.id).accessibilityHidden(true)
+        }
         if row.replyCount > 0 {
             Text("\(row.replyCount)")
                 .font(theme.font(11, weight: .semibold))
@@ -2060,8 +2178,8 @@ struct RowView: View, Equatable {
     /// with that emoji; long-press lists everyone who used it below the chips.
     private var reactionChips: some View {
         let mine = model.myUserId
-        return HStack(spacing: 4) {
-            if row.role == .user { Spacer(minLength: 0) }
+        // Wraps: many different emoji take a second line instead of squeezing the chips.
+        return WrapLayout(spacing: 4) {
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
                 let selected = !showReactionSenders && selectedReactionEmoji == reaction.emoji
@@ -2087,8 +2205,10 @@ struct RowView: View, Equatable {
                         )
                 )
                 .contentShape(Capsule(style: .continuous))
+                .transition(.reactionPop)
                 .onTapGesture {
                     guard account.accepts(model) else { return }
+                    ChatGestures.chipTap = (row.messageId, ProcessInfo.processInfo.systemUptime)
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 }
                 // High-priority so the row's bubble long-press (capsule + menu)
@@ -2111,8 +2231,8 @@ struct RowView: View, Equatable {
                     selectedReactionEmoji = selected ? nil : reaction.emoji
                 }
             }
-            if row.role != .user { Spacer(minLength: 0) }
         }
+        .frame(maxWidth: .infinity, alignment: row.role == .user ? .trailing : .leading)
         .padding(.leading, reactionLeading)
     }
 
@@ -2121,7 +2241,7 @@ struct RowView: View, Equatable {
         let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
         return HStack(spacing: 0) {
             if row.role == .user { Spacer(minLength: 0) }
-            Text(names)
+            Text("\(reaction.emoji) \(names)")
                 .font(theme.font(12))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(row.role == .user ? .trailing : .leading)
@@ -2172,6 +2292,7 @@ struct RowView: View, Equatable {
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
         case .cheque(_, let mine, _, _): return mine ? 0 : lane
+        case .poll(_, let by, _, _): return by == nil ? 0 : lane
         case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
         case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0
@@ -2270,6 +2391,12 @@ struct RowView: View, Equatable {
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
     /// 6 from the reply quote to the text (#1393).
     static let nameToTextGap: CGFloat = 2
+    /// What the name line adds to a bubble's height (`LiveSenderName`, 16 pt at least for
+    /// the agent badge, plus the gap under it). A media card's name sits 4 pt above the
+    /// card, not 2: the hold menu, the one reader, lands 2 pt low there.
+    static func nameLineHeight(_ theme: Theme) -> CGFloat {
+        max(16, UIFont.systemFont(ofSize: theme.pt(Theme.small), weight: .semibold).lineHeight) + nameToTextGap
+    }
     static let quoteToTextGap: CGFloat = 6
 
     /// A people-chat member's name inside its bubble, in the same colour as its bar
@@ -2727,6 +2854,8 @@ struct CodeCard: View {
                     .accessibilityIdentifier("code-body")
             }
             Button {
+                // Not the lift of a hold into the menu, nor of a reply swipe that began here.
+                guard !ChatGestures.tapEndsHold() else { return }
                 Self.copyToPasteboard(code)
                 Haptics.pick()
                 copied = true
@@ -3806,11 +3935,50 @@ struct FileCard: View {
     var onQuoteTap: ((Quote) -> Void)? = nil
 
     @State private var viewer: MediaViewerState?
+    /// Flipped when a poster being made for this video has come in, so the card is drawn again.
+    @State private var posterSettled = false
 
     private var captionText: String? {
         guard let caption else { return nil }
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
+    }
+
+    private var posterKey: ChatImageCache.Key? {
+        account.owner.flatMap { VideoThumb.key(owner: $0, slot: item.slot, kind: item.kind, blobRef: item.blobRef) }
+    }
+
+    /// The poster, when this phone has had the video's bytes (sent from here, or played);
+    /// `nil` keeps the file card.
+    private var poster: VideoThumb.Frame? {
+        _ = posterSettled
+        return posterKey.flatMap { VideoThumb.frame(for: $0) }
+    }
+
+    /// A video's poster frame with Play and its length, in place of the card's header
+    /// (tester report, 2026-11-17).
+    private func posterTile(_ poster: VideoThumb.Frame) -> some View {
+        let size = ImageBubble.fit(poster.image.size, maxWidth: 280)
+        let length = VideoThumb.durationLabel(poster.seconds)
+        return ZStack {
+            Image(uiImage: poster.image).resizable().scaledToFit()
+            Circle().fill(Color.black.opacity(0.47)).frame(width: 44, height: 44)
+                .overlay(Image(systemName: "play.fill").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white).offset(x: 1))
+            if !length.isEmpty {
+                Text(length)
+                    .font(theme.font(11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(8)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("video-poster")
     }
 
     var body: some View {
@@ -3827,30 +3995,36 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
-            Button {
-                guard !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
-                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-            } label: {
-                // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
-                // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-                HStack(spacing: 14) {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(FileCard.kindColor(item, theme: theme))
-                        .frame(width: 21, height: 27)
-                        .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
-                        Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+            // Not a Button, as the picture tile above: a Button counts a back swipe that starts
+            // on the card as a tap when the finger lifts, and the file opened under the pop.
+            Group {
+                if let poster {
+                    posterTile(poster)
+                } else {
+                    // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+                    // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
+                    HStack(spacing: 14) {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(FileCard.kindColor(item, theme: theme))
+                            .frame(width: 21, height: 27)
+                            .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1).truncationMode(.middle)
+                            Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                        }
                     }
+                    .padding(.leading, 15)
+                    .padding(.trailing, Theme.bubbleHPad + 4)
+                    .padding(.vertical, 13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(.leading, 15)
-                .padding(.trailing, Theme.bubbleHPad + 4)
-                .padding(.vertical, 13)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(item.blobRef == nil)
+            .onTapGesture {
+                guard item.blobRef != nil, !ChatGestures.tapEndsHold(), account.accepts(model) else { return }
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            }
+            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
                 Text(captionText)
@@ -3865,6 +4039,12 @@ struct FileCard: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        // Again when the viewer closes: playing the video there is what puts its bytes on the phone.
+        .task(id: "\(item.blobRef ?? "")|\(viewer == nil)") {
+            guard let posterKey else { return }
+            await VideoThumb.settled(posterKey)
+            posterSettled.toggle()
+        }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
                         origin: MediaOrigin(model, account: account))
@@ -3904,7 +4084,7 @@ struct VoiceMemoBubble: View {
 
     var body: some View {
         Button {
-            guard account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
+            guard !ChatGestures.tapEndsHold(), account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
             player.toggle(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
         } label: {
             HStack(spacing: 10) {

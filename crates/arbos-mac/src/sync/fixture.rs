@@ -1725,6 +1725,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .transact(|d| d.set_reaction(&message_id, &emoji, &me, on));
             }
         }
+        ClientCommand::SendPoll {
+            chat_id,
+            message_id,
+            poll,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let opts = arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{ME_ID}")),
+                    ..Default::default()
+                };
+                let _ = doc
+                    .core
+                    .transact(|d| d.append_poll_message(&message_id, &poll, "fixture", &opts));
+            }
+        }
+        ClientCommand::VotePoll {
+            chat_id,
+            message_id,
+            selections,
+        } => {
+            let me = format!("user:{ME_ID}");
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc
+                    .core
+                    .transact(|d| d.set_poll_vote(&message_id, &me, &selections));
+            }
+        }
         ClientCommand::DeleteMessage {
             chat_id,
             message_id,
