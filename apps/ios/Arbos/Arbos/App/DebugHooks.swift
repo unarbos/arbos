@@ -44,6 +44,10 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
+    /// `ARBOS_FIXTURE_POLLS=1`: the fixture group "Launch week" ends with three polls, one
+    /// in each state the card draws (someone's closed one, mine with a time left and names
+    /// shown, mine with names hidden).
+    static var fixturePolls: Bool { value("ARBOS_FIXTURE_POLLS") == "1" }
     /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers among the home chats.
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
     /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).

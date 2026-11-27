@@ -418,6 +418,8 @@ struct ChatSession: View {
     @State private var showProfile = false
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
     @State private var confirmUnblock = false
+    /// The poll "Close this poll?" is asking about (hold menu → Close poll).
+    @State private var closingPoll: Id?
     @State private var showSearch = false
     /// The result row whose tap just closed the bar (one run-loop turn), so the transcript's
     /// own close-on-tap steps aside ([feedback iphone-search-close-2026-10-28]).
@@ -1553,7 +1555,8 @@ struct ChatSession: View {
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true,
-                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty),
+                                                hasLink: !ChatMedia.links(in: m_text(row)).isEmpty,
+                                                canClosePoll: canClosePoll(row)),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -1640,6 +1643,15 @@ struct ChatSession: View {
                 }
                 .environment(\.theme, theme)
             }
+        }
+        // A close is final, so it asks first, with the app's one confirm.
+        .confirm(ConfirmSpec(title: "Close this poll?",
+                             message: "It keeps its counts and takes no more votes. It cannot be opened again.",
+                             action: "Close poll"),
+                 isPresented: Binding(get: { closingPoll != nil }, set: { if !$0 { closingPoll = nil } })) {
+            guard account.accepts(model), let messageId = closingPoll else { return }
+            closingPoll = nil
+            model.closePoll(chatId: chatId, messageId: messageId)
         }
         .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
             guard account.accepts(model) else { return }
@@ -3420,9 +3432,11 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .poll, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
             return false
-        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+        // A poll is a message like any other: it is replied to, and its author deletes it
+        // (tester report, 2026-11-14). Edit stays off (`canEditMessage`).
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image, .poll:
             return messageById[row.messageId] != nil
         }
     }
@@ -3481,6 +3495,12 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
+    /// Close poll is offered to a poll's maker while it is open (and can be closed at all).
+    private func canClosePoll(_ row: Row) -> Bool {
+        guard case .poll(let poll, let by, _, _) = row.kind else { return false }
+        return by == nil && poll.closable && !poll.closed(now: pollNowMs())
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
     /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
@@ -3514,6 +3534,8 @@ struct ChatSession: View {
             model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
+        case .closePoll:
+            closingPoll = row.messageId
         case .removePreview:
             model.removeLinkPreview(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         case .delete:
@@ -3535,7 +3557,8 @@ struct ChatSession: View {
     /// Own user text the long-press menu may offer Edit for.
     private func canEditMessage(_ row: Row) -> Bool {
         guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
-        guard isOwnMessage(m) else { return false }
+        // A poll is not editable; its text is only the poll in plain words.
+        guard isOwnMessage(m), !m.parts.contains(where: { $0.pollValue != nil }) else { return false }
         return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -4982,6 +5005,8 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
+                                        // Two quick taps on a poll are two votes, not a heart.
+                                        if case .poll = row.kind { return }
                                         // Next turn of the run loop: the chip's own tap has then
                                         // run, whichever of the two handlers SwiftUI calls first.
                                         DispatchQueue.main.async {

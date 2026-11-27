@@ -68,9 +68,14 @@ final class CoreChatDoc {
 
     // MARK: Reading
 
-    func readMessage(_ ix: Int) -> Message? {
+    /// `viewer` is who is reading (`user:<id>`): a poll that hides its voters hands over that
+    /// reader's own vote and no other voter's id. Every read that feeds a transcript names
+    /// the reader; a read for anything else does not need one.
+    func readMessage(_ ix: Int) -> Message? { readMessage(ix, as: nil) }
+
+    func readMessage(_ ix: Int, as viewer: String?) -> Message? {
         guard ix >= 0, ix < count,
-              let raw = doc.readMessageJson(index: UInt64(ix)),
+              let raw = doc.readMessageJson(index: UInt64(ix), viewer: viewer),
               let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data)
         else { return nil }
@@ -80,8 +85,8 @@ final class CoreChatDoc {
     /// The whole transcript in one FFI call and one JSON parse. Reading row by
     /// row crossed the FFI `count` times; a long group chat paid for that on every
     /// snapshot (2026-10-23, long-chat-perf).
-    func readAll() -> [Message] {
-        Self.decodeRows(doc.readRowsJson(), count: count, chatId: key, row: readMessage)
+    func readAll(as viewer: String? = nil) -> [Message] {
+        Self.decodeRows(doc.readRowsJson(viewer: viewer), count: count, chatId: key) { readMessage($0, as: viewer) }
     }
 
     /// One unreadable row must not blank the chat ([feedback arbonites-blank-chat-ios-2026-10-28]):
@@ -157,17 +162,24 @@ final class CoreChatDoc {
     }
 
     /// A poll message (`docs/polls.md`); its text part is the poll in plain words. Does not
-    /// commit. Throws when the fields are not a poll within bounds.
+    /// commit. Throws when the fields are not a poll within bounds. `showVoters: nil` posts the
+    /// older shape, for a relay that does not take the newer fields (`PollOptionsFlag`).
     func insertPollMessage(
-        id: Id, question: String, options: [String], multiple: Bool, deviceId: String,
-        author: Author?, mentions: [String] = []
+        id: Id, question: String, options: [String], multiple: Bool, showVoters: Bool? = false,
+        closesInMs: Int64? = nil, deviceId: String, author: Author?, mentions: [String] = []
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: [], mentions: mentions, replyTo: nil,
             sender: author?.sender, senderHandle: author?.handle, senderName: author?.name, senderAvatar: author?.avatar,
             forwardedFrom: nil, replyRef: nil)
         try doc.insertPollMessage(id: id, question: question, options: options, multiple: multiple,
-                                  deviceId: deviceId, opts: opts)
+                                  showVoters: showVoters, closesInMs: closesInMs, deviceId: deviceId, opts: opts)
+    }
+
+    /// The author closes their poll, now: later votes do not count. Does not commit. Throws
+    /// when `sender` did not post it or it is not a poll that can be closed.
+    func closePoll(messageId: Id, sender: String) throws {
+        try doc.closePoll(messageId: messageId, sender: sender)
     }
 
     /// `sender`'s vote on a poll, replacing any earlier one; empty retracts. Does not commit.

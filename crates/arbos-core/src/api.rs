@@ -613,6 +613,11 @@ pub struct MeFeaturesDto {
     /// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
     #[serde(default)]
     pub voice_mode: Option<bool>,
+    /// The relay takes polls with a visibility flag, a duration and a close (`docs/polls.md`
+    /// §11). Absent on a relay from before them, which refuses such a poll: a client then
+    /// posts polls of the older shape and offers none of the three.
+    #[serde(default)]
+    pub poll_options: Option<bool>,
 }
 
 /// Privacy choices on `GET /me` / `PATCH /me`. Absent on an older relay → open defaults.

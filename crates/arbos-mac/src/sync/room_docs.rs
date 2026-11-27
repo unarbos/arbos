@@ -48,6 +48,11 @@ impl<T> RoomDocs<T> {
         self.entries.lock().unwrap().contains_key(key)
     }
 
+    /// The keys of every open doc, for work that has to visit each one.
+    pub(crate) fn keys(&self) -> Vec<String> {
+        self.entries.lock().unwrap().keys().cloned().collect()
+    }
+
     pub(crate) fn insert(&self, key: String, doc: T) -> Arc<RoomDoc<T>> {
         let doc = Arc::new(RoomDoc {
             value: Mutex::new(doc),

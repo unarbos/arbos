@@ -39,13 +39,13 @@ final class PollTests: XCTestCase {
     private func doc(_ key: String) throws -> CoreChatDoc {
         let doc = CoreChatDoc(key: key)
         try doc.insertPollMessage(id: "p1", question: " Where? ", options: ["Lisbon", "", "Berlin"], multiple: false,
-                                  deviceId: "dev", author: .init(sender: "user:ana", name: "Ana"))
+                                  showVoters: true, deviceId: "dev", author: .init(sender: "user:ana", name: "Ana"))
         doc.commit()
         return doc
     }
 
-    private func poll(_ doc: CoreChatDoc) -> Poll? {
-        doc.readAll().first?.parts.lazy.compactMap(\.pollValue).first
+    private func poll(_ doc: CoreChatDoc, as viewer: String? = nil) -> Poll? {
+        doc.readAll(as: viewer).first?.parts.lazy.compactMap(\.pollValue).first
     }
 
     func testAPollIsReadAsItsPartAndItsPlainText() throws {
@@ -69,7 +69,7 @@ final class PollTests: XCTestCase {
         XCTAssertEqual(poll.votes, ["2": ["user:ana", "user:ben"]])
         XCTAssertEqual(poll.voters, 2)
         XCTAssertEqual(poll.picked(by: "user:ana"), ["2"])
-        XCTAssertEqual(poll.foot(by: "Ana"), "Ana's poll · 2 voted · pick one")
+        XCTAssertEqual(poll.foot(by: "Ana"), "Ana's poll · 2 voted · pick one · names shown")
 
         // What a tap sends: a swap, or a retraction when it is the option already held.
         XCTAssertEqual(poll.picking("1", by: "user:ana"), ["1"])
@@ -86,7 +86,7 @@ final class PollTests: XCTestCase {
 
     func testAMultipleAnswerPollTogglesEachOption() {
         let poll = Poll(question: "Q", options: [ChoiceOption(id: "1", label: "A"), ChoiceOption(id: "2", label: "B")],
-                        max: 2, votes: ["1": ["user:ana"]])
+                        max: 2, votes: ["1": ["user:ana"]], counts: ["1": 1], voters: 1)
         XCTAssertEqual(poll.picking("2", by: "user:ana"), ["1", "2"])
         XCTAssertEqual(poll.picking("1", by: "user:ana"), [])
         XCTAssertEqual(poll.foot(by: nil), "Your poll · 1 voted · pick any")
@@ -98,6 +98,176 @@ final class PollTests: XCTestCase {
         XCTAssertNil(pollText(question: "Q", options: ["A", " "], multiple: false))
         XCTAssertNil(pollText(question: "Q", options: Array(repeating: "A", count: SendPollSheet.optionsMax + 1), multiple: true))
         XCTAssertNotNil(pollText(question: "Q", options: Array(repeating: "A", count: SendPollSheet.optionsMax), multiple: true))
+    }
+
+    /// The new choices ride on the part: who voted is shown only where the author said so, a
+    /// close by hand or by time closes the card, and only a poll posted with them can be closed.
+    func testVisibilityAndClosingAreReadFromThePart() throws {
+        let doc = CoreChatDoc(key: "poll-options")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: true, closesInMs: 3_600_000, deviceId: "dev",
+                                  author: .init(sender: "user:ana", name: "Ana"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ben", selections: ["1"])
+        doc.commit()
+        var poll = try XCTUnwrap(poll(doc))
+        let now = nowMs()
+        XCTAssertEqual(poll.showVoters, true)
+        XCTAssertTrue(poll.closable)
+        let closesAt = try XCTUnwrap(poll.deadline)
+        XCTAssertTrue((now + 3_590_000...now + 3_610_000).contains(closesAt))
+        XCTAssertFalse(poll.closed(now: now))
+        XCTAssertTrue(poll.closed(now: closesAt), "its own time closes it")
+        XCTAssertEqual(poll.foot(by: "Ana", now: closesAt - 2 * 3_600_000 - 1),
+                       "Ana's poll · 1 voted · pick one · names shown · closes in 2 h")
+
+        // Only its author closes it; then the core takes no vote, change or retraction.
+        XCTAssertThrowsError(try doc.closePoll(messageId: "p1", sender: "user:ben"))
+        usleep(3_000) // a vote in the very millisecond of the close is not before it
+        try doc.closePoll(messageId: "p1", sender: "user:ana")
+        doc.commit()
+        poll = try XCTUnwrap(self.poll(doc))
+        XCTAssertTrue(poll.closed(now: nowMs()), "closed by hand, an hour before its time")
+        XCTAssertLessThan(try XCTUnwrap(poll.deadline), closesAt)
+        XCTAssertEqual(poll.foot(by: nil), "Your poll · 1 voted · closed · names shown")
+        XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:cat", selections: ["2"]))
+        XCTAssertThrowsError(try doc.setPollVote(messageId: "p1", sender: "user:ben", selections: []))
+        XCTAssertEqual(try XCTUnwrap(self.poll(doc)).votes, ["1": ["user:ben"]])
+
+        // A part from before the choices existed: counts only, never closed, not closable.
+        let old = Poll(question: "Q", options: [ChoiceOption(id: "1", label: "A"), ChoiceOption(id: "2", label: "B")],
+                       max: 1, votes: [:])
+        XCTAssertNil(old.showVoters)
+        XCTAssertFalse(old.closable)
+        XCTAssertFalse(old.closed(now: .max))
+    }
+
+    /// A poll that hides its voters reaches the phone with counts and my own vote: nobody
+    /// else's id is in the part the card is drawn from, so no screen can name them.
+    func testAPollThatHidesItsVotersGivesThePhoneNoOtherNames() throws {
+        let doc = CoreChatDoc(key: "poll-hidden")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: false, deviceId: "dev", author: .init(sender: "user:zoe", name: "Zoe"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ana", selections: ["2"])
+        try doc.setPollVote(messageId: "p1", sender: "user:me", selections: ["2"])
+        doc.commit()
+        let mine = try XCTUnwrap(poll(doc, as: "user:me"))
+        XCTAssertEqual(mine.counts, ["2": 2])
+        XCTAssertEqual(mine.voters, 2)
+        XCTAssertEqual(mine.votes, ["2": ["user:me"]], "my own vote, so the card can mark it")
+        XCTAssertEqual(mine.picked(by: "user:me"), ["2"])
+        XCTAssertEqual(mine.foot(by: "Zoe"), "Zoe's poll · 2 voted · pick one")
+
+        let nobody = try XCTUnwrap(poll(doc))
+        XCTAssertEqual(nobody.votes, [:], "no names at all without a reader")
+        XCTAssertEqual(nobody.counts, ["2": 2])
+        // The row itself, as it crosses the FFI: Ana's stored vote fields are not on it.
+        let ffi = ArbosFFI.ChatDoc.open()
+        try ffi.apply(bytes: doc.exportSnapshot())
+        let row = try XCTUnwrap(ffi.readMessageJson(index: 0, viewer: "user:me"))
+        XCTAssertFalse(row.contains("user:ana"), row)
+        XCTAssertTrue(row.contains("vote|user:me"), "my own fields stay: \(row)")
+    }
+
+    /// The maker closes a poll from its hold menu, above Delete; and a custom closing time is
+    /// a duration of at least a minute and at most the week the core allows.
+    func testClosePollIsOnTheMenuAndACustomTimeIsBounded() {
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true, inPrivateChat: true, canClosePoll: true),
+                       [.copy, .reply, .forward, .closePoll, .delete])
+        XCTAssertFalse(MessageMenu.items(forMessage: true, canDelete: true).contains(.closePoll))
+        XCTAssertFalse(MessageMenuItem.closePoll.isDestructive)
+
+        let now = Date()
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(3 * 3600), from: now), 3 * 3_600_000)
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(-5), from: now), 60_000)
+        XCTAssertEqual(SendPollSheet.customDuration(until: now.addingTimeInterval(30 * 86_400), from: now),
+                       SendPollSheet.durationMaxMs)
+        XCTAssertNotNil(SendPollSheet.durations.first { $0.ms == SendPollSheet.custom })
+    }
+
+    /// The voters line names at most twelve people and counts the rest; someone with no name
+    /// to show (left the chat, blocked) is counted, never named.
+    func testTheVotersLineIsBoundedAndNamesOnlyThoseItMay() {
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: []), "Lisbon: no votes")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: ["Ana", "You"]), "Lisbon: Ana, You")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: ["Ana", nil, "Ben", nil]), "Lisbon: Ana, Ben and 2 others")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: [nil]), "Lisbon: 1 person")
+        XCTAssertEqual(Poll.voterLine(label: "Lisbon", names: [nil, nil]), "Lisbon: 2 people")
+        let many = (1...40).map { Optional("P\($0)") }
+        let line = Poll.voterLine(label: "Lisbon", names: many)
+        XCTAssertTrue(line.hasSuffix("P12 and 28 others"), line)
+        XCTAssertFalse(line.contains("P13"), line)
+    }
+
+    /// What is posted follows what the relay says it takes: without the flag the poll goes
+    /// out in the older shape whatever the sheet held, and the flag is off until `/me`
+    /// answers for this account.
+    func testAPollIsPostedInTheShapeTheRelayTakes() {
+        let draft = PollDraft(question: "Q", options: ["A", "B"], multiple: false, showVoters: true, closesInMs: 3_600_000)
+        let newer = draft.posted(relayTakesOptions: true)
+        XCTAssertEqual(newer.showVoters, true)
+        XCTAssertEqual(newer.closesInMs, 3_600_000)
+        let older = draft.posted(relayTakesOptions: false)
+        XCTAssertNil(older.showVoters)
+        XCTAssertNil(older.closesInMs)
+        // In memory only: nothing of it is stored for the next launch or the next account.
+        PollOptionsFlag.shared.set(true)
+        XCTAssertNil(UserDefaults.standard.object(forKey: "features.poll_options"))
+        PollOptionsFlag.shared.set(false)
+    }
+
+    /// A poll bears its message's reactions, as the Mac draws them: the hold menu offers the
+    /// reaction row on a poll, so a reaction given there has to show.
+    func testAPollBearsItsReactions() throws {
+        let doc = try doc("poll-reactions")
+        var message = try XCTUnwrap(doc.readAll().first)
+        message.reactions = [MessageReaction(emoji: "🔥", senders: ["user:ben"])]
+        let rows = Transcript.rows([message], projectId: "people:c1", me: "user:ben", people: true, multiParty: true)
+        let card = try XCTUnwrap(rows.first { if case .poll = $0.kind { return true }; return false })
+        XCTAssertTrue(Transcript.bearsReactions(card.kind))
+        XCTAssertEqual(card.reactions, message.reactions)
+    }
+
+    /// Until the account has loaded nobody knows whose poll it is: it is not drawn as mine,
+    /// so "Close poll" is not offered on someone else's.
+    func testBeforeTheAccountLoadsNoPollIsMine() throws {
+        let doc = try doc("poll-no-account")
+        let rows = Transcript.rows(doc.readAll(), projectId: "people:c1", me: nil, people: true, multiParty: true)
+        let card = try XCTUnwrap(rows.first { if case .poll = $0.kind { return true }; return false })
+        guard case .poll(_, let by, _, _) = card.kind else { return XCTFail("a poll row") }
+        XCTAssertEqual(by, "Ana", "someone's poll, not mine")
+        XCTAssertEqual(card.role, .project)
+    }
+
+    /// VoiceOver hears an option's count and whether it is my pick; a question card that is
+    /// not a poll reads as before.
+    func testAnOptionIsSpokenWithItsCountAndState() {
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "A", label: "Lisbon", votes: "3", chosen: true), "A, Lisbon, 3 votes, chosen")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "B", label: "Berlin", votes: "1", chosen: false), "B, Berlin, 1 vote")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "B", label: "Berlin", votes: "0", chosen: false), "B, Berlin, 0 votes")
+        XCTAssertEqual(QuestionCard.optionSpoken(letter: "A", label: "Yes", votes: nil, chosen: false), "A, Yes")
+    }
+
+    /// A poll from before "Show who voted" names its voters to every reader, as it always
+    /// has; only a poll whose author turned the names off hides them.
+    func testAPollFromBeforeTheChoiceStillNamesItsVoters() throws {
+        let doc = CoreChatDoc(key: "poll-older")
+        try doc.insertPollMessage(id: "p1", question: "Where?", options: ["Lisbon", "Berlin"], multiple: false,
+                                  showVoters: nil, deviceId: "dev", author: .init(sender: "user:zoe", name: "Zoe"))
+        try doc.setPollVote(messageId: "p1", sender: "user:ana", selections: ["2"])
+        doc.commit()
+        let older = try XCTUnwrap(poll(doc))
+        XCTAssertNil(older.showVoters)
+        XCTAssertEqual(older.votes, ["2": ["user:ana"]])
+        XCTAssertFalse(older.closable)
+    }
+
+    /// A reply quotes a poll by its question: the strip above the composer and the header in
+    /// the reply's bubble both read "Poll: <question>", not the list of options.
+    func testAReplyQuotesAPollByItsQuestion() throws {
+        let doc = try doc("poll-quote")
+        let message = try XCTUnwrap(doc.readAll().first)
+        XCTAssertEqual(Quote.line(of: message, maxChars: 160), "Poll: Where?")
+        XCTAssertEqual(Quote.forReply("p1", in: [message]).text, "Poll: Where?")
     }
 
     func testThePollRowIsTheCardAndNotATextBubble() throws {

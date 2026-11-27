@@ -42,6 +42,9 @@ pub enum MessageMenuItem {
     /// The message shows a link preview card and the user may edit the message: drop the
     /// card for everyone ([feedback link-embeds-mac-2026-10-27]).
     RemovePreview,
+    /// The maker's own open poll: close it for good. Not one of [`ITEMS`] — a bubble never
+    /// has it; [`render`] adds it above Delete on a poll ([`can_close_poll`]).
+    ClosePoll,
     Delete,
 }
 
@@ -54,6 +57,7 @@ impl MessageMenuItem {
             MessageMenuItem::ReplyInDm => "Reply in DM",
             MessageMenuItem::Edit => "Edit",
             MessageMenuItem::RemovePreview => "Remove preview",
+            MessageMenuItem::ClosePoll => "Close poll",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -67,6 +71,7 @@ impl MessageMenuItem {
             MessageMenuItem::ReplyInDm => "bubble.left",
             MessageMenuItem::Edit => "pencil",
             MessageMenuItem::RemovePreview => "link",
+            MessageMenuItem::ClosePoll => "lock",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -100,6 +105,16 @@ pub fn can_edit_message(me_id: &str, message: &Message) -> bool {
     // A poll is not editable (`docs/polls.md`); its text is only the poll in plain words.
     let poll = message.parts.iter().any(|p| matches!(p, Part::Poll { .. }));
     mine && !poll && !message.plain_text().trim().is_empty()
+}
+
+/// The maker may close this poll now: it is theirs, it can be closed at all (every poll
+/// posted since closing exists), and it is still open by the core's one rule.
+pub fn can_close_poll(me_id: &str, message: &Message, now_ms: i64) -> bool {
+    message.sender == format!("user:{me_id}")
+        && message.parts.iter().any(|p| {
+            matches!(p, Part::Poll { show_voters: Some(_), deadline, .. }
+                if !arbos_core::poll::closed(*deadline, now_ms))
+        })
 }
 
 /// The items for one bubble: Copy, Reply and Forward always; Reply in DM only
@@ -247,7 +262,19 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             }),
         )
     };
-    let items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let mut items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let closes_poll = {
+        let state = shell.state.read(cx);
+        let message = state
+            .messages_of(&chat_id)
+            .iter()
+            .find(|m| m.id == message_id);
+        message.is_some_and(|m| can_close_poll(&state.me_id(), m, arbos_core::poll::now()))
+    };
+    if closes_poll {
+        let above_delete = items.iter().position(|i| i.danger()).unwrap_or(items.len());
+        items.insert(above_delete, MessageMenuItem::ClosePoll);
+    }
     let origin = place(at, menu_size_for(items.len()), window.viewport_size());
     let mut reaction_row = div()
         .h(px(MENU_ROW_HEIGHT))
@@ -296,6 +323,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                 item.danger(),
                 &theme,
             )
+            .debug_selector(move || format!("message-menu-{}", item.label()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.message_menu = None;
                 run(this, item, chat.clone(), msg.clone(), cx);
@@ -360,6 +388,13 @@ fn run(
                 c.input.update(cx, |input, cx| input.set_text(text, cx));
             });
         }
+        MessageMenuItem::ClosePoll => {
+            // Asked first, on the poll's own card: a close is for everyone and cannot be
+            // taken back (Delete has no confirm; this is not a delete).
+            shell
+                .transcript
+                .update(cx, |t, cx| t.ask_close_poll(message_id, cx));
+        }
         MessageMenuItem::RemovePreview => {
             shell
                 .state
@@ -379,6 +414,38 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Close poll is the maker's, on a poll that can be closed and is still open.
+    #[test]
+    fn close_poll_is_offered_to_the_maker_of_an_open_poll() {
+        let poll = |sender: &str, show_voters: serde_json::Value, deadline: serde_json::Value| {
+            let row = serde_json::json!({ "id": "p1", "role": "user", "sender": sender,
+                "status": "done", "createdAt": 1,
+                "parts": [{ "id": "poll", "kind": "poll", "question": "Q", "max": 1,
+                    "options": [{ "id": "1", "label": "A" }, { "id": "2", "label": "B" }],
+                    "showVoters": show_voters, "deadline": deadline }] });
+            serde_json::from_value::<Message>(row).expect("a message")
+        };
+        let null = serde_json::Value::Null;
+        let open = poll("user:me", false.into(), null.clone());
+        assert!(can_close_poll("me", &open, 100));
+        assert!(!can_close_poll("ana", &open, 100), "not hers");
+        assert!(can_close_poll(
+            "me",
+            &poll("user:me", true.into(), 200.into()),
+            100
+        ));
+        assert!(
+            !can_close_poll("me", &poll("user:me", true.into(), 100.into()), 100),
+            "closed"
+        );
+        assert!(
+            !can_close_poll("me", &poll("user:me", null.clone(), null), 100),
+            "an older poll"
+        );
+        assert_eq!(MessageMenuItem::ClosePoll.label(), "Close poll");
+        assert!(!MessageMenuItem::ClosePoll.danger());
+    }
 
     const WIN: (f32, f32) = (1180.0, 780.0);
 
@@ -603,5 +670,205 @@ mod tests {
             }
         }
         assert_eq!(sent, [(DM.to_owned(), "m1".to_owned(), "👍".to_owned())]);
+    }
+
+    /// A poll in a DM of mine, as the transcript holds it: built by the core and read as
+    /// the reader `gh_me`.
+    fn poll_message(id: &str, closes_in: Option<i64>, chat: &str) -> crate::model::Message {
+        use arbos_core::doc::{ChatDoc, UserMessageOpts, POLL_CLOSES_FIELD};
+        let doc = ChatDoc::new(Some(1), false);
+        let labels = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        let poll = arbos_core::poll::Poll::new("Where?", &labels, false, false, closes_in).unwrap();
+        let opts = UserMessageOpts {
+            sender: Some("user:gh_me".into()),
+            ..Default::default()
+        };
+        doc.transact(|d| {
+            d.append_poll_message(id, &poll, "dev", &opts).unwrap();
+            if closes_in.is_some() {
+                // Its time ran out long ago.
+                d.set_message_fields(id, &[(POLL_CLOSES_FIELD, serde_json::json!(5))]);
+            }
+        });
+        let mut row = doc.projected_rows_for(Some("user:gh_me")).remove(0);
+        row["chatId"] = serde_json::json!(chat);
+        serde_json::from_value(row).expect("a core row reads as a Message")
+    }
+
+    /// A click on a closed poll's option casts nothing. On an open one it votes; its maker's
+    /// "Close poll" asks on the card first, Cancel leaves it open, and the confirm sends the
+    /// close.
+    #[gpui::test]
+    fn a_closed_poll_takes_no_click_and_closing_one_asks_first(cx: &mut gpui::TestAppContext) {
+        use crate::sync::ClientCommand;
+        const DM: &str = "01DMSAM0000000000000000000";
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            crate::ui::motion::PulseClock::init(cx);
+        });
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let state =
+            cx.new(|cx| crate::app::AppState::new(Box::new(Recording(commands.clone())), cx));
+        let show = |state: &gpui::Entity<crate::app::AppState>,
+                    cx: &mut gpui::TestAppContext,
+                    message: crate::model::Message| {
+            state.update(cx, |s, cx| {
+                s.messages.insert(DM.into(), vec![message]);
+                cx.notify();
+            });
+        };
+        state.update(cx, |s, cx| {
+            s.account = Some(crate::model::AccountView {
+                id: "gh_me".into(),
+                ..Default::default()
+            });
+            s.projects.push(crate::model::Project {
+                id: DM.into(),
+                name: "sam".into(),
+                kind: crate::model::SpaceKind::Dm,
+                ..Default::default()
+            });
+            let chat = serde_json::from_value(serde_json::json!({
+                "id": DM, "project_id": DM, "title": "sam", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": 1,
+            }))
+            .expect("chat");
+            s.chats.insert(DM.into(), vec![chat]);
+            s.selected_project = Some(DM.into());
+            s.active_tab.insert(DM.into(), DM.into());
+            cx.notify();
+        });
+        show(&state, cx, poll_message("p-closed", Some(3_600_000), DM));
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        let settle = |vcx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                state.update(vcx, |_, cx| cx.notify());
+                vcx.run_until_parked();
+                rt.block_on(tokio::task::yield_now());
+            }
+        };
+        let sent = || {
+            let mut out = Vec::new();
+            let mut slot = commands.lock().expect("commands");
+            while let Ok(c) = slot.as_mut().expect("the source ran").try_recv() {
+                match c {
+                    ClientCommand::VotePoll { message_id, .. } => out.push(("vote", message_id)),
+                    ClientCommand::ClosePoll { message_id, .. } => out.push(("close", message_id)),
+                    _ => {}
+                }
+            }
+            out
+        };
+        let none = gpui::Modifiers::default();
+        let click = |vcx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} drawn"));
+            vcx.simulate_click(at.center(), none);
+            vcx.run_until_parked();
+        };
+        let right_click = |vcx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} drawn"));
+            vcx.simulate_mouse_down(at.center(), gpui::MouseButton::Right, none);
+            vcx.simulate_mouse_up(at.center(), gpui::MouseButton::Right, none);
+            vcx.run_until_parked();
+        };
+
+        // Closed: the option takes no click, and its maker is not offered a close.
+        settle(vcx);
+        click(vcx, "poll-option#1");
+        assert_eq!(sent(), []);
+        right_click(vcx, "poll-card");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.message_menu.is_some()));
+        assert!(vcx.debug_bounds("message-menu-Close poll").is_none());
+        shell.update(vcx, |sh, cx| {
+            sh.message_menu = None;
+            cx.notify();
+        });
+
+        // Open: a click votes.
+        show(&state, vcx, poll_message("p-open", None, DM));
+        settle(vcx);
+        click(vcx, "poll-option#1");
+        assert_eq!(sent(), [("vote", "p-open".to_owned())]);
+
+        // Close poll asks on the card; Cancel sends nothing and the question goes away.
+        right_click(vcx, "poll-card");
+        click(vcx, "message-menu-Close poll");
+        settle(vcx);
+        assert!(
+            vcx.debug_bounds("poll-close-confirm").is_some(),
+            "asked first"
+        );
+        assert_eq!(sent(), []);
+        click(vcx, "poll-close-cancel");
+        settle(vcx);
+        assert!(vcx.debug_bounds("poll-close-confirm").is_none());
+        assert_eq!(sent(), []);
+
+        // And the confirm closes it.
+        right_click(vcx, "poll-card");
+        click(vcx, "message-menu-Close poll");
+        settle(vcx);
+        click(vcx, "poll-close-confirm");
+        assert_eq!(sent(), [("close", "p-open".to_owned())]);
+    }
+
+    /// What the Mac posts depends on what the relay says it takes: with `poll_options` the
+    /// poll carries the visibility choice and the picked duration; without, the older shape
+    /// that every relay stores, whatever the form held.
+    #[gpui::test]
+    fn a_poll_is_posted_in_the_shape_the_relay_takes(cx: &mut gpui::TestAppContext) {
+        use crate::sync::ClientCommand;
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state =
+            cx.new(|cx| crate::app::AppState::new(Box::new(Recording(commands.clone())), cx));
+        let options = ["Lisbon".to_owned(), "Berlin".to_owned()];
+        let posted = |flag: bool, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |s, cx| {
+                s.poll_options = flag;
+                assert!(s.send_poll(
+                    "c1".into(),
+                    "Where?",
+                    &options,
+                    false,
+                    true,
+                    Some(3_600_000),
+                    cx
+                ));
+            });
+            cx.run_until_parked();
+            rt.block_on(tokio::task::yield_now());
+            let mut slot = commands.lock().expect("commands");
+            let mut polls = Vec::new();
+            while let Ok(c) = slot.as_mut().expect("the source ran").try_recv() {
+                if let ClientCommand::SendPoll { poll, .. } = c {
+                    polls.push(poll);
+                }
+            }
+            polls.pop().expect("a poll was sent")
+        };
+        let newer = posted(true, cx);
+        assert_eq!(
+            (newer.show_voters, newer.closes_in),
+            (Some(true), Some(3_600_000))
+        );
+        let older = posted(false, cx);
+        assert_eq!((older.show_voters, older.closes_in), (None, None));
+        assert!(!older.timed(), "no close offered on it either");
     }
 }
