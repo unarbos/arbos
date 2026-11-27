@@ -16,6 +16,7 @@ use chrono_tz::Tz;
 use croner::Cron;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use arbos_core::api::{FireRoutineResponseDto, RoutineDto, RoutineRunDto};
 use arbos_core::ids::{now_ms, ulid};
@@ -24,6 +25,10 @@ use arbos_core::wire::BoxState;
 use crate::api::resolve_project_id;
 use crate::auth::Principal;
 use crate::boxes;
+use crate::connectors::{
+    self,
+    providers::{ActionKind, Provider},
+};
 use crate::db::{Routine, RoutineRun};
 use crate::state::AppState;
 
@@ -54,12 +59,77 @@ fn require_once_in_future(trigger: &Trigger) -> Result<(), String> {
     }
 }
 
+/// Largest serialized `args` a check may carry.
+const CHECK_ARGS_MAX: usize = 2048;
+
+/// A read-only connector call (`{ provider, action, args? }`) a cron routine makes before it
+/// runs. Same reach as the box's own `POST /connectors/call`, minus writes and sends.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    pub provider: String,
+    pub action: String,
+    #[serde(default)]
+    pub args: serde_json::Map<String, Value>,
+}
+
+impl Check {
+    fn parse(v: &Value) -> Result<Self, String> {
+        let c: Check = serde_json::from_value(v.clone()).map_err(|e| format!("bad check: {e}"))?;
+        let spec = Provider::parse(&c.provider)
+            .and_then(|p| p.action(&c.action))
+            .ok_or_else(|| format!("check: no action {}.{}", c.provider, c.action))?;
+        if spec.kind != ActionKind::Read {
+            return Err(format!("check: {}.{} is not a read", c.provider, c.action));
+        }
+        let args = Value::Object(c.args.clone());
+        let missing = spec.missing(&args);
+        if !missing.is_empty() {
+            return Err(format!("check: missing args {}", missing.join(", ")));
+        }
+        if args.to_string().len() > CHECK_ARGS_MAX {
+            return Err(format!("check args must be under {CHECK_ARGS_MAX} bytes"));
+        }
+        Ok(c)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({ "provider": self.provider, "action": self.action, "args": self.args })
+    }
+}
+
+/// What a due check decided. A check that cannot be read never hides a run: the routine fires
+/// and is told, so the gap gets reported instead of passing as "nothing new".
+#[derive(Debug, PartialEq)]
+enum Checked {
+    Unchanged,
+    Changed,
+    Unreadable(String),
+}
+
+async fn run_check(state: &AppState, rt: &Routine, check: &Check) -> Checked {
+    let args = Value::Object(check.args.clone());
+    let reply = match connectors::broker_call(state, &check.provider, &check.action, &args).await {
+        Ok(v) if v["ok"].as_bool() == Some(true) => v,
+        Ok(v) => return Checked::Unreadable(format!("HTTP {}", v["status"])),
+        Err((_, e)) => return Checked::Unreadable(e),
+    };
+    let hash = hex::encode(Sha256::digest(reply["data"].to_string()));
+    match state.db.routine_check_changed(&rt.id, &hash) {
+        Ok(false) => Checked::Unchanged,
+        Ok(true) => Checked::Changed,
+        Err(e) => Checked::Unreadable(e.to_string()),
+    }
+}
+
 /// A validated trigger. The JSON form in the table is what clients send.
 #[derive(Debug, Clone)]
 pub enum Trigger {
     Cron {
         expr: String,
         tz: Tz,
+        /// A connector read the relay makes first; an unchanged answer skips the run.
+        check: Option<Check>,
     },
     /// Fire once at `at_ms` (unix ms), then stop. Accepts `at` / `at_ms`, or `in_seconds` (converted at parse).
     Once {
@@ -89,7 +159,11 @@ impl Trigger {
                 let tz: Tz = tz_name
                     .parse()
                     .map_err(|_| format!("unknown time zone {tz_name:?}"))?;
-                Ok(Trigger::Cron { expr, tz })
+                let check = match v.get("check") {
+                    None | Some(Value::Null) => None,
+                    Some(c) => Some(Check::parse(c)?),
+                };
+                Ok(Trigger::Cron { expr, tz, check })
             }
             Some("once") => {
                 // Past `at` values are allowed here: the scheduler re-parses the stored
@@ -142,7 +216,13 @@ impl Trigger {
 
     pub fn to_json(&self) -> Value {
         match self {
-            Trigger::Cron { expr, tz } => json!({ "kind": "cron", "expr": expr, "tz": tz.name() }),
+            Trigger::Cron { expr, tz, check } => {
+                let mut v = json!({ "kind": "cron", "expr": expr, "tz": tz.name() });
+                if let Some(c) = check {
+                    v["check"] = c.to_json();
+                }
+                v
+            }
             Trigger::Once { at_ms } => json!({ "kind": "once", "at": at_ms }),
             Trigger::Webhook { secret } => json!({ "kind": "webhook", "secret": secret }),
             Trigger::Event { event } => json!({ "kind": "event", "event": event }),
@@ -154,7 +234,7 @@ impl Trigger {
 /// Cron uses the next occurrence *strictly after* `now_ms`; once uses `at_ms` while it is still due.
 pub fn next_run_ms(trigger: &Trigger, now_ms: i64) -> Option<i64> {
     match trigger {
-        Trigger::Cron { expr, tz } => {
+        Trigger::Cron { expr, tz, .. } => {
             let cron = Cron::from_str(expr).ok()?;
             let now = Utc.timestamp_millis_opt(now_ms).single()?.with_timezone(tz);
             cron.find_next_occurrence(&now, false)
@@ -301,13 +381,40 @@ pub async fn spawn_scheduler(state: AppState) {
                             .db
                             .update_routine(&rt.id, None, None, None, None, Some(false), None);
                 }
+                let mut context = None;
+                if let (
+                    true,
+                    Trigger::Cron {
+                        check: Some(check), ..
+                    },
+                ) = (fires, &trigger)
+                {
+                    match run_check(&state, &rt, check).await {
+                        Checked::Unchanged => {
+                            let _ = state.db.insert_routine_run(&RoutineRun {
+                                id: ulid(),
+                                routine_id: rt.id.clone(),
+                                started_at: now,
+                                finished_at: Some(now),
+                                status: "skipped".into(),
+                                message_id: None,
+                                note: Some("check: nothing new".into()),
+                            });
+                            continue;
+                        }
+                        Checked::Changed => {}
+                        Checked::Unreadable(why) => {
+                            context = Some(json!({ "check_failed": why }));
+                        }
+                    }
+                }
                 if fires {
                     let cause = match &trigger {
                         Trigger::Cron { .. } => "cron",
                         Trigger::Once { .. } => "once",
                         Trigger::Webhook { .. } | Trigger::Event { .. } => "schedule",
                     };
-                    if let Err(e) = fire(&state, &rt, cause, None).await {
+                    if let Err(e) = fire(&state, &rt, cause, context).await {
                         tracing::warn!(routine = %rt.id, error = %e, "routine fire failed");
                     }
                 }
@@ -675,6 +782,92 @@ pub async fn webhook_fire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checked(check: Value) -> Result<Trigger, String> {
+        Trigger::parse(&json!({ "kind": "cron", "expr": "0 9 * * *", "check": check }))
+    }
+
+    /// A check is a read and nothing else, and survives the round trip through the table.
+    #[test]
+    fn a_check_must_be_a_known_read_with_its_arguments() {
+        let t = checked(json!({ "provider": "google", "action": "list_threads" })).unwrap();
+        assert_eq!(t.to_json()["check"]["action"], "list_threads");
+        assert!(Trigger::parse(&t.to_json()).is_ok());
+
+        for bad in [
+            json!({ "provider": "google", "action": "send", "args": { "to": "a@b.c", "subject": "s", "body": "b" } }),
+            json!({ "provider": "google", "action": "nope" }),
+            json!({ "provider": "nowhere", "action": "list_threads" }),
+            json!({ "provider": "google", "action": "read_message" }),
+            json!({ "provider": "google", "action": "list_threads", "url": "http://169.254.169.254/" }),
+            json!({ "provider": "google", "action": "list_threads", "args": { "q": "x".repeat(CHECK_ARGS_MAX) } }),
+            json!("list_threads"),
+        ] {
+            assert!(checked(bad.clone()).is_err(), "accepted {bad}");
+        }
+    }
+
+    /// The first look runs, an unchanged answer does not, a failed run is looked at again, and
+    /// a source that cannot be read never passes as "nothing new".
+    #[tokio::test]
+    async fn an_unchanged_check_skips_and_an_unreadable_one_does_not() {
+        use crate::state::{test_support::test_state, AuthMode};
+        let state = test_state(AuthMode::Github);
+        let rt = Routine {
+            id: ulid(),
+            project_id: "p1".into(),
+            chat_id: "c1".into(),
+            name: "inbox".into(),
+            prompt: "Tell me what is new.".into(),
+            trigger: json!({}),
+            enabled: true,
+            created_at: 0,
+            last_run_at: None,
+            next_run_at: None,
+        };
+        state.db.insert_routine(&rt).unwrap();
+        let check =
+            Check::parse(&json!({ "provider": "google", "action": "list_threads" })).unwrap();
+
+        // Not connected yet: the routine must still run, and be told why.
+        assert!(matches!(
+            run_check(&state, &rt, &check).await,
+            Checked::Unreadable(_)
+        ));
+
+        state
+            .db
+            .upsert_connector(&crate::db::Connector {
+                id: ulid(),
+                provider: "google".into(),
+                label: "me".into(),
+                scopes: vec![],
+                status: "connected".into(),
+                config: json!({}),
+                created_at: 0,
+                last_used_at: None,
+                last_error: None,
+            })
+            .unwrap();
+        assert_eq!(run_check(&state, &rt, &check).await, Checked::Changed);
+        assert_eq!(run_check(&state, &rt, &check).await, Checked::Unchanged);
+
+        let run = RoutineRun {
+            id: ulid(),
+            routine_id: rt.id.clone(),
+            started_at: 0,
+            finished_at: None,
+            status: "queued".into(),
+            message_id: None,
+            note: None,
+        };
+        state.db.insert_routine_run(&run).unwrap();
+        state
+            .db
+            .update_routine_run(&run.id, "failed", None, None)
+            .unwrap();
+        assert_eq!(run_check(&state, &rt, &check).await, Checked::Changed);
+    }
 
     fn at(s: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(s)

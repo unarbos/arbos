@@ -676,6 +676,7 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE routines ADD COLUMN check_hash TEXT", []);
         let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
         // Agent sites: an explicit prefix move keeps the old name answering 301 for 30 days.
         let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_from TEXT", []);
@@ -3171,6 +3172,17 @@ impl Db {
         })
     }
 
+    /// Remember what a routine's check last saw; true when `hash` differs from it.
+    pub fn routine_check_changed(&self, id: &str, hash: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE routines SET check_hash = ?2 WHERE id = ?1 AND check_hash IS NOT ?2",
+                params![id, hash],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn delete_routine(&self, id: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
@@ -3225,6 +3237,15 @@ impl Db {
     ) -> Result<bool> {
         let finished = matches!(status, "done" | "failed" | "skipped").then(now_ms);
         self.with(|c| {
+            if status == "failed" {
+                // A failed run told the owner nothing: forget what its check saw so the next
+                // tick runs again instead of skipping as "nothing new".
+                c.execute(
+                    "UPDATE routines SET check_hash = NULL
+                     WHERE id = (SELECT routine_id FROM routine_runs WHERE id = ?1)",
+                    params![id],
+                )?;
+            }
             c.execute(
                 "UPDATE routine_runs SET status = ?2, message_id = COALESCE(?3, message_id), note = COALESCE(?4, note),
                         finished_at = COALESCE(?5, finished_at) WHERE id = ?1",

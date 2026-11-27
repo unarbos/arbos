@@ -1377,6 +1377,10 @@ pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
     // user → their soonest routine. The rows come soonest first.
     let mut users: HashMap<String, i64> = HashMap::new();
     for rt in &due {
+        // A routine with a check wakes the box only once its check finds something new.
+        if rt.trigger.get("check").is_some_and(|c| !c.is_null()) {
+            continue;
+        }
         if let (Some(user_id), Some(at)) = (state.user_of(&rt.project_id), rt.next_run_at) {
             users.entry(user_id).or_insert(at);
         }

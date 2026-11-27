@@ -29,7 +29,7 @@ pub fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "routines_create",
-            "description": "Schedule a routine that will message a chat later. Use for reminders and recurring jobs. trigger: {kind:\"cron\", expr, tz?} (five-field cron, e.g. \"0 9 * * 1-5\"), {kind:\"once\", in_seconds} or {kind:\"once\", at} (unix ms), {kind:\"webhook\"}, or {kind:\"event\", event}. prompt is what you will be asked to do when it fires (write it as an instruction to yourself, e.g. \"Tell the user: time is up.\"). Defaults to the chat you are in: inside a job, the chat that job runs beside. A routine is a schedule, not a messaging path — to say something now, use `send_message` with no `to`; from inside a job a `once` trigger under 60 seconds is refused.",
+            "description": "Schedule a routine that will message a chat later. Use for reminders and recurring jobs. trigger: {kind:\"cron\", expr, tz?} (five-field cron, e.g. \"0 9 * * 1-5\"), {kind:\"once\", in_seconds} or {kind:\"once\", at} (unix ms), {kind:\"webhook\"}, or {kind:\"event\", event}. A cron trigger may add check: {provider, action, args?}, one connector read action: the relay makes that read first and runs the routine only when its answer changed, so a quiet inbox or repo costs nothing. prompt is what you will be asked to do when it fires (write it as an instruction to yourself, e.g. \"Tell the user: time is up.\"). Defaults to the chat you are in: inside a job, the chat that job runs beside. A routine is a schedule, not a messaging path — to say something now, use `send_message` with no `to`; from inside a job a `once` trigger under 60 seconds is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
