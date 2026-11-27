@@ -12343,10 +12343,14 @@ mod time_divider_tests {
     }
 
     /// 23:52 → 00:03 is four minutes short of the hour and still a new day:
-    /// neither client drew a stamp there before this.
+    /// neither client drew a stamp there before this. The midnight is the
+    /// reader's own, in the zone the rows are built with, so this holds off UTC.
     #[test]
     fn a_new_day_draws_one_on_a_gap_too_short_for_the_hour() {
-        let before_midnight = NOON + 11 * 60 * MINUTE + 52 * MINUTE;
+        let local_midnight = (NOON + 12 * 60 * MINUTE)
+            .checked_add_signed(-i64::from(utc_offset_seconds()) * 1000)
+            .expect("in range");
+        let before_midnight = local_midnight - 8 * MINUTE;
         let messages = [
             person("m1", "last of the night", before_midnight),
             person("m2", "one more thought", before_midnight + 11 * MINUTE),
