@@ -1,0 +1,542 @@
+# promtool test rules rules_test.yml   (check.sh runs it)
+rule_files:
+  - rules.yml
+  - subnet-rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # Every source series carries the labels that identify a box, a user or the host. Whatever the
+  # subnet rules produce from them must come out with a name and nothing else: this list is the
+  # complete expected output, so a rule that lets a label through (or a new rule not listed) fails.
+  - name: subnet aggregates carry no labels
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x20
+      - series: 'probe_success{job="public-https", instance="https://relay.arbos.life/healthz"}'
+        values: 1x20
+      - series: 'probe_success{job="public-https", instance="https://arbos.life/"}' # Cloudflare challenged the probe: not the partner's "reachable"
+        values: 0x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="2.5", instance="host-1"}'
+        values: 0+50x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="+Inf", instance="host-1"}'
+        values: 0+50x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="10", instance="host-1"}'
+        values: 0+5x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf", instance="host-1"}'
+        values: 0+5x20
+      - series: 'arbos_relay_uptime_seconds{instance="127.0.0.1:9108", job="relay"}'
+        values: 100x20
+      - series: 'arbos_agentd_uptime_seconds{box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
+        values: 100x20
+      - series: 'arbos_relay_box_scrapes{result="ok", instance="127.0.0.1:9108", job="relay"}'
+        values: 1x20
+      - series: 'arbos_relay_box_scrapes{result="old_image", instance="127.0.0.1:9108", job="relay"}'
+        values: 1x20
+      - series: 'arbos_relay_box_scrapes{result="unreachable", instance="127.0.0.1:9108", job="relay"}'
+        values: 0x20
+      - series: 'arbos_relay_box_scrapes{result="pending", instance="127.0.0.1:9108", job="relay"}'
+        values: 0x20
+      - series: 'container_last_seen{name="arbos-box-u_alice", id="/docker/aaa", image="arbos-agent:1", instance="host-1"}'
+        values: 1x20
+      - series: 'container_last_seen{name="arbos-box-u_bob", id="/docker/bbb", image="arbos-agent:1", instance="host-1"}'
+        values: 1x20
+      - series: 'container_last_seen{name="postgres", id="/docker/ccc", instance="host-1"}'
+        values: 1x20
+      - series: 'arbos_relay_boxes_turn_running{instance="host-1"}'
+        values: 21x20
+      - series: 'node_filesystem_avail_bytes{fstype="vfat", mountpoint="/boot/efi", device="/dev/sda15", instance="host-1"}' # nearly full, and not ours
+        values: 1x20
+      - series: 'node_filesystem_size_bytes{fstype="vfat", mountpoint="/boot/efi", device="/dev/sda15", instance="host-1"}'
+        values: 100x20
+      - series: 'arbos_relay_boxes{state="asleep", instance="host-1"}'
+        values: 3x20
+      - series: 'arbos_relay_waitlist_length{instance="host-1"}'
+        values: 0x20
+      - series: 'arbos_relay_boxes_max{instance="host-1"}'
+        values: 100x20
+      - series: 'arbos_relay_box_starts_total{result="ok", instance="host-1"}'
+        values: 0+27x20
+      - series: 'arbos_relay_box_starts_total{result="failed", instance="host-1"}'
+        values: 0+3x20
+      - series: 'arbos_agentd_turns_started_total{box="0a1b2c3d4e5f", instance="127.0.0.1:9108"}'
+        values: 0+60x20
+      - series: 'arbos_agentd_turns_finished_total{box="0a1b2c3d4e5f", result="done"}'
+        values: 0+54x20
+      - series: 'arbos_agentd_turns_finished_total{box="1b2c3d4e5f60", result="error"}'
+        values: 0+6x20
+      - series: 'arbos_agentd_turns_running{box="0a1b2c3d4e5f"}'
+        values: 2x20
+      - series: 'arbos_agentd_sends_waiting{box="1b2c3d4e5f60"}'
+        values: 5x20
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="10"}'
+        values: 0+30x20
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="+Inf"}'
+        values: 0+30x20
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx", instance="host-1"}'
+        values: 0+90x20
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx", instance="host-1"}'
+        values: 0+10x20
+      - series: 'arbos_relay_tokens_total{kind="input", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+300x20
+      - series: 'arbos_relay_tokens_total{kind="cache_read", instance="127.0.0.1:9108", job="relay"}'
+        values: 0+2700x20
+      # per-box series live in the same Prometheus: none of them may reach a subnet rule
+      - series: 'arbos_relay_box_tokens_total{box="0a1b2c3d4e5f", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+999x20
+      - series: 'arbos_relay_box_info{box="0a1b2c3d4e5f", container="arbos-box-u_alice", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      # three boxes: alice's working, bob's asleep, and one using tokens with no turn flagged
+      - series: 'arbos_relay_box_state{box="0a1b2c3d4e5f", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="0a1b2c3d4e5f", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_state{box="1b2c3d4e5f60", state="asleep", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="1b2c3d4e5f60", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="1b2c3d4e5f60", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_state{box="2c3d4e5f6071", state="awake", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 1x20
+      - series: 'arbos_relay_box_turn_running{box="2c3d4e5f6071", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0x20
+      - series: 'arbos_relay_box_tokens_total{box="2c3d4e5f6071", kind="output", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+2000x20
+      - series: 'container_cpu_usage_seconds_total{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 0+7.4x20
+      - series: 'container_memory_working_set_bytes{name="arbos-box-u_alice", id="/docker/aaa", instance="host-1"}'
+        values: 2900000000x20
+      - series: 'arbos_relay_boxes{state="awake", instance="host-1"}'
+        values: 30x20
+      - series: 'arbos_relay_boxes{state="waking", instance="host-1"}'
+        values: 1x20
+      - series: 'arbos_relay_boxes{state="error", instance="host-1"}'
+        values: 0x20
+      - series: 'arbos_relay_spend_today_usd{instance="host-1"}'
+        values: 125x20
+      - series: 'arbos_relay_spend_daily_cap_usd{instance="host-1"}'
+        values: 500x20
+      - series: 'node_cpu_seconds_total{mode="idle", cpu="0", instance="host-1"}'
+        values: 0+15x20
+      - series: 'node_cpu_seconds_total{mode="user", cpu="0", instance="host-1"}'
+        values: 0+15x20
+      - series: 'node_memory_MemAvailable_bytes{instance="host-1"}'
+        values: 25x20
+      - series: 'node_memory_MemTotal_bytes{instance="host-1"}'
+        values: 100x20
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", device="/dev/sda1", instance="host-1"}'
+        values: 27x20
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", device="/dev/sda1", instance="host-1"}'
+        values: 100x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:.+"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:relay_up", value: 1 }
+          - { labels: "subnet:public_up", value: 1 }
+          # counts of machines: 0, -5 for one to four ("<5"), otherwise the nearest five
+          - { labels: "subnet:boxes_running", value: -5 }
+          - { labels: "subnet:boxes_working", value: 20 }
+          - { labels: "subnet:boxes_asleep", value: -5 }
+          - { labels: "subnet:boxes_awake", value: 30 }
+          - { labels: "subnet:boxes_idle", value: 10 }
+          - { labels: "subnet:boxes_waking", value: -5 }
+          - { labels: "subnet:boxes_error", value: 0 }
+          - { labels: "subnet:boxes_waitlisted", value: 0 }
+          - { labels: "subnet:boxes_max", value: 100 }
+          - { labels: "subnet:boxes_reporting", value: -5 }
+          - { labels: "subnet:boxes_not_reporting", value: -5 }
+          - { labels: "subnet:box_starts:rate5m", value: 1 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0.1 }
+          - { labels: "subnet:turns_started:rate5m", value: 2 }
+          - { labels: "subnet:turns_finished:rate5m", value: 2 }
+          - { labels: "subnet:turns_failed:rate5m", value: 0.2 }
+          - { labels: "subnet:turns_active", value: 2 }
+          - { labels: "subnet:queue_depth", value: 5 }
+          - { labels: "subnet:turn_duration_seconds:p50", value: 5 }
+          - { labels: "subnet:turn_duration_seconds:p95", value: 9.5 }
+          - { labels: "subnet:model_error_ratio", value: 0.1 }
+          # amounts of tokens and calls: two significant figures
+          - { labels: "subnet:model_requests:rate5m", value: 3.3000000000000003 }
+          # two machines are using tokens, fewer than 5: one significant figure (100 is already that)
+          - { labels: "subnet:tokens:rate5m", value: 100 }
+          - { labels: "subnet:relay_counts_tokens", value: 1 }
+          # three machines in all: every group that has any is "<5" (-5), an empty one is 0
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: 0 }
+          - { labels: "subnet:tokens:increase24h", value: 60000 }
+          - { labels: "subnet:spend_cap_ratio", value: 0.25 }
+          - { labels: "subnet:model_response_seconds:p95", value: 2.375 }
+          - { labels: "subnet:box_wake_seconds:p95", value: 9.5 }
+          - { labels: "subnet:host_cpu_used_ratio", value: 0.5 }
+          - { labels: "subnet:host_memory_used_ratio", value: 0.75 }
+          - { labels: "subnet:host_disk_free_ratio", value: 0.27 }
+
+  # Groups of machines leave as 0, "fewer than five" or the nearest five, and the fleet's token
+  # rate as two figures, one while fewer than five machines are using tokens.
+  - name: small groups of machines are not counted out loud
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_box_tokens_total{box="a1", kind="input", instance="127.0.0.1:9108", job="relay-boxes"}'
+        values: 0+10000x20 # 20,000 a minute
+      - series: 'arbos_relay_box_tokens_total{box="a2", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a3", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a4", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a5", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="a6", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="b1", kind="input"}'
+        values: 0+1000000x20 # 2,000,000 a minute
+      - series: 'arbos_relay_box_tokens_total{box="c1", kind="input"}'
+        values: 0x20
+      - series: 'arbos_relay_tokens_total{kind="input"}'
+        values: 0+1061729x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(boxes_by_token_rate|tokens:rate5m)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: 'subnet:boxes_by_token_rate{bucket="idle"}', value: -5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="under 10K"}', value: 0 }
+          # six machines: the nearest five, so that a seventh joining does not show
+          - { labels: 'subnet:boxes_by_token_rate{bucket="10K to 100K"}', value: 5 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="100K to 1M"}', value: 0 }
+          - { labels: 'subnet:boxes_by_token_rate{bucket="over 1M"}', value: -5 }
+          # seven machines are using tokens: 35,390.97 a second leaves as two figures
+          - { labels: "subnet:tokens:rate5m", value: 35000 }
+
+  - name: with fewer than five machines at work the token rate is one figure
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_box_tokens_total{box="a1", kind="input"}'
+        values: 0+10000x20
+      - series: 'arbos_relay_box_tokens_total{box="c1", kind="input"}'
+        values: 0x20
+      - series: 'arbos_relay_tokens_total{kind="input"}'
+        values: 0+1061729x20
+    promql_expr_test:
+      - expr: 'subnet:tokens:rate5m'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:tokens:rate5m", value: 40000 }
+
+  # A healthy system has no "failed"/"error"/"5xx" series at all (a labelled counter appears with its
+  # first event). The Subnet view must then read 0 failures, not nothing.
+  - name: healthy system reads zero failures
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x20
+      - series: 'arbos_agentd_uptime_seconds{box="0a1b2c3d4e5f"}'
+        values: 100x20
+      - series: 'arbos_relay_box_scrapes{result="ok"}'
+        values: 1x20
+      - series: 'arbos_relay_box_scrapes{result="old_image"}'
+        values: 0x20
+      - series: 'arbos_agentd_turns_finished_total{box="0a1b2c3d4e5f", result="done"}'
+        values: 0+60x20
+      - series: 'arbos_agentd_turn_duration_seconds_bucket{box="0a1b2c3d4e5f", le="+Inf"}'
+        values: 0x20
+      - series: 'arbos_relay_box_starts_total{result="ok"}'
+        values: 0+30x20
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
+        values: 0+90x20
+    promql_expr_test:
+      # the turn-duration histogram exists but no turn finished: no NaN, the series is simply absent
+      - expr: '{__name__=~"subnet:turn_duration_seconds:.+"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: '{__name__=~"subnet:(turns_failed:rate5m|box_start_failures:rate5m|model_error_ratio|boxes_not_reporting|boxes_asleep)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:turns_failed:rate5m", value: 0 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0 }
+          - { labels: "subnet:model_error_ratio", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:boxes_asleep", value: 0 }
+
+  # Today's relay just after a restart: its own metrics, no box scrape series (those come with a
+  # later release), and no model call or box start yet. The labelled counters
+  # (arbos_relay_model_requests_total, arbos_relay_box_starts_total) therefore do not exist at all;
+  # only the unlabelled histograms do, at zero. No NaN, and every count reads 0 instead of being absent.
+  - name: relay metrics only, no traffic since the relay started
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x20
+      - series: 'arbos_relay_model_response_seconds_bucket{le="+Inf"}'
+        values: 0x20
+      - series: 'arbos_relay_box_wake_duration_seconds_bucket{le="+Inf"}'
+        values: 0x20
+    promql_expr_test:
+      # no token counter either (it comes with a later release): absent, never an invented 0
+      - expr: '{__name__=~"subnet:(model_error_ratio|model_response_seconds:p95|box_wake_seconds:p95|turn_duration_seconds:.+|tokens:.+)"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: '{__name__=~"subnet:(boxes_reporting|boxes_not_reporting|model_requests:rate5m|box_starts:rate5m|box_start_failures:rate5m)"}'
+        eval_time: 10m
+        exp_samples:
+          - { labels: "subnet:boxes_reporting", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:model_requests:rate5m", value: 0 }
+          - { labels: "subnet:box_starts:rate5m", value: 0 }
+          - { labels: "subnet:box_start_failures:rate5m", value: 0 }
+
+  # A relay new enough to count box scrapes, with the per-box scrape job still off (it waits for the
+  # box image roll): no box has ever been asked, so every awake box is `pending`. That is a healthy
+  # fleet. Nobody, the partner least of all, may read "83 boxes not reporting" from it, and no box
+  # alert may fire.
+  - name: per-box scrape job off, relay new
+    interval: 30s
+    input_series:
+      - series: 'arbos_relay_uptime_seconds'
+        values: 100x40
+      - series: 'arbos_relay_boxes{state="awake"}'
+        values: 83x40
+      - series: 'arbos_relay_box_scrapes{result="ok"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="old_image"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="unreachable"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="rejected"}'
+        values: 0x40
+      - series: 'arbos_relay_box_scrapes{result="pending"}'
+        values: 83x40
+      - series: 'arbos_relay_box_scrape_dropped_lines_total'
+        values: 0x40
+    promql_expr_test:
+      - expr: '{__name__=~"(arbos|subnet):boxes_(not_)?reporting"}'
+        eval_time: 15m
+        exp_samples:
+          - { labels: "arbos:boxes_reporting", value: 0 }
+          - { labels: "subnet:boxes_reporting", value: 0 }
+          - { labels: "arbos:boxes_not_reporting", value: 0 }
+          - { labels: "subnet:boxes_not_reporting", value: 0 }
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BoxesUnreachable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BoxMetricsRejected
+        exp_alerts: []
+
+  # ...and with nothing reporting, there is no invented zero.
+  - name: no relay metrics means no data
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="x"}'
+        values: 1x20
+    promql_expr_test:
+      - expr: '{__name__=~"subnet:(turns_failed:rate5m|box_start_failures:rate5m|model_error_ratio|boxes_not_reporting|boxes_asleep)"}'
+        eval_time: 10m
+        exp_samples: []
+
+  - name: a healthy relay without its metrics endpoint warns; junk from a box warns
+    interval: 1m
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x30
+      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # never answered: ScrapeTargetDown would stay quiet
+        values: 0x30
+      - series: 'arbos_relay_box_scrapes{result="rejected"}'
+        values: 0x30
+      - series: 'arbos_relay_box_scrape_dropped_lines_total'
+        values: 0x10 3x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RelayMetricsOff
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RelayMetricsOff
+        exp_alerts:
+          - exp_labels: { severity: warning, job: relay, instance: "127.0.0.1:9108" }
+            exp_annotations: { summary: "The relay is up but its metrics endpoint (127.0.0.1:9108) does not answer; relay dashboards and alerts are blind." }
+      - eval_time: 12m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BoxMetricsRejected
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: BoxMetricsRejected
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "A box's metrics answer was rejected or had lines dropped by the relay (oversized, not text, or not agentd's own series)." }
+
+  - name: provider 4xx warns, provider 5xx pages
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="2xx"}'
+        values: 0+60x40
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="4xx"}' # 20% of calls from the start
+        values: 0+15x40
+      - series: 'arbos_relay_model_requests_total{provider="openrouter", class="5xx"}' # and from minute 20, 5xx as well
+        values: 0x20 0+25x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ModelErrorsHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "20% of model calls do not answer 2xx." }
+      - eval_time: 15m
+        alertname: ModelProviderFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ModelProviderFailing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "25% of model calls fail at the provider (5xx or no answer)." }
+
+  - name: a write-ahead log that stays large warns; a relay without the series is quiet
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_db_bytes{file="db", instance="new"}'
+        values: 9e9x30
+      - series: 'arbos_relay_db_bytes{file="wal", instance="new"}' # a checkpoint spike, then stuck high
+        values: 4e6x5 2e8x2 4e6x3 2e8x20
+      - series: 'arbos_relay_uptime_seconds{instance="old"}' # a relay from before the series existed
+        values: 100x30
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RelayWalLarge
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: RelayWalLarge
+        exp_alerts:
+          - exp_labels: { severity: warning, file: wal, instance: new }
+            exp_annotations: { summary: "The relay database's write-ahead log is 190.7MiB and not shrinking (Fleet dashboard → Relay database)." }
+
+  - name: a waitlist warns, a growing waitlist pages
+    interval: 1m
+    input_series:
+      - series: 'arbos_relay_waitlist_length'
+        values: 2x80 3+1x10 13x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Waitlist
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: Waitlist
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "2 users are waiting for a box: the host is at its box limit." }
+      - eval_time: 60m
+        alertname: WaitlistGrowing
+        exp_alerts: []
+      - eval_time: 91m
+        alertname: WaitlistGrowing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "The waitlist grew by 11 in 30 minutes: sign-ups are arriving faster than box slots free up." }
+
+  - name: relay down, low disk, and a target that never answered
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="relay-health", instance="http://127.0.0.1:7700/healthz"}'
+        values: 1x4 0x20
+      - series: 'up{job="relay", instance="127.0.0.1:9108"}' # relay healthy for 2 minutes, metrics never on: not long enough to warn
+        values: 0x30
+      - series: 'up{job="node", instance="127.0.0.1:9100"}' # was up, went down: must fire
+        values: 1x4 0x20
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/"}' # 14% free and falling fast, with 15 minutes of history
+        values: 14-0.01x30
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/"}'
+        values: 100x30
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/boot"}' # 5% free: not a mount we alert on
+        values: 5x30
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/boot"}'
+        values: 100x30
+      - series: 'probe_success{job="public-https", instance="https://arbos.life/"}'
+        values: 1x4 0x26
+      - series: 'up{job="arbos-agentd", instance="127.0.0.1:9108", box="0a1b2c3d4e5f"}' # a box target going down is not ScrapeTargetDown
+        values: 1x4 0x20
+      - series: 'arbos_relay_box_scrapes{result="old_image"}' # boxes on an old image are not unreachable: quiet
+        values: 60x30
+      - series: 'arbos_relay_box_scrapes{result="unreachable"}'
+        values: 0x4 2x26
+      - series: 'node_vmstat_oom_kill'
+        values: 0x10 1x20
+      - series: 'arbos_relay_boxes_registered{provider="gvisor"}'
+        values: 72x30
+      - series: 'arbos_relay_boxes_registered{provider="daytona"}' # retired provider rows hold no slot
+        values: 5x30
+      - series: 'arbos_relay_boxes_max'
+        values: 80x30
+      - series: 'arbos_relay_spend_today_usd'
+        values: 290x10 310x20
+      - series: 'arbos_relay_spend_daily_cap_usd'
+        values: 500x30
+      - series: 'arbos_relay_kill_switch'
+        values: 0x30
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RelayDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RelayDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: relay-health, instance: "http://127.0.0.1:7700/healthz" }
+            exp_annotations: { summary: The relay does not answer /healthz on the host. }
+      - eval_time: 8m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels: { severity: warning, job: node, instance: "127.0.0.1:9100" }
+            exp_annotations: { summary: Prometheus cannot scrape node. }
+      - eval_time: 8m
+        alertname: DiskFreeLow
+        exp_alerts:
+          - exp_labels: { severity: warning, fstype: ext4, mountpoint: / }
+            exp_annotations: { summary: "/ has 13.84% free." }
+      # falling at a rate that would empty it in hours, but on 15 minutes of data: no page yet
+      - eval_time: 14m
+        alertname: DiskFullWithin24h
+        exp_alerts: []
+      # the public probe failing is a warning; nothing critical fires for it
+      - eval_time: 9m
+        alertname: PublicProbeFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, job: public-https, instance: "https://arbos.life/" }
+            exp_annotations: { summary: "https://arbos.life/ fails from outside (DNS, Caddy, TLS or the service)." }
+      - eval_time: 6m
+        alertname: BoxOOMKilled
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "The kernel OOM-killed 1 processes in the last 10 minutes (Boxes dashboard → OOM kills)." }
+      # 72 of 80 slots is exactly 90%: fires after its 5 minutes
+      - eval_time: 8m
+        alertname: BoxCapacityHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "90% of the box slots are taken; new sign-ups go on the waitlist at 100%." }
+      # $290 of $500 is 58%: quiet. $310 is 62%: the first warning, not the second.
+      - eval_time: 4m
+        alertname: SpendAt60Percent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SpendAt60Percent
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Today's spend is 62% of the daily cap that trips the kill switch." }
+      - eval_time: 8m
+        alertname: SpendAt85Percent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: KillSwitchOn
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BoxesUnreachable
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: BoxesUnreachable
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "2 awake boxes do not answer the relay's metrics scrape (Agents dashboard → Box health)." }

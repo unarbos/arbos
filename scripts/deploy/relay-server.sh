@@ -147,6 +147,21 @@ fi
 find "$DATA_DIR" -xdev -not -path "$DATA_DIR/boxes/*/mnt" \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
 chmod 0750 "$DATA_DIR"
 
+# ---- 2b. host limits -------------------------------------------------------------------------------
+# containerd keeps one inotify instance per running container (its shim watches the container's cgroup
+# events, out-of-memory among them), all of them root's. The kernel default is 128 instances per user: on
+# 2026-11-18, with 131 containers, root held exactly 128, every further container start logged
+# "failed to create inotify fd: too many open files" and ran with nothing watching its cgroup, and
+# cAdvisor could not start. 8192 leaves room for a host full of sandboxes. Written only when it differs.
+say "host limits"
+SYSCTL_FILE=/etc/sysctl.d/60-arbos-inotify.conf
+SYSCTL_WANT='fs.inotify.max_user_instances = 8192'
+if [[ "$(cat "$SYSCTL_FILE" 2>/dev/null)" != "$SYSCTL_WANT" ]]; then
+  printf '%s\n' "$SYSCTL_WANT" > "$SYSCTL_FILE"
+  echo "wrote $SYSCTL_FILE"
+fi
+sysctl -q -p "$SYSCTL_FILE" || echo "WARNING: could not apply $SYSCTL_FILE; containers past the 128th start unwatched"
+
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
 # Items are referenced by id: `op read` rejects titles with parentheses ("invalid character in secret reference").
@@ -233,6 +248,10 @@ UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_AT
 # numbers, kept from the env file, never read from the vault. Unset = the relay's defaults ($100, no cap,
 # $500). They were not listed here, so a value set by hand was dropped by the next run of this script.
 CREDIT_KEYS=(ARBOS_DEFAULT_GRANT_USD ARBOS_DEFAULT_DAILY_CAP_USD ARBOS_GLOBAL_DAILY_CAP_USD)
+# Prometheus (docs/metrics.md): the loopback address the relay serves GET /metrics on, e.g.
+# 127.0.0.1:9108. An operator switch kept from the env file; unset = no endpoint. Dropping it on a
+# deploy would blank every dashboard without an error anywhere.
+METRICS_KEYS=(ARBOS_RELAY_METRICS_LISTEN)
 # Agent-hosted sites (#2060): the relay pushes published snapshots to the Cloudflare R2 bucket
 # the edge Worker serves from. Endpoint from the vault config item, S3 keys from the account-wide
 # R2 key pair ("Cloudflare R2 — S3 access key ID / secret key, account-wide, no IP lock").
@@ -253,7 +272,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${CREDIT_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}" "${GIF_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${CREDIT_KEYS[@]}" "${METRICS_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}" "${GIF_KEYS[@]}"; do keep "$k"; done
 fi
 # A kept APNS_KEY_P8 path whose file is gone is no key at all; the relay would log an error and run with push off.
 if [[ -n "${APNS_KEY_P8:-}" && "$APNS_KEY_P8" != *"-----BEGIN"* && ! -r "$APNS_KEY_P8" ]]; then
@@ -339,6 +358,10 @@ for k in "${UPGRADE_KEYS[@]}"; do
 done
 # Credit numbers: only the keys that have a value; unset means the relay default.
 for k in "${CREDIT_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
+# Metrics listener: only when set.
+for k in "${METRICS_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
 # Agent sites: only the keys that have a value.

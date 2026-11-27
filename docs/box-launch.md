@@ -14,11 +14,11 @@ A sign-up is refused a machine, and put on the waitlist, when any of these holds
 |---|---|---|
 | machines, running or stopped by their user, ≥ the cap | cap: `PUT /admin/fleet {"max_boxes": N}` (kept in the database, wins), else `ARBOS_HOST_MAX_BOXES`, else 80 | runtime, no restart |
 | free disk on the relay data volume < the floor | `ARBOS_HOST_MIN_FREE_DISK_GB`, default 40 | env, relay restart |
-| available memory < the eviction floor | `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64 | env, relay restart |
+| available memory (`MemAvailable`) < the eviction floor | `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64 | env, relay restart |
 
-The waitlist is first come, first served. Once a minute the people at its head, as many as there are free slots, are woken; each leaves the line and is told their computer is ready when their machine's create passes the gate, not before. A newcomer stands behind everyone already in line, and a person whose create fails keeps their place. A machine its user stopped keeps its slot, so Start is never refused. While the spend kill switch is on (§7) the line does not move.
+The memory gate is the eviction floor: a host that is stopping idle machines for memory (§6) makes no new ones. A `waitlisted` event and the journal line name the gate that shut and give the numbers. The operator's admit (`POST /admin/waitlist/{id}/admit`) passes the same three gates and answers 409 `host_full` while one is shut; the cap is raised with one call, but the disk and memory floors are env settings, so getting past them means changing the env file and restarting the relay. On a host with less than 64 GB of memory, lower the memory floor or every sign-up is waitlisted.
 
-The memory gate uses `MemAvailable`. Its default of 64 GB suits this host; on a host with less memory than that, set `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB` lower or every sign-up is waitlisted.
+The waitlist is first come, first served. Once a minute the people at its head, as many as there are free slots, are woken; each leaves the line and is told their computer is ready when their machine's create passes the gate, not before. A newcomer stands behind everyone already in line, and a person whose create fails keeps their place. The operator's admit moves one person to the head of the line and wakes them. Keep the cap above demand so the line stays empty; the Mac app in particular leaves a new user who is waitlisted on its first-run screen. A machine its user stopped keeps its slot, so Start is never refused. While the spend kill switch is on (§7) the line does not move.
 
 ## 2. The capacity number
 
@@ -35,6 +35,8 @@ Each resource gives a ceiling; the cap is the lowest, with a margin.
 **Cap: 300 machines**, 228 more than the 72 of that day. Disk and CPU run out first; memory is not the limit until machines average well over 1.5 GB each. The planned figures are guesses about people who have not arrived: on launch day read the real averages in `GET /admin/fleet` → `samples.last_24h` and move the cap with one call.
 
 A machine's own limits (`ARBOS_BOX_CPUS=8`, `ARBOS_BOX_MEM_GB=16`) are what one user may use at once, not what the host has set aside: 300 machines × 16 GB is ten times the host, and fourteen machines pinning 8 cores each fill every core. That is deliberate. It is safe for memory because of the eviction loop (§6) and the kernel order in §3; for CPU, Docker's shares keep machines fair to each other but do not keep a full host fast, so watch load.
+
+One limit that is none of these: inotify instances. containerd keeps one per running container, all of them root's, and the kernel default is 128 per user (`fs.inotify.max_user_instances`). On 2026-11-18 the host ran 131 containers and root held exactly 128: each further container still started, but containerd logged `failed to create inotify fd: too many open files` and nothing watched that container's cgroup events, out-of-memory among them. It is 8192 now, in `/etc/sysctl.d/60-arbos-inotify.conf`, which `scripts/deploy/relay-server.sh` writes on every run; a container started while the limit was exhausted is not watched until it is next restarted. The relay does not depend on that watch to notice a dead machine (§5, `died`), only to be told by Docker that the cause was memory.
 
 Not limits on this host: the machines' bridge is a /16, loop devices are made on demand, and connection tracking is at 1 % of its table.
 
@@ -56,7 +58,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
    ARBOS_HOST_MIN_FREE_DISK_GB=40
    ```
 
-   The first only matters if the database value is ever cleared; it is there so the two do not disagree. The other two are the defaults, written down so the host's numbers are in one place. The deploy script keeps all three when it rewrites the file. Machines made from now on can be given a smaller ceiling than today's 16 GB / 8 CPU with `ARBOS_BOX_MEM_GB` and `ARBOS_BOX_CPUS`; existing machines keep theirs until they are re-created by an image roll.
+   The first only matters if the database value is ever cleared; it is there so the two do not disagree. The other two are the defaults, written down so the host's numbers are in one place: the first is the available memory under which idle machines are stopped, the second the free disk under which no machine is made. The deploy script keeps all three when it rewrites the file. Machines made from now on can be given a smaller ceiling than today's 16 GB / 8 CPU with `ARBOS_BOX_MEM_GB` and `ARBOS_BOX_CPUS`; existing machines keep theirs until they are re-created by an image roll.
 
 3. **[production]** Shrink what one newcomer can write. `ARBOS_BOX_WORK_GB` is the size of a new machine's `/work` image; at 128, three people who fill theirs take all the free disk, and a full disk stops every machine (2026-10-25). The image is sized once, when the machine is made, so a smaller number applies to machines made after the restart and existing ones keep theirs:
 
@@ -66,7 +68,9 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
    A user who needs more is given it by hand; nothing grows an image by itself yet.
 
-4. **[production]** Keep the kernel away from the databases. After the relay carrying #3090 is deployed, the relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
+   Production runs `ARBOS_BOX_WORK_GB=64` since 2026-11-19 (Doug's setting): machines made from then on get 64 GB, and five people who fill theirs take the 342 GB that was free.
+
+4. **[production]** Keep the kernel away from the databases. Once the relay built from a commit after 2026-11-18 is deployed (#3090), the relay unit carries `OOMScoreAdjust=-900` and new machines start at `+500`, so a host that runs out of memory loses a sandbox (whose files are on its `/work` image) first. Postgres, Synapse and LiveKit run as plain containers at score 0; until they are re-created with `--oom-score-adj=-900`, set it on the running processes (lost when the container restarts):
 
    ```bash
    for c in arbos-matrix-postgres arbos-matrix-synapse livekit; do for p in $(docker top "$c" -o pid | tail -n +2); do echo -900 | sudo tee /proc/$p/oom_score_adj >/dev/null; done; done
@@ -92,7 +96,7 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 
 ## 5. What to watch
 
-`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, available memory, `has_room`), `pressure` (memory, swap, load), every machine with its live CPU and memory, and the last 50 fleet events.
+`GET /admin/fleet` is the one page: `capacity` (cap, resident, waitlist, free disk, available memory, `has_room`), `pressure` (available memory, swap, load, free disk), every machine with its live CPU and memory, and the last 50 fleet events. The same signs over time, with alerts, are on the Grafana dashboards of the monitoring stack; [`scripts/deploy/monitoring/README.md`](../scripts/deploy/monitoring/README.md) is its runbook.
 
 | Sign | Where | Meaning |
 |---|---|---|
@@ -102,8 +106,9 @@ Not limits on this host: the machines' bridge is a /16, loop devices are made on
 | event `disk_low` | events | free disk within 20 GB of the floor; sign-ups stop at the floor |
 | event `evicted` | events | the host stopped an idle machine under pressure; its user's next message starts it |
 | event `died` | events | a machine's container went away (out of memory at its own cap, or killed); the relay restarted it |
-| machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish, after two tries 5 s apart; `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason. Its user's Start tries again |
-| `wake failed` naming `losetup` or `mount` | journal | two machines made at once were given the same loop device (eight are made at a time since #3089); the wake job tries twice before the machine is left in `error`, so one line is noise and a run of them is not. Gone once the relay carrying #3110 is deployed |
+| machine stuck `waking`, or `error` | `/admin/fleet` → `sandboxes[].state` | a create or start that did not finish, after three tries (two on a relay older than #3117); `journalctl -u arbos-relay | grep 'wake failed'` has Docker's reason. Its user's Start tries again |
+| `failed to create inotify fd: too many open files` | `journalctl -u containerd` | root is out of inotify instances (§2): containers start unwatched. `sysctl fs.inotify.max_user_instances` must say 8192; `sudo sysctl -p /etc/sysctl.d/60-arbos-inotify.conf` sets it at once and restarts nothing |
+| `wake failed` naming `losetup`, `flock` or "gave up after 120 s" | journal | machines are made eight at a time and each claims a loop device under a shared lock (#3110), waiting 20 s for it at most; a helper that hangs is given up on after 120 s. One line is noise, since the wake is retried; a run of them means a helper container is stuck: `docker ps --filter ancestor=ubuntu:24.04` shows it, and removing it frees the lock |
 | load5 > 100 | `pressure` | eviction by load starts, one machine every 30 s |
 
 ## 6. When the host is 80 % full
@@ -113,7 +118,7 @@ Eighty per cent is 240 machines, or free disk under 100 GB, or available memory 
 1. Find what is short in `/admin/fleet`: `capacity` and `pressure`.
 2. Disk: repeat §4. Then look for the largest `/work` images (`sandboxes[].work_img_used_mb`).
 3. Memory or CPU: the host already sheds load by itself. Under the memory floor or over 20 GB of swap it stops idle machines, least recently used first, never one in the middle of a turn, five at most every 30 s; over load 100, one every 30 s. Nothing is deleted; a stopped machine starts again on its user's next message.
-4. **[production]** To shed load before that point, stop the machines nobody is using (after the relay carrying #3092 is deployed; before it there is no such call):
+4. **[production]** To shed load before that point, stop the machines nobody is using (a relay built after 2026-11-18, #3092; an older one has no such call):
 
    ```bash
    curl -sS -X POST -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"count":20}' http://127.0.0.1:7700/admin/fleet/evict
@@ -139,6 +144,8 @@ Read where it stands (cap, spend today, whether the switch is on):
 curl -sS -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" http://127.0.0.1:7700/admin/killswitch
 ```
 
+Production runs `ARBOS_GLOBAL_DAILY_CAP_USD=2500` since 2026-11-19 (Doug's setting); the 500 above is the default of a relay with no value set.
+
 **[production]** To change the cap, set `ARBOS_GLOBAL_DAILY_CAP_USD=<number>` in `/etc/arbos/relay.env` and restart the relay (`systemctl restart arbos-relay`, or a deploy). The restart closes every app's connection for a few seconds, the apps reconnect by themselves, and machines keep running with their turns. If the switch had already tripped that day, the first request after the restart clears nothing by itself: turn it off once with `PUT /admin/killswitch {"on":false}`; with spend now under the new cap it stays off.
 
 One account, at once and without a restart: `PUT /admin/users/{id}/credits` with `{"grant_usd": n}`, `{"daily_cap_usd": n}` (`0` freezes the account, `null` removes the cap).
@@ -146,3 +153,5 @@ One account, at once and without a restart: `PUT /admin/users/{id}/credits` with
 ## 8. What a deploy does to running machines
 
 A relay deploy restarts the relay, not the machines: containers keep running, their agents reconnect within seconds, turns in flight continue. Changes to how a machine is started (its limits, flags, image) reach a machine only when it is next created or re-created by an image roll.
+
+A deploy run by hand through the lane (`deploy_lane_run`, the monitoring README's window step) answers 75 while another deploy or a canary smoke holds the lane. If it keeps answering 75 and `/var/lib/arbos-deploy` has no `relay.deploying`, `agentd.canary` or `www.reloading` file, a process left behind by an earlier lane command is holding the lock (an `op daemon` did for 1 h 53 min on 2026-11-19, with a helper older than this fix): `find /proc/[0-9]*/fd -lname /var/lib/arbos-deploy/.lane.lock` names it, and the lane is free once that process ends.

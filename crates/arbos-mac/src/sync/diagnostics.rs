@@ -111,7 +111,11 @@ pub fn is_transient(detail: &str) -> bool {
         || d.contains("connection closed before message completed")
         // Empty or truncated response body after HTTP success (e.g. GET /chats on a flaky link).
         || d.contains("eof while parsing")
+        || d.contains("unexpected eof")
         || d.contains("empty body")
+        || d.contains("error decoding response body")
+        || d.contains("error reading a body from connection")
+        || d.contains("peer closed connection without sending tls close_notify")
         // Load-balancer / reverse-proxy blips in front of the relay (not app bugs).
         || d.contains("http 502")
         || d.contains("http 503")
@@ -149,4 +153,25 @@ pub fn signature(kind: &str, detail: &str) -> String {
         normalized.push_str("error");
     }
     format!("mac:{kind}:{normalized}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient;
+
+    #[test]
+    fn thumbnail_body_and_connection_failures_retry_without_diagnostics() {
+        let tls_eof = "att-01m5na20c508bpctf9b23rpqef.png: error decoding response body: request or response body error: error reading a body from connection: peer closed connection without sending TLS close_notify: rustls unexpected-eof";
+        assert!(is_transient(tls_eof));
+        assert!(is_transient("thumbnail: unexpected EOF"));
+        assert!(is_transient("thumbnail: connection reset by peer"));
+
+        for status in [
+            "HTTP 400 Bad Request",
+            "HTTP 403 Forbidden",
+            "HTTP 404 Not Found",
+        ] {
+            assert!(!is_transient(status), "{status}");
+        }
+    }
 }
