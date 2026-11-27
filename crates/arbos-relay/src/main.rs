@@ -308,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
         vault_mock: std::env::var("ARBOS_VAULT_MOCK").is_ok_and(|v| v == "1"),
+        local_approval_enforce: std::env::var("ARBOS_LOCAL_APPROVAL").is_ok_and(|v| v == "enforce"),
         auth_mode,
         github_client_id,
         github_client_secret,
@@ -969,6 +970,11 @@ fn app(state: AppState) -> Router {
             axum::routing::patch(local::patch).delete(local::delete),
         )
         .route("/projects/{id}/local/{device}/exec", post(local::exec))
+        .route(
+            "/projects/{id}/local/{device}/requests",
+            post(local::request),
+        )
+        .route("/local/requests/{id}/decide", post(local::decide))
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",

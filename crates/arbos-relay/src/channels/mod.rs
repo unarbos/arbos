@@ -807,6 +807,7 @@ mod tests {
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
+            local_approval_enforce: false,
             auth_mode: crate::state::AuthMode::Paircode,
             github_client_id: None,
             github_client_secret: None,
