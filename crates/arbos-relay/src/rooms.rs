@@ -137,7 +137,11 @@ impl PendingRoomPush<'_> {
     /// because a push stored without its correction would become the state the relay defends.
     fn correct(&mut self, state: &AppState, chat_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let now = arbos_core::ids::now_ms();
-        let fixes = crate::push_guard::corrections(state, chat_id, &self.changes, now)?;
+        // A push that could not be judged was refused before this is reached.
+        let Ok(changes) = &self.changes else {
+            return Ok(None);
+        };
+        let fixes = crate::push_guard::corrections(state, chat_id, changes, now)?;
         if fixes.is_empty() {
             return Ok(None);
         }
@@ -993,10 +997,11 @@ async fn handle_frame(
             let ids = |rows: &[arbos_core::doc::MessageIdentity]| -> Vec<String> {
                 rows.iter().map(|(id, _)| id.clone()).collect()
             };
-            let (inserted, removed) = (
-                ids(&pending.changes.inserted),
-                ids(&pending.changes.removed),
-            );
+            let (inserted, removed) = pending
+                .changes
+                .as_ref()
+                .map(|c| (ids(&c.inserted), ids(&c.removed)))
+                .unwrap_or_default();
             // Whose message each new row carries is recorded from the socket that pushed it,
             // with the row. The announce routes write an author record too, but they take
             // the message id from a request body and are gated only on membership — so that
