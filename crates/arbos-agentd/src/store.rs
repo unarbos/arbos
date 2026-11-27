@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS asks (
   id TEXT PRIMARY KEY, chat_id TEXT, session_id TEXT, question TEXT NOT NULL, answered INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
 );
 
+-- Unasked offers (`ask_user` with `offer`): one row per offer card. `answer` is the tapped choice
+-- (do | later | never), NULL while unanswered; `at` is when it was made or answered.
+CREATE TABLE IF NOT EXISTS offers (
+  ask_id TEXT PRIMARY KEY, topic TEXT NOT NULL, answer TEXT, at INTEGER NOT NULL
+);
+
 -- Approval cards (feature approve): the doc part is the source of truth for clients; this row
 -- survives a restart so a late decision still dispatches.
 CREATE TABLE IF NOT EXISTS approvals (
@@ -1962,6 +1968,52 @@ impl Store {
         })
     }
 
+    /// Why no unasked offer on `topic` may be made at `now`, or `None` when one may. A topic
+    /// answered "never" is closed for good. Otherwise every offer rests all offers: seven days
+    /// while unanswered, three after "not now", one day after any other answer.
+    pub fn offer_refusal(&self, topic: &str, now: i64) -> Result<Option<&'static str>> {
+        const DAY: i64 = 86_400_000;
+        self.with(|c| {
+            let closed: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM offers WHERE topic = ?1 AND answer = 'never')",
+                params![topic],
+                |r| r.get(0),
+            )?;
+            if closed {
+                return Ok(Some("the user said never to suggest this"));
+            }
+            let rest_until: Option<i64> = c.query_row(
+                "SELECT MAX(at + CASE WHEN answer IS NULL THEN 7 WHEN answer = 'later' THEN 3 ELSE 1 END * ?1) FROM offers",
+                params![DAY],
+                |r| r.get(0),
+            )?;
+            Ok(rest_until
+                .filter(|until| now < *until)
+                .map(|_| "an earlier offer is still resting"))
+        })
+    }
+
+    pub fn insert_offer(&self, ask_id: &str, topic: &str, now: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO offers(ask_id, topic, at) VALUES (?1,?2,?3)",
+                params![ask_id, topic, now],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Record the tapped answer to an offer, once. Not an offer, or already answered: nothing.
+    pub fn answer_offer(&self, ask_id: &str, answer: &str, now: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE offers SET answer = ?2, at = ?3 WHERE ask_id = ?1 AND answer IS NULL",
+                params![ask_id, answer, now],
+            )
+            .map(|_| ())
+        })
+    }
+
     // ---- approvals (feature approve) ------------------------------------------------------------
 
     /// `expires_at` is written `0`: this card has no deadline and never gets one.
@@ -2387,6 +2439,46 @@ mod tests {
     fn job_store() -> Store {
         let dir = std::env::temp_dir().join(format!("arbos-store-{}", ulid()));
         Store::open(&dir.join("state.sqlite")).unwrap()
+    }
+
+    #[test]
+    fn an_offer_rests_by_its_answer_and_never_closes_the_topic() {
+        const DAY: i64 = 86_400_000;
+        let s = job_store();
+        let may = |topic: &str, day: i64| s.offer_refusal(topic, day * DAY).unwrap().is_none();
+        assert!(may("brief", 0), "nothing offered yet");
+
+        s.insert_offer("a", "brief", 0).unwrap();
+        assert!(
+            !may("other", 6),
+            "unanswered rests every topic for seven days"
+        );
+        assert!(may("other", 7));
+
+        s.answer_offer("a", "later", 7 * DAY).unwrap();
+        assert!(!may("brief", 9), "not now rests three days from the answer");
+        assert!(may("brief", 10));
+
+        s.insert_offer("b", "brief", 10 * DAY).unwrap();
+        s.answer_offer("b", "do", 10 * DAY).unwrap();
+        assert!(!may("brief", 10), "at most one a day, even after a yes");
+        assert!(may("brief", 11));
+
+        s.insert_offer("c", "watch", 11 * DAY).unwrap();
+        s.answer_offer("c", "never", 11 * DAY).unwrap();
+        s.answer_offer("c", "do", 11 * DAY).unwrap();
+        assert!(
+            !may("watch", 400),
+            "never closes the topic, and an answer is taken once"
+        );
+        assert!(may("brief", 12), "other topics open again after a day");
+
+        s.insert_offer("d", "brief", 12 * DAY).unwrap();
+        s.answer_offer("d", "typed", 12 * DAY).unwrap();
+        assert!(
+            !may("brief", 12) && may("brief", 13),
+            "a typed reply is an answer"
+        );
     }
 
     /// A job running since a moment ago, on the step its worker last reported.
